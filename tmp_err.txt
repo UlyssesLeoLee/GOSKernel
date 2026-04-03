@@ -1,0 +1,41 @@
+   Compiling gos-kernel v0.1.0 (E:\GOSKernel)
+error[E0255]: the name `serial_println` is defined multiple times
+  --> src\hal\serial.rs:60:1
+   |
+60 | macro_rules! serial_println {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `serial_println` redefined here
+   |
+  ::: src\main.rs:37:13
+   |
+37 | use crate::{serial_println, println};
+   |             ----------------
+   |             |
+   |             previous import of the macro `serial_println` here
+   |             help: remove unnecessary import
+   |
+   = note: `serial_println` must be defined only once in the macro namespace of this module
+
+error[E0255]: the name `println` is defined multiple times
+   --> src\hal\vga_buffer.rs:245:1
+    |
+245 | macro_rules! println {
+    | ^^^^^^^^^^^^^^^^^^^^ `println` redefined here
+    |
+   ::: src\main.rs:37:29
+    |
+ 37 | use crate::{serial_println, println};
+    |                             ------- previous import of the macro `println` here
+    |
+    = note: `println` must be defined only once in the macro namespace of this module
+
+warning: unused imports: `println` and `serial_println`
+  --> src\main.rs:37:13
+   |
+37 | use crate::{serial_println, println};
+   |             ^^^^^^^^^^^^^^  ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0255`.
+warning: `gos-kernel` (bin "gos-kernel") generated 1 warning
+error: could not compile `gos-kernel` (bin "gos-kernel") due to 2 previous errors; 1 warning emitted

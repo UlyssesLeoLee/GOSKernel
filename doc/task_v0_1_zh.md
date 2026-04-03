@@ -6,11 +6,11 @@
 
 ## 🔴 阶段 0：引导冒烟（Boot Smoke Test）
 
-- [ ] `K_BUILD` — 配置 `.cargo/config.toml`，交叉编译目标 + QEMU runner
-- [ ] `K_BOOT` — 实现 `_start` 入口，读取 bootloader BootInfo
-- [ ] `K_VGA` — VGA 文本缓冲区驱动（0xb8000），实现 `println!`
-- [ ] `K_SERIAL` — UART 16550 串口驱动，`serial_println!`
-- [ ] `K_PANIC` — panic_handler，输出位置信息后发出 `hlt`
+- [x] `K_BUILD` — 配置 `.cargo/config.toml`，交叉编译目标 + QEMU runner
+- [x] `K_BOOT` — 实现 `_start` 入口，读取 bootloader BootInfo
+- [x] `K_VGA` — VGA 文本缓冲区驱动（0xb8000），实现 `println!`
+- [x] `K_SERIAL` — UART 16550 串口驱动，`serial_println!`
+- [x] `K_PANIC` — panic_handler，输出位置信息后发出 `hlt`
 
 **里程碑验证**: `cargo run` 在 QEMU 中显示 "GOS v0.1 booting..."
 

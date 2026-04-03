@@ -1,0 +1,23 @@
+# K_BUILD: Cargo build configuration
+# Node: build_config
+# Edges:
+#   build_config --[cross_compile]--> x86_64-gos-kernel (target node)
+#   build_config --[runner]---------> qemu (executor node)
+
+[build]
+target = "x86_64-gos-kernel.json"
+
+# build-std: compile core + alloc from source for our custom JSON target.
+# This is a stable Cargo nightly feature since 2022.
+[unstable]
+build-std         = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec   = true
+
+# QEMU runner — bootimage packages kernel + bootloader into a disk image,
+# then boots it in QEMU
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"
+
+[target.x86_64-gos-kernel]
+runner = "bootimage runner"
