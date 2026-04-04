@@ -1,4 +1,4 @@
-# GOS (Graph-Oriented System) Bare-Metal Kernel v0.1 实施方案
+# GOS (Graph Operating System) Bare-Metal Kernel v0.1 实施方案
 
 本方案旨在将 GOS 构建为一个运行在 x86_64 裸机环境（QEMU）下的原生操作系统内核。系统以图为内核控制流，并在内核级别提供 CLI 交互。
 

@@ -18,12 +18,12 @@
 
 ## 🟠 阶段 1：硬件抽象层（HAL Ready）
 
-- [ ] `K_GDT` — 设置 GDT 和 TSS
-- [ ] `K_IDT` — 设置 IDT，注册 CPU 异常 handler（breakpoint, page_fault, double_fault）
-- [ ] `K_PIC` — 初始化并重映射 8259A PIC（IRQ 向量表偏移 32）
-- [ ] `K_PIT` — 8254 定时器，产生周期性 IRQ0；实现系统 tick 计数
-- [ ] `K_PS2` — PS/2 键盘驱动，扫描码 → ASCII；维护环形缓冲队列
-- [ ] `K_CPUID` — 读取 CPU 信息写入初始图节点
+- [x] `K_GDT` — 设置 GDT 和 TSS
+- [x] `K_IDT` — 设置 IDT，注册 CPU 异常 handler（breakpoint, page_fault, double_fault）
+- [x] `K_PIC` — 初始化并重映射 8259A PIC（IRQ 向量表偏移 32）
+- [x] `K_PIT` — 8254 定时器，产生周期性 IRQ0；实现系统 tick 计数
+- [x] `K_PS2` — PS/2 键盘驱动，扫描码 → ASCII；维护环形缓冲队列
+- [x] `K_CPUID` — 读取 CPU 信息写入初始图节点
 
 **里程碑验证**: 键盘按键有回显，定时器 tick 可观测
 

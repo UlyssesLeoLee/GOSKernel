@@ -1,4 +1,4 @@
-# GOS (Graph-Oriented System) — 主设计文档 v0.1
+# GOS (Graph Operating System) — 主设计文档 v0.1
 
 **目标平台**: x86_64 裸机 / qemu-system-x86_64  
 **开发语言**: Rust (`#[no_std]`)  

@@ -1,41 +1,78 @@
-   Compiling gos-kernel v0.1.0 (E:\GOSKernel)
-error[E0255]: the name `serial_println` is defined multiple times
-  --> src\hal\serial.rs:60:1
+warning: unnecessary `unsafe` block
+  --> src\pluginGroup\K_GDT\mod.rs:36:50
    |
-60 | macro_rules! serial_println {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `serial_println` redefined here
+36 |             let stack_start = VirtAddr::from_ptr(unsafe { core::ptr::addr_of!(STACK) } as *const ());
+   |                                                  ^^^^^^ unnecessary `unsafe` block
    |
-  ::: src\main.rs:37:13
-   |
-37 | use crate::{serial_println, println};
-   |             ----------------
-   |             |
-   |             previous import of the macro `serial_println` here
-   |             help: remove unnecessary import
-   |
-   = note: `serial_println` must be defined only once in the macro namespace of this module
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 
-error[E0255]: the name `println` is defined multiple times
-   --> src\hal\vga_buffer.rs:245:1
-    |
-245 | macro_rules! println {
-    | ^^^^^^^^^^^^^^^^^^^^ `println` redefined here
-    |
-   ::: src\main.rs:37:29
-    |
- 37 | use crate::{serial_println, println};
-    |                             ------- previous import of the macro `println` here
-    |
-    = note: `println` must be defined only once in the macro namespace of this module
-
-warning: unused imports: `println` and `serial_println`
-  --> src\main.rs:37:13
+warning: unnecessary `unsafe` block
+  --> src\pluginGroup\K_CPUID\mod.rs:13:15
    |
-37 | use crate::{serial_println, println};
-   |             ^^^^^^^^^^^^^^  ^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+13 |     let res = unsafe { __cpuid(0) };
+   |               ^^^^^^ unnecessary `unsafe` block
 
-For more information about this error, try `rustc --explain E0255`.
-warning: `gos-kernel` (bin "gos-kernel") generated 1 warning
-error: could not compile `gos-kernel` (bin "gos-kernel") due to 2 previous errors; 1 warning emitted
+warning: module `pluginGroup` should have a snake case name
+  --> src\main.rs:28:9
+   |
+28 | pub mod pluginGroup;
+   |         ^^^^^^^^^^^ help: convert the identifier to snake case: `plugin_group`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: module `K_PANIC` should have a snake case name
+ --> src\pluginGroup\mod.rs:4:9
+  |
+4 | pub mod K_PANIC;
+  |         ^^^^^^^ help: convert the identifier to snake case: `k_panic`
+
+warning: module `K_VGA` should have a snake case name
+ --> src\pluginGroup\mod.rs:5:9
+  |
+5 | pub mod K_VGA;
+  |         ^^^^^ help: convert the identifier to snake case: `k_vga`
+
+warning: module `K_SERIAL` should have a snake case name
+ --> src\pluginGroup\mod.rs:6:9
+  |
+6 | pub mod K_SERIAL;
+  |         ^^^^^^^^ help: convert the identifier to snake case: `k_serial`
+
+warning: module `K_GDT` should have a snake case name
+ --> src\pluginGroup\mod.rs:7:9
+  |
+7 | pub mod K_GDT;
+  |         ^^^^^ help: convert the identifier to snake case: `k_gdt`
+
+warning: module `K_IDT` should have a snake case name
+ --> src\pluginGroup\mod.rs:8:9
+  |
+8 | pub mod K_IDT;
+  |         ^^^^^ help: convert the identifier to snake case: `k_idt`
+
+warning: module `K_PIC` should have a snake case name
+ --> src\pluginGroup\mod.rs:9:9
+  |
+9 | pub mod K_PIC;
+  |         ^^^^^ help: convert the identifier to snake case: `k_pic`
+
+warning: module `K_PIT` should have a snake case name
+  --> src\pluginGroup\mod.rs:10:9
+   |
+10 | pub mod K_PIT;
+   |         ^^^^^ help: convert the identifier to snake case: `k_pit`
+
+warning: module `K_PS2` should have a snake case name
+  --> src\pluginGroup\mod.rs:11:9
+   |
+11 | pub mod K_PS2;
+   |         ^^^^^ help: convert the identifier to snake case: `k_ps2`
+
+warning: module `K_CPUID` should have a snake case name
+  --> src\pluginGroup\mod.rs:12:9
+   |
+12 | pub mod K_CPUID;
+   |         ^^^^^^^ help: convert the identifier to snake case: `k_cpuid`
+
+warning: `gos-kernel` (bin "gos-kernel") generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
