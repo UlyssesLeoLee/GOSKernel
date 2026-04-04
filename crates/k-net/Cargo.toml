@@ -1,0 +1,8 @@
+[package]
+name = "k-net"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+x86_64 = "0.14"

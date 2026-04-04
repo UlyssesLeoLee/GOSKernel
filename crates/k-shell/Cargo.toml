@@ -1,0 +1,10 @@
+[package]
+name = "k-shell"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+gos-runtime = { path = "../gos-runtime" }
+spin = "0.9"

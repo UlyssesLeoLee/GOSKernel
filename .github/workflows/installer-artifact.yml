@@ -1,0 +1,36 @@
+name: installer-artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-installer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nightly Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools-preview
+
+      - name: Install cargo-bootimage
+        run: cargo install bootimage --locked
+
+      - name: Build Installer Package
+        shell: pwsh
+        run: ./tools/build-installer.ps1 -Profile release
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gos-installer-release
+          path: |
+            dist/gos-installer/*
+            dist/gos-installer-release.zip

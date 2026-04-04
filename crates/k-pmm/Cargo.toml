@@ -1,0 +1,12 @@
+[package]
+name = "k-pmm"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+k-vga = { path = "../k-vga" }
+bootloader = { version = "0.9.23" }
+spin = "0.9"
+x86_64 = "0.14"

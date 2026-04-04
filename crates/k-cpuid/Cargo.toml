@@ -1,0 +1,9 @@
+[package]
+name = "k-cpuid"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+spin = "0.9"

@@ -1,0 +1,13 @@
+[package]
+name = "k-heap"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+k-pmm = { path = "../k-pmm" }
+k-vmm = { path = "../k-vmm" }
+spin = "0.9"
+x86_64 = "0.14"
+linked_list_allocator = "0.10.5"

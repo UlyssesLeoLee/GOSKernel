@@ -1,0 +1,12 @@
+[package]
+name = "k-pit"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+k-shell = { path = "../k-shell" }
+k-pic = { path = "../k-pic" }
+spin = "0.9"
+x86_64 = "0.14"

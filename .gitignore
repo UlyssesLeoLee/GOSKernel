@@ -1,4 +1,5 @@
 /target
+/dist
 *.log
 *.txt
 # Specific patterns found in current directory

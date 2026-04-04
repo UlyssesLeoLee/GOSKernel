@@ -1,0 +1,11 @@
+[package]
+name = "gos-hal"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-runtime = { path = "../gos-runtime" }
+spin = "0.9"
+bootloader = { version = "0.9.23" }
+x86_64 = "0.14"

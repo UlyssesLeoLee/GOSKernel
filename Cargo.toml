@@ -1,72 +1,27 @@
-# K_BUILD: GOS Kernel — Cargo.toml
-# Every [dependency] maps to a plugin node in the dependency graph.
-#
-# Dependency Graph (crate level):
-#   gos-kernel
-#     --[boot]-------> bootloader        (K_BOOT infrastructure)
-#     --[hw_access]--> x86_64            (K_GDT, K_IDT, K_VMM, K_PS2)
-#     --[serial]-----> uart_16550        (K_SERIAL)
-#     --[sync]-------> spin              (K_SPINLOCK, global statics)
-#     --[lazy_init]--> lazy_static       (K_VGA, K_SERIAL global singletons)
-
-[package]
-name    = "gos-kernel"
-version = "0.1.0"
-edition = "2021"
-
-# ─── Core Plugin Dependencies ──────────────────────────────────────────────
-
-[dependencies]
-
-# K_BOOT: Bootloader — switches CPU to 64-bit long mode, maps memory,
-#         passes BootInfo to kernel_main.
-bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
-
-# K_GDT / K_IDT / K_VMM / K_PS2 / K_PIC: x86_64 hardware abstractions.
-# Provides port I/O, page table types, interrupt descriptors.
-x86_64 = "0.14"
-
-# K_SERIAL: UART 16550 serial port driver.
-uart_16550 = "0.2"
-
-# K_SPINLOCK: Spin-based Mutex for no_std environments.
-# Used by all plugins that have global mutable state.
-spin = "0.9"
-
-# K_VGA / K_SERIAL: lazy_static creates global singletons without std.
-lazy_static = { version = "1.4", features = ["spin_no_std"] }
-
-# K_PIC: 8259A Programmable Interrupt Controller remapping.
-pic8259 = "0.10"
-
-# K_PS2: PS/2 keyboard scancode-to-ASCII decoder.
-pc-keyboard = "0.7"
-
-# ─── Heap Allocator (Phase 2 — K_HEAP) ─────────────────────────────────────
-# Activated when K_HEAP plugin is implemented.
-# linked_list_allocator = "0.10"
-
-# ─── Build Profiles ─────────────────────────────────────────────────────────
-
-[profile.dev]
-panic = "abort"     # No unwinding in kernel — panic handler is K_PANIC
-
-[profile.release]
-panic   = "abort"
-opt-level = 3
-
-# ─── Package Metadata for bootimage ─────────────────────────────────────────
-
-[package.metadata.bootimage]
-# QEMU launch arguments for `cargo run`
-run-args = [
-    "-serial", "stdio",
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+[workspace]
+resolver = "2"
+members = [
+    "crates/hypervisor",
+    "crates/gos-protocol",
+    "crates/gos-runtime",
+    "crates/gos-loader",
+    "crates/gos-hal",
+    "crates/k-panic",
+    "crates/k-vga",
+    "crates/k-serial",
+    "crates/k-gdt",
+    "crates/k-idt",
+    "crates/k-pic",
+    "crates/k-pit",
+    "crates/k-ps2",
+    "crates/k-cpuid",
+    "crates/k-pmm",
+    "crates/k-vmm",
+    "crates/k-heap",
+    "crates/k-shell",
+    "crates/k-ai",
+    "crates/k-cypher",
+    "crates/k-ime",
+    "crates/k-net",
+    "crates/k-mouse",
 ]
-# QEMU arguments for `cargo test`
-test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-    "-serial", "stdio",
-    "-display", "none",
-]
-test-success-exit-code = 33

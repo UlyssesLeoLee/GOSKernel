@@ -1,0 +1,26 @@
+name: graph-governance
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nightly Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools-preview, rustfmt, clippy
+
+      - name: Verify Graph Governance
+        shell: pwsh
+        run: ./tools/verify-graph-architecture.ps1
+
+      - name: Cargo Check
+        run: cargo check -p gos-kernel
