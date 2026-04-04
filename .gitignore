@@ -1,1 +1,14 @@
 /target
+*.log
+*.txt
+# Specific patterns found in current directory
+qemu_out.txt
+boot_out.txt
+run_output.txt
+build_clean.txt
+run_final*.txt
+log*.txt
+success.log
+test_log.txt
+qemu-int.log
+serial.log
