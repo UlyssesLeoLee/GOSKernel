@@ -8,6 +8,7 @@ gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 gos-runtime = { path = "../gos-runtime" }
 gos-loader = { path = "../gos-loader" }
+gos-supervisor = { path = "../gos-supervisor" }
 k-panic = { path = "../k-panic" }
 k-serial = { path = "../k-serial" }
 k-vga = { path = "../k-vga" }

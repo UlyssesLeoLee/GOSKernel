@@ -358,6 +358,26 @@ pub struct ExecutorId(pub [u8; 16]);
 #[repr(transparent)]
 pub struct VectorStorageKey(pub [u8; 16]);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ModuleId(pub [u8; 16]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ModuleHandle(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct DomainId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EndpointId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct CapabilityToken(pub u64);
+
 impl PluginId {
     pub const ZERO: Self = Self([0; 16]);
 
@@ -388,6 +408,50 @@ impl ExecutorId {
 
 impl VectorStorageKey {
     pub const ZERO: Self = Self([0; 16]);
+}
+
+impl ModuleId {
+    pub const ZERO: Self = Self([0; 16]);
+
+    pub const fn new(raw: [u8; 16]) -> Self {
+        Self(raw)
+    }
+
+    pub const fn from_ascii(name: &str) -> Self {
+        Self(fixed_bytes_16(name))
+    }
+}
+
+impl ModuleHandle {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl DomainId {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl EndpointId {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl CapabilityToken {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 pub const fn fixed_bytes_16(value: &str) -> [u8; 16] {
@@ -581,6 +645,223 @@ pub struct ImportSpec {
     pub capability: &'static str,
     pub namespace: &'static str,
     pub required: bool,
+}
+
+pub const MODULE_ABI_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModuleImageFormat {
+    Builtin = 0x01,
+    ElfReloc = 0x02,
+    ElfShared = 0x03,
+    FlatBinary = 0x04,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModuleLifecycle {
+    Installed = 0x01,
+    Validated = 0x02,
+    Mapped = 0x03,
+    Instantiated = 0x04,
+    Running = 0x05,
+    Quiescing = 0x06,
+    Stopped = 0x07,
+    Faulted = 0xFF,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModuleFaultPolicy {
+    FaultKernelDegraded = 0x01,
+    Restart = 0x02,
+    RestartAlways = 0x03,
+    Manual = 0x04,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModuleSegmentKind {
+    Text = 0x01,
+    Rodata = 0x02,
+    Data = 0x03,
+    Bss = 0x04,
+    Stack = 0x05,
+    Ipc = 0x06,
+    Shared = 0x07,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModuleMessageKind {
+    Data = 0x01,
+    Event = 0x02,
+    Control = 0x03,
+    Interrupt = 0x04,
+    CapabilityRevoked = 0x05,
+    Fault = 0x06,
+    Shutdown = 0x07,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ModuleCallStatus {
+    Ok = 0,
+    Retry = 1,
+    Denied = -1,
+    Unsupported = -2,
+    Fault = -3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleDependencySpec {
+    pub module_id: ModuleId,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleImageSegment {
+    pub kind: ModuleSegmentKind,
+    pub virt_addr: u64,
+    pub mem_len: u64,
+    pub file_offset: u64,
+    pub file_len: u64,
+    pub flags: u64,
+}
+
+impl ModuleImageSegment {
+    pub const EMPTY: Self = Self {
+        kind: ModuleSegmentKind::Text,
+        virt_addr: 0,
+        mem_len: 0,
+        file_offset: 0,
+        file_len: 0,
+        flags: 0,
+    };
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleMessageHeader {
+    pub kind: ModuleMessageKind,
+    pub from: EndpointId,
+    pub to: EndpointId,
+    pub token: CapabilityToken,
+    pub length: u16,
+    pub _reserved: u16,
+}
+
+impl ModuleMessageHeader {
+    pub const EMPTY: Self = Self {
+        kind: ModuleMessageKind::Data,
+        from: EndpointId::ZERO,
+        to: EndpointId::ZERO,
+        token: CapabilityToken::ZERO,
+        length: 0,
+        _reserved: 0,
+    };
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleMessage {
+    pub header: ModuleMessageHeader,
+    pub payload: [u8; 48],
+}
+
+impl ModuleMessage {
+    pub const EMPTY: Self = Self {
+        header: ModuleMessageHeader::EMPTY,
+        payload: [0; 48],
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ModuleAbiV1 {
+    pub abi_version: u32,
+    pub log: Option<unsafe extern "C" fn(module: ModuleHandle, level: u8, bytes: *const u8, len: usize) -> ModuleCallStatus>,
+    pub send_message:
+        Option<unsafe extern "C" fn(module: ModuleHandle, endpoint: EndpointId, message: *const ModuleMessage) -> ModuleCallStatus>,
+    pub receive_message:
+        Option<unsafe extern "C" fn(module: ModuleHandle, endpoint: EndpointId, out: *mut ModuleMessage) -> ModuleCallStatus>,
+    pub resolve_capability:
+        Option<unsafe extern "C" fn(module: ModuleHandle, namespace: *const u8, namespace_len: usize, name: *const u8, name_len: usize, out: *mut CapabilityToken) -> ModuleCallStatus>,
+    pub open_endpoint:
+        Option<unsafe extern "C" fn(module: ModuleHandle, label: *const u8, label_len: usize, out: *mut EndpointId) -> ModuleCallStatus>,
+    pub request_pages:
+        Option<unsafe extern "C" fn(module: ModuleHandle, page_count: usize, writable: u8, out_base: *mut u64) -> ModuleCallStatus>,
+    pub free_pages:
+        Option<unsafe extern "C" fn(module: ModuleHandle, base: u64, page_count: usize) -> ModuleCallStatus>,
+    pub subscribe_interrupt:
+        Option<unsafe extern "C" fn(module: ModuleHandle, irq: u8, endpoint: EndpointId) -> ModuleCallStatus>,
+    pub register_lifecycle:
+        Option<unsafe extern "C" fn(module: ModuleHandle, endpoint: EndpointId) -> ModuleCallStatus>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ModuleEntry {
+    pub module_init:
+        Option<unsafe extern "C" fn(abi: *const ModuleAbiV1, handle: ModuleHandle, domain: DomainId) -> ModuleCallStatus>,
+    pub module_start:
+        Option<unsafe extern "C" fn(abi: *const ModuleAbiV1, handle: ModuleHandle, domain: DomainId) -> ModuleCallStatus>,
+    pub module_stop:
+        Option<unsafe extern "C" fn(abi: *const ModuleAbiV1, handle: ModuleHandle, domain: DomainId) -> ModuleCallStatus>,
+    pub module_suspend:
+        Option<unsafe extern "C" fn(abi: *const ModuleAbiV1, handle: ModuleHandle, domain: DomainId) -> ModuleCallStatus>,
+    pub module_resume:
+        Option<unsafe extern "C" fn(abi: *const ModuleAbiV1, handle: ModuleHandle, domain: DomainId) -> ModuleCallStatus>,
+}
+
+impl ModuleEntry {
+    pub const NONE: Self = Self {
+        module_init: None,
+        module_start: None,
+        module_stop: None,
+        module_suspend: None,
+        module_resume: None,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub struct ModuleDescriptor {
+    pub abi_version: u32,
+    pub module_id: ModuleId,
+    pub name: &'static str,
+    pub version: u32,
+    pub image_format: ModuleImageFormat,
+    pub fault_policy: ModuleFaultPolicy,
+    pub dependencies: &'static [ModuleDependencySpec],
+    pub permissions: &'static [PermissionSpec],
+    pub exports: &'static [CapabilitySpec],
+    pub imports: &'static [ImportSpec],
+    pub segments: &'static [ModuleImageSegment],
+    pub entry: ModuleEntry,
+    pub signature: Option<&'static [u8]>,
+    pub flags: u64,
+}
+
+impl ModuleDescriptor {
+    pub const fn empty(module_id: ModuleId, name: &'static str) -> Self {
+        Self {
+            abi_version: MODULE_ABI_VERSION,
+            module_id,
+            name,
+            version: 1,
+            image_format: ModuleImageFormat::Builtin,
+            fault_policy: ModuleFaultPolicy::Manual,
+            dependencies: &[],
+            permissions: &[],
+            exports: &[],
+            imports: &[],
+            segments: &[],
+            entry: ModuleEntry::NONE,
+            signature: None,
+            flags: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

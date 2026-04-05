@@ -3,8 +3,10 @@ use gos_loader::{
     NativeNodeBinding, BUNDLE_MAGIC,
 };
 use gos_protocol::{
-    derive_node_id, BootContext, CapabilitySpec, EntryPolicy, ExecutorId, ImportSpec, NodeSpec,
-    PermissionKind, PermissionSpec, PluginId, PluginManifest, PluginEntry, RuntimeNodeType,
+    derive_node_id, BootContext, CapabilitySpec, EntryPolicy, ExecutorId, ImportSpec,
+    ModuleDependencySpec, ModuleDescriptor, ModuleEntry, ModuleFaultPolicy, ModuleId,
+    ModuleImageFormat, NodeSpec, PermissionKind, PermissionSpec, PluginId, PluginManifest,
+    PluginEntry, RuntimeNodeType, MODULE_ABI_VERSION,
 };
 
 const K_PANIC_ID: PluginId = PluginId::from_ascii("K_PANIC");
@@ -157,6 +159,95 @@ const DEP_MOUSE: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_IDT_ID];
 const DEP_CYPHER: &[PluginId] = &[K_VGA_ID];
 const DEP_SHELL: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_HEAP_ID, K_IME_ID, K_NET_ID, K_CYPHER_ID];
 const DEP_AI: &[PluginId] = &[K_SHELL_ID];
+
+const MOD_DEP_PIT: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_PIC_ID),
+    required: true,
+}];
+const MOD_DEP_PS2: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_PIC_ID),
+    required: true,
+}];
+const MOD_DEP_IDT: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec {
+        module_id: module_id(K_GDT_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_PIT_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_PS2_ID),
+        required: true,
+    },
+];
+const MOD_DEP_VMM: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_PMM_ID),
+    required: true,
+}];
+const MOD_DEP_HEAP: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec {
+        module_id: module_id(K_PMM_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_VMM_ID),
+        required: true,
+    },
+];
+const MOD_DEP_NET: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_VGA_ID),
+    required: true,
+}];
+const MOD_DEP_MOUSE: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec {
+        module_id: module_id(K_VGA_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_PS2_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_IDT_ID),
+        required: true,
+    },
+];
+const MOD_DEP_CYPHER: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_VGA_ID),
+    required: true,
+}];
+const MOD_DEP_SHELL: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec {
+        module_id: module_id(K_VGA_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_PS2_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_HEAP_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_IME_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_NET_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_CYPHER_ID),
+        required: true,
+    },
+];
+const MOD_DEP_AI: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_SHELL_ID),
+    required: true,
+}];
 
 const PANIC_MANIFEST: PluginManifest = manifest(K_PANIC_ID, "K_PANIC", &[], NONE_PERMS, &[], &[]);
 const SERIAL_MANIFEST: PluginManifest = manifest(K_SERIAL_ID, "K_SERIAL", &[], SERIAL_PERMS, SERIAL_EXPORTS, &[]);
@@ -367,6 +458,37 @@ const AI_MANIFEST: PluginManifest = manifest_with_nodes(
     AI_NODE_SPECS,
 );
 
+const fn module_id(plugin_id: PluginId) -> ModuleId {
+    ModuleId::new(plugin_id.0)
+}
+
+const fn module_descriptor(
+    plugin_id: PluginId,
+    name: &'static str,
+    dependencies: &'static [ModuleDependencySpec],
+    permissions: &'static [PermissionSpec],
+    exports: &'static [CapabilitySpec],
+    imports: &'static [ImportSpec],
+    fault_policy: ModuleFaultPolicy,
+) -> ModuleDescriptor {
+    ModuleDescriptor {
+        abi_version: MODULE_ABI_VERSION,
+        module_id: module_id(plugin_id),
+        name,
+        version: 1,
+        image_format: ModuleImageFormat::Builtin,
+        fault_policy,
+        dependencies,
+        permissions,
+        exports,
+        imports,
+        segments: &[],
+        entry: ModuleEntry::NONE,
+        signature: None,
+        flags: 0,
+    }
+}
+
 const fn manifest(
     plugin_id: PluginId,
     name: &'static str,
@@ -534,6 +656,171 @@ const BUNDLE: BootBundle = BootBundle {
     modules: &BUILTIN_MODULES,
 };
 
+const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 18] = [
+    module_descriptor(
+        K_PANIC_ID,
+        "K_PANIC",
+        &[],
+        NONE_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_SERIAL_ID,
+        "K_SERIAL",
+        &[],
+        SERIAL_PERMS,
+        SERIAL_EXPORTS,
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_VGA_ID,
+        "K_VGA",
+        &[],
+        VGA_PERMS,
+        VGA_EXPORTS,
+        &[],
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_GDT_ID,
+        "K_GDT",
+        &[],
+        MEM_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_CPUID_ID,
+        "K_CPUID",
+        &[],
+        NONE_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_PIC_ID,
+        "K_PIC",
+        &[],
+        PIC_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_PIT_ID,
+        "K_PIT",
+        MOD_DEP_PIT,
+        PIT_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_PS2_ID,
+        "K_PS2",
+        MOD_DEP_PS2,
+        PS2_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_IDT_ID,
+        "K_IDT",
+        MOD_DEP_IDT,
+        IRQ_PERMS,
+        &[],
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_PMM_ID,
+        "K_PMM",
+        &[],
+        MEM_PERMS,
+        PMM_EXPORTS,
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_VMM_ID,
+        "K_VMM",
+        MOD_DEP_VMM,
+        MEM_PERMS,
+        VMM_EXPORTS,
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_HEAP_ID,
+        "K_HEAP",
+        MOD_DEP_HEAP,
+        MEM_PERMS,
+        HEAP_EXPORTS,
+        &[],
+        ModuleFaultPolicy::FaultKernelDegraded,
+    ),
+    module_descriptor(
+        K_IME_ID,
+        "K_IME",
+        &[],
+        IME_PERMS,
+        IME_EXPORTS,
+        IME_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_NET_ID,
+        "K_NET",
+        MOD_DEP_NET,
+        NET_PERMS,
+        NET_EXPORTS,
+        NET_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_MOUSE_ID,
+        "K_MOUSE",
+        MOD_DEP_MOUSE,
+        MOUSE_PERMS,
+        &[],
+        MOUSE_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_CYPHER_ID,
+        "K_CYPHER",
+        MOD_DEP_CYPHER,
+        CYPHER_PERMS,
+        CYPHER_EXPORTS,
+        CYPHER_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_SHELL_ID,
+        "K_SHELL",
+        MOD_DEP_SHELL,
+        SHELL_PERMS,
+        SHELL_EXPORTS,
+        SHELL_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_AI_ID,
+        "K_AI",
+        MOD_DEP_AI,
+        AI_PERMS,
+        AI_EXPORTS,
+        AI_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+];
+
 const fn legacy_node(
     vector: gos_protocol::VectorAddress,
     local_node_key: &'static str,
@@ -558,6 +845,10 @@ const fn legacy_node(
 
 pub fn builtin_bundle() -> &'static BootBundle {
     &BUNDLE
+}
+
+pub fn builtin_supervisor_modules() -> &'static [ModuleDescriptor] {
+    &BUILTIN_SUPERVISOR_MODULES
 }
 
 fn panic_entry(ctx: &mut BootContext) {

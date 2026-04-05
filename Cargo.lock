@@ -46,6 +46,7 @@ dependencies = [
  "gos-loader",
  "gos-protocol",
  "gos-runtime",
+ "gos-supervisor",
  "k-ai",
  "k-cpuid",
  "k-cypher",
@@ -84,6 +85,15 @@ name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
  "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-supervisor"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "k-vmm",
  "spin",
 ]
 

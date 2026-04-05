@@ -68,6 +68,7 @@ const GRAPH_CTX_OVERVIEW: u8 = 1;
 const GRAPH_CTX_NODE: u8 = 2;
 const GRAPH_CTX_EDGE: u8 = 3;
 const MAX_IME_PREVIEW: usize = 24;
+const GRAPH_NAV_DEPTH: usize = 8;
 
 const CP437_LIGHT: u8 = 176;
 const CP437_MEDIUM: u8 = 177;
@@ -146,6 +147,27 @@ const LIVE_TRAIL_HEAD: [usize; LIVE_SIGIL_FRAMES] = [2, 4, 7, 9, 10, 8, 6, 4, 3,
 const BOOT_WOBBLE_X: [i32; LIVE_SIGIL_FRAMES] = [0, 1, -1, 2, -2, 1, -1, 0, 1, -1, 0, 0];
 const BOOT_WOBBLE_Y: [i32; LIVE_SIGIL_FRAMES] = [0, 0, 1, -1, 1, -1, 0, 1, -1, 0, 0, 0];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GraphNavState {
+    selected_node: Option<VectorAddress>,
+    selected_edge: Option<EdgeVector>,
+    graph_mode: u8,
+    graph_context: u8,
+    graph_offset: usize,
+    graph_total: usize,
+}
+
+impl GraphNavState {
+    const EMPTY: Self = Self {
+        selected_node: None,
+        selected_edge: None,
+        graph_mode: GRAPH_MODE_NONE,
+        graph_context: GRAPH_CTX_NONE,
+        graph_offset: 0,
+        graph_total: 0,
+    };
+}
+
 #[repr(C)]
 struct ShellState {
     buffer: [u8; 128],
@@ -156,6 +178,8 @@ struct ShellState {
     graph_context: u8,
     graph_offset: usize,
     graph_total: usize,
+    graph_nav: [GraphNavState; GRAPH_NAV_DEPTH],
+    graph_nav_len: usize,
     ai_lines: [[u8; AI_PANEL_LINE_WIDTH]; AI_PANEL_LINES],
     ai_line_lens: [u8; AI_PANEL_LINES],
     ai_stream: [u8; AI_PANEL_LINE_WIDTH],
@@ -410,6 +434,48 @@ fn clear_ai_panel(state: &mut ShellState) {
     state.ai_stream_len = 0;
 }
 
+fn clear_graph_nav(state: &mut ShellState) {
+    state.graph_nav = [GraphNavState::EMPTY; GRAPH_NAV_DEPTH];
+    state.graph_nav_len = 0;
+}
+
+fn current_graph_nav_state(state: &ShellState) -> GraphNavState {
+    GraphNavState {
+        selected_node: state.selected_node,
+        selected_edge: state.selected_edge,
+        graph_mode: state.graph_mode,
+        graph_context: state.graph_context,
+        graph_offset: state.graph_offset,
+        graph_total: state.graph_total,
+    }
+}
+
+fn push_graph_nav_state(state: &mut ShellState) {
+    let snapshot = current_graph_nav_state(state);
+    if state.graph_nav_len > 0 && state.graph_nav[state.graph_nav_len - 1] == snapshot {
+        return;
+    }
+    if state.graph_nav_len == GRAPH_NAV_DEPTH {
+        for idx in 1..GRAPH_NAV_DEPTH {
+            state.graph_nav[idx - 1] = state.graph_nav[idx];
+        }
+        state.graph_nav_len = GRAPH_NAV_DEPTH - 1;
+        state.graph_nav[state.graph_nav_len] = GraphNavState::EMPTY;
+    }
+    state.graph_nav[state.graph_nav_len] = snapshot;
+    state.graph_nav_len += 1;
+}
+
+fn pop_graph_nav_state(state: &mut ShellState) -> Option<GraphNavState> {
+    if state.graph_nav_len == 0 {
+        return None;
+    }
+    state.graph_nav_len -= 1;
+    let snapshot = state.graph_nav[state.graph_nav_len];
+    state.graph_nav[state.graph_nav_len] = GraphNavState::EMPTY;
+    Some(snapshot)
+}
+
 fn clear_graph_selection(state: &mut ShellState) {
     state.selected_node = None;
     state.selected_edge = None;
@@ -417,6 +483,7 @@ fn clear_graph_selection(state: &mut ShellState) {
     state.graph_context = GRAPH_CTX_NONE;
     state.graph_offset = 0;
     state.graph_total = 0;
+    clear_graph_nav(state);
 }
 
 fn node_type_label(node_type: gos_protocol::RuntimeNodeType) -> &'static str {
@@ -1628,6 +1695,44 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     render_graph_footer(sink, state, "where  select clear");
 }
 
+fn restore_graph_nav_state(sink: &ConsoleSink, state: &mut ShellState, snapshot: GraphNavState) {
+    state.selected_node = snapshot.selected_node;
+    state.selected_edge = snapshot.selected_edge;
+    state.graph_mode = snapshot.graph_mode;
+    state.graph_context = snapshot.graph_context;
+    state.graph_offset = snapshot.graph_offset;
+    state.graph_total = snapshot.graph_total;
+
+    match snapshot.graph_mode {
+        GRAPH_MODE_NONE => {
+            clear_command_area(sink);
+            redraw_footer(sink, state, false);
+            focus_footer_input(sink, state);
+        }
+        GRAPH_MODE_OVERVIEW => render_graph_overview(sink, state, snapshot.graph_offset),
+        GRAPH_MODE_NODE_LIST => render_node_list(sink, state, snapshot.graph_offset),
+        GRAPH_MODE_EDGE_LIST => render_edge_list(sink, state, snapshot.graph_offset),
+        GRAPH_MODE_NODE_DETAIL => {
+            if snapshot.selected_edge.is_some() && snapshot.graph_total == 2 {
+                render_nodes_for_selected_edge(sink, state);
+            } else if let Some(vector) = snapshot.selected_node {
+                render_node_detail(sink, state, vector);
+            } else {
+                render_graph_overview(sink, state, 0);
+            }
+        }
+        GRAPH_MODE_EDGE_DETAIL => {
+            if let Some(vector) = snapshot.selected_edge {
+                render_edge_detail(sink, state, vector);
+            } else {
+                render_graph_overview(sink, state, 0);
+            }
+        }
+        GRAPH_MODE_INFO => render_where(sink, state),
+        _ => {}
+    }
+}
+
 fn begin_graph_command(sink: &ConsoleSink, state: &mut ShellState) {
     state.len = 0;
     clear_command_area(sink);
@@ -1639,12 +1744,32 @@ fn parse_node_command(cmd: &str) -> Option<VectorAddress> {
     VectorAddress::parse(payload.trim())
 }
 
+fn is_vector_wrapper_char(ch: char) -> bool {
+    matches!(ch, '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';')
+}
+
+fn parse_edge_vector_payload(payload: &str) -> Option<EdgeVector> {
+    for raw in payload.split_ascii_whitespace() {
+        let token = raw.trim_matches(is_vector_wrapper_char);
+        let token = token
+            .strip_prefix("vector=")
+            .or_else(|| token.strip_prefix("vector:"))
+            .or_else(|| token.strip_prefix("vec="))
+            .or_else(|| token.strip_prefix("vec:"))
+            .unwrap_or(token);
+        let token = token.trim_matches(is_vector_wrapper_char);
+        let token = token.strip_prefix("e:").unwrap_or(token);
+        if let Some(vector) = EdgeVector::parse(token.trim_matches(is_vector_wrapper_char)) {
+            return Some(vector);
+        }
+    }
+    None
+}
+
 fn parse_edge_command(cmd: &str) -> Option<EdgeVector> {
     let trimmed = cmd.trim();
     let payload = trimmed.strip_prefix("edge ")?;
-    let payload = payload.trim();
-    let payload = payload.strip_prefix("e:").unwrap_or(payload);
-    EdgeVector::parse(payload.trim())
+    parse_edge_vector_payload(payload.trim())
 }
 
 fn graph_page_stride(state: &ShellState) -> usize {
@@ -1717,14 +1842,28 @@ fn handle_graph_page_key(sink: &ConsoleSink, state: &mut ShellState, byte: u8) -
 }
 
 fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -> bool {
+    if cmd == "back" {
+        if state.graph_mode == GRAPH_MODE_NONE {
+            return false;
+        }
+        begin_graph_command(sink, state);
+        if let Some(snapshot) = pop_graph_nav_state(state) {
+            restore_graph_nav_state(sink, state, snapshot);
+        } else {
+            render_graph_notice(sink, state, "GRAPH BACK", "no previous graph view", "", 12);
+        }
+        return true;
+    }
     if cmd == "show" {
         begin_graph_command(sink, state);
+        push_graph_nav_state(state);
         show_by_context(sink, state, true);
         return true;
     }
     if cmd == "show next" {
         begin_graph_command(sink, state);
         if state.graph_mode == GRAPH_MODE_NONE {
+            push_graph_nav_state(state);
             render_graph_overview(sink, state, GRAPH_OVERVIEW_ITEMS);
         } else {
             render_graph_next_page(sink, state);
@@ -1734,6 +1873,7 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
     if cmd == "show prev" {
         begin_graph_command(sink, state);
         if state.graph_mode == GRAPH_MODE_NONE {
+            push_graph_nav_state(state);
             render_graph_overview(sink, state, 0);
         } else {
             render_graph_prev_page(sink, state);
@@ -1743,6 +1883,7 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
     if cmd == "node" {
         begin_graph_command(sink, state);
         if let Some(vector) = state.selected_node {
+            push_graph_nav_state(state);
             render_node_detail(sink, state, vector);
         } else {
             render_graph_notice(sink, state, "NODE DETAIL", "no node selected", "use node <vector> first", 12);
@@ -1752,6 +1893,7 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
     if cmd == "edge" {
         begin_graph_command(sink, state);
         if let Some(vector) = state.selected_edge {
+            push_graph_nav_state(state);
             render_edge_detail(sink, state, vector);
         } else {
             render_graph_notice(sink, state, "EDGE DETAIL", "no edge selected", "use edge <vector> or show from node", 12);
@@ -1763,6 +1905,9 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         if state.graph_mode == GRAPH_MODE_EDGE_LIST {
             render_graph_next_page(sink, state);
         } else {
+            if state.selected_node.is_some() {
+                push_graph_nav_state(state);
+            }
             render_edge_list(sink, state, GRAPH_PAGE_ITEMS);
         }
         return true;
@@ -1772,12 +1917,16 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         if state.graph_mode == GRAPH_MODE_EDGE_LIST {
             render_graph_prev_page(sink, state);
         } else {
+            if state.selected_node.is_some() {
+                push_graph_nav_state(state);
+            }
             render_edge_list(sink, state, 0);
         }
         return true;
     }
     if cmd == "where" {
         begin_graph_command(sink, state);
+        push_graph_nav_state(state);
         render_where(sink, state);
         return true;
     }
@@ -1817,11 +1966,13 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
     }
     if let Some(edge_vector) = parse_edge_command(cmd) {
         begin_graph_command(sink, state);
+        push_graph_nav_state(state);
         render_edge_detail(sink, state, edge_vector);
         return true;
     }
     if let Some(vector) = parse_node_command(cmd) {
         begin_graph_command(sink, state);
+        push_graph_nav_state(state);
         render_node_detail(sink, state, vector);
         return true;
     }
@@ -1995,7 +2146,7 @@ fn draw_footer_input(sink: &ConsoleSink, state: &ShellState) {
                 COMMAND_INPUT_TEXT_COL,
                 8,
                 0,
-                "show / node <vec> / edge <vec> / cypher MATCH ... / ask <prompt>",
+                "show / back / node <vec> / edge <vec> / ask <prompt>",
             );
         } else {
             let start = visible_len.saturating_sub(available);
@@ -2258,7 +2409,8 @@ fn redraw_console(sink: &ConsoleSink, state: &ShellState) {
     draw_text(sink, 7, 19, 7, 0, "node");
     draw_text(sink, 7, 26, 15, 0, "edge");
     draw_text(sink, 7, 33, 7, 0, "where");
-    draw_text(sink, 8, 4, 8, 0, "show toggles node/edge context; use node <vec> and edge <vec>.");
+    draw_text(sink, 7, 41, 15, 0, "back");
+    draw_text(sink, 8, 4, 8, 0, "show toggles node/edge context; back returns one level.");
     draw_text(sink, 9, 4, 8, 0, "PgUp/PgDn pages overview and graph lists; cypher MATCH ... still works.");
     draw_console_sigil(sink, 0);
     draw_ai_panel(sink, state);
@@ -2388,6 +2540,8 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 graph_context: GRAPH_CTX_NONE,
                 graph_offset: 0,
                 graph_total: 0,
+                graph_nav: [GraphNavState::EMPTY; GRAPH_NAV_DEPTH],
+                graph_nav_len: 0,
                 ai_lines: [[0; AI_PANEL_LINE_WIDTH]; AI_PANEL_LINES],
                 ai_line_lens: [0; AI_PANEL_LINES],
                 ai_stream: [0; AI_PANEL_LINE_WIDTH],
@@ -2597,6 +2751,7 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 }
 
                 if state.graph_mode != GRAPH_MODE_NONE {
+                    clear_graph_nav(state);
                     state.graph_mode = GRAPH_MODE_NONE;
                     state.graph_offset = 0;
                     state.graph_total = 0;
@@ -2633,6 +2788,7 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                     print_str(&sink, "  info    runtime snapshot\n");
                     print_str(&sink, "  graph   graph counters\n");
                     print_str(&sink, "  show    overview, or toggle node/edge context\n");
+                    print_str(&sink, "  back    return to the previous graph view\n");
                     print_str(&sink, "  node <vector>  select/show one node\n");
                     print_str(&sink, "  edge <vector>  select/show one edge\n");
                     print_str(&sink, "  PgUp/PgDn  page graph overview/lists\n");
@@ -2859,4 +3015,34 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
 
 unsafe extern "C" fn shell_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_edge_command, parse_edge_vector_payload};
+    use gos_protocol::EdgeVector;
+
+    #[test]
+    fn parse_edge_command_accepts_plain_vector() {
+        assert_eq!(
+            parse_edge_command("edge e:17.34.51.68"),
+            Some(EdgeVector::new(17, 34, 51, 68))
+        );
+    }
+
+    #[test]
+    fn parse_edge_command_accepts_vector_embedded_in_edge_row_text() {
+        assert_eq!(
+            parse_edge_command("edge out e:17.34.51.68 call 6.1.0.0 -> 6.1.0.1"),
+            Some(EdgeVector::new(17, 34, 51, 68))
+        );
+    }
+
+    #[test]
+    fn parse_edge_payload_accepts_vector_field_wrappers() {
+        assert_eq!(
+            parse_edge_vector_payload("vector:'e:17.34.51.68'"),
+            Some(EdgeVector::new(17, 34, 51, 68))
+        );
+    }
 }

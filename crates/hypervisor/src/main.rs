@@ -32,11 +32,32 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     gos_hal::meta::init();
     raw_serial_println(format_args!("boot: vaddr/meta initialized"));
 
+    raw_serial_println(format_args!("boot: staging supervisor domains"));
+    gos_supervisor::bootstrap(boot_info as *const _ as u64);
+    for descriptor in builtin_bundle::builtin_supervisor_modules() {
+        gos_supervisor::install_module(*descriptor)
+            .expect("supervisor failed to install module descriptor");
+    }
+    raw_serial_println(format_args!("boot: supervisor registered module descriptors"));
+
     let mut ctx = gos_runtime::bootstrap_context(boot_info as *const _ as u64);
     raw_serial_println(format_args!("boot: loading builtin bundle"));
     let report = gos_loader::load_bundle(builtin_bundle::builtin_bundle(), &mut ctx)
         .expect("builtin boot bundle failed to load");
     raw_serial_println(format_args!("boot: bundle loaded"));
+
+    let supervisor_report = gos_supervisor::realize_boot_modules()
+        .expect("supervisor failed to realize isolated domains");
+    raw_serial_println(format_args!("boot: supervisor staged isolated domains"));
+
+    k_serial::serial_println!(
+        "supervisor modules={} running={} domains={} compat={} caps={}",
+        supervisor_report.discovered_modules,
+        supervisor_report.running_modules,
+        supervisor_report.isolated_domains,
+        supervisor_report.compat_bridges,
+        supervisor_report.published_capabilities
+    );
 
     k_serial::serial_println!("\n=== GOS v0.2 BUNDLE LOAD ===");
     k_serial::serial_println!(

@@ -1,0 +1,14 @@
+[package]
+name = "gos-supervisor"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["kernel-vmm"]
+kernel-vmm = ["dep:k-vmm"]
+host-testing = []
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+k-vmm = { path = "../k-vmm", optional = true }
+spin = "0.9"
