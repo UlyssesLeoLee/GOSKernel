@@ -21,6 +21,7 @@ members = [
     "crates/k-heap",
     "crates/k-shell",
     "crates/k-ai",
+    "crates/k-cuda-host",
     "crates/k-cypher",
     "crates/k-ime",
     "crates/k-net",

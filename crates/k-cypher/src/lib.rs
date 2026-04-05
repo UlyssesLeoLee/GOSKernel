@@ -144,6 +144,7 @@ fn print_runtime_edge_type(sink: &ConsoleSink, edge_type: RuntimeEdgeType) {
         RuntimeEdgeType::Mount => "mount",
         RuntimeEdgeType::Sync => "sync",
         RuntimeEdgeType::Stream => "stream",
+        RuntimeEdgeType::Use => "use",
     };
     print_str(sink, label);
 }

@@ -96,6 +96,10 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
                     let shell_vec = VectorAddress::new(6, 1, 0, 0);
                     let special = if key == pc_keyboard::KeyCode::Backspace {
                         Some(0x08)
+                    } else if key == pc_keyboard::KeyCode::ArrowUp {
+                        Some(INPUT_KEY_UP)
+                    } else if key == pc_keyboard::KeyCode::ArrowDown {
+                        Some(INPUT_KEY_DOWN)
                     } else if key == pc_keyboard::KeyCode::PageUp {
                         Some(INPUT_KEY_PAGE_UP)
                     } else if key == pc_keyboard::KeyCode::PageDown {

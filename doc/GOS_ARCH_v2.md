@@ -1,458 +1,281 @@
-# GOS Architecture v2 — Node Graph Runtime 完整系统设计
-
-> **版本**: v2.0 (Phase 2 设计基准)  
-> **平台**: x86_64 无标准库裸机  
-> **语言**: Rust `#[no_std]` + 未来阶段引入 `alloc`  
-> **核心公理**: 一切皆 Node（持有状态），一切皆 Edge（管理关系）
-
----
-
-## 一、系统哲学与核心不变量
-
-### 1.1 五条不变量（必须永远成立）
-
-```
-INV-1: 所有持久状态必须存在于某个 Node 的 NodeBlock 内，不得存在"游离"全局变量。
-INV-2: 所有组件间交互必须经过 Edge，不得跨 Node 直接写另一个 Node 的状态字段。
-INV-3: 每个 Node 拥有唯一向量地址 VectorAddress[L4:Domain, L3:Type, L2:Instance, Offset]。
-INV-4: 每条 Edge 默认 acl_mask = u64::MAX（全连通）；仅在必要时收窄掩码限制通路。
-INV-5: 系统的"启动完成"不是某函数返回，而是图达到 StableState（无未决激活边）。
-```
-
-### 1.2 Node 与 Edge 的职责边界
-
-| 概念 | 持有 | 禁止 |
-|---|---|---|
-| **Node** | 状态、能力声明、NodeHeader | 直接读写其他 Node 内存 |
-| **Edge** | 关系类型、ACL 掩码、权重、目标向量 | 持有业务状态 |
-| **Plugin** | Node 集合 + Edge 集合 + Entry Node 声明 | 拥有全局执行流 |
-
----
-
-## 二、向量地址空间（Vector Address Space）
-
-所有 Node 和 Edge 都通过 48 位规范向量地址定位，由 `K_VADDR` 插件（Domain 1, Type 9）拥有并管理。
-
-### 2.1 3-Nibble 规则
-
-```
-Bit layout (48-bit canonical address):
-  0xFFFF_8 [L4: 8bit domain] [L3: 12bit type] [L2: 12bit instance] [Offset: 12bit]
-
-映射示例:
-  K_VGA  → VectorAddress[1, 1,  0, 0] → 0xFFFF_8_01_001_000_000
-  K_META → VectorAddress[1, 10, 0, 0] → 0xFFFF_8_01_00A_000_000
-```
-
-### 2.2 域（Domain）划分
-
-| L4 Domain | 用途 | 当前插件 |
-|---|---|---|
-| `0x00` | 系统保留（Bootstrap） | K_PANIC |
-| `0x01` | HAL 域（硬件抽象） | K_VADDR, K_META, K_VGA, K_SERIAL... |
-| `0x02` | 内存管理域 | K_PMM, K_VMM, K_HEAP (Phase 2) |
-| `0x03` | 图内核域 | K_NODE, K_EDGE, K_GRAPH (Phase 3) |
-| `0x04` | 调度域 | K_TASK, K_EXECUTOR, K_SCHED (Phase 3) |
-| `0x05` | 插件注册域 | K_REGISTRY, K_LOADER (Phase 3) |
-| `0x06` | 用户空间域 | P_* 插件群 (Phase 4+) |
-| `0xFF` | AI 向量域 | K_VECTOR, K_AGENT (Phase 5+) |
-
-### 2.3 NodeBlock 内存布局（4KB / block）
-
-```
-Offset 0x000 - 0x0FF  : NodeHeader (256B)  — 元数据、Magic、UUID、ACL
-Offset 0x100 - 0x3FF  : EdgeRegistry (768B) — 12条 EdgeHeader × 64B
-Offset 0x400 - 0xFFF  : NodeState (3072B)  — 具体插件数据（Writer/ChainedPics/...）
-```
-
----
-
-## 三、核心数据结构
-
-### 3.1 NodeHeader (256B)
-
-```rust
-#[repr(C, align(64))]
-pub struct NodeHeader {
-    pub magic: u32,           // 0x474F5321 "GOS!"
-    pub uuid: [u8; 16],       // 全局唯一 Node ID（未来由 K_UUID 生成）
-    pub label: [u8; 16],      // 域标签 e.g. "HAL"
-    pub name: [u8; 16],       // 节点名 e.g. "VGA"
-    pub version: u32,         // 插件版本
-    pub acl: u64,             // Node 级 ACL（0xFFFF = 全开）
-    pub node_type: u16,       // NodeType 枚举（见 3.3）
-    pub state_flags: u16,     // 状态标志位
-    pub _res: [u8; 188],      // 预留扩展（向量嵌入、AI 标签等）
-}
-```
-
-### 3.2 EdgeHeader (64B) — 含 Omni-Link 算法
-
-```rust
-#[repr(C, align(32))]
-pub struct EdgeHeader {
-    pub magic: u32,           // 0x45444745 "EDGE"
-    pub edge_type: EdgeType,  // 语义类型（见 3.4）
-    pub type_tag: [u8; 8],    // 辅助标签 e.g. "INIT"
-    pub target_vec: u64,      // 目标 Node 的向量地址
-    pub weight: f32,          // 边权重（调度优先级参考）
-    pub acl_mask: u64,        // Omni-Link 掩码：MAX=全通，其他=按位过滤
-    pub _res: [u8; 20],       // 预留（扩展为 EdgeState、回调地址等）
-}
-
-/// 检测调用方是否可以穿越此 Edge（O(1) 位运算）
-impl EdgeHeader {
-    pub fn permits(&self, caller_vec: u64) -> bool {
-        self.acl_mask == u64::MAX                         // 全通（Omni-Link 默认）
-            || (caller_vec & self.acl_mask) == self.target_vec  // 精确过滤
-    }
-}
-```
-
-### 3.3 NodeType 枚举
-
-```rust
-#[repr(u16)]
-pub enum NodeType {
-    /// 硬件抽象节点 — 对应物理硬件或固定内存映射
-    Hardware    = 0x0001,
-    /// 驱动节点 — 管理设备状态、提供 I/O 能力
-    Driver      = 0x0002,
-    /// 系统服务节点 — 逻辑服务（调度、内存管理等）
-    Service     = 0x0003,
-    /// 插件入口节点 — 每个插件的 Entry Node
-    PluginEntry = 0x0010,
-    /// 计算节点 — 执行一段算法并将结果写入输出 Edge
-    Compute     = 0x0020,
-    /// 路由节点 — 根据条件将激活信号转发到不同路径
-    Router      = 0x0030,
-    /// 聚合节点 — 等待多条输入 Edge 全部 Ready 后才激活
-    Aggregator  = 0x0040,
-    /// 向量节点 — 携带嵌入向量，支持 AI 语义检索
-    Vector      = 0x00FF,
-}
-```
-
-### 3.4 EdgeType 枚举（语义边类型）
-
-```rust
-#[repr(u8)]
-pub enum EdgeType {
-    /// 调用边：激活目标 Node 并等待其完成（同步语义）
-    Call    = 0x01,
-    /// 生成边：激活目标 Node 但不等待（异步/spawn 语义）
-    Spawn   = 0x02,
-    /// 依赖边：声明 "我依赖此 Node 必须先处于 Ready 状态"
-    Depend  = 0x03,
-    /// 信号边：发送非阻塞信号给目标 Node（中断/事件语义）
-    Signal  = 0x04,
-    /// 返回边：计算完成后将结果传递给调用方
-    Return  = 0x05,
-    /// 挂载边：将一个 Node 的能力接口挂载为另一个的子节点
-    Mount   = 0x06,
-    /// 同步边：协调两个 Node 的时间点（Barrier 语义）
-    Sync    = 0x07,
-    /// 数据流边：持续将数据从源 Node 流向目标 Node
-    Stream  = 0x08,
-    /// 继承边：目标 Node 继承源 Node 的部分状态（克隆/继承语义）
-    Inherit = 0x09,
-}
-```
-
----
-
-## 四、插件规范（Plugin Contract）
-
-每个插件必须满足以下合约：
-
-### 4.1 插件目录结构
-
-```
-pluginGroup/
-└── K_EXAMPLE/
-    ├── mod.rs          ← 插件根：声明 node/edge 子模块，导出 init()
-    ├── node/
-    │   └── mod.rs      ← Node 模块：定义状态结构、NODE_VEC、node_ptr()、init_node_state()
-    └── edge/
-        ├── mod.rs      ← 聚合所有 edge 子模块
-        ├── init.rs     ← 初始化 Edge：注册元数据
-        └── *.rs        ← 其他能力 Edge（call, signal, stream 等）
-```
-
-### 4.2 plugins.toml 规范（Phase 3 引入 K_LOADER 时读取）
-
-```toml
-[[plugin]]
-id       = "K_VGA"
-domain   = 1
-type_id  = 1
-entry    = "vga::edge::init::init"     # Entry Node 对应的激活函数
-depends  = []
-exports  = ["print", "set_color", "clear"]
-
-[[plugin]]
-id       = "K_GRAPH"
-domain   = 3
-type_id  = 1
-entry    = "graph::edge::bootstrap::init"
-depends  = ["K_HEAP", "K_VADDR", "K_META"]
-exports  = ["node_create", "edge_link", "graph_query"]
-```
-
-### 4.3 Entry Node 协议
-
-每个插件必须有且仅有一个 Entry Node。Entry Node 通过 `PluginEntry` NodeType 标识，由 Bootstrap 层在启动时自动扫描并激活。
-
-```rust
-// 每个插件的 edge/init.rs 是其 Entry Edge（等价于 Entry Node 的激活函数）
-pub fn init() {
-    unsafe {
-        let p = node_ptr();
-        burn_node_metadata(p, "DOMAIN_LABEL", "PLUGIN_NAME");
-        init_node_state();
-        // 注册自身的能力 Edge 到 EdgeRegistry
-        burn_edge_metadata(p, 0, "INIT", 0x0); // slot 0: 自身已初始化信号
-    }
-}
-```
-
----
-
-## 五、Node Graph Runtime（节点图运行时）— Phase 3 核心
-
-NGR 是整个 GOS 的调度心脏，位于 `Domain 0x03`，由 `K_GRAPH`、`K_NODE`、`K_EDGE` 三个插件组成。
-
-### 5.1 NGR 职责
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  Node Graph Runtime (NGR)                    │
-├──────────────┬──────────────┬──────────────┬────────────────┤
-│  Node Pool   │  Edge Router │  Scheduler   │  State Machine │
-│  (K_NODE)    │  (K_EDGE)    │  (K_SCHED)   │  (K_GRAPH)     │
-│              │              │              │                │
-│ - 分配/释放   │ - 路由激活信号 │ - Ready队列   │ - 系统状态机    │
-│   NodeBlock  │ - ACL 检查   │ - 优先级调度  │ - StableState  │
-│ - 管理生命周期 │ - 跨域转发   │ - 时间片控制  │   检测          │
-│ - 索引向量地址 │ - Edge 类型  │ - 抢占/协作   │ - 热更新触发    │
-│              │   分发策略   │   模式切换    │                │
-└──────────────┴──────────────┴──────────────┴────────────────┘
-```
-
-### 5.2 Node 生命周期状态机
-
-```
-        ┌────────────────────────────────────────────┐
-        │                                            │
-        ▼                                            │
-  [Unregistered]                                     │
-        │ K_LOADER 扫描到插件元数据                   │
-        ▼                                            │
-   [Registered]                                      │
-        │ Bootstrap 为其分配 NodeBlock 并烧录元数据   │
-        ▼                                            │
-    [Allocated]                                      │
-        │ Entry Edge init() 执行完毕                  │
-        ▼                                            │
-     [Ready]  ◄──────────────────────────────────────┤
-        │ NGR 调度器激活此 Node                       │
-        ▼                                            │
-    [Running]                                        │
-        │ 执行完成，发出 Return/Signal Edge            │
-        ▼                                            │
-   [Suspended] ────────────────────────────────────►─┘
-        │ 某条 Depend Edge 的上游 Node 被销毁
-        ▼
-   [Terminated]
-```
-
-### 5.3 图稳定状态（Stable State）检测
-
-系统不再有"main 函数返回 = 启动完成"，改为：
-
-```
-StableState 条件:
-  ∀ Node n ∈ RegisteredNodes:
-    n.state == Ready || n.state == Suspended || n.state == Terminated
-  ∧
-  ∀ Edge e ∈ PendingEdges: e.target.state == Ready
-  ∧
-  Scheduler.ready_queue.is_empty()
-
-达成 StableState 后，NGR 进入 EventLoop 模式（等待中断/外部触发）。
-```
-
----
-
-## 六、Bootstrap 引导层（当前 Phase 1 已实现）
-
-```
-Bootstrap 启动序列:
-
-Phase -1: K_VADDR::init()   ← 分配 HAL_MATRIX（向量空间物理后备）
-          K_META::init()    ← 建立 NodeHeader/EdgeHeader Schema
-
-Phase 0:  K_PANIC::init()   ← 全局 Panic Handler 上线
-
-Phase 1:  K_SERIAL::init()  ← 调试输出
-          K_VGA::init()     ← VGA 文本缓冲
-
-Phase 2:  K_GDT::init()     ← 全局描述符表
-          K_IDT::init()     ← 中断描述符表
-          K_PIC::init()     ← 中断控制器
-          K_PIT::init()     ← 定时器
-          K_PS2::init()     ← 键盘
-          K_CPUID::init()   ← CPU 能力
-
-Phase 3+: K_PMM → K_VMM → K_HEAP → K_GRAPH → K_NODE → K_EDGE → K_SCHED
-          → K_REGISTRY → K_LOADER → P_* 用户插件
-```
-
----
-
-## 七、Phase 路线图
-
-### Phase 1 ✅ — HAL 向量化（已完成）
-- [x] K_VADDR: 向量地址空间 + HAL_MATRIX
-- [x] K_META: NodeHeader/EdgeHeader + acl_mask Omni-Link 算法
-- [x] 全部 HAL 插件（K_VGA/SERIAL/GDT/IDT/PIC/PIT/PS2/CPUID/PANIC）Node/Edge 化
-
-### Phase 2 — 内存管理
-- [ ] `K_PMM` (Domain 2, Type 1): 物理内存帧分配器（Buddy System）
-- [ ] `K_VMM` (Domain 2, Type 2): 页表管理（4级页表 x86_64）
-- [ ] `K_HEAP` (Domain 2, Type 3): 内核堆分配器（使能 `alloc` crate）
-
-### Phase 3 — 节点图运行时（NGR）
-- [ ] `K_NODE` (Domain 3, Type 1): Node Pool 管理 + 生命周期状态机
-- [ ] `K_EDGE` (Domain 3, Type 2): Edge Router + ACL校验 + 类型分发
-- [ ] `K_GRAPH` (Domain 3, Type 3): 全局图结构 + StableState 检测
-- [ ] `K_SCHED` (Domain 4, Type 1): 调度器（Ready Queue + 优先级 + 时间片）
-- [ ] `K_REGISTRY` (Domain 5, Type 1): 插件注册表
-- [ ] `K_LOADER` (Domain 5, Type 2): 插件扫描 + Entry Node 激活
-
-### Phase 4 — Shell 与用户空间
-- [ ] `K_SHELL` (Domain 6, Type 1): 基于 Cypher 的命令行接口
-  - `MATCH (n:HAL) RETURN n.name` — 枚举 HAL 节点
-  - `CREATE (a:Node {name:"MyApp"})-[:CALL]->(b:Node {name:"VGA"})` — 动态创建
-- [ ] `P_APP` 插件模型: 用户程序 = 插件，入口 = Entry Node
-
-### Phase 5 — AI 原生调度
-- [ ] `K_VECTOR` (Domain 0xFF, Type 1): Node/Edge 向量嵌入（为语义检索提供特征）
-- [ ] `K_AGENT` (Domain 0xFF, Type 2): AI 调度代理，读取图状态，输出调度决策
-  - 决策输入: 图邻接矩阵 + Node 向量 + Edge 权重 + 历史激活序列
-  - 决策输出: 下一轮激活的 Node 集合 + Edge 优先级调整
-
----
-
-## 八、Edge 路由算法
-
-```
-Edge 激活流程 (NGR Edge Router):
-
-1. Source Node 执行完毕，生成 EdgeActivation { edge_slot, payload }
-2. Edge Router 从 Source Node 的 EdgeRegistry[slot] 读取 EdgeHeader
-3. ACL 检查: EdgeHeader.permits(source_node.vec_addr) → 拒绝则 drop
-4. 按 EdgeType 分发:
-   Call   → 将 target 加入 Ready Queue，Source 进入 Suspended 状态
-   Spawn  → 将 target 加入 Ready Queue，Source 继续 Running
-   Signal → 写入 target 的 SignalBuffer（无阻塞），Source 继续
-   Depend → 检查 target 状态，若非 Ready 则 Source 进入 Waiting
-   Return → Source 完成，唤醒等待它的 Caller Node
-   Mount  → 将 target 注册为 source 的子 Node（树状结构）
-   Sync   → 双方互等，形成 Barrier
-
-5. Scheduler 从 Ready Queue 取下一个 Node 执行
-```
-
----
-
-## 九、Cypher 查询接口（Phase 4 实现，Phase 3 预留）
-
-GOS 将 Cypher 作为系统 CLI 的查询/操作语言，取代传统命令行。
-
-```cypher
-// 查询所有 HAL 节点
-MATCH (n:Node {domain: 1}) RETURN n.name, n.vec_addr, n.state
-
-// 查找 VGA 节点可达的所有节点（2 跳内）
-MATCH (vga:Node {name:"VGA"})-[:CALL|SIGNAL*1..2]->(target)
-RETURN target.name, target.state
-
-// 动态创建一条限制边（只允许 Domain 1 通过）
-MATCH (src:Node {name:"PIC"}), (dst:Node {name:"IDT"})
-CREATE (src)-[:SIGNAL {acl_mask: 0xFFFF000000000000}]->(dst)
-
-// 激活一个 Node
-MATCH (n:Node {name:"MyApp"}) SET n.state = "Ready"
-
-// 查找处于 Running 状态的所有节点
-MATCH (n:Node) WHERE n.state = "Running" RETURN n
-```
-
----
-
-## 十、AI 调度接口规范（Phase 5 预留）
-
-### 10.1 图状态快照（AI 输入）
-
-```rust
-pub struct GraphSnapshot {
-    /// 所有 Node 的向量表示（embedding）
-    pub node_embeddings: &'static [[f32; 128]], // 每 Node 128维
-    /// 邻接矩阵（稀疏 COO 格式）
-    pub edge_src: &'static [u32],
-    pub edge_dst: &'static [u32],
-    pub edge_type: &'static [u8],
-    pub edge_weight: &'static [f32],
-    /// 当前 Ready Queue 长度
-    pub ready_queue_len: usize,
-    /// 当前系统时间（tick 计数）
-    pub tick: u64,
-}
-```
-
-### 10.2 AI 调度决策（AI 输出）
-
-```rust
-pub struct SchedulerDecision {
-    /// 下一轮激活的 Node 列表（按优先级排序）
-    pub activate_nodes: &'static [u64],        // Vec<VectorAddress as u64>
-    /// 建议调整权重的 Edge 集合
-    pub reweight_edges: &'static [(u64, f32)], // (edge_target_vec, new_weight)
-    /// 建议暂停的 Node（负载均衡）
-    pub suspend_nodes: &'static [u64],
-}
-```
-
----
-
-## 十一、当前目录结构（Phase 1 完成态）
-
-```
-src/
-├── main.rs                          ← K_BOOT (Entry Plugin)
-└── pluginGroup/
-    ├── mod.rs                       ← Plugin Group 注册表 + init_hal()
-    ├── K_VADDR/ [Domain 1, Type 9]  ← 向量地址空间所有者
-    │   ├── node/mod.rs              ← VectorAddress, HAL_MATRIX, NodeBlock
-    │   └── edge/{ init.rs }
-    ├── K_META/  [Domain 1, Type 10] ← 元数据 Schema 权威
-    │   ├── node/mod.rs              ← NodeHeader, EdgeHeader, acl_mask
-    │   └── edge/{ init.rs, burn.rs }
-    ├── K_PANIC/ [Domain 1, Type 0]
-    ├── K_VGA/   [Domain 1, Type 1]
-    ├── K_SERIAL/[Domain 1, Type 2]
-    ├── K_GDT/   [Domain 1, Type 3]
-    ├── K_IDT/   [Domain 1, Type 4]
-    ├── K_PIC/   [Domain 1, Type 5]
-    ├── K_PIT/   [Domain 1, Type 6]
-    ├── K_PS2/   [Domain 1, Type 7]
-    └── K_CPUID/ [Domain 1, Type 8]
-doc/
-├── RULE_GRAPH_PRIME.md              ← 不变量准则（强制性）
-└── GOS_ARCH_v2.md                   ← 本文档
-```
-
----
-
-*GOS: A system that remains correct as the world changes, and grows smarter as the graph grows denser.*
+# GOS 当前架构与后续路线图
+
+> 口径说明：本文档描述的是 **当前仓库已经采用的系统主线**，并在文末单列后续路线图。未完成能力不会伪装成已完成能力。
+
+## 一、系统身份
+
+GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原型模型，而是：
+
+- `hypervisor` 只负责最小引导
+- builtin graph 是启动时注册的第一份系统图
+- `gos-runtime` 负责图登记、激活、路由、能力解析和图摘要
+- `gos-supervisor` 负责模块描述符、模块域、能力发布、实例与资源控制，以及 steady-state system cycle
+- node / edge / vector / capability / `mount` / `use` 是公开的一等执行结构
+
+现有 legacy island 仍存在，但它只代表迁移中的技术债，不代表系统长期形态。
+
+## 二、启动主链
+
+当前启动链固定如下：
+
+1. `hypervisor::kernel_main`
+   - 开启 CPU 必要特性
+   - 初始化 `gos-hal::vaddr` 与 `gos-hal::meta`
+2. `gos_supervisor::bootstrap(...)`
+   - 建立 supervisor 控制面
+   - 安装 builtin module descriptors
+3. `builtin_bundle::boot_builtin_graph(...)`
+   - 发现 builtin plugins
+   - 注册 manifest、node、edge、capability import/export
+   - 启动 builtin graph 中需要引导的节点
+4. `gos_supervisor::realize_boot_modules()`
+   - 为模块准备 domain / capability / control-plane 视角
+5. `gos_supervisor::service_system_cycle()`
+   - 成为 steady-state 的统一服务入口
+
+当前治理规则已经明确禁止：
+
+- `kernel_main` 再走 `gos_loader::load_bundle`
+- `kernel_main` 直接 `gos_runtime::pump`
+- `kernel_main` 直接 `plugin_main(...)`
+- `kernel_main` 手工 `post_signal(...)` 做业务启动
+
+## 三、核心对象模型
+
+### 3.1 身份与位置
+
+| 概念 | 作用 |
+|---|---|
+| `PluginId` | 插件或模块的稳定归属身份 |
+| `NodeId` | 由 `plugin_id + local_node_key` 派生出的逻辑身份 |
+| `VectorAddress` | 运行时位置与图访问地址，不等于逻辑身份 |
+| `EdgeId` | 由 `from_node + to_node + edge_key` 派生出的稳定边身份 |
+| `EdgeVector` | 边在图控制台中的可读寻址形式 |
+
+当前统一术语是：
+
+- `NodeId` 是逻辑身份
+- `VectorAddress` 是运行位置
+- 任何热切换、迁移、重启方案都必须优先保持 `NodeId` 稳定
+
+### 3.2 边的公开语义
+
+当前 runtime 对以下语义边有一等支持：
+
+- `Depend`
+- `Call`
+- `Spawn`
+- `Signal`
+- `Return`
+- `Mount`
+- `Sync`
+- `Stream`
+- `Use`
+
+其中两个关键公开模型已经进入用户可见层：
+
+- `theme.current -[use]-> theme.wabi|theme.shoji`
+- `node -[mount]-> clipboard.mount`
+
+它们不是 UI 特判，而是图中的真实节点关系。
+
+### 3.3 capability 与挂载关系
+
+跨插件协作遵循：
+
+1. provider 通过 `exports` 暴露 capability
+2. consumer 通过 `imports` 声明依赖
+3. builtin graph 或 manifest 同步生成 `Mount` edges
+4. runtime 通过 capability 解析与信号路由完成协作
+
+因此，shell 访问网络、cypher、AI、clipboard、console，都是图结构上的依赖与挂载，而不是硬编码函数调用链。
+
+## 四、当前工作区职责图
+
+### 4.1 核心 crate
+
+| crate | 当前职责 |
+|---|---|
+| `hypervisor` | 最小引导、builtin graph bootstrap、steady-state handoff |
+| `gos-protocol` | 公共 ABI、graph 类型、module / instance / resource / heap 协议 |
+| `gos-runtime` | 图登记、节点激活、边路由、capability 解析、图摘要 |
+| `gos-supervisor` | module/domain 控制面、instance lanes、claims、heap grants、system cycle |
+| `gos-hal` | 向量地址、元数据、低层兼容桥 |
+| `gos-loader` | 仍在 workspace 中，但已不在 `kernel_main` 主启动路径 |
+
+### 4.2 原生图节点 crate
+
+| crate | 当前定位 |
+|---|---|
+| `k-shell` | 图控制终端、graph CLI、theme.current、clipboard.mount |
+| `k-cypher` | 受控 Cypher v1 子集 |
+| `k-ai` | AI supervisor client / control-plane consumer |
+| `k-cuda-host` | host-backed CUDA bridge |
+| `k-net` | 原生 uplink driver node |
+| `k-ime` | 输入法控制 node |
+| `k-mouse` | 指针与显示输入 node |
+| `k-vga` | 显示与调色板输出 node |
+
+### 4.3 当前 legacy island
+
+当前仍在治理 allowlist 中的迁移岛为：
+
+- `k-panic`
+- `k-serial`
+- `k-gdt`
+- `k-cpuid`
+- `k-pic`
+- `k-pit`
+- `k-ps2`
+- `k-idt`
+- `k-pmm`
+- `k-vmm`
+- `k-heap`
+
+这些 crate 仍允许保留 `NodeCell` / `PluginEntry` / `try_mount_cell` 形式，但不再被视为推荐插件模型。
+
+## 五、当前用户可见图控制面
+
+### 5.1 终端与图导航
+
+`k-shell` 当前已经支持：
+
+- `show`
+- `back`
+- `node <vector>`
+- `edge <vector>`
+- `where`
+- `select clear`
+- `activate`
+- `spawn`
+- `PgUp` / `PgDn`
+- `Up` / `Down` 历史输入回放
+
+### 5.2 主题图
+
+当前主题系统是一个显式的图模型：
+
+| 向量 | 节点 |
+|---|---|
+| `6.1.1.0` | `theme.wabi` |
+| `6.1.2.0` | `theme.shoji` |
+| `6.1.3.0` | `theme.current` |
+
+只有 `theme.current` 持有排他的 `Use` edge。  
+主题切换的本质是重新指向：
+
+- `theme.current -[use]-> theme.wabi`
+- 或 `theme.current -[use]-> theme.shoji`
+
+### 5.3 共享剪贴板图
+
+当前共享剪贴板是独立的挂载节点：
+
+| 向量 | 节点 |
+|---|---|
+| `6.1.4.0` | `clipboard.mount` |
+
+它的关系是非排他的 `Mount`：
+
+- 任意 node 都可以同时挂载到 `clipboard.mount`
+- shell 当前支持 `clipboard mount <vector>` / `clipboard unmount <vector>`
+- `Ctrl+C / Ctrl+X / Ctrl+V` 通过该挂载节点复用复制、剪切、粘贴能力
+
+### 5.4 Cypher 与控制查询
+
+`k-cypher` 当前不是通用图数据库解释器，而是受控的 runtime 查询与激活客户端。  
+支持的能力集中在：
+
+- 浏览 node
+- 浏览 edge
+- `CALL activate(n)`
+- `CALL spawn(n)`
+- `CALL route(e)`
+
+不支持图结构写入、属性写回、事务或任意 mutation。
+
+## 六、当前 supervisor 控制面
+
+`gos-supervisor` 当前已经引入的控制面对象包括：
+
+- `ModuleDescriptor`
+- `ModuleDomain`
+- `NodeTemplateId`
+- `NodeInstanceId`
+- `ExecutionLaneClass`
+- `ResourceId`
+- `ClaimId`
+- `LeaseEpoch`
+- `HeapQuota`
+
+当前状态可概括为：
+
+- module descriptor install 已存在
+- boot module realization 已存在
+- instance lane / ready queue / restart queue 已存在
+- claim / revoke / heap grant 控制表已存在
+- host 测试 harness 已存在
+
+但以下底座仍未完全闭环：
+
+- 真实模块镜像装载与重定位
+- 独立 CR3 下的真实模块执行
+- 所有 legacy island 的完全迁出
+- 私有 heap 的全面替代
+
+## 七、当前验证与治理
+
+当前仓库的权威机械约束来自：
+
+- `tools/verify-graph-architecture.ps1`
+- `cargo check -p gos-kernel`
+- `cargo check -p k-shell`
+- `gos-supervisor` host harness
+
+治理脚本当前强制：
+
+- `kernel_main` 必须经过 `boot_builtin_graph`
+- `kernel_main` 必须委托 `gos_supervisor::service_system_cycle`
+- 新 crate 不得引入新的 legacy trait 路径
+- `NodeSpec` / `EdgeSpec` literal 必须显式声明 `vector_ref`
+
+## 八、后续路线图
+
+### Phase A：清零剩余 legacy island
+
+目标：
+
+- 把剩余 allowlist 中的 legacy crate 全部迁出主架构模型
+- native-first 启动链成为唯一推荐与唯一主要实现路线
+
+完成标志：
+
+- `NodeCell / PluginEntry / try_mount_cell` 不再出现在权威架构主线
+- allowlist 缩到零或接近零
+- 文档中的 legacy 只保留为 debt backlog
+
+### Phase B：补齐原子化底座
+
+重点固定为：
+
+1. 真实 module image / domain page table / CR3 切换执行
+2. `NodeTemplate -> NodeInstance` 调度模型
+3. `claim / lease / revoke / epoch fencing`
+4. 每实例私有 heap 与 supervisor 授页
+5. fault attribution / restart / degraded mode
+
+这一阶段完成前，不插入新的高层 feature phase。
+
+### Phase C：底座完成后的图原生控制面
+
+在 Phase A/B 收口后，再推进：
+
+- shell / cypher / AI 成为纯图客户端与控制面
+- host-backed CUDA / AI orchestration 继续保留，但必须建立在稳定的资源与实例模型上
+- 开发者体验与更丰富 UI/查询能力作为第三优先级推进
+
+## 九、当前默认结论
+
+- GOS 当前的系统身份是 graph-native + supervisor-native
+- legacy island 是待清零技术债，不是架构中心
+- 文档与实现都必须围绕 builtin graph boot、runtime graph semantics、supervisor system cycle 这三条主轴展开

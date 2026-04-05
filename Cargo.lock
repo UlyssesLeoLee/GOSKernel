@@ -43,12 +43,12 @@ version = "0.2.0"
 dependencies = [
  "bootloader",
  "gos-hal",
- "gos-loader",
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
  "k-ai",
  "k-cpuid",
+ "k-cuda-host",
  "k-cypher",
  "k-gdt",
  "k-heap",
@@ -93,8 +93,10 @@ name = "gos-supervisor"
 version = "0.1.0"
 dependencies = [
  "gos-protocol",
+ "gos-runtime",
  "k-vmm",
  "spin",
+ "x86_64",
 ]
 
 [[package]]
@@ -113,6 +115,13 @@ dependencies = [
  "gos-hal",
  "gos-protocol",
  "spin",
+]
+
+[[package]]
+name = "k-cuda-host"
+version = "0.2.0"
+dependencies = [
+ "gos-protocol",
 ]
 
 [[package]]

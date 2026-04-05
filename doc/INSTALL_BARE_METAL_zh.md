@@ -86,7 +86,7 @@ pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-insta
 1. 插入写好镜像的 U 盘。
 2. 进入 BIOS/UEFI 启动菜单。
 3. 选择该 U 盘启动。
-4. GOS 会直接引导进入系统。
+4. GOS 会引导进入当前的 builtin graph，并进入由 supervisor 持续服务的系统控制台。
 
 ## 当前限制
 

@@ -40,22 +40,20 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     }
     raw_serial_println(format_args!("boot: supervisor registered module descriptors"));
 
-    let mut ctx = gos_runtime::bootstrap_context(boot_info as *const _ as u64);
-    raw_serial_println(format_args!("boot: loading builtin bundle"));
-    let report = gos_loader::load_bundle(builtin_bundle::builtin_bundle(), &mut ctx)
-        .expect("builtin boot bundle failed to load");
-    raw_serial_println(format_args!("boot: bundle loaded"));
+    raw_serial_println(format_args!("boot: bootstrapping builtin graph"));
+    let report = builtin_bundle::boot_builtin_graph(boot_info as *const _ as u64)
+        .expect("builtin graph boot failed");
+    raw_serial_println(format_args!("boot: builtin graph booted"));
 
     let supervisor_report = gos_supervisor::realize_boot_modules()
         .expect("supervisor failed to realize isolated domains");
     raw_serial_println(format_args!("boot: supervisor staged isolated domains"));
 
     k_serial::serial_println!(
-        "supervisor modules={} running={} domains={} compat={} caps={}",
+        "supervisor modules={} running={} domains={} caps={}",
         supervisor_report.discovered_modules,
         supervisor_report.running_modules,
         supervisor_report.isolated_domains,
-        supervisor_report.compat_bridges,
         supervisor_report.published_capabilities
     );
 
@@ -76,14 +74,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         snapshot.signal_queue_len
     );
 
-    raw_serial_println(format_args!("boot: ai supervisor owns shell handoff"));
-    gos_runtime::pump();
+    raw_serial_println(format_args!("boot: supervisor owns system cycle"));
+    gos_supervisor::service_system_cycle();
 
     x86_64::instructions::interrupts::enable();
 
     loop {
         x86_64::instructions::interrupts::without_interrupts(|| {
-            gos_runtime::pump();
+            gos_supervisor::service_system_cycle();
         });
         x86_64::instructions::hlt();
     }

@@ -1,6 +1,47 @@
 # GOS Kernel
 
-GOS is a graph-oriented operating system kernel prototype built around plugins, nodes, edges, and a native Node Graph Runtime.
+GOS is a graph-native operating system kernel for x86_64 bare metal.
+
+The current system model is:
+
+- `hypervisor` performs minimal bootstrap only
+- builtin graph boot registers the runtime-visible node and edge graph
+- `gos-supervisor` owns the long-lived system service cycle
+- nodes, edges, vectors, capabilities, `mount`, and `use` are public execution concepts
+
+The repository is no longer documented as a loader-first or procedure-first kernel. The recommended architecture is graph-native and supervisor-owned; the remaining legacy island is tracked as migration debt.
+
+## Current Architecture
+
+- `hypervisor`
+  - enables CPU/platform prerequisites
+  - initializes `gos-hal` vector and metadata spaces
+  - installs builtin supervisor module descriptors
+  - boots the builtin graph through `builtin_bundle::boot_builtin_graph(...)`
+  - hands steady-state servicing to `gos_supervisor::service_system_cycle()`
+- `gos-runtime`
+  - registers plugins, nodes, and edges
+  - owns activation, routing, capability lookup, and graph summaries
+- `gos-supervisor`
+  - owns module descriptors, domains, capability publication, instance queues, claims, and the system cycle
+- native graph plugins
+  - `k-shell`, `k-cypher`, `k-ai`, `k-cuda-host`, `k-net`, `k-ime`, `k-mouse`, `k-vga`
+
+## User-Facing Graph Features
+
+- Graph shell with contextual `show`, `back`, `node <vector>`, `edge <vector>`, `PgUp/PgDn`
+- `theme.current -[use]-> theme.wabi|theme.shoji`
+- `clipboard.mount` as a shared mounted clipboard node
+- Cypher v1 subset for graph browsing and controlled activation/routing
+- Host-backed CUDA bridge for graph-visible accelerator work
+- Native network status node exporting `net/uplink`
+
+See:
+
+- [doc/GOS_ARCH_v2.md](./doc/GOS_ARCH_v2.md)
+- [doc/GRAPH_CLI_COMMANDS_zh.md](./doc/GRAPH_CLI_COMMANDS_zh.md)
+- [doc/CYPHER_NODE_zh.md](./doc/CYPHER_NODE_zh.md)
+- [doc/NETWORK_NODE_zh.md](./doc/NETWORK_NODE_zh.md)
 
 ## Developer Quick Start
 
@@ -23,9 +64,16 @@ Run governance checks only:
 pwsh -File .\run.ps1 -ValidateOnly
 ```
 
+Direct verification:
+
+```powershell
+pwsh -File .\tools\verify-graph-architecture.ps1
+cargo check -p gos-kernel
+```
+
 ## Bare-Metal Install
 
-The project now includes an installer packaging flow so a target machine does not need a Rust toolchain.
+The project includes an installer packaging flow so the target machine does not need a Rust toolchain.
 
 Build a portable installer package on a build machine:
 
@@ -49,31 +97,10 @@ pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-insta
 
 Detailed Chinese install instructions are in [doc/INSTALL_BARE_METAL_zh.md](./doc/INSTALL_BARE_METAL_zh.md).
 
-## Graph CLI
+## Current Development Priority
 
-The shell now includes a built-in graph control layer with contextual `show`, explicit `node <vector>` / `edge <vector>` selection, and `PgUp` / `PgDn` paging for overview and relation lists.
+The next development phases are intentionally substrate-first:
 
-See [doc/GRAPH_CLI_COMMANDS_zh.md](./doc/GRAPH_CLI_COMMANDS_zh.md) for the command reference.
-
-## Cypher Node
-
-The system now includes a native `K_CYPHER` node. It accepts a controlled Cypher v1 subset from the shell and can browse nodes, browse edges, activate nodes, spawn nodes, and route edges through the runtime.
-
-See [doc/CYPHER_NODE_zh.md](./doc/CYPHER_NODE_zh.md) for the supported syntax.
-
-## Network Node
-
-The system now includes a native `K_NET` uplink node. It can probe the QEMU PCI NIC, enable the device, read BAR layout, bring up the E1000 register surface, and report MAC and carrier state through the shell.
-
-Use `net`, `net probe`, and `net reset` from the shell. Current capability is hardware bring-up and status reporting; guest DHCP/IP/TCP is still pending.
-
-See [doc/NETWORK_NODE_zh.md](./doc/NETWORK_NODE_zh.md) for the current network scope and commands.
-
-## CI Installer Artifact
-
-GitHub Actions can produce a prebuilt installer artifact:
-
-- workflow: `.github/workflows/installer-artifact.yml`
-- output: `gos-installer-release`
-
-That artifact can be downloaded on another machine and written to USB without setting up Rust.
+1. clear the remaining legacy island
+2. finish native module execution, isolated domains, resource arbitration, and private heaps
+3. only then expand higher-level AI, CUDA, and developer experience features on top of the stabilized substrate

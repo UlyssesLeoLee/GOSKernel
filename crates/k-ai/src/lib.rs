@@ -326,6 +326,15 @@ fn commit_chat_capture(sink: &ConsoleSink, state: &mut AiState) {
     let prompt = &state.prompt[..state.prompt_len];
     if prompt_contains(prompt, b"graph") || prompt_contains(prompt, b"status") {
         emit_status_summary(sink, state);
+    } else if prompt_contains(prompt, b"cuda")
+        || prompt_contains(prompt, b"gpu")
+        || prompt_contains(prompt, b"nvidia")
+    {
+        emit_shell_chat_line(
+            sink,
+            state,
+            "ai> cuda bridge is graph-native; use cuda status / cuda submit <job> in shell",
+        );
     } else if prompt_contains(prompt, b"net")
         || prompt_contains(prompt, b"wifi")
         || prompt_contains(prompt, b"network")

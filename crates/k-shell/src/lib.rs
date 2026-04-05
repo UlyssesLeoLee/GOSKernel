@@ -1,22 +1,52 @@
 #![no_std]
 
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, AI_CONTROL_API_BEGIN, AI_CONTROL_API_COMMIT,
-    AI_CONTROL_CHAT_BEGIN, AI_CONTROL_CHAT_COMMIT, CYPHER_CONTROL_QUERY_BEGIN,
-    CYPHER_CONTROL_QUERY_COMMIT, EdgeVector, ExecStatus, ExecutorContext, ExecutorId,
-    GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, IME_CONTROL_SET_MODE, IME_MODE_ASCII,
-    IME_MODE_ZH_PINYIN, INPUT_KEY_PAGE_DOWN, INPUT_KEY_PAGE_UP, KernelAbi, NET_CONTROL_PROBE,
-    NET_CONTROL_REPORT, NET_CONTROL_RESET, NodeEvent, NodeExecutorVTable, Signal,
+    derive_edge_id, derive_node_id, packet_to_signal, signal_to_packet,
+    AI_CONTROL_API_BEGIN, AI_CONTROL_API_COMMIT, AI_CONTROL_CHAT_BEGIN,
+    AI_CONTROL_CHAT_COMMIT, CLIPBOARD_DATA_BEGIN, CLIPBOARD_DATA_CLEAR,
+    CLIPBOARD_DATA_COMMIT, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,
+    CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET, CYPHER_CONTROL_QUERY_BEGIN,
+    CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
+    DISPLAY_THEME_WABI, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
+    ExecutorId, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
+    IME_CONTROL_SET_MODE, IME_MODE_ASCII, IME_MODE_ZH_PINYIN, INPUT_KEY_DOWN,
+    INPUT_KEY_PAGE_DOWN, INPUT_KEY_PAGE_UP, INPUT_KEY_UP, KernelAbi,
+    NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET, NodeEvent,
+    NodeExecutorVTable, PluginId, RoutePolicy, RuntimeEdgeType, Signal,
     VectorAddress,
 };
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 0, 0);
+pub const THEME_WABI_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 1, 0);
+pub const THEME_SHOJI_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 2, 0);
+pub const THEME_CURRENT_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 3, 0);
+pub const CLIPBOARD_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 4, 0);
 const VGA_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.shell");
+pub const THEME_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.theme");
+pub const CLIPBOARD_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.clip");
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: EXECUTOR_ID,
     on_init: Some(shell_on_init),
     on_event: Some(shell_on_event),
+    on_suspend: Some(shell_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
+pub const THEME_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: THEME_EXECUTOR_ID,
+    on_init: None,
+    on_event: None,
+    on_suspend: Some(shell_on_suspend),
+    on_resume: Some(theme_on_resume),
+    on_teardown: None,
+};
+pub const CLIPBOARD_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: CLIPBOARD_EXECUTOR_ID,
+    on_init: Some(clipboard_on_init),
+    on_event: Some(clipboard_on_event),
     on_suspend: Some(shell_on_suspend),
     on_resume: None,
     on_teardown: None,
@@ -38,10 +68,10 @@ const AI_PANEL_WIDTH: usize = 26;
 const AI_PANEL_HEIGHT: usize = 12;
 const AI_PANEL_LINES: usize = 4;
 const AI_PANEL_LINE_WIDTH: usize = 22;
-const LIVE_SIGIL_TOP: usize = 4;
-const LIVE_SIGIL_LEFT: usize = 29;
-const LIVE_SIGIL_WIDTH: usize = 19;
-const LIVE_SIGIL_HEIGHT: usize = 8;
+const LIVE_SIGIL_TOP: usize = 5;
+const LIVE_SIGIL_LEFT: usize = 50;
+const LIVE_SIGIL_WIDTH: usize = 3;
+const LIVE_SIGIL_HEIGHT: usize = 5;
 const GRAPH_PAGE_ITEMS: usize = 6;
 const GRAPH_OVERVIEW_ITEMS: usize = 3;
 const GRAPH_VIEW_TITLE_ROW: usize = COMMAND_SCROLL_TOP;
@@ -52,8 +82,6 @@ const COMMAND_SCROLL_BOTTOM: usize = 21;
 const FOOTER_SHORTCUT_ROW: usize = 22;
 const FOOTER_STATUS_ROW: usize = 23;
 const FOOTER_INPUT_ROW: usize = 24;
-const COMMAND_INPUT_PROMPT_COL: usize = 2;
-const COMMAND_INPUT_TEXT_COL: usize = 4;
 const MENU_MODE_COMMAND: u8 = 0;
 const MENU_MODE_AI_API: u8 = 1;
 const GRAPH_MODE_NONE: u8 = 0;
@@ -69,6 +97,7 @@ const GRAPH_CTX_NODE: u8 = 2;
 const GRAPH_CTX_EDGE: u8 = 3;
 const MAX_IME_PREVIEW: usize = 24;
 const GRAPH_NAV_DEPTH: usize = 8;
+const COMMAND_HISTORY_ITEMS: usize = 16;
 
 const CP437_LIGHT: u8 = 176;
 const CP437_MEDIUM: u8 = 177;
@@ -80,6 +109,31 @@ const CP437_TL: u8 = 201;
 const CP437_TR: u8 = 187;
 const CP437_BL: u8 = 200;
 const CP437_BR: u8 = 188;
+
+const WABI_INK: u8 = 0;
+const WABI_INDIGO: u8 = 1;
+const WABI_MOSS: u8 = 2;
+const WABI_STONE: u8 = 8;
+const WABI_PAPER: u8 = 7;
+const WABI_MOON: u8 = 15;
+const WABI_TEA: u8 = 6;
+const WABI_SAGE: u8 = 10;
+const THEME_EDGE_KEY: &str = "theme.use";
+const CLIPBOARD_EDGE_KEY: &str = "clipboard.mount";
+const THEME_NAME_WABI: &str = "wabi";
+const THEME_NAME_SHOJI: &str = "shoji";
+const THEME_KIND_WABI: u8 = DISPLAY_THEME_WABI;
+const THEME_KIND_SHOJI: u8 = DISPLAY_THEME_SHOJI;
+const CLIPBOARD_MAX_BYTES: usize = 224;
+
+const SHELL_PLUGIN_ID: PluginId = PluginId::from_ascii("K_SHELL");
+const THEME_WABI_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "theme.wabi");
+const THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "theme.shoji");
+const THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "theme.current");
+const CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "clipboard.mount");
+
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(THEME_KIND_WABI);
+static CLIPBOARD_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -118,32 +172,24 @@ const ORBIT_POINTS: [(usize, usize); 14] = [
     (14, 36), (13, 31), (10, 28), (7, 28), (5, 31), (8, 50), (9, 30),
 ];
 
-const LIVE_SIGIL_ROWS: [[u8; 7]; 6] = [
-    [b' ', CP437_LIGHT, CP437_BLOCK, CP437_BLOCK, CP437_BLOCK, CP437_LIGHT, b' '],
-    [CP437_LIGHT, CP437_BLOCK, b' ', b' ', b' ', CP437_BLOCK, CP437_LIGHT],
-    [CP437_BLOCK, b' ', b' ', CP437_BLOCK, CP437_BLOCK, b' ', b' '],
-    [CP437_BLOCK, b' ', b' ', CP437_BLOCK, CP437_BLOCK, CP437_BLOCK, CP437_LIGHT],
-    [CP437_LIGHT, CP437_BLOCK, b' ', b' ', b' ', CP437_BLOCK, CP437_LIGHT],
-    [b' ', CP437_LIGHT, CP437_BLOCK, CP437_BLOCK, CP437_BLOCK, CP437_LIGHT, b' '],
-];
+const LIVE_SIGIL_ROWS: [[u8; 1]; 1] = [[b'G']];
 
-const LIVE_SHAKE_X: [i8; LIVE_SIGIL_FRAMES] = [0, 2, -2, 3, -3, 2, -2, 1, -1, 2, -2, 0];
-const LIVE_SHAKE_Y: [i8; LIVE_SIGIL_FRAMES] = [0, -1, 1, -1, 1, 0, 0, -1, 1, 0, 0, 0];
+const LIVE_SHAKE_X: [i8; LIVE_SIGIL_FRAMES] = [0, 0, 1, 0, -1, 0, 1, 0, -1, 0, 0, 0];
+const LIVE_SHAKE_Y: [i8; LIVE_SIGIL_FRAMES] = [0, -1, 0, 1, 0, -1, 0, 1, 0, -1, 0, 1];
 const LIVE_SPARKS: [[(i8, i8); 4]; LIVE_SIGIL_FRAMES] = [
-    [(-1, 2), (1, 10), (5, 0), (6, 11)],
-    [(-1, 3), (2, 11), (5, 0), (6, 10)],
-    [(0, 2), (3, 11), (6, 1), (6, 9)],
-    [(1, 2), (4, 10), (6, 2), (5, 9)],
-    [(1, 1), (4, 9), (5, 10), (4, 11)],
-    [(0, 1), (3, 9), (4, 10), (3, 11)],
-    [(-1, 1), (2, 9), (3, 10), (2, 11)],
-    [(-1, 2), (1, 9), (4, 0), (5, 10)],
-    [(-1, 3), (2, 10), (5, 1), (6, 10)],
-    [(0, 2), (3, 9), (6, 2), (6, 8)],
-    [(-1, 1), (1, 10), (4, 1), (5, 11)],
-    [(-1, 2), (2, 10), (5, 0), (6, 11)],
+    [(-1, -1), (0, 1), (1, -1), (2, 0)],
+    [(-1, 0), (0, 1), (1, 1), (2, 0)],
+    [(-1, 1), (0, 0), (1, 1), (2, -1)],
+    [(0, 1), (1, -1), (2, 0), (1, 1)],
+    [(1, 1), (2, 0), (1, -1), (0, -1)],
+    [(2, 0), (1, -1), (0, 0), (-1, -1)],
+    [(1, -1), (0, -1), (-1, 0), (0, 1)],
+    [(0, -1), (-1, 0), (0, 1), (1, 1)],
+    [(-1, 0), (0, 1), (1, 0), (2, 1)],
+    [(0, 1), (1, 0), (2, -1), (1, -1)],
+    [(1, 0), (2, -1), (1, -1), (0, 0)],
+    [(0, -1), (1, -1), (2, 0), (1, 1)],
 ];
-const LIVE_TRAIL_HEAD: [usize; LIVE_SIGIL_FRAMES] = [2, 4, 7, 9, 10, 8, 6, 4, 3, 7, 9, 5];
 const BOOT_WOBBLE_X: [i32; LIVE_SIGIL_FRAMES] = [0, 1, -1, 2, -2, 1, -1, 0, 1, -1, 0, 0];
 const BOOT_WOBBLE_Y: [i32; LIVE_SIGIL_FRAMES] = [0, 0, 1, -1, 1, -1, 0, 1, -1, 0, 0, 0];
 
@@ -172,6 +218,13 @@ impl GraphNavState {
 struct ShellState {
     buffer: [u8; 128],
     len: usize,
+    command_history: [[u8; 128]; COMMAND_HISTORY_ITEMS],
+    command_history_lens: [usize; COMMAND_HISTORY_ITEMS],
+    command_history_len: usize,
+    command_history_cursor: usize,
+    command_history_active: u8,
+    command_history_draft: [u8; 128],
+    command_history_draft_len: usize,
     selected_node: Option<VectorAddress>,
     selected_edge: Option<EdgeVector>,
     graph_mode: u8,
@@ -195,12 +248,23 @@ struct ShellState {
     ai_target: u64,
     cypher_target: u64,
     net_target: u64,
+    cuda_target: u64,
+    clipboard_target: u64,
     console_live: u8,
     sigil_frame: u8,
     heartbeat_divider: u8,
     menu_mode: u8,
     input_lang: u8,
     api_configured: u8,
+}
+
+#[repr(C)]
+struct ClipboardState {
+    bytes: [u8; CLIPBOARD_MAX_BYTES],
+    len: usize,
+    capture_from: u64,
+    capture_len: usize,
+    capture_active: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -368,14 +432,413 @@ fn print_str(sink: &ConsoleSink, s: &str) {
 }
 
 fn emit_target_signal(sink: &ConsoleSink, target: u64, signal: Signal) -> bool {
+    emit_target_signal_raw(sink.abi, target, signal)
+}
+
+fn emit_target_signal_raw(abi: &KernelAbi, target: u64, signal: Signal) -> bool {
     if target == 0 {
         return false;
     }
-    if let Some(emit_signal) = sink.abi.emit_signal {
+    if let Some(emit_signal) = abi.emit_signal {
         unsafe { emit_signal(target, signal_to_packet(signal)) == 0 }
     } else {
         false
     }
+}
+
+fn theme_name(theme: u8) -> &'static str {
+    match theme {
+        THEME_KIND_SHOJI => THEME_NAME_SHOJI,
+        _ => THEME_NAME_WABI,
+    }
+}
+
+fn current_theme() -> u8 {
+    ACTIVE_THEME.load(Ordering::SeqCst)
+}
+
+fn is_theme_vector(vector: VectorAddress) -> bool {
+    vector == THEME_CURRENT_NODE_VEC || vector == THEME_WABI_NODE_VEC || vector == THEME_SHOJI_NODE_VEC
+}
+
+fn theme_kind_for_vector(vector: VectorAddress) -> Option<u8> {
+    if vector == THEME_WABI_NODE_VEC {
+        Some(THEME_KIND_WABI)
+    } else if vector == THEME_SHOJI_NODE_VEC {
+        Some(THEME_KIND_SHOJI)
+    } else {
+        None
+    }
+}
+
+fn theme_vector(theme: u8) -> VectorAddress {
+    match theme {
+        THEME_KIND_SHOJI => THEME_SHOJI_NODE_VEC,
+        _ => THEME_WABI_NODE_VEC,
+    }
+}
+
+fn theme_node_id(theme: u8) -> gos_protocol::NodeId {
+    match theme {
+        THEME_KIND_SHOJI => THEME_SHOJI_NODE_ID,
+        _ => THEME_WABI_NODE_ID,
+    }
+}
+
+fn theme_edge_id(theme: u8) -> gos_protocol::EdgeId {
+    derive_edge_id(THEME_CURRENT_NODE_ID, theme_node_id(theme), THEME_EDGE_KEY)
+}
+
+fn linked_theme_kind() -> Option<u8> {
+    let mut edges = [GraphEdgeSummary::EMPTY; 4];
+    let Ok((_total, returned)) = gos_runtime::edge_page_for_node(THEME_CURRENT_NODE_VEC, 0, &mut edges) else {
+        return None;
+    };
+
+    for summary in edges.iter().take(returned) {
+        if summary.edge_type != RuntimeEdgeType::Use || summary.from_vector != THEME_CURRENT_NODE_VEC {
+            continue;
+        }
+        if let Some(theme) = theme_kind_for_vector(summary.to_vector) {
+            return Some(theme);
+        }
+    }
+
+    None
+}
+
+fn selected_theme() -> u8 {
+    linked_theme_kind().unwrap_or_else(current_theme)
+}
+
+fn clipboard_len() -> usize {
+    CLIPBOARD_BYTES.load(Ordering::SeqCst)
+}
+
+fn node_has_mount_edge(source: VectorAddress, target: VectorAddress) -> bool {
+    let mut edges = [GraphEdgeSummary::EMPTY; 12];
+    let Ok((_total, returned)) = gos_runtime::edge_page_for_node(source, 0, &mut edges) else {
+        return false;
+    };
+
+    for summary in edges.iter().take(returned) {
+        if summary.edge_type == RuntimeEdgeType::Mount
+            && summary.from_vector == source
+            && summary.to_vector == target
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn clipboard_mounted(source: VectorAddress) -> bool {
+    node_has_mount_edge(source, CLIPBOARD_NODE_VEC)
+}
+
+fn sync_clipboard_mount_for_vector(source: VectorAddress, mounted: bool) -> bool {
+    let Some(source_node) = gos_runtime::node_id_for_vec(source) else {
+        return false;
+    };
+
+    let edge_id = derive_edge_id(source_node, CLIPBOARD_NODE_ID, CLIPBOARD_EDGE_KEY);
+    if !mounted {
+        return gos_runtime::unregister_edge(edge_id).is_ok()
+            || !node_has_mount_edge(source, CLIPBOARD_NODE_VEC);
+    }
+
+    gos_runtime::register_edge(EdgeSpec {
+        edge_id,
+        from_node: source_node,
+        to_node: CLIPBOARD_NODE_ID,
+        edge_type: RuntimeEdgeType::Mount,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: Some("clipboard"),
+        capability_binding: Some("buffer"),
+        vector_ref: None,
+    })
+    .is_ok()
+}
+
+fn clipboard_clear(sink: &ConsoleSink, target: u64) -> bool {
+    if !clipboard_mounted(VectorAddress::from_u64(sink.from)) {
+        return false;
+    }
+    emit_target_signal(
+        sink,
+        target,
+        Signal::Data {
+            from: sink.from,
+            byte: CLIPBOARD_DATA_CLEAR,
+        },
+    )
+}
+
+fn clipboard_store(sink: &ConsoleSink, target: u64, bytes: &[u8]) -> bool {
+    if !clipboard_mounted(VectorAddress::from_u64(sink.from)) {
+        return false;
+    }
+    if !emit_target_signal(
+        sink,
+        target,
+        Signal::Data {
+            from: sink.from,
+            byte: CLIPBOARD_DATA_BEGIN,
+        },
+    ) {
+        return false;
+    }
+
+    for byte in bytes.iter().copied() {
+        if !emit_target_signal(sink, target, Signal::Data { from: sink.from, byte }) {
+            return false;
+        }
+    }
+
+    emit_target_signal(
+        sink,
+        target,
+        Signal::Data {
+            from: sink.from,
+            byte: CLIPBOARD_DATA_COMMIT,
+        },
+    )
+}
+
+fn clipboard_request_paste(sink: &ConsoleSink, target: u64) -> bool {
+    if !clipboard_mounted(VectorAddress::from_u64(sink.from)) {
+        return false;
+    }
+    emit_target_signal(sink, target, Signal::Call { from: sink.from })
+}
+
+fn active_input_len(state: &ShellState) -> usize {
+    if state.menu_mode == MENU_MODE_AI_API {
+        state.api_edit_len
+    } else {
+        state.len
+    }
+}
+
+fn clipboard_copy_active_input(sink: &ConsoleSink, state: &mut ShellState) -> bool {
+    if state.clipboard_target == 0 || !clipboard_mounted(NODE_VEC) {
+        return false;
+    }
+
+    let active_len = active_input_len(state);
+    if state.menu_mode == MENU_MODE_AI_API {
+        clipboard_store(sink, state.clipboard_target, &state.api_buffer[..active_len])
+    } else {
+        clipboard_store(sink, state.clipboard_target, &state.buffer[..active_len])
+    }
+}
+
+fn clipboard_cut_active_input(sink: &ConsoleSink, state: &mut ShellState) -> bool {
+    if !clipboard_copy_active_input(sink, state) {
+        return false;
+    }
+
+    if state.menu_mode == MENU_MODE_AI_API {
+        state.api_buffer = [0; 128];
+        state.api_edit_len = 0;
+    } else {
+        state.buffer = [0; 128];
+        state.len = 0;
+        state.ime_utf8_tail = 0;
+        clear_ime_preview(state);
+    }
+    reset_command_history_cursor(state);
+    redraw_footer(sink, state, false);
+    focus_footer_input(sink, state);
+    true
+}
+
+fn clipboard_paste_active_input(sink: &ConsoleSink, state: &mut ShellState) -> bool {
+    if state.clipboard_target == 0 || !clipboard_mounted(NODE_VEC) {
+        return false;
+    }
+    clipboard_request_paste(sink, state.clipboard_target)
+}
+
+fn append_api_edit_byte(state: &mut ShellState, byte: u8) {
+    if state.api_edit_len < state.api_buffer.len() {
+        state.api_buffer[state.api_edit_len] = byte;
+        state.api_edit_len += 1;
+    }
+    reset_command_history_cursor(state);
+}
+
+fn append_clipboard_byte(sink: &ConsoleSink, state: &mut ShellState, byte: u8) {
+    if state.menu_mode == MENU_MODE_AI_API {
+        append_api_edit_byte(state, byte);
+        redraw_footer(sink, state, false);
+        return;
+    }
+
+    if state.ime_preview_len > 0 {
+        clear_ime_preview(state);
+    }
+    append_command_byte(sink, state, byte, false);
+}
+
+fn sync_theme_use_edges(theme: u8) -> bool {
+    let _ = gos_runtime::unregister_edge(theme_edge_id(THEME_KIND_WABI));
+    let _ = gos_runtime::unregister_edge(theme_edge_id(THEME_KIND_SHOJI));
+
+    let spec = EdgeSpec {
+        edge_id: theme_edge_id(theme),
+        from_node: THEME_CURRENT_NODE_ID,
+        to_node: theme_node_id(theme),
+        edge_type: RuntimeEdgeType::Use,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    };
+
+    gos_runtime::register_edge(spec).is_ok()
+}
+
+fn apply_theme_choice_raw(abi: &KernelAbi, from: u64, console_target: u64, theme: u8) -> bool {
+    let graph_ok = sync_theme_use_edges(theme);
+    let target = if console_target == 0 {
+        VGA_VEC.as_u64()
+    } else {
+        console_target
+    };
+    let visual_ok = emit_target_signal_raw(
+        abi,
+        target,
+        Signal::Control {
+            cmd: DISPLAY_CONTROL_THEME,
+            val: theme,
+        },
+    );
+    ACTIVE_THEME.store(theme, Ordering::SeqCst);
+    if from != 0 && from != NODE_VEC.as_u64() {
+        let _ = gos_runtime::post_signal(NODE_VEC, Signal::Interrupt { irq: 32 });
+    }
+    graph_ok && visual_ok
+}
+
+fn apply_theme_choice(sink: &ConsoleSink, theme: u8) -> bool {
+    apply_theme_choice_raw(sink.abi, sink.from, sink.target, theme)
+}
+
+fn parse_theme_selector(cmd: &str) -> Option<u8> {
+    match cmd.trim() {
+        THEME_NAME_WABI | "sabi" | "theme.wabi" | "6.1.1.0" => Some(THEME_KIND_WABI),
+        THEME_NAME_SHOJI | "miyabi" | "theme.shoji" | "6.1.2.0" => Some(THEME_KIND_SHOJI),
+        _ => None,
+    }
+}
+
+fn parse_clipboard_vector(cmd: &str) -> Option<VectorAddress> {
+    VectorAddress::parse(cmd.trim())
+}
+
+fn set_command_buffer(state: &mut ShellState, bytes: &[u8]) {
+    state.buffer = [0; 128];
+    let len = bytes.len().min(state.buffer.len());
+    if len > 0 {
+        state.buffer[..len].copy_from_slice(&bytes[..len]);
+    }
+    state.len = len;
+    state.ime_utf8_tail = 0;
+    clear_ime_preview(state);
+}
+
+fn reset_command_history_cursor(state: &mut ShellState) {
+    state.command_history_active = 0;
+    state.command_history_cursor = state.command_history_len;
+    state.command_history_draft = [0; 128];
+    state.command_history_draft_len = 0;
+}
+
+fn command_history_prev(state: &mut ShellState) -> bool {
+    if state.command_history_len == 0 {
+        return false;
+    }
+
+    if state.command_history_active == 0 {
+        state.command_history_draft = [0; 128];
+        state.command_history_draft[..state.len].copy_from_slice(&state.buffer[..state.len]);
+        state.command_history_draft_len = state.len;
+        state.command_history_cursor = state.command_history_len;
+        state.command_history_active = 1;
+    }
+
+    if state.command_history_cursor == 0 {
+        return true;
+    }
+
+    state.command_history_cursor -= 1;
+    let idx = state.command_history_cursor;
+    let len = state.command_history_lens[idx].min(state.command_history[idx].len());
+    let entry = state.command_history[idx];
+    set_command_buffer(state, &entry[..len]);
+    true
+}
+
+fn command_history_next(state: &mut ShellState) -> bool {
+    if state.command_history_active == 0 {
+        return false;
+    }
+
+    if state.command_history_cursor + 1 < state.command_history_len {
+        state.command_history_cursor += 1;
+        let idx = state.command_history_cursor;
+        let len = state.command_history_lens[idx].min(state.command_history[idx].len());
+        let entry = state.command_history[idx];
+        set_command_buffer(state, &entry[..len]);
+    } else {
+        let draft_len = state.command_history_draft_len.min(state.command_history_draft.len());
+        let draft = state.command_history_draft;
+        set_command_buffer(state, &draft[..draft_len]);
+        reset_command_history_cursor(state);
+    }
+
+    true
+}
+
+fn record_command_history(state: &mut ShellState) {
+    if state.len == 0 {
+        reset_command_history_cursor(state);
+        return;
+    }
+
+    if state.command_history_len > 0 {
+        let last_idx = state.command_history_len - 1;
+        let last_len = state.command_history_lens[last_idx];
+        if last_len == state.len
+            && state.command_history[last_idx][..last_len] == state.buffer[..state.len]
+        {
+            reset_command_history_cursor(state);
+            return;
+        }
+    }
+
+    if state.command_history_len == COMMAND_HISTORY_ITEMS {
+        let mut idx = 1usize;
+        while idx < COMMAND_HISTORY_ITEMS {
+            state.command_history[idx - 1] = state.command_history[idx];
+            state.command_history_lens[idx - 1] = state.command_history_lens[idx];
+            idx += 1;
+        }
+        state.command_history_len = COMMAND_HISTORY_ITEMS - 1;
+    }
+
+    let slot = state.command_history_len;
+    state.command_history[slot] = [0; 128];
+    state.command_history[slot][..state.len].copy_from_slice(&state.buffer[..state.len]);
+    state.command_history_lens[slot] = state.len;
+    state.command_history_len += 1;
+    reset_command_history_cursor(state);
 }
 
 fn command_pop_scalar(state: &mut ShellState) -> bool {
@@ -404,6 +867,7 @@ fn utf8_tail_len(byte: u8) -> u8 {
 }
 
 fn append_command_byte(sink: &ConsoleSink, state: &mut ShellState, byte: u8, from_ime: bool) {
+    reset_command_history_cursor(state);
     if state.len < state.buffer.len() {
         state.buffer[state.len] = byte;
         state.len += 1;
@@ -533,6 +997,7 @@ fn edge_type_label(edge_type: gos_protocol::RuntimeEdgeType) -> &'static str {
         gos_protocol::RuntimeEdgeType::Mount => "mount",
         gos_protocol::RuntimeEdgeType::Sync => "sync",
         gos_protocol::RuntimeEdgeType::Stream => "stream",
+        gos_protocol::RuntimeEdgeType::Use => "use",
     }
 }
 
@@ -757,12 +1222,328 @@ fn draw_box(
     draw_byte(sink, top + height - 1, left + width - 1, fg, bg, CP437_BR);
 
     if !title.is_empty() && width > title.len() + 4 {
-        draw_text(sink, top, left + 2, 15, bg, title);
+        draw_text(sink, top, left + 2, WABI_PAPER, bg, title);
     }
+}
+
+fn draw_badge(sink: &ConsoleSink, row: usize, col: usize, fg: u8, bg: u8, text: &str) {
+    let width = text.len() + 2;
+    fill_band(sink, row, col, width, fg, bg);
+    draw_text(sink, row, col + 1, fg, bg, text);
+}
+
+fn draw_runtime_header(sink: &ConsoleSink, state: &ShellState, snapshot: gos_protocol::GraphSnapshot) {
+    let phase = (state.sigil_frame as usize) / 2;
+    let pulse_col = 38 + ((phase * 2) % 14);
+    let mode_label = if state.menu_mode == MENU_MODE_AI_API {
+        "api"
+    } else {
+        graph_mode_label(state.graph_mode)
+    };
+
+    fill_band(sink, 0, 0, SCREEN_WIDTH, WABI_INK, WABI_INDIGO);
+    fill_band(sink, 1, 0, SCREEN_WIDTH, WABI_INK, WABI_INK);
+
+    draw_badge(sink, 0, 2, WABI_MOON, WABI_TEA, "GOS v0.2");
+    draw_text(sink, 0, 14, WABI_PAPER, WABI_INDIGO, "VECTOR MESH TERMINAL");
+    draw_repeat(sink, 0, 37, WABI_STONE, WABI_INDIGO, CP437_LIGHT, 18);
+    draw_repeat(
+        sink,
+        0,
+        pulse_col,
+        if gos_runtime::is_stable() {
+            WABI_SAGE
+        } else {
+            WABI_TEA
+        },
+        WABI_INDIGO,
+        CP437_MEDIUM,
+        2,
+    );
+    draw_text(sink, 0, 58, WABI_STONE, WABI_INDIGO, "mode");
+    draw_badge(
+        sink,
+        0,
+        63,
+        WABI_MOON,
+        if state.menu_mode == MENU_MODE_AI_API {
+            WABI_INDIGO
+        } else {
+            WABI_STONE
+        },
+        mode_label,
+    );
+    draw_badge(
+        sink,
+        0,
+        74,
+        WABI_MOON,
+        if gos_runtime::is_stable() {
+            WABI_MOSS
+        } else {
+            WABI_TEA
+        },
+        if gos_runtime::is_stable() { "SYNC" } else { "LIVE" },
+    );
+
+    draw_text(sink, 1, 2, WABI_STONE, WABI_INK, "mesh");
+    let mut mesh = LineBuf::<24>::new();
+    mesh.push_byte(b'p');
+    mesh.push_dec(snapshot.plugin_count as u64);
+    mesh.push_str(" n");
+    mesh.push_dec(snapshot.node_count as u64);
+    mesh.push_str(" e");
+    mesh.push_dec(snapshot.edge_count as u64);
+    mesh.push_str(" rq");
+    mesh.push_dec(snapshot.ready_queue_len as u64);
+    draw_linebuf(sink, 1, 7, WABI_PAPER, WABI_INK, &mesh);
+
+    draw_repeat(sink, 1, 29, WABI_STONE, WABI_INK, CP437_LIGHT, 17);
+    draw_repeat(sink, 1, 30 + ((phase * 2) % 12), WABI_TEA, WABI_INK, CP437_MEDIUM, 2);
+    draw_byte(sink, 1, 45 + (phase % 3), WABI_STONE, WABI_INK, b'.');
+
+    draw_badge(
+        sink,
+        1,
+        50,
+        if state.ai_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.ai_target == 0 {
+            WABI_INK
+        } else {
+            WABI_INDIGO
+        },
+        "AI",
+    );
+    draw_badge(
+        sink,
+        1,
+        56,
+        if state.cypher_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cypher_target == 0 {
+            WABI_INK
+        } else {
+            WABI_STONE
+        },
+        "CY",
+    );
+    draw_badge(
+        sink,
+        1,
+        62,
+        if state.net_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.net_target == 0 {
+            WABI_INK
+        } else {
+            WABI_MOSS
+        },
+        "NET",
+    );
+    draw_badge(
+        sink,
+        1,
+        69,
+        if state.cuda_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cuda_target == 0 {
+            WABI_INK
+        } else {
+            WABI_TEA
+        },
+        "CUDA",
+    );
+}
+
+fn draw_runtime_gap_flux(sink: &ConsoleSink, state: &ShellState) {
+    let phase = (state.sigil_frame as usize) / 2;
+    clear_rect(sink, 2, 49, 2, 12);
+    for idx in 0..12 {
+        let row = 2 + idx;
+        let fg = match (idx + phase) % 3 {
+            0 => WABI_STONE,
+            1 => WABI_PAPER,
+            _ => WABI_TEA,
+        };
+        let glyph = match (idx + phase) % 3 {
+            0 => CP437_LIGHT,
+            1 => CP437_MEDIUM,
+            _ => CP437_DARK,
+        };
+        let col = 49 + ((idx + phase) % 2);
+        draw_byte(sink, row, col, fg, WABI_INK, glyph);
+        if (idx + phase) % 4 == 0 {
+            draw_byte(sink, row, 50, WABI_STONE, WABI_INK, b'.');
+        }
+    }
+    draw_byte(sink, 3 + (phase % 8), 50, WABI_PAPER, WABI_INK, b'.');
+}
+
+fn draw_command_deck_panel(
+    sink: &ConsoleSink,
+    state: &ShellState,
+    snapshot: gos_protocol::GraphSnapshot,
+) {
+    let phase = (state.sigil_frame as usize) / 2;
+    draw_box(
+        sink,
+        COMMAND_DECK_TOP,
+        COMMAND_DECK_LEFT,
+        COMMAND_DECK_WIDTH,
+        COMMAND_DECK_HEIGHT,
+        " VECTOR DECK ",
+        WABI_PAPER,
+        WABI_INK,
+    );
+    draw_text(sink, 3, 4, WABI_STONE, WABI_INK, "graph-native shell // quiet vector core");
+    draw_text(sink, 4, 4, WABI_STONE, WABI_INK, "plugins");
+    draw_usize(sink, 4, 12, WABI_MOON, WABI_INK, snapshot.plugin_count);
+    draw_text(sink, 4, 18, WABI_STONE, WABI_INK, "nodes");
+    draw_usize(sink, 4, 24, WABI_PAPER, WABI_INK, snapshot.node_count);
+    draw_text(sink, 4, 30, WABI_STONE, WABI_INK, "edges");
+    draw_usize(sink, 4, 36, WABI_TEA, WABI_INK, snapshot.edge_count);
+
+    draw_text(sink, 5, 4, WABI_STONE, WABI_INK, "stability");
+    draw_badge(
+        sink,
+        5,
+        14,
+        WABI_MOON,
+        if gos_runtime::is_stable() {
+            WABI_MOSS
+        } else {
+            WABI_TEA
+        },
+        if gos_runtime::is_stable() { "locked" } else { "surge" },
+    );
+    draw_text(sink, 5, 24, WABI_STONE, WABI_INK, "focus");
+    draw_badge(
+        sink,
+        5,
+        31,
+        WABI_MOON,
+        if state.graph_context == GRAPH_CTX_NONE {
+            WABI_STONE
+        } else {
+            WABI_INDIGO
+        },
+        graph_context_label(state.graph_context),
+    );
+
+    draw_text(sink, 6, 4, WABI_STONE, WABI_INK, "rq");
+    draw_meter(
+        sink,
+        6,
+        8,
+        11,
+        (snapshot.ready_queue_len * 2).min(11),
+        WABI_PAPER,
+        WABI_INK,
+    );
+    draw_text(sink, 6, 22, WABI_STONE, WABI_INK, "sig");
+    draw_meter(
+        sink,
+        6,
+        27,
+        11,
+        (snapshot.signal_queue_len * 2).min(11),
+        WABI_TEA,
+        WABI_INK,
+    );
+
+    draw_text(sink, 7, 4, WABI_STONE, WABI_INK, "quick");
+    draw_badge(sink, 7, 10, WABI_MOON, WABI_STONE, "show");
+    draw_badge(sink, 7, 17, WABI_MOON, WABI_INDIGO, "node");
+    draw_badge(sink, 7, 24, WABI_MOON, WABI_TEA, "edge");
+    draw_badge(sink, 7, 31, WABI_MOON, WABI_MOSS, "back");
+    draw_badge(sink, 7, 38, WABI_MOON, WABI_STONE, "where");
+
+    draw_text(sink, 8, 4, WABI_STONE, WABI_INK, "query");
+    draw_text(sink, 8, 11, WABI_PAPER, WABI_INK, "cypher MATCH ...");
+    draw_text(sink, 9, 4, WABI_STONE, WABI_INK, "lanes");
+    draw_badge(
+        sink,
+        9,
+        11,
+        if state.ai_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.ai_target == 0 { WABI_INK } else { WABI_INDIGO },
+        "AI",
+    );
+    draw_badge(
+        sink,
+        9,
+        17,
+        if state.cuda_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cuda_target == 0 { WABI_INK } else { WABI_TEA },
+        "CUDA",
+    );
+    draw_badge(
+        sink,
+        9,
+        25,
+        if state.net_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.net_target == 0 { WABI_INK } else { WABI_MOSS },
+        "NET",
+    );
+    draw_text(sink, 9, 32, WABI_STONE, WABI_INK, "ask / submit / probe");
+
+    draw_text(sink, 10, 4, WABI_STONE, WABI_INK, "vector weave");
+    draw_repeat(sink, 10, 18, WABI_STONE, WABI_INK, CP437_LIGHT, 22);
+    draw_repeat(sink, 10, 18 + ((phase * 2) % 18), WABI_TEA, WABI_INK, CP437_MEDIUM, 2);
+    draw_byte(sink, 10, 41, WABI_PAPER, WABI_INK, b'.');
+}
+
+fn draw_operator_band(
+    sink: &ConsoleSink,
+    state: &ShellState,
+    snapshot: gos_protocol::GraphSnapshot,
+) {
+    let phase = (state.sigil_frame as usize) / 2;
+    fill_band(sink, 12, 2, 47, WABI_INK, WABI_INK);
+    fill_band(sink, 13, 2, 47, WABI_INK, WABI_INK);
+
+    draw_text(sink, 12, 4, WABI_STONE, WABI_INK, "operator");
+    draw_badge(sink, 12, 13, WABI_MOON, WABI_STONE, "deck");
+    draw_badge(
+        sink,
+        12,
+        20,
+        if state.ai_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.ai_target == 0 { WABI_INK } else { WABI_INDIGO },
+        "ai",
+    );
+    draw_badge(
+        sink,
+        12,
+        25,
+        if state.cuda_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cuda_target == 0 { WABI_INK } else { WABI_TEA },
+        "cu",
+    );
+    draw_badge(
+        sink,
+        12,
+        30,
+        if state.net_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.net_target == 0 { WABI_INK } else { WABI_MOSS },
+        "net",
+    );
+    draw_repeat(sink, 12, 36, WABI_STONE, WABI_INK, CP437_LIGHT, 11);
+    draw_repeat(sink, 12, 37 + ((phase * 2) % 7), WABI_PAPER, WABI_INK, CP437_MEDIUM, 2);
+    draw_byte(sink, 12, 47, WABI_STONE, WABI_INK, b'.');
+
+    draw_text(sink, 13, 4, WABI_STONE, WABI_INK, "route");
+    let mut route = LineBuf::<34>::new();
+    route.push_str(graph_mode_label(state.graph_mode));
+    route.push_str(" :: ");
+    route.push_str(graph_context_label(state.graph_context));
+    route.push_str(" :: rq ");
+    route.push_dec(snapshot.ready_queue_len as u64);
+    route.push_str(" / sg ");
+    route.push_dec(snapshot.signal_queue_len as u64);
+    draw_linebuf(sink, 13, 11, WABI_PAPER, WABI_INK, &route);
 }
 
 fn draw_ai_panel(sink: &ConsoleSink, state: &ShellState) {
     let snapshot = gos_runtime::snapshot();
+    let phase = (state.sigil_frame as usize) / 2;
     draw_box(
         sink,
         AI_PANEL_TOP,
@@ -770,70 +1551,123 @@ fn draw_ai_panel(sink: &ConsoleSink, state: &ShellState) {
         AI_PANEL_WIDTH,
         AI_PANEL_HEIGHT,
         " AI CONTROL ",
-        11,
-        0,
+        WABI_PAPER,
+        WABI_INK,
     );
-    draw_text(sink, AI_PANEL_TOP + 2, AI_PANEL_LEFT + 2, 8, 0, "link");
-    draw_text(
+    draw_badge(sink, AI_PANEL_TOP + 1, AI_PANEL_LEFT + 2, WABI_MOON, WABI_TEA, "NEURAL");
+    draw_repeat(sink, AI_PANEL_TOP + 1, AI_PANEL_LEFT + 12, WABI_STONE, WABI_INK, CP437_LIGHT, 10);
+    draw_repeat(
+        sink,
+        AI_PANEL_TOP + 1,
+        AI_PANEL_LEFT + 12 + ((phase * 2) % 8),
+        WABI_PAPER,
+        WABI_INK,
+        CP437_MEDIUM,
+        2,
+    );
+    draw_byte(sink, AI_PANEL_TOP + 1, AI_PANEL_LEFT + 22, WABI_STONE, WABI_INK, b'.');
+
+    draw_text(sink, AI_PANEL_TOP + 2, AI_PANEL_LEFT + 2, WABI_STONE, WABI_INK, "link");
+    draw_badge(
         sink,
         AI_PANEL_TOP + 2,
-        AI_PANEL_LEFT + 8,
-        if state.ai_target == 0 { 12 } else { 10 },
-        0,
+        AI_PANEL_LEFT + 7,
+        if state.ai_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.ai_target == 0 { WABI_INK } else { WABI_INDIGO },
         if state.ai_target == 0 { "down" } else { "live" },
     );
-    draw_text(sink, AI_PANEL_TOP + 2, AI_PANEL_LEFT + 14, 8, 0, "api");
-    draw_text(
+    draw_text(sink, AI_PANEL_TOP + 2, AI_PANEL_LEFT + 15, WABI_STONE, WABI_INK, "api");
+    draw_badge(
         sink,
         AI_PANEL_TOP + 2,
         AI_PANEL_LEFT + 19,
-        if state.api_configured != 0 { 10 } else { 14 },
-        0,
-        if state.api_configured != 0 { "armed" } else { "empty" },
-    );
-    draw_text(sink, AI_PANEL_TOP + 3, AI_PANEL_LEFT + 2, 8, 0, "kern");
-    draw_text(
-        sink,
-        AI_PANEL_TOP + 3,
-        AI_PANEL_LEFT + 8,
-        if gos_runtime::is_stable() { 10 } else { 14 },
-        0,
-        if gos_runtime::is_stable() { "stable" } else { "live" },
-    );
-    draw_text(sink, AI_PANEL_TOP + 3, AI_PANEL_LEFT + 15, 8, 0, "rq");
-    draw_usize(
-        sink,
-        AI_PANEL_TOP + 3,
-        AI_PANEL_LEFT + 18,
-        15,
-        0,
-        snapshot.ready_queue_len,
+        if state.api_configured != 0 { WABI_MOON } else { WABI_STONE },
+        if state.api_configured != 0 { WABI_TEA } else { WABI_INK },
+        if state.api_configured != 0 { "key" } else { "void" },
     );
 
-    draw_text(sink, AI_PANEL_TOP + 4, AI_PANEL_LEFT + 2, 8, 0, "mesh");
-    let mut mesh = LineBuf::<20>::new();
+    draw_text(sink, AI_PANEL_TOP + 3, AI_PANEL_LEFT + 2, WABI_STONE, WABI_INK, "mesh");
+    let mut mesh = LineBuf::<16>::new();
     mesh.push_byte(b'p');
     mesh.push_dec(snapshot.plugin_count as u64);
     mesh.push_str(" n");
     mesh.push_dec(snapshot.node_count as u64);
     mesh.push_str(" e");
     mesh.push_dec(snapshot.edge_count as u64);
-    draw_linebuf(sink, AI_PANEL_TOP + 4, AI_PANEL_LEFT + 7, 11, 0, &mesh);
+    draw_linebuf(sink, AI_PANEL_TOP + 3, AI_PANEL_LEFT + 7, WABI_PAPER, WABI_INK, &mesh);
 
-    draw_text(sink, AI_PANEL_TOP + 5, AI_PANEL_LEFT + 2, 8, 0, "focus");
-    let mut focus = LineBuf::<20>::new();
-    focus.push_str(graph_context_label(state.graph_context));
-    if let Some(vector) = state.selected_node {
-        focus.push_byte(b' ');
-        focus.push_vector(vector);
-    } else if let Some(edge) = state.selected_edge {
-        focus.push_byte(b' ');
-        focus.push_edge_vector(edge);
-    }
-    draw_linebuf(sink, AI_PANEL_TOP + 5, AI_PANEL_LEFT + 8, 15, 0, &focus);
+    draw_text(sink, AI_PANEL_TOP + 4, AI_PANEL_LEFT + 2, WABI_STONE, WABI_INK, "rq");
+    draw_meter(
+        sink,
+        AI_PANEL_TOP + 4,
+        AI_PANEL_LEFT + 5,
+        6,
+        (snapshot.ready_queue_len * 2).min(6),
+        WABI_PAPER,
+        WABI_INK,
+    );
+    draw_text(sink, AI_PANEL_TOP + 4, AI_PANEL_LEFT + 13, WABI_STONE, WABI_INK, "sg");
+    draw_meter(
+        sink,
+        AI_PANEL_TOP + 4,
+        AI_PANEL_LEFT + 16,
+        6,
+        (snapshot.signal_queue_len * 2).min(6),
+        WABI_TEA,
+        WABI_INK,
+    );
 
-    draw_text(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 2, 8, 0, "lane");
-    draw_text(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 8, 11, 0, "ask <prompt>");
+    draw_text(sink, AI_PANEL_TOP + 5, AI_PANEL_LEFT + 2, WABI_STONE, WABI_INK, "focus");
+    draw_badge(
+        sink,
+        AI_PANEL_TOP + 5,
+        AI_PANEL_LEFT + 8,
+        WABI_MOON,
+        if state.graph_context == GRAPH_CTX_NONE {
+            WABI_STONE
+        } else {
+            WABI_INDIGO
+        },
+        graph_context_label(state.graph_context),
+    );
+    let focus_label = if state.selected_node.is_some() {
+        "N"
+    } else if state.selected_edge.is_some() {
+        "E"
+    } else {
+        "-"
+    };
+    draw_badge(sink, AI_PANEL_TOP + 5, AI_PANEL_LEFT + 19, WABI_MOON, WABI_TEA, focus_label);
+
+    draw_text(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 2, WABI_STONE, WABI_INK, "ops");
+    draw_badge(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 6, WABI_MOON, WABI_MOSS, "ask");
+    draw_badge(
+        sink,
+        AI_PANEL_TOP + 6,
+        AI_PANEL_LEFT + 12,
+        if state.cypher_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cypher_target == 0 { WABI_INK } else { WABI_STONE },
+        "cy",
+    );
+    draw_badge(
+        sink,
+        AI_PANEL_TOP + 6,
+        AI_PANEL_LEFT + 17,
+        if state.cuda_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cuda_target == 0 { WABI_INK } else { WABI_TEA },
+        "cu",
+    );
+    draw_repeat(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 20, WABI_STONE, WABI_INK, CP437_LIGHT, 4);
+    draw_repeat(
+        sink,
+        AI_PANEL_TOP + 6,
+        AI_PANEL_LEFT + 20 + (phase % 3),
+        WABI_PAPER,
+        WABI_INK,
+        CP437_MEDIUM,
+        2,
+    );
+    draw_byte(sink, AI_PANEL_TOP + 6, AI_PANEL_LEFT + 23, WABI_STONE, WABI_INK, b'.');
 
     for row in 0..AI_PANEL_LINES {
         let line_row = AI_PANEL_TOP + 7 + row;
@@ -849,16 +1683,16 @@ fn draw_ai_panel(sink: &ConsoleSink, state: &ShellState) {
             && state.ai_lines[row][2] == b'u'
             && state.ai_lines[row][3] == b'>'
         {
-            14
+            WABI_TEA
         } else if len >= 4
             && state.ai_lines[row][0] == b's'
             && state.ai_lines[row][1] == b'y'
             && state.ai_lines[row][2] == b's'
             && state.ai_lines[row][3] == b'>'
         {
-            8
+            WABI_STONE
         } else {
-            11
+            WABI_PAPER
         };
 
         draw_bytes(
@@ -866,7 +1700,7 @@ fn draw_ai_panel(sink: &ConsoleSink, state: &ShellState) {
             line_row,
             AI_PANEL_LEFT + 2,
             fg,
-            0,
+            WABI_INK,
             &state.ai_lines[row][..len],
         );
     }
@@ -1841,6 +2675,25 @@ fn handle_graph_page_key(sink: &ConsoleSink, state: &mut ShellState, byte: u8) -
     false
 }
 
+fn handle_command_history_key(sink: &ConsoleSink, state: &mut ShellState, byte: u8) -> bool {
+    if state.menu_mode != MENU_MODE_COMMAND {
+        return false;
+    }
+
+    let changed = match byte {
+        INPUT_KEY_UP => command_history_prev(state),
+        INPUT_KEY_DOWN => command_history_next(state),
+        _ => false,
+    };
+
+    if changed {
+        redraw_footer(sink, state, false);
+        focus_footer_input(sink, state);
+    }
+
+    changed
+}
+
 fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -> bool {
     if cmd == "back" {
         if state.graph_mode == GRAPH_MODE_NONE {
@@ -1941,7 +2794,18 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         begin_graph_command(sink, state);
         if let Some(vector) = state.selected_node {
             match gos_runtime::activate(vector) {
-                Ok(_) => render_graph_notice(sink, state, "ACTIVATE", "node activation completed", "run node or show to refresh summaries", 10),
+                Ok(_) => {
+                    if is_theme_vector(vector) {
+                        let theme = selected_theme();
+                        let mut detail = LineBuf::<48>::new();
+                        detail.push_str("theme.current -> ");
+                        detail.push_vector(theme_vector(theme));
+                        let message = core::str::from_utf8(detail.as_slice()).unwrap_or("theme link applied");
+                        render_graph_notice(sink, state, "ACTIVATE", "theme relation applied", message, 10);
+                    } else {
+                        render_graph_notice(sink, state, "ACTIVATE", "node activation completed", "run node or show to refresh summaries", 10);
+                    }
+                }
                 Err(_) => render_graph_notice(sink, state, "ACTIVATE", "node activation failed", "selected node is not activatable", 12),
             }
         } else {
@@ -2052,24 +2916,105 @@ fn dispatch_cypher_query(sink: &ConsoleSink, state: &mut ShellState, query: &str
     true
 }
 
-fn draw_footer_shortcuts(sink: &ConsoleSink, state: &ShellState) {
-    fill_band(sink, FOOTER_SHORTCUT_ROW, 0, SCREEN_WIDTH, 0, 1);
-    if state.menu_mode == MENU_MODE_AI_API {
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 2, 15, 1, "^S save");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 14, 11, 1, "enter apply");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 31, 15, 1, "esc cancel");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 46, 11, 1, "backspace erase");
-    } else {
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 2, 15, 1, "^A AI-API");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 14, 11, 1, "^L input");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 28, 15, 1, "show");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 35, 11, 1, "node");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 42, 15, 1, "edge");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 49, 11, 1, "where");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 56, 15, 1, "cypher");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 64, 11, 1, "ask");
-        draw_text(sink, FOOTER_SHORTCUT_ROW, 70, 15, 1, "help");
+fn dispatch_cuda_submit(sink: &ConsoleSink, state: &mut ShellState, job: &str) -> bool {
+    if state.cuda_target == 0 {
+        set_color(sink, 12, 0);
+        print_str(sink, " cuda bridge unresolved\n");
+        return false;
     }
+
+    if !emit_target_signal(
+        sink,
+        state.cuda_target,
+        Signal::Control {
+            cmd: CUDA_CONTROL_JOB_BEGIN,
+            val: 0,
+        },
+    ) {
+        set_color(sink, 12, 0);
+        print_str(sink, " cuda bridge refused job begin\n");
+        return false;
+    }
+
+    for byte in job.bytes() {
+        if !emit_target_signal(
+            sink,
+            state.cuda_target,
+            Signal::Data {
+                from: sink.from,
+                byte,
+            },
+        ) {
+            set_color(sink, 12, 0);
+            print_str(sink, " cuda bridge dropped job payload\n");
+            return false;
+        }
+    }
+
+    if !emit_target_signal(
+        sink,
+        state.cuda_target,
+        Signal::Control {
+            cmd: CUDA_CONTROL_JOB_COMMIT,
+            val: 0,
+        },
+    ) {
+        set_color(sink, 12, 0);
+        print_str(sink, " cuda bridge refused job commit\n");
+        return false;
+    }
+
+    gos_runtime::pump();
+    true
+}
+
+fn draw_footer_shortcuts(sink: &ConsoleSink, state: &ShellState) {
+    let phase = (state.sigil_frame as usize) / 2;
+    fill_band(sink, FOOTER_SHORTCUT_ROW, 0, SCREEN_WIDTH, WABI_INK, WABI_INDIGO);
+    draw_badge(
+        sink,
+        FOOTER_SHORTCUT_ROW,
+        1,
+        WABI_MOON,
+        if state.menu_mode == MENU_MODE_AI_API {
+            WABI_INDIGO
+        } else {
+            WABI_TEA
+        },
+        if state.menu_mode == MENU_MODE_AI_API { "API" } else { "CMD" },
+    );
+    if state.menu_mode == MENU_MODE_AI_API {
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 9, WABI_MOON, WABI_STONE, "^S");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 14, WABI_PAPER, WABI_INDIGO, "save");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 21, WABI_MOON, WABI_MOSS, "ENT");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 27, WABI_PAPER, WABI_INDIGO, "apply");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 35, WABI_MOON, WABI_TEA, "ESC");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 41, WABI_PAPER, WABI_INDIGO, "cancel");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 51, WABI_MOON, WABI_STONE, "DEL");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 57, WABI_PAPER, WABI_INDIGO, "erase");
+    } else {
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 9, WABI_MOON, WABI_STONE, "^A");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 14, WABI_PAPER, WABI_INDIGO, "ai-key");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 23, WABI_MOON, WABI_STONE, "^L");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 28, WABI_PAPER, WABI_INDIGO, "ime");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 34, WABI_MOON, WABI_STONE, "^C");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 39, WABI_PAPER, WABI_INDIGO, "copy");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 46, WABI_MOON, WABI_TEA, "^X");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 51, WABI_PAPER, WABI_INDIGO, "cut");
+        draw_badge(sink, FOOTER_SHORTCUT_ROW, 57, WABI_MOON, WABI_MOSS, "^V");
+        draw_text(sink, FOOTER_SHORTCUT_ROW, 62, WABI_PAPER, WABI_INDIGO, "paste");
+    }
+    draw_repeat(sink, FOOTER_SHORTCUT_ROW, 69, WABI_STONE, WABI_INDIGO, CP437_LIGHT, 8);
+    draw_repeat(
+        sink,
+        FOOTER_SHORTCUT_ROW,
+        69 + ((phase * 2) % 6),
+        WABI_PAPER,
+        WABI_INDIGO,
+        CP437_MEDIUM,
+        2,
+    );
+    draw_byte(sink, FOOTER_SHORTCUT_ROW, 78, WABI_STONE, WABI_INDIGO, b'.');
 }
 
 fn draw_footer_status(sink: &ConsoleSink, state: &ShellState) {
@@ -2078,74 +3023,144 @@ fn draw_footer_status(sink: &ConsoleSink, state: &ShellState) {
     } else {
         state.api_len
     };
-    fill_band(sink, FOOTER_STATUS_ROW, 0, SCREEN_WIDTH, 0, 8);
-    let mut line = LineBuf::<78>::new();
-    line.push_str("lang ");
-    line.push_str(ime_mode_label(state.input_lang));
-    line.push_str("  ai ");
-    line.push_str(if state.ai_target == 0 { "off" } else { "on" });
-    line.push_str("  cy ");
-    line.push_str(if state.cypher_target == 0 { "off" } else { "on" });
-    line.push_str("  net ");
-    line.push_str(if state.net_target == 0 { "down" } else { "up" });
-    line.push_str("  key ");
-    line.push_str(if state.api_configured != 0 { "armed" } else { "empty" });
-    line.push_str("  bytes ");
-    line.push_dec(shown_len as u64);
-    line.push_str("  mode ");
-    line.push_str(if state.menu_mode == MENU_MODE_AI_API {
-        "api"
-    } else {
-        graph_mode_label(state.graph_mode)
-    });
-
-    if let Some(vector) = state.selected_node {
-        line.push_str("  sel-node ");
-        line.push_vector(vector);
-    }
-    if let Some(vector) = state.selected_edge {
-        line.push_str("  sel-edge ");
-        line.push_edge_vector(vector);
-    }
-
-    draw_linebuf(sink, FOOTER_STATUS_ROW, 1, 15, 8, &line);
+    fill_band(sink, FOOTER_STATUS_ROW, 0, SCREEN_WIDTH, WABI_INK, WABI_INK);
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        1,
+        WABI_MOON,
+        if state.input_lang == IME_MODE_ZH_PINYIN {
+            WABI_MOSS
+        } else {
+            WABI_STONE
+        },
+        ime_mode_label(state.input_lang),
+    );
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        9,
+        if state.ai_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.ai_target == 0 { WABI_INK } else { WABI_INDIGO },
+        "AI",
+    );
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        14,
+        if state.cypher_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cypher_target == 0 { WABI_INK } else { WABI_STONE },
+        "CY",
+    );
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        19,
+        if state.net_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.net_target == 0 { WABI_INK } else { WABI_MOSS },
+        "NET",
+    );
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        25,
+        if state.cuda_target == 0 { WABI_STONE } else { WABI_MOON },
+        if state.cuda_target == 0 { WABI_INK } else { WABI_TEA },
+        "CUDA",
+    );
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        32,
+        if clipboard_mounted(NODE_VEC) { WABI_MOON } else { WABI_STONE },
+        if clipboard_mounted(NODE_VEC) { WABI_MOSS } else { WABI_INK },
+        "CLIP",
+    );
+    draw_text(sink, FOOTER_STATUS_ROW, 39, WABI_PAPER, WABI_INK, "buf");
+    draw_usize(sink, FOOTER_STATUS_ROW, 43, WABI_PAPER, WABI_INK, shown_len);
+    draw_text(sink, FOOTER_STATUS_ROW, 48, WABI_PAPER, WABI_INK, "mode");
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        53,
+        WABI_MOON,
+        WABI_STONE,
+        if state.menu_mode == MENU_MODE_AI_API {
+            "api"
+        } else {
+            graph_mode_label(state.graph_mode)
+        },
+    );
+    draw_text(sink, FOOTER_STATUS_ROW, 63, WABI_PAPER, WABI_INK, "ctx");
+    draw_badge(
+        sink,
+        FOOTER_STATUS_ROW,
+        67,
+        WABI_MOON,
+        if state.graph_context == GRAPH_CTX_NONE {
+            WABI_STONE
+        } else {
+            WABI_INDIGO
+        },
+        graph_context_label(state.graph_context),
+    );
 }
 
 fn draw_footer_input(sink: &ConsoleSink, state: &ShellState) {
-    fill_band(sink, FOOTER_INPUT_ROW, 0, SCREEN_WIDTH, 15, 0);
-    if state.menu_mode == MENU_MODE_AI_API {
-        draw_text(sink, FOOTER_INPUT_ROW, 2, 14, 0, "AI API KEY >");
-        if state.api_edit_len == 0 {
-            draw_text(sink, FOOTER_INPUT_ROW, 16, 8, 0, "type token for this boot session");
+    let phase = (state.sigil_frame as usize) / 2;
+    fill_band(sink, FOOTER_INPUT_ROW, 0, SCREEN_WIDTH, WABI_PAPER, WABI_INK);
+    draw_badge(
+        sink,
+        FOOTER_INPUT_ROW,
+        0,
+        WABI_MOON,
+        if state.menu_mode == MENU_MODE_AI_API {
+            WABI_INDIGO
         } else {
-            let visible_width = SCREEN_WIDTH.saturating_sub(18);
+            WABI_STONE
+        },
+        if state.menu_mode == MENU_MODE_AI_API { "API" } else { "RUN" },
+    );
+    if state.menu_mode == MENU_MODE_AI_API {
+        draw_text(sink, FOOTER_INPUT_ROW, 6, WABI_TEA, WABI_INK, "AI API KEY >");
+        if state.api_edit_len == 0 {
+            draw_text(
+                sink,
+                FOOTER_INPUT_ROW,
+                20,
+                WABI_STONE,
+                WABI_INK,
+                "type token for this boot session",
+            );
+        } else {
+            let visible_width = SCREEN_WIDTH.saturating_sub(22);
             let start = state.api_edit_len.saturating_sub(visible_width);
             if start > 0 {
-                draw_text(sink, FOOTER_INPUT_ROW, 16, 8, 0, "...");
+                draw_text(sink, FOOTER_INPUT_ROW, 20, WABI_STONE, WABI_INK, "...");
             }
-            let col = if start > 0 { 19 } else { 16 };
+            let col = if start > 0 { 23 } else { 20 };
             draw_bytes(
                 sink,
                 FOOTER_INPUT_ROW,
                 col,
-                15,
-                0,
+                WABI_MOON,
+                WABI_INK,
                 &state.api_buffer[start..state.api_edit_len],
             );
         }
     } else {
         let mut visible = [0u8; 128];
         let visible_len = command_display_bytes(state, &mut visible);
-        draw_text(sink, FOOTER_INPUT_ROW, COMMAND_INPUT_PROMPT_COL, 14, 0, ">");
+        draw_text(sink, FOOTER_INPUT_ROW, 6, WABI_TEA, WABI_INK, ">");
 
-        let available = SCREEN_WIDTH.saturating_sub(COMMAND_INPUT_TEXT_COL + 1);
+        let available = SCREEN_WIDTH.saturating_sub(9);
         if visible_len == 0 {
             draw_text(
                 sink,
                 FOOTER_INPUT_ROW,
-                COMMAND_INPUT_TEXT_COL,
                 8,
-                0,
+                WABI_STONE,
+                WABI_INK,
                 "show / back / node <vec> / edge <vec> / ask <prompt>",
             );
         } else {
@@ -2153,50 +3168,61 @@ fn draw_footer_input(sink: &ConsoleSink, state: &ShellState) {
             draw_bytes(
                 sink,
                 FOOTER_INPUT_ROW,
-                COMMAND_INPUT_TEXT_COL,
-                15,
-                0,
+                8,
+                WABI_MOON,
+                WABI_INK,
                 &visible[start..visible_len],
             );
         }
 
         if state.input_lang == IME_MODE_ZH_PINYIN && state.ime_preview_len > 0 {
-            let preview_col = 56usize;
+            let preview_col = 58usize;
             if preview_col < SCREEN_WIDTH {
-                draw_text(sink, FOOTER_INPUT_ROW, preview_col, 11, 0, "py:");
+                draw_text(sink, FOOTER_INPUT_ROW, preview_col, WABI_SAGE, WABI_INK, "py:");
                 let remaining = SCREEN_WIDTH.saturating_sub(preview_col + 3);
                 let preview_len = state.ime_preview_len.min(remaining);
                 draw_bytes(
                     sink,
                     FOOTER_INPUT_ROW,
                     preview_col + 3,
-                    15,
-                    0,
+                    WABI_PAPER,
+                    WABI_INK,
                     &state.ime_preview[..preview_len],
                 );
             }
         }
     }
+    draw_repeat(sink, FOOTER_INPUT_ROW, 70, WABI_STONE, WABI_INK, CP437_LIGHT, 8);
+    draw_repeat(
+        sink,
+        FOOTER_INPUT_ROW,
+        70 + ((phase * 2) % 6),
+        WABI_PAPER,
+        WABI_INK,
+        CP437_MEDIUM,
+        2,
+    );
+    draw_byte(sink, FOOTER_INPUT_ROW, 79, WABI_STONE, WABI_INK, b'.');
 }
 
 fn focus_footer_input(sink: &ConsoleSink, state: &ShellState) {
     let col = if state.menu_mode == MENU_MODE_AI_API {
-        let visible_width = SCREEN_WIDTH.saturating_sub(18);
+        let visible_width = SCREEN_WIDTH.saturating_sub(22);
         let visible_len = state.api_edit_len.min(visible_width);
         if state.api_edit_len > visible_width {
-            19 + visible_len
+            23 + visible_len
         } else {
-            16 + visible_len
+            20 + visible_len
         }
     } else {
         let mut visible = [0u8; 128];
         let visible_len = command_display_bytes(state, &mut visible);
-        let available = SCREEN_WIDTH.saturating_sub(COMMAND_INPUT_TEXT_COL + 1);
+        let available = SCREEN_WIDTH.saturating_sub(9);
         let shown_len = visible_len.min(available);
-        COMMAND_INPUT_TEXT_COL + shown_len
+        8 + shown_len
     };
     goto(sink, FOOTER_INPUT_ROW, col.min(SCREEN_WIDTH - 1));
-    set_color(sink, 15, 0);
+    set_color(sink, WABI_MOON, WABI_INK);
 }
 
 fn restore_output_cursor(sink: &ConsoleSink) {
@@ -2214,9 +3240,9 @@ fn echo_command_line(sink: &ConsoleSink, state: &ShellState) {
 
     let mut visible = [0u8; 128];
     let visible_len = command_display_bytes(state, &mut visible);
-    set_color(sink, 14, 0);
+    set_color(sink, WABI_TEA, WABI_INK);
     print_str(sink, "> ");
-    set_color(sink, 15, 0);
+    set_color(sink, WABI_MOON, WABI_INK);
     if visible_len > 0 {
         let text = core::str::from_utf8(&visible[..visible_len]).unwrap_or("");
         print_str(sink, text);
@@ -2286,8 +3312,8 @@ fn clear_rect(sink: &ConsoleSink, top: usize, left: usize, width: usize, height:
 }
 
 fn draw_sigil_layer(sink: &ConsoleSink, top: i32, left: i32, primary_fg: u8, secondary_fg: u8) {
-    let top = top.max(2) as usize;
-    let left = left.max(56) as usize;
+    let top = top.clamp(4, 8) as usize;
+    let left = left.clamp(49, 50) as usize;
     for (idx, row) in LIVE_SIGIL_ROWS.iter().enumerate() {
         let fg = if idx % 2 == 0 { primary_fg } else { secondary_fg };
         draw_bytes(sink, top + idx, left, fg, 0, row);
@@ -2304,60 +3330,56 @@ fn draw_console_sigil(sink: &ConsoleSink, frame: usize) {
     let base_top = LIVE_SIGIL_TOP as i32 + current_y;
     let base_left = LIVE_SIGIL_LEFT as i32 + current_x;
     let primary_fg = match phase {
-        0 | 4 => 11,
-        1 | 2 => 9,
-        3 => 15,
-        5 | 6 => 13,
-        _ => 10,
+        0 | 4 => WABI_PAPER,
+        1 | 2 => WABI_STONE,
+        3 => WABI_MOON,
+        5 | 6 => WABI_TEA,
+        _ => WABI_SAGE,
     };
     let secondary_fg = match phase {
-        0 | 1 => 15,
-        2 | 3 => 11,
-        4 | 5 => 11,
-        _ => 10,
+        0 | 1 => WABI_STONE,
+        2 | 3 => WABI_PAPER,
+        4 | 5 => WABI_SAGE,
+        _ => WABI_TEA,
     };
 
     clear_rect(
         sink,
-        LIVE_SIGIL_TOP.saturating_sub(2),
-        LIVE_SIGIL_LEFT.saturating_sub(6),
-        LIVE_SIGIL_WIDTH + 4,
-        LIVE_SIGIL_HEIGHT + 3,
+        LIVE_SIGIL_TOP.saturating_sub(1),
+        LIVE_SIGIL_LEFT.saturating_sub(1),
+        LIVE_SIGIL_WIDTH,
+        LIVE_SIGIL_HEIGHT,
     );
-    draw_text(sink, 3, 24, 8, 0, "sigil flux");
-    draw_text(sink, 10, 24, 8, 0, "orbit");
-    let speed_meter = ((velocity_x.abs() + velocity_y.abs()) as usize * 2).max(LIVE_TRAIL_HEAD[phase]).min(10);
-    draw_meter(sink, 10, 65, 10, speed_meter, 11, 0);
 
     draw_sigil_layer(
         sink,
-        base_top - velocity_y * 2,
-        base_left - velocity_x * 2,
-        8,
-        1,
+        base_top - velocity_y,
+        base_left - velocity_x,
+        WABI_STONE,
+        WABI_INDIGO,
     );
     draw_sigil_layer(
         sink,
         base_top - velocity_y,
         base_left - velocity_x,
-        9,
-        3,
+        WABI_STONE,
+        WABI_MOSS,
     );
     draw_sigil_layer(sink, base_top, base_left, primary_fg, secondary_fg);
 
     for (idx, (dy, dx)) in LIVE_SPARKS[phase].iter().enumerate() {
-        let row = (base_top + *dy as i32).max(3) as usize;
-        let col = (base_left + *dx as i32).max(58) as usize;
+        let row = (base_top + *dy as i32).clamp(4, 9) as usize;
+        let col = (base_left + *dx as i32).clamp(49, 51) as usize;
         let (fg, byte) = if idx % 2 == 0 {
-            (15, b'*')
+            (WABI_PAPER, b'.')
         } else {
-            (11, CP437_LIGHT)
+            (WABI_STONE, CP437_LIGHT)
         };
-        draw_byte(sink, row, col, fg, 0, byte);
+        draw_byte(sink, row, col, fg, WABI_INK, byte);
         if velocity_x != 0 || velocity_y != 0 {
-            let trail_row = (row as i32 - velocity_y).max(3) as usize;
-            let trail_col = (col as i32 - velocity_x).max(58) as usize;
-            draw_byte(sink, trail_row, trail_col, 8, 0, CP437_LIGHT);
+            let trail_row = (row as i32 - velocity_y).clamp(4, 9) as usize;
+            let trail_col = (col as i32 - velocity_x).clamp(49, 51) as usize;
+            draw_byte(sink, trail_row, trail_col, WABI_STONE, WABI_INK, CP437_LIGHT);
         }
     }
 }
@@ -2377,45 +3399,12 @@ fn redraw_console(sink: &ConsoleSink, state: &ShellState) {
     clear_canvas(sink);
     set_scroll_top(sink, COMMAND_SCROLL_TOP);
     set_scroll_bottom(sink, COMMAND_SCROLL_BOTTOM);
-    fill_band(sink, 0, 0, SCREEN_WIDTH, 0, 2);
-    draw_text(sink, 0, 2, 15, 2, " GOS v0.2 ");
-    draw_text(sink, 0, 14, 11, 2, "LIVE GRAPH CONSOLE");
-    draw_repeat(sink, 0, 60, 9, 2, CP437_LIGHT, 8);
-    draw_text(sink, 0, 69, 11, 2, "G LIVE ");
-
-    draw_box(
-        sink,
-        COMMAND_DECK_TOP,
-        COMMAND_DECK_LEFT,
-        COMMAND_DECK_WIDTH,
-        COMMAND_DECK_HEIGHT,
-        " COMMAND DECK ",
-        11,
-        0,
-    );
-    draw_text(sink, 4, 4, 11, 0, "graph-native shell online");
-    draw_text(sink, 5, 4, 7, 0, "plugins");
-    draw_usize(sink, 5, 13, 15, 0, snapshot.plugin_count);
-    draw_text(sink, 5, 18, 7, 0, "nodes");
-    draw_usize(sink, 5, 25, 15, 0, snapshot.node_count);
-    draw_text(sink, 5, 31, 7, 0, "edges");
-    draw_usize(sink, 5, 38, 15, 0, snapshot.edge_count);
-    draw_text(sink, 6, 4, 7, 0, "stable");
-    draw_text(sink, 6, 12, if gos_runtime::is_stable() { 10 } else { 14 }, 0, if gos_runtime::is_stable() { "yes" } else { "no " });
-    draw_text(sink, 6, 18, 7, 0, "mode");
-    draw_text(sink, 6, 24, 10, 0, "live");
-    draw_text(sink, 7, 4, 11, 0, "quick");
-    draw_text(sink, 7, 12, 15, 0, "show");
-    draw_text(sink, 7, 19, 7, 0, "node");
-    draw_text(sink, 7, 26, 15, 0, "edge");
-    draw_text(sink, 7, 33, 7, 0, "where");
-    draw_text(sink, 7, 41, 15, 0, "back");
-    draw_text(sink, 8, 4, 8, 0, "show toggles node/edge context; back returns one level.");
-    draw_text(sink, 9, 4, 8, 0, "PgUp/PgDn pages overview and graph lists; cypher MATCH ... still works.");
-    draw_console_sigil(sink, 0);
+    draw_runtime_header(sink, state, snapshot);
+    draw_command_deck_panel(sink, state, snapshot);
+    draw_runtime_gap_flux(sink, state);
+    draw_console_sigil(sink, state.sigil_frame as usize);
     draw_ai_panel(sink, state);
-
-    draw_text(sink, 13, 4, 8, 0, "operator link");
+    draw_operator_band(sink, state, snapshot);
     goto(sink, COMMAND_SCROLL_TOP, 4);
     save_cursor(sink, 1);
     redraw_footer(sink, state, false);
@@ -2440,6 +3429,143 @@ fn print_num_inline(sink: &ConsoleSink, mut value: usize) {
         len -= 1;
         print_byte(sink, buf[len]);
     }
+}
+
+fn resolve_capability_target(
+    ctx: *mut ExecutorContext,
+    namespace: &'static [u8],
+    capability: &'static [u8],
+) -> u64 {
+    let ctx_ref = unsafe { &*ctx };
+    let abi = unsafe { &*ctx_ref.abi };
+    if let Some(resolve_capability) = abi.resolve_capability {
+        unsafe {
+            resolve_capability(
+                namespace.as_ptr(),
+                namespace.len(),
+                capability.as_ptr(),
+                capability.len(),
+            )
+        }
+    } else {
+        0
+    }
+}
+
+unsafe fn clipboard_state_mut(ctx: *mut ExecutorContext) -> &'static mut ClipboardState {
+    let ctx = unsafe { &mut *ctx };
+    unsafe { &mut *(ctx.state_ptr as *mut ClipboardState) }
+}
+
+fn clipboard_request_allowed(from: u64) -> bool {
+    if from == 0 {
+        return false;
+    }
+    clipboard_mounted(VectorAddress::from_u64(from))
+}
+
+unsafe extern "C" fn clipboard_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe {
+        core::ptr::write(
+            (*ctx).state_ptr as *mut ClipboardState,
+            ClipboardState {
+                bytes: [0; CLIPBOARD_MAX_BYTES],
+                len: 0,
+                capture_from: 0,
+                capture_len: 0,
+                capture_active: 0,
+            },
+        );
+    }
+    CLIPBOARD_BYTES.store(0, Ordering::SeqCst);
+    ExecStatus::Done
+}
+
+unsafe extern "C" fn clipboard_on_event(
+    ctx: *mut ExecutorContext,
+    event: *const NodeEvent,
+) -> ExecStatus {
+    let state = unsafe { clipboard_state_mut(ctx) };
+    let signal = packet_to_signal(unsafe { (*event).signal });
+
+    match signal {
+        Signal::Call { from } => {
+            if !clipboard_request_allowed(from) {
+                return ExecStatus::Done;
+            }
+
+            let target = VectorAddress::from_u64(from);
+            let mut idx = 0usize;
+            while idx < state.len {
+                let _ = gos_runtime::post_signal(
+                    target,
+                    Signal::Data {
+                        from: CLIPBOARD_NODE_VEC.as_u64(),
+                        byte: state.bytes[idx],
+                    },
+                );
+                idx += 1;
+            }
+            ExecStatus::Done
+        }
+        Signal::Data { from, byte } => {
+            if !clipboard_request_allowed(from) {
+                return ExecStatus::Done;
+            }
+
+            match byte {
+                CLIPBOARD_DATA_BEGIN => {
+                    state.capture_from = from;
+                    state.capture_len = 0;
+                    state.capture_active = 1;
+                }
+                CLIPBOARD_DATA_COMMIT => {
+                    if state.capture_active != 0 && state.capture_from == from {
+                        state.len = state.capture_len.min(state.bytes.len());
+                        CLIPBOARD_BYTES.store(state.len, Ordering::SeqCst);
+                    }
+                    state.capture_active = 0;
+                    state.capture_from = 0;
+                    state.capture_len = 0;
+                }
+                CLIPBOARD_DATA_CLEAR => {
+                    state.bytes = [0; CLIPBOARD_MAX_BYTES];
+                    state.len = 0;
+                    state.capture_active = 0;
+                    state.capture_from = 0;
+                    state.capture_len = 0;
+                    CLIPBOARD_BYTES.store(0, Ordering::SeqCst);
+                }
+                _ => {
+                    if state.capture_active != 0
+                        && state.capture_from == from
+                        && state.capture_len < state.bytes.len()
+                    {
+                        state.bytes[state.capture_len] = byte;
+                        state.capture_len += 1;
+                    }
+                }
+            }
+            ExecStatus::Done
+        }
+        _ => ExecStatus::Done,
+    }
+}
+
+unsafe extern "C" fn theme_on_resume(ctx: *mut ExecutorContext) -> ExecStatus {
+    let vector = unsafe { (*ctx).vector };
+    let theme = if vector == THEME_CURRENT_NODE_VEC {
+        selected_theme()
+    } else if let Some(theme) = theme_kind_for_vector(vector) {
+        theme
+    } else {
+        return ExecStatus::Done;
+    };
+    let console_target = resolve_capability_target(ctx, b"console", b"write");
+    let ctx_ref = unsafe { &*ctx };
+    let abi = unsafe { &*ctx_ref.abi };
+    let _ = apply_theme_choice_raw(abi, vector.as_u64(), console_target, theme);
+    ExecStatus::Done
 }
 
 unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
@@ -2528,6 +3654,40 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
         }
     };
 
+    let cuda_target = {
+        let ctx_ref = unsafe { &*ctx };
+        let abi = unsafe { &*ctx_ref.abi };
+        if let Some(resolve_capability) = abi.resolve_capability {
+            unsafe {
+                resolve_capability(
+                    b"cuda".as_ptr(),
+                    b"cuda".len(),
+                    b"bridge".as_ptr(),
+                    b"bridge".len(),
+                )
+            }
+        } else {
+            0
+        }
+    };
+
+    let clipboard_target = {
+        let ctx_ref = unsafe { &*ctx };
+        let abi = unsafe { &*ctx_ref.abi };
+        if let Some(resolve_capability) = abi.resolve_capability {
+            unsafe {
+                resolve_capability(
+                    b"clipboard".as_ptr(),
+                    b"clipboard".len(),
+                    b"buffer".as_ptr(),
+                    b"buffer".len(),
+                )
+            }
+        } else {
+            0
+        }
+    };
+
     unsafe {
         core::ptr::write(
             (*ctx).state_ptr as *mut ShellState,
@@ -2549,6 +3709,13 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 ime_preview: [0; MAX_IME_PREVIEW],
                 ime_preview_len: 0,
                 ime_utf8_tail: 0,
+                command_history: [[0; 128]; COMMAND_HISTORY_ITEMS],
+                command_history_lens: [0; COMMAND_HISTORY_ITEMS],
+                command_history_len: 0,
+                command_history_cursor: 0,
+                command_history_active: 0,
+                command_history_draft: [0; 128],
+                command_history_draft_len: 0,
                 api_buffer: [0; 128],
                 api_edit_len: 0,
                 api_len: 0,
@@ -2561,6 +3728,12 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 ai_target,
                 cypher_target,
                 net_target,
+                cuda_target,
+                clipboard_target: if clipboard_target == 0 {
+                    CLIPBOARD_NODE_VEC.as_u64()
+                } else {
+                    clipboard_target
+                },
                 console_live: 0,
                 sigil_frame: 0,
                 heartbeat_divider: 0,
@@ -2570,6 +3743,8 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
             },
         );
     }
+    let sink = sink_from_ctx(ctx);
+    let _ = apply_theme_choice(&sink, THEME_KIND_WABI);
     seed_ai_panel(unsafe { state_mut(ctx) });
     ExecStatus::Done
 }
@@ -2588,6 +3763,11 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 return ExecStatus::Done;
             }
 
+            if from == state.clipboard_target {
+                append_clipboard_byte(&sink, state, byte);
+                return ExecStatus::Done;
+            }
+
             if from == state.ai_target {
                 append_ai_stream_byte(state, byte);
                 redraw_ai_panel(&sink, state, true);
@@ -2598,6 +3778,10 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 return ExecStatus::Done;
             }
 
+            if handle_command_history_key(&sink, state, byte) {
+                return ExecStatus::Done;
+            }
+
             if byte == 0x01 && state.menu_mode != MENU_MODE_AI_API {
                 enter_ai_api_mode(&sink, state);
                 return ExecStatus::Done;
@@ -2605,6 +3789,15 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
 
             if state.menu_mode == MENU_MODE_AI_API {
                 match byte {
+                    0x03 => {
+                        let _ = clipboard_copy_active_input(&sink, state);
+                    }
+                    0x16 => {
+                        let _ = clipboard_paste_active_input(&sink, state);
+                    }
+                    0x18 => {
+                        let _ = clipboard_cut_active_input(&sink, state);
+                    }
                     b'\n' | b'\r' | 0x13 => {
                         if commit_ai_api(&sink, state) {
                             exit_ai_api_mode(&sink, state, " ai uplink armed for this boot session", 10);
@@ -2613,11 +3806,12 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                             exit_ai_api_mode(&sink, state, " ai uplink commit failed", 12);
                         }
                     }
-                    0x1B | 0x03 => {
+                    0x1B => {
                         exit_ai_api_mode(&sink, state, " ai uplink edit cancelled", 14);
                     }
                     0x08 | 0x7F => {
                         if state.api_edit_len > 0 {
+                            reset_command_history_cursor(state);
                             state.api_edit_len -= 1;
                             state.api_buffer[state.api_edit_len] = 0;
                         }
@@ -2746,6 +3940,10 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 cmd_buf[..cmd_len].copy_from_slice(&state.buffer[..cmd_len]);
                 let cmd = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
 
+                if !cmd.is_empty() {
+                    record_command_history(state);
+                }
+
                 if handle_graph_command(&sink, state, cmd) {
                     return ExecStatus::Done;
                 }
@@ -2796,13 +3994,26 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                     print_str(&sink, "  select clear  clear node/edge selection\n");
                     print_str(&sink, "  activate  activate selected node\n");
                     print_str(&sink, "  spawn     spawn selected node\n");
+                    print_str(&sink, "  Up/Down   browse previous command history\n");
                     print_str(&sink, "  cypher <query>  send cypher v1 query into graph node\n");
                     print_str(&sink, "  MATCH ...       direct cypher entry without prefix\n");
                     print_str(&sink, "  net / net status  print uplink status\n");
                     print_str(&sink, "  net probe         rescan pci and refresh nic state\n");
                     print_str(&sink, "  net reset         re-init nic registers and report\n");
+                    print_str(&sink, "  cuda / cuda status  print host bridge status\n");
+                    print_str(&sink, "  cuda submit <job>   submit one host-backed cuda job\n");
+                    print_str(&sink, "  cuda demo           send a sample saxpy-style job\n");
+                    print_str(&sink, "  cuda reset          clear bridge counters and capture state\n");
+                    print_str(&sink, "  clipboard          show clipboard.mount node and mount edges\n");
+                    print_str(&sink, "  clipboard clear    clear shared clipboard buffer\n");
+                    print_str(&sink, "  clipboard mount <vector>    add node -[mount]-> clipboard.mount\n");
+                    print_str(&sink, "  clipboard unmount <vector>  remove node -[mount]-> clipboard.mount\n");
+                    print_str(&sink, "  theme              show theme.current and its active use edge\n");
+                    print_str(&sink, "  theme wabi         repoint theme.current -> theme.wabi\n");
+                    print_str(&sink, "  theme shoji        repoint theme.current -> theme.shoji\n");
                     print_str(&sink, "  ai      open bottom ai api editor\n");
                     print_str(&sink, "  ask     send prompt into ai chat lane\n");
+                    print_str(&sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
                     print_str(&sink, "  ctrl+l  toggle input language en/zh-py\n");
                     print_str(&sink, "  clear   redraw command deck\n");
                     print_str(&sink, "  splash  replay boot cinema\n");
@@ -2841,10 +4052,27 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                     print_str(&sink, if state.ai_target == 0 { "offline" } else { "online" });
                     print_str(&sink, "  cypher: ");
                     print_str(&sink, if state.cypher_target == 0 { "offline" } else { "online" });
+                    print_str(&sink, "  cuda: ");
+                    print_str(&sink, if state.cuda_target == 0 { "offline" } else { "online" });
+                    print_str(&sink, "  clip: ");
+                    print_str(&sink, if clipboard_mounted(NODE_VEC) { "mounted" } else { "detached" });
+                    print_str(&sink, "  bytes: ");
+                    print_num_inline(&sink, clipboard_len());
                     print_str(&sink, "  api-key: ");
                     print_str(&sink, if state.api_configured != 0 { "armed" } else { "empty" });
                     print_str(&sink, "  bytes: ");
                     print_num_inline(&sink, state.api_len);
+                    print_str(&sink, "\n  theme: ");
+                    let theme = selected_theme();
+                    print_str(&sink, theme_name(theme));
+                    print_str(&sink, "  theme-node: ");
+                    let mut current_line = LineBuf::<20>::new();
+                    current_line.push_vector(THEME_CURRENT_NODE_VEC);
+                    print_str(&sink, core::str::from_utf8(current_line.as_slice()).unwrap_or("set"));
+                    print_str(&sink, "\n  use-> ");
+                    let mut theme_line = LineBuf::<20>::new();
+                    theme_line.push_vector(theme_vector(theme));
+                    print_str(&sink, core::str::from_utf8(theme_line.as_slice()).unwrap_or("set"));
                     print_str(&sink, "\n  lang: ");
                     print_str(&sink, ime_mode_label(state.input_lang));
                     print_str(&sink, "  ime-preview: ");
@@ -2860,6 +4088,131 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                         print_str(&sink, "none");
                     }
                     print_str(&sink, "\n");
+                } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
+                    let theme = selected_theme();
+                    set_color(&sink, 11, 0);
+                    print_str(&sink, " terminal themes\n");
+                    set_color(&sink, 7, 0);
+                    print_str(&sink, "  active: ");
+                    print_str(&sink, theme_name(theme));
+                    print_str(&sink, "  edge: theme.current -[use]-> ");
+                    let mut active_line = LineBuf::<20>::new();
+                    active_line.push_vector(theme_vector(theme));
+                    print_str(&sink, core::str::from_utf8(active_line.as_slice()).unwrap_or("set"));
+                    print_str(&sink, "\n  ");
+                    let mut current = LineBuf::<20>::new();
+                    current.push_vector(THEME_CURRENT_NODE_VEC);
+                    print_str(&sink, core::str::from_utf8(current.as_slice()).unwrap_or("6.1.3.0"));
+                    print_str(&sink, "  theme.current active theme state\n  ");
+                    let mut wabi = LineBuf::<20>::new();
+                    wabi.push_vector(THEME_WABI_NODE_VEC);
+                    print_str(&sink, core::str::from_utf8(wabi.as_slice()).unwrap_or("6.1.1.0"));
+                    print_str(&sink, "  theme.wabi  quiet ink / tea / moss\n  ");
+                    let mut shoji = LineBuf::<20>::new();
+                    shoji.push_vector(THEME_SHOJI_NODE_VEC);
+                    print_str(&sink, core::str::from_utf8(shoji.as_slice()).unwrap_or("6.1.2.0"));
+                    print_str(&sink, "  theme.shoji paper / indigo / brass\n");
+                } else if let Some(selector) = cmd.strip_prefix("theme ") {
+                    if let Some(theme) = parse_theme_selector(selector) {
+                        if apply_theme_choice(&sink, theme) {
+                            set_color(&sink, 11, 0);
+                            print_str(&sink, " theme switched -> ");
+                            set_color(&sink, 15, 0);
+                            print_str(&sink, theme_name(theme));
+                            print_str(&sink, "  edge theme.current -[use]-> ");
+                            let mut line = LineBuf::<20>::new();
+                            line.push_vector(theme_vector(theme));
+                            print_str(&sink, core::str::from_utf8(line.as_slice()).unwrap_or("set"));
+                            print_str(&sink, "\n");
+                        } else {
+                            set_color(&sink, 12, 0);
+                            print_str(&sink, " theme switch failed\n");
+                        }
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " unknown theme, use: theme wabi | theme shoji\n");
+                    }
+                } else if cmd == "clipboard" || cmd == "clip" || cmd == "clipboard status" {
+                    let mut edges = [GraphEdgeSummary::EMPTY; 12];
+                    let (_, returned) =
+                        gos_runtime::edge_page_for_node(CLIPBOARD_NODE_VEC, 0, &mut edges).unwrap_or((0, 0));
+                    set_color(&sink, 11, 0);
+                    print_str(&sink, " clipboard.mount\n");
+                    set_color(&sink, 7, 0);
+                    print_str(&sink, "  vector: ");
+                    let mut node_line = LineBuf::<20>::new();
+                    node_line.push_vector(CLIPBOARD_NODE_VEC);
+                    print_str(&sink, core::str::from_utf8(node_line.as_slice()).unwrap_or("6.1.4.0"));
+                    print_str(&sink, "\n  bytes: ");
+                    print_num_inline(&sink, clipboard_len());
+                    print_str(&sink, "\n  mounts:\n");
+                    let mut listed = 0usize;
+                    for summary in edges.iter().take(returned) {
+                        if summary.edge_type != RuntimeEdgeType::Mount
+                            || summary.to_vector != CLIPBOARD_NODE_VEC
+                        {
+                            continue;
+                        }
+                        print_str(&sink, "    ");
+                        let mut line = LineBuf::<24>::new();
+                        line.push_vector(summary.from_vector);
+                        print_str(&sink, core::str::from_utf8(line.as_slice()).unwrap_or("node"));
+                        print_str(&sink, "  ");
+                        print_str(&sink, summary.from_key);
+                        print_str(&sink, "\n");
+                        listed += 1;
+                    }
+                    if listed == 0 {
+                        print_str(&sink, "    none\n");
+                    }
+                } else if cmd == "clipboard clear" || cmd == "clip clear" {
+                    if clipboard_clear(&sink, state.clipboard_target) {
+                        set_color(&sink, 11, 0);
+                        print_str(&sink, " clipboard cleared\n");
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " clipboard clear failed\n");
+                    }
+                } else if let Some(selector) = cmd
+                    .strip_prefix("clipboard mount ")
+                    .or_else(|| cmd.strip_prefix("clip mount "))
+                {
+                    if let Some(vector) = parse_clipboard_vector(selector) {
+                        if sync_clipboard_mount_for_vector(vector, true) {
+                            set_color(&sink, 11, 0);
+                            print_str(&sink, " clipboard mounted <- ");
+                            let mut line = LineBuf::<20>::new();
+                            line.push_vector(vector);
+                            print_str(&sink, core::str::from_utf8(line.as_slice()).unwrap_or("set"));
+                            print_str(&sink, "\n");
+                        } else {
+                            set_color(&sink, 12, 0);
+                            print_str(&sink, " clipboard mount failed\n");
+                        }
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " clipboard mount requires node vector\n");
+                    }
+                } else if let Some(selector) = cmd
+                    .strip_prefix("clipboard unmount ")
+                    .or_else(|| cmd.strip_prefix("clip unmount "))
+                {
+                    if let Some(vector) = parse_clipboard_vector(selector) {
+                        if sync_clipboard_mount_for_vector(vector, false) {
+                            set_color(&sink, 11, 0);
+                            print_str(&sink, " clipboard unmounted <- ");
+                            let mut line = LineBuf::<20>::new();
+                            line.push_vector(vector);
+                            print_str(&sink, core::str::from_utf8(line.as_slice()).unwrap_or("set"));
+                            print_str(&sink, "\n");
+                        } else {
+                            set_color(&sink, 12, 0);
+                            print_str(&sink, " clipboard unmount failed\n");
+                        }
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " clipboard unmount requires node vector\n");
+                    }
                 } else if cmd == "net" || cmd == "net status" || cmd == "uplink" {
                     if emit_target_signal(
                         &sink,
@@ -2904,6 +4257,52 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                     } else {
                         set_color(&sink, 12, 0);
                         print_str(&sink, " net uplink unresolved\n");
+                    }
+                } else if cmd == "cuda" || cmd == "cuda status" || cmd == "gpu" || cmd == "gpu status" {
+                    if emit_target_signal(
+                        &sink,
+                        state.cuda_target,
+                        Signal::Control {
+                            cmd: CUDA_CONTROL_REPORT,
+                            val: 0,
+                        },
+                    ) {
+                        gos_runtime::pump();
+                        set_color(&sink, 11, 0);
+                        print_str(&sink, " cuda bridge status requested\n");
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " cuda bridge unresolved\n");
+                    }
+                } else if cmd == "cuda reset" {
+                    if emit_target_signal(
+                        &sink,
+                        state.cuda_target,
+                        Signal::Control {
+                            cmd: CUDA_CONTROL_RESET,
+                            val: 0,
+                        },
+                    ) {
+                        gos_runtime::pump();
+                        set_color(&sink, 11, 0);
+                        print_str(&sink, " cuda bridge reset dispatched\n");
+                    } else {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " cuda bridge unresolved\n");
+                    }
+                } else if cmd == "cuda demo" {
+                    let _ = dispatch_cuda_submit(
+                        &sink,
+                        state,
+                        "kernel=saxpy grid=120 block=256 bytes=4096 dtype=f32",
+                    );
+                } else if let Some(job) = cmd.strip_prefix("cuda submit ") {
+                    let trimmed = job.trim();
+                    if trimmed.is_empty() {
+                        set_color(&sink, 12, 0);
+                        print_str(&sink, " empty cuda job\n");
+                    } else {
+                        let _ = dispatch_cuda_submit(&sink, state, trimmed);
                     }
                 } else if cmd == "ai" || cmd == "api" || cmd == "ai-api" {
                     state.len = 0;
@@ -2981,8 +4380,15 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 save_output_cursor(&sink);
                 state.len = 0;
                 redraw_footer(&sink, state, false);
+            } else if byte == 0x03 {
+                let _ = clipboard_copy_active_input(&sink, state);
+            } else if byte == 0x16 {
+                let _ = clipboard_paste_active_input(&sink, state);
+            } else if byte == 0x18 {
+                let _ = clipboard_cut_active_input(&sink, state);
             } else if byte == 0x08 || byte == 0x7F {
                 if command_pop_scalar(state) {
+                    reset_command_history_cursor(state);
                     redraw_footer(&sink, state, false);
                 }
             } else if byte >= 0x20 {
@@ -3001,9 +4407,15 @@ unsafe extern "C" fn shell_on_event(ctx: *mut ExecutorContext, event: *const Nod
                 state.heartbeat_divider = state.heartbeat_divider.wrapping_add(1);
                 state.sigil_frame = (state.sigil_frame + 1) % LIVE_SIGIL_FRAMES as u8;
                 save_cursor(&sink, 0);
+                let snapshot = gos_runtime::snapshot();
+                draw_runtime_header(&sink, state, snapshot);
+                draw_runtime_gap_flux(&sink, state);
                 draw_console_sigil(&sink, state.sigil_frame as usize);
-                if state.heartbeat_divider % 8 == 0 {
-                    draw_ai_panel(&sink, state);
+                draw_ai_panel(&sink, state);
+                draw_operator_band(&sink, state, snapshot);
+                if state.heartbeat_divider % 4 == 0 {
+                    draw_command_deck_panel(&sink, state, snapshot);
+                    redraw_footer(&sink, state, false);
                 }
                 restore_cursor(&sink, 0);
             }

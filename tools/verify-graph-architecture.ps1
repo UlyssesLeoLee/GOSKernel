@@ -79,13 +79,17 @@ Assert-Rule (Test-Path $primeRules) "Missing graph prime rules document"
 Assert-Rule (Test-Path $governance) "Missing governance document"
 
 $main = Read-RepoFile "crates\hypervisor\src\main.rs"
-Assert-Rule ($main -match "gos_loader::load_bundle") "kernel_main must load plugins through gos_loader::load_bundle"
+Assert-Rule ($main -match "builtin_bundle::boot_builtin_graph") "kernel_main must bootstrap builtin graph through builtin_bundle::boot_builtin_graph"
+Assert-Rule ($main -match "gos_supervisor::service_system_cycle") "kernel_main must delegate runtime service to gos_supervisor::service_system_cycle"
+Assert-Rule ($main -notmatch "gos_loader::load_bundle") "kernel_main must not route boot through gos_loader::load_bundle anymore"
+Assert-Rule ($main -notmatch "gos_runtime::pump") "kernel_main must not directly pump gos_runtime"
 Assert-Rule ($main -notmatch "plugin_main\s*\(") "kernel_main must not directly call plugin_main"
 Assert-Rule ($main -notmatch "k_[a-z0-9_]+::NODE_VEC") "kernel_main must not hardcode plugin node vectors"
 Assert-Rule ($main -notmatch "post_signal\s*\(") "kernel_main must not directly post startup signals"
 
 $bundle = Read-RepoFile "crates\hypervisor\src\builtin_bundle.rs"
-Assert-Rule ($bundle -match "BundleModule::Native") "Builtin bundle must include manifest-native modules"
+Assert-Rule ($bundle -match "BuiltinModule::Native") "Builtin boot registry must include native modules"
+Assert-Rule ($bundle -match "boot_builtin_graph") "Builtin boot registry must expose direct graph bootstrap"
 
 $legacyBundleMatches = [regex]::Matches($bundle, "legacy_node\((k_[a-z0-9_]+)::NODE_VEC")
 foreach ($match in $legacyBundleMatches) {

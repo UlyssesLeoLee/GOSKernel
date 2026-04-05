@@ -1,0 +1,10 @@
+[package]
+name = "gos-supervisor-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }

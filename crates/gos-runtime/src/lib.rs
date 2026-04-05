@@ -244,6 +244,16 @@ impl AdjacencyArena {
         }
         Err(RuntimeError::EdgeTableFull)
     }
+
+    fn release(&mut self, edge_id: EdgeId) {
+        if let Some(slot) = self
+            .slots
+            .iter()
+            .position(|slot| slot.map(|value| value == edge_id).unwrap_or(false))
+        {
+            self.slots[slot] = None;
+        }
+    }
 }
 
 pub struct GraphRuntime {
@@ -463,6 +473,13 @@ impl GraphRuntime {
         });
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         Ok(spec.edge_id)
+    }
+
+    pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
+        let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
+        self.edges[slot] = None;
+        self.adjacency_arena.release(edge_id);
+        Ok(())
     }
 
     pub fn bind_legacy_cell(
@@ -726,7 +743,11 @@ impl GraphRuntime {
                 let target_vec = self.node_vector(edge.to_node)?;
                 self.post_signal(target_vec, signal)?;
             }
-            RuntimeEdgeType::Spawn | RuntimeEdgeType::Signal | RuntimeEdgeType::Stream | RuntimeEdgeType::Mount => {
+            RuntimeEdgeType::Spawn
+            | RuntimeEdgeType::Signal
+            | RuntimeEdgeType::Stream
+            | RuntimeEdgeType::Mount
+            | RuntimeEdgeType::Use => {
                 let target_vec = self.node_vector(edge.to_node)?;
                 self.post_signal(target_vec, signal)?;
             }
@@ -1007,6 +1028,10 @@ pub fn register_node(
 
 pub fn register_edge(spec: EdgeSpec) -> Result<EdgeId, RuntimeError> {
     RUNTIME.lock().register_edge(spec)
+}
+
+pub fn unregister_edge(edge_id: EdgeId) -> Result<(), RuntimeError> {
+    RUNTIME.lock().unregister_edge(edge_id)
 }
 
 pub fn bind_legacy_cell(vector: VectorAddress, cell_ptr: [usize; 2]) -> Result<(), RuntimeError> {

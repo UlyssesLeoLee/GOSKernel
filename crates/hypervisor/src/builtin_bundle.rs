@@ -1,13 +1,90 @@
-use gos_loader::{
-    BootBundle, BundleHeader, BundleModule, LegacyModule, LegacyNodeTemplate, NativeModule,
-    NativeNodeBinding, BUNDLE_MAGIC,
-};
 use gos_protocol::{
-    derive_node_id, BootContext, CapabilitySpec, EntryPolicy, ExecutorId, ImportSpec,
-    ModuleDependencySpec, ModuleDescriptor, ModuleEntry, ModuleFaultPolicy, ModuleId,
-    ModuleImageFormat, NodeSpec, PermissionKind, PermissionSpec, PluginId, PluginManifest,
-    PluginEntry, RuntimeNodeType, MODULE_ABI_VERSION,
+    derive_edge_id, derive_node_id, BootContext, CapabilitySpec, EdgeSpec, EntryPolicy,
+    ExecutorId, ImportSpec, ModuleDependencySpec, ModuleDescriptor, ModuleEntry,
+    ModuleFaultPolicy, ModuleId, ModuleImageFormat, NodeExecutorVTable, NodeSpec,
+    PermissionKind, PermissionSpec, PluginId, PluginManifest, PluginEntry, RoutePolicy,
+    RuntimeEdgeType, RuntimeNodeType, Signal, VectorAddress, VectorRef, GOS_ABI_VERSION,
+    MODULE_ABI_VERSION,
 };
+use gos_runtime::{self, RuntimeError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinBootError {
+    AbiVersionMismatch(PluginId),
+    MissingDependency(PluginId),
+    PermissionDenied(PluginId),
+    UnresolvedImport(PluginId, &'static str),
+    Runtime(RuntimeError),
+}
+
+impl From<RuntimeError> for BuiltinBootError {
+    fn from(value: RuntimeError) -> Self {
+        Self::Runtime(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinBootReport {
+    pub discovered_plugins: usize,
+    pub loaded_plugins: usize,
+    pub stable_after_load: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LegacyNodeTemplate {
+    vector: VectorAddress,
+    local_node_key: &'static str,
+    node_type: RuntimeNodeType,
+    entry_policy: EntryPolicy,
+    executor_id: ExecutorId,
+    state_schema_hash: u64,
+    permissions: &'static [PermissionSpec],
+    exports: &'static [CapabilitySpec],
+    vector_ref: Option<VectorRef>,
+}
+
+#[derive(Clone, Copy)]
+struct LegacyModule {
+    manifest: PluginManifest,
+    granted_permissions: &'static [PermissionSpec],
+    node: LegacyNodeTemplate,
+    entry: fn(&mut BootContext),
+    load_hook: Option<fn()>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeNodeBinding {
+    vector: VectorAddress,
+    local_node_key: &'static str,
+    executor: NodeExecutorVTable,
+}
+
+#[derive(Clone, Copy)]
+struct NativeModule {
+    manifest: PluginManifest,
+    granted_permissions: &'static [PermissionSpec],
+    nodes: &'static [NativeNodeBinding],
+    register_hook: Option<fn(&mut BootContext)>,
+}
+
+#[derive(Clone, Copy)]
+enum BuiltinModule {
+    Legacy(LegacyModule),
+    Native(NativeModule),
+}
+
+impl BuiltinModule {
+    const fn manifest(&self) -> PluginManifest {
+        match *self {
+            Self::Legacy(module) => module.manifest,
+            Self::Native(module) => module.manifest,
+        }
+    }
+
+    const fn plugin_id(&self) -> PluginId {
+        self.manifest().plugin_id
+    }
+}
 
 const K_PANIC_ID: PluginId = PluginId::from_ascii("K_PANIC");
 const K_SERIAL_ID: PluginId = PluginId::from_ascii("K_SERIAL");
@@ -25,6 +102,7 @@ const K_IME_ID: PluginId = PluginId::from_ascii("K_IME");
 const K_NET_ID: PluginId = PluginId::from_ascii("K_NET");
 const K_MOUSE_ID: PluginId = PluginId::from_ascii("K_MOUSE");
 const K_CYPHER_ID: PluginId = PluginId::from_ascii("K_CYPHER");
+const K_CUDA_ID: PluginId = PluginId::from_ascii("K_CUDA");
 const K_SHELL_ID: PluginId = PluginId::from_ascii("K_SHELL");
 const K_AI_ID: PluginId = PluginId::from_ascii("K_AI");
 
@@ -75,6 +153,12 @@ const AI_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::ScheduleHint, arg0: 0, arg1: 0 },
 ];
+const CUDA_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::ScheduleHint, arg0: 0, arg1: 0 },
+];
 const IME_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphRead, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
@@ -111,9 +195,15 @@ const HEAP_EXPORTS: &[CapabilitySpec] = &[
 const SHELL_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "shell", name: "input" },
 ];
+const CLIPBOARD_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "clipboard", name: "buffer" },
+];
 const AI_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "ai", name: "supervisor" },
     CapabilitySpec { namespace: "graph", name: "orchestrate" },
+];
+const CUDA_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "cuda", name: "bridge" },
 ];
 const CYPHER_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "cypher", name: "query" },
@@ -131,9 +221,14 @@ const SHELL_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "ai", capability: "supervisor", required: true },
     ImportSpec { namespace: "cypher", capability: "query", required: true },
     ImportSpec { namespace: "net", capability: "uplink", required: true },
+    ImportSpec { namespace: "cuda", capability: "bridge", required: true },
 ];
 const CYPHER_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
+];
+const CUDA_IMPORTS: &[ImportSpec] = &[
+    ImportSpec { namespace: "console", capability: "write", required: true },
+    ImportSpec { namespace: "serial", capability: "write", required: true },
 ];
 const AI_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
@@ -157,7 +252,8 @@ const DEP_HEAP: &[PluginId] = &[K_PMM_ID, K_VMM_ID];
 const DEP_NET: &[PluginId] = &[K_VGA_ID];
 const DEP_MOUSE: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_IDT_ID];
 const DEP_CYPHER: &[PluginId] = &[K_VGA_ID];
-const DEP_SHELL: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_HEAP_ID, K_IME_ID, K_NET_ID, K_CYPHER_ID];
+const DEP_CUDA: &[PluginId] = &[K_VGA_ID, K_SERIAL_ID];
+const DEP_SHELL: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_HEAP_ID, K_IME_ID, K_NET_ID, K_CYPHER_ID, K_CUDA_ID];
 const DEP_AI: &[PluginId] = &[K_SHELL_ID];
 
 const MOD_DEP_PIT: &[ModuleDependencySpec] = &[ModuleDependencySpec {
@@ -218,6 +314,16 @@ const MOD_DEP_CYPHER: &[ModuleDependencySpec] = &[ModuleDependencySpec {
     module_id: module_id(K_VGA_ID),
     required: true,
 }];
+const MOD_DEP_CUDA: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec {
+        module_id: module_id(K_VGA_ID),
+        required: true,
+    },
+    ModuleDependencySpec {
+        module_id: module_id(K_SERIAL_ID),
+        required: true,
+    },
+];
 const MOD_DEP_SHELL: &[ModuleDependencySpec] = &[
     ModuleDependencySpec {
         module_id: module_id(K_VGA_ID),
@@ -243,6 +349,10 @@ const MOD_DEP_SHELL: &[ModuleDependencySpec] = &[
         module_id: module_id(K_CYPHER_ID),
         required: true,
     },
+    ModuleDependencySpec {
+        module_id: module_id(K_CUDA_ID),
+        required: true,
+    },
 ];
 const MOD_DEP_AI: &[ModuleDependencySpec] = &[ModuleDependencySpec {
     module_id: module_id(K_SHELL_ID),
@@ -256,7 +366,12 @@ const K_IME_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IME_ID, "ime.router
 const K_NET_NODE_ID: gos_protocol::NodeId = derive_node_id(K_NET_ID, "net.uplink");
 const K_MOUSE_NODE_ID: gos_protocol::NodeId = derive_node_id(K_MOUSE_ID, "mouse.pointer");
 const K_CYPHER_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CYPHER_ID, "cypher.query");
+const K_CUDA_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CUDA_ID, "cuda.bridge");
 const K_SHELL_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "shell.entry");
+const K_THEME_WABI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.wabi");
+const K_THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.shoji");
+const K_THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.current");
+const K_CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "clipboard.mount");
 const K_AI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_AI_ID, "ai.supervisor");
 
 const VGA_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
@@ -319,6 +434,18 @@ const CYPHER_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     vector_ref: None,
 }];
 
+const CUDA_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_CUDA_NODE_ID,
+    local_node_key: "cuda.bridge",
+    node_type: RuntimeNodeType::Compute,
+    entry_policy: EntryPolicy::Background,
+    executor_id: k_cuda_host::EXECUTOR_ID,
+    state_schema_hash: 0x2016,
+    permissions: CUDA_PERMS,
+    exports: CUDA_EXPORTS,
+    vector_ref: None,
+}];
+
 const SHELL_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     node_id: K_SHELL_NODE_ID,
     local_node_key: "shell.entry",
@@ -328,6 +455,46 @@ const SHELL_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     state_schema_hash: 0x200E,
     permissions: SHELL_PERMS,
     exports: SHELL_EXPORTS,
+    vector_ref: None,
+}, NodeSpec {
+    node_id: K_THEME_CURRENT_NODE_ID,
+    local_node_key: "theme.current",
+    node_type: RuntimeNodeType::Vector,
+    entry_policy: EntryPolicy::Manual,
+    executor_id: k_shell::THEME_EXECUTOR_ID,
+    state_schema_hash: 0x2019,
+    permissions: SHELL_PERMS,
+    exports: &[],
+    vector_ref: None,
+}, NodeSpec {
+    node_id: K_CLIPBOARD_NODE_ID,
+    local_node_key: "clipboard.mount",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::OnDemand,
+    executor_id: k_shell::CLIPBOARD_EXECUTOR_ID,
+    state_schema_hash: 0x2020,
+    permissions: SHELL_PERMS,
+    exports: CLIPBOARD_EXPORTS,
+    vector_ref: None,
+}, NodeSpec {
+    node_id: K_THEME_WABI_NODE_ID,
+    local_node_key: "theme.wabi",
+    node_type: RuntimeNodeType::Vector,
+    entry_policy: EntryPolicy::Manual,
+    executor_id: k_shell::THEME_EXECUTOR_ID,
+    state_schema_hash: 0x2017,
+    permissions: SHELL_PERMS,
+    exports: &[],
+    vector_ref: None,
+}, NodeSpec {
+    node_id: K_THEME_SHOJI_NODE_ID,
+    local_node_key: "theme.shoji",
+    node_type: RuntimeNodeType::Vector,
+    entry_policy: EntryPolicy::Manual,
+    executor_id: k_shell::THEME_EXECUTOR_ID,
+    state_schema_hash: 0x2018,
+    permissions: SHELL_PERMS,
+    exports: &[],
     vector_ref: None,
 }];
 
@@ -373,10 +540,32 @@ const CYPHER_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     executor: k_cypher::EXECUTOR_VTABLE,
 }];
 
+const CUDA_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_cuda_host::NODE_VEC,
+    local_node_key: "cuda.bridge",
+    executor: k_cuda_host::EXECUTOR_VTABLE,
+}];
+
 const SHELL_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_shell::NODE_VEC,
     local_node_key: "shell.entry",
     executor: k_shell::EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::THEME_CURRENT_NODE_VEC,
+    local_node_key: "theme.current",
+    executor: k_shell::THEME_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::CLIPBOARD_NODE_VEC,
+    local_node_key: "clipboard.mount",
+    executor: k_shell::CLIPBOARD_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::THEME_WABI_NODE_VEC,
+    local_node_key: "theme.wabi",
+    executor: k_shell::THEME_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::THEME_SHOJI_NODE_VEC,
+    local_node_key: "theme.shoji",
+    executor: k_shell::THEME_EXECUTOR_VTABLE,
 }];
 
 const AI_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
@@ -438,6 +627,15 @@ const CYPHER_MANIFEST: PluginManifest = manifest_with_nodes(
     CYPHER_EXPORTS,
     CYPHER_IMPORTS,
     CYPHER_NODE_SPECS,
+);
+const CUDA_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_CUDA_ID,
+    "K_CUDA",
+    DEP_CUDA,
+    CUDA_PERMS,
+    CUDA_EXPORTS,
+    CUDA_IMPORTS,
+    CUDA_NODE_SPECS,
 );
 const SHELL_MANIFEST: PluginManifest = manifest_with_nodes(
     K_SHELL_ID,
@@ -525,121 +723,127 @@ const fn manifest_with_nodes(
     }
 }
 
-const BUILTIN_MODULES: [BundleModule; 18] = [
-    BundleModule::Legacy(LegacyModule {
+const BUILTIN_MODULES: [BuiltinModule; 19] = [
+    BuiltinModule::Legacy(LegacyModule {
         manifest: PANIC_MANIFEST,
         granted_permissions: NONE_PERMS,
         node: legacy_node(k_panic::NODE_VEC, "panic.entry", RuntimeNodeType::Service, "legacy.panic", 0x1001, NONE_PERMS, &[]),
         entry: panic_entry,
         load_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: SERIAL_MANIFEST,
         granted_permissions: SERIAL_PERMS,
         node: legacy_node(k_serial::NODE_VEC, "serial.entry", RuntimeNodeType::Driver, "legacy.serial", 0x1002, SERIAL_PERMS, SERIAL_EXPORTS),
         entry: serial_entry,
         load_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: VGA_MANIFEST,
         granted_permissions: VGA_PERMS,
         nodes: VGA_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: GDT_MANIFEST,
         granted_permissions: MEM_PERMS,
         node: legacy_node(k_gdt::NODE_VEC, "gdt.entry", RuntimeNodeType::Service, "legacy.gdt", 0x1004, MEM_PERMS, &[]),
         entry: gdt_entry,
         load_hook: Some(gdt_load_hook),
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: CPUID_MANIFEST,
         granted_permissions: NONE_PERMS,
         node: legacy_node(k_cpuid::NODE_VEC, "cpuid.entry", RuntimeNodeType::Service, "legacy.cpuid", 0x1005, NONE_PERMS, &[]),
         entry: cpuid_entry,
         load_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: PIC_MANIFEST,
         granted_permissions: PIC_PERMS,
         node: legacy_node(k_pic::NODE_VEC, "pic.entry", RuntimeNodeType::Driver, "legacy.pic", 0x1006, PIC_PERMS, &[]),
         entry: pic_entry,
         load_hook: Some(pic_load_hook),
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: PIT_MANIFEST,
         granted_permissions: PIT_PERMS,
         node: legacy_node(k_pit::NODE_VEC, "pit.entry", RuntimeNodeType::Driver, "legacy.pit", 0x1007, PIT_PERMS, &[]),
         entry: pit_entry,
         load_hook: Some(pit_load_hook),
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: PS2_MANIFEST,
         granted_permissions: PS2_PERMS,
         node: legacy_node(k_ps2::NODE_VEC, "ps2.entry", RuntimeNodeType::Driver, "legacy.ps2", 0x1008, PS2_PERMS, &[]),
         entry: ps2_entry,
         load_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: IDT_MANIFEST,
         granted_permissions: IRQ_PERMS,
         node: legacy_node(k_idt::NODE_VEC, "idt.entry", RuntimeNodeType::Service, "legacy.idt", 0x1009, IRQ_PERMS, &[]),
         entry: idt_entry,
         load_hook: Some(idt_load_hook),
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: PMM_MANIFEST,
         granted_permissions: MEM_PERMS,
         node: legacy_node(k_pmm::NODE_VEC, "pmm.entry", RuntimeNodeType::Service, "legacy.pmm", 0x100A, MEM_PERMS, PMM_EXPORTS),
         entry: pmm_entry,
         load_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: VMM_MANIFEST,
         granted_permissions: MEM_PERMS,
         node: legacy_node(k_vmm::NODE_VEC, "vmm.entry", RuntimeNodeType::Service, "legacy.vmm", 0x100B, MEM_PERMS, VMM_EXPORTS),
         entry: vmm_entry,
         load_hook: None,
     }),
-    BundleModule::Legacy(LegacyModule {
+    BuiltinModule::Legacy(LegacyModule {
         manifest: HEAP_MANIFEST,
         granted_permissions: MEM_PERMS,
         node: legacy_node(k_heap::NODE_VEC, "heap.entry", RuntimeNodeType::Service, "legacy.heap", 0x100C, MEM_PERMS, HEAP_EXPORTS),
         entry: heap_entry,
         load_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: IME_MANIFEST,
         granted_permissions: IME_PERMS,
         nodes: IME_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: NET_MANIFEST,
         granted_permissions: NET_PERMS,
         nodes: NET_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: MOUSE_MANIFEST,
         granted_permissions: MOUSE_PERMS,
         nodes: MOUSE_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: CYPHER_MANIFEST,
         granted_permissions: CYPHER_PERMS,
         nodes: CYPHER_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
+        manifest: CUDA_MANIFEST,
+        granted_permissions: CUDA_PERMS,
+        nodes: CUDA_NATIVE_NODES,
+        register_hook: None,
+    }),
+    BuiltinModule::Native(NativeModule {
         manifest: SHELL_MANIFEST,
         granted_permissions: SHELL_PERMS,
         nodes: SHELL_NATIVE_NODES,
         register_hook: None,
     }),
-    BundleModule::Native(NativeModule {
+    BuiltinModule::Native(NativeModule {
         manifest: AI_MANIFEST,
         granted_permissions: AI_PERMS,
         nodes: AI_NATIVE_NODES,
@@ -647,16 +851,7 @@ const BUILTIN_MODULES: [BundleModule; 18] = [
     }),
 ];
 
-const BUNDLE: BootBundle = BootBundle {
-    header: BundleHeader {
-        magic: BUNDLE_MAGIC,
-        version: 1,
-        module_count: BUILTIN_MODULES.len() as u16,
-    },
-    modules: &BUILTIN_MODULES,
-};
-
-const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 18] = [
+const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 19] = [
     module_descriptor(
         K_PANIC_ID,
         "K_PANIC",
@@ -802,6 +997,15 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 18] = [
         ModuleFaultPolicy::RestartAlways,
     ),
     module_descriptor(
+        K_CUDA_ID,
+        "K_CUDA",
+        MOD_DEP_CUDA,
+        CUDA_PERMS,
+        CUDA_EXPORTS,
+        CUDA_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
         K_SHELL_ID,
         "K_SHELL",
         MOD_DEP_SHELL,
@@ -843,12 +1047,400 @@ const fn legacy_node(
     }
 }
 
-pub fn builtin_bundle() -> &'static BootBundle {
-    &BUNDLE
+pub fn boot_builtin_graph(boot_payload: u64) -> Result<BuiltinBootReport, BuiltinBootError> {
+    gos_runtime::reset();
+    gos_runtime::emit_hello();
+
+    for module in BUILTIN_MODULES {
+        validate_manifest(module.manifest())?;
+        gos_runtime::discover_plugin(module.manifest())?;
+    }
+    validate_imports(&BUILTIN_MODULES)?;
+
+    let mut ctx = BootContext::new(boot_payload);
+    let mut loaded = [false; BUILTIN_MODULES.len()];
+    let mut idx = 0usize;
+    while idx < BUILTIN_MODULES.len() {
+        let module = BUILTIN_MODULES[idx];
+        if let Some(dep) = first_missing_dependency(module.manifest().depends_on, &loaded, &BUILTIN_MODULES) {
+            return Err(BuiltinBootError::MissingDependency(dep));
+        }
+        load_builtin_module(module, &mut ctx)?;
+        loaded[idx] = true;
+        idx += 1;
+    }
+
+    synchronize_manifest_graph(&BUILTIN_MODULES)?;
+    synchronize_clipboard_mount_graph()?;
+    synchronize_legacy_graph(&BUILTIN_MODULES)?;
+    gos_supervisor::service_system_cycle();
+
+    Ok(BuiltinBootReport {
+        discovered_plugins: BUILTIN_MODULES.len(),
+        loaded_plugins: loaded.iter().filter(|loaded| **loaded).count(),
+        stable_after_load: gos_runtime::is_stable(),
+    })
 }
 
 pub fn builtin_supervisor_modules() -> &'static [ModuleDescriptor] {
     &BUILTIN_SUPERVISOR_MODULES
+}
+
+fn validate_manifest(manifest: PluginManifest) -> Result<(), BuiltinBootError> {
+    if manifest.abi_version != GOS_ABI_VERSION {
+        return Err(BuiltinBootError::AbiVersionMismatch(manifest.plugin_id));
+    }
+    Ok(())
+}
+
+fn validate_imports(modules: &[BuiltinModule]) -> Result<(), BuiltinBootError> {
+    for module in modules {
+        let manifest = module.manifest();
+        for import in manifest.imports {
+            if !capability_is_exported(import, modules) {
+                return Err(BuiltinBootError::UnresolvedImport(
+                    manifest.plugin_id,
+                    import.capability,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn capability_is_exported(import: &ImportSpec, modules: &[BuiltinModule]) -> bool {
+    modules.iter().any(|module| {
+        module
+            .manifest()
+            .exports
+            .iter()
+            .any(|export| export.namespace == import.namespace && export.name == import.capability)
+    })
+}
+
+fn first_missing_dependency(
+    deps: &'static [PluginId],
+    loaded: &[bool; BUILTIN_MODULES.len()],
+    modules: &[BuiltinModule],
+) -> Option<PluginId> {
+    deps.iter().copied().find(|dep| {
+        modules
+            .iter()
+            .enumerate()
+            .find(|(_, module)| module.plugin_id() == *dep)
+            .map(|(idx, _)| !loaded[idx])
+            .unwrap_or(true)
+    })
+}
+
+fn load_builtin_module(module: BuiltinModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
+    match module {
+        BuiltinModule::Legacy(module) => load_legacy_module(module, ctx),
+        BuiltinModule::Native(module) => load_native_module(module, ctx),
+    }
+}
+
+fn load_legacy_module(module: LegacyModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
+    ensure_permissions(
+        module.manifest.plugin_id,
+        module.manifest.permissions,
+        module.granted_permissions,
+    )?;
+
+    for spec in module.manifest.nodes {
+        gos_runtime::register_node(module.manifest.plugin_id, module.node.vector, *spec)?;
+    }
+
+    for edge in module.manifest.edges {
+        gos_runtime::register_edge(*edge)?;
+    }
+
+    let node_id = derive_node_id(module.manifest.plugin_id, module.node.local_node_key);
+    let node_spec = NodeSpec {
+        node_id,
+        local_node_key: module.node.local_node_key,
+        node_type: module.node.node_type,
+        entry_policy: module.node.entry_policy,
+        executor_id: module.node.executor_id,
+        state_schema_hash: module.node.state_schema_hash,
+        permissions: module.node.permissions,
+        exports: module.node.exports,
+        vector_ref: module.node.vector_ref,
+    };
+
+    gos_runtime::register_node(module.manifest.plugin_id, module.node.vector, node_spec)?;
+    gos_runtime::mark_plugin_loaded(module.manifest.plugin_id)?;
+
+    (module.entry)(ctx);
+
+    if matches!(
+        module.node.entry_policy,
+        EntryPolicy::Bootstrap | EntryPolicy::Background
+    ) {
+        gos_runtime::post_signal(module.node.vector, Signal::Spawn { payload: 0 })?;
+        gos_supervisor::service_system_cycle();
+    }
+
+    if let Some(load_hook) = module.load_hook {
+        load_hook();
+    }
+
+    Ok(())
+}
+
+fn load_native_module(module: NativeModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
+    ensure_permissions(
+        module.manifest.plugin_id,
+        module.manifest.permissions,
+        module.granted_permissions,
+    )?;
+
+    for spec in module.manifest.nodes {
+        let binding = module
+            .nodes
+            .iter()
+            .find(|binding| binding.local_node_key == spec.local_node_key)
+            .ok_or(BuiltinBootError::Runtime(RuntimeError::NativeExecutorMissing))?;
+        gos_runtime::register_node(module.manifest.plugin_id, binding.vector, *spec)?;
+        gos_runtime::bind_native_executor(binding.vector, binding.executor)?;
+    }
+
+    for edge in module.manifest.edges {
+        gos_runtime::register_edge(*edge)?;
+    }
+
+    gos_runtime::mark_plugin_loaded(module.manifest.plugin_id)?;
+
+    if let Some(register_hook) = module.register_hook {
+        register_hook(ctx);
+    }
+
+    for spec in module.manifest.nodes {
+        if matches!(spec.entry_policy, EntryPolicy::Bootstrap | EntryPolicy::Background) {
+            let binding = module
+                .nodes
+                .iter()
+                .find(|binding| binding.local_node_key == spec.local_node_key)
+                .ok_or(BuiltinBootError::Runtime(RuntimeError::NativeExecutorMissing))?;
+            gos_runtime::post_signal(binding.vector, Signal::Spawn { payload: 0 })?;
+        }
+    }
+    gos_supervisor::service_system_cycle();
+
+    Ok(())
+}
+
+fn ensure_permissions(
+    plugin_id: PluginId,
+    requested: &'static [PermissionSpec],
+    granted: &'static [PermissionSpec],
+) -> Result<(), BuiltinBootError> {
+    for req in requested {
+        let ok = granted.iter().any(|grant| {
+            grant.kind == req.kind
+                && (grant.arg0 == u64::MAX || grant.arg0 == req.arg0)
+                && (grant.arg1 == u64::MAX || grant.arg1 == req.arg1)
+        });
+        if !ok {
+            return Err(BuiltinBootError::PermissionDenied(plugin_id));
+        }
+    }
+    Ok(())
+}
+
+fn synchronize_manifest_graph(modules: &[BuiltinModule]) -> Result<(), BuiltinBootError> {
+    for module in modules {
+        let Some(source_node) = primary_node_for_module(*module) else {
+            continue;
+        };
+
+        for dep in module.manifest().depends_on {
+            let Some(target_node) = primary_node_for_plugin(*dep, modules) else {
+                return Err(BuiltinBootError::MissingDependency(*dep));
+            };
+
+            let edge_spec = EdgeSpec {
+                edge_id: derive_edge_id(source_node, target_node, "manifest.depend"),
+                from_node: source_node,
+                to_node: target_node,
+                edge_type: RuntimeEdgeType::Depend,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::FailFast,
+                capability_namespace: None,
+                capability_binding: None,
+                vector_ref: None,
+            };
+            gos_runtime::register_edge(edge_spec)?;
+        }
+
+        for import in module.manifest().imports {
+            if let Some((provider_node, capability)) = provider_for_import(import, modules) {
+                let edge_spec = EdgeSpec {
+                    edge_id: derive_edge_id(source_node, provider_node, capability.name),
+                    from_node: source_node,
+                    to_node: provider_node,
+                    edge_type: RuntimeEdgeType::Mount,
+                    weight: 1.0,
+                    acl_mask: u64::MAX,
+                    route_policy: RoutePolicy::Direct,
+                    capability_namespace: Some(capability.namespace),
+                    capability_binding: Some(capability.name),
+                    vector_ref: None,
+                };
+                gos_runtime::register_edge(edge_spec)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn synchronize_clipboard_mount_graph() -> Result<(), BuiltinBootError> {
+    for source_node in [K_SHELL_NODE_ID, K_CYPHER_NODE_ID, K_AI_NODE_ID] {
+        let edge_spec = EdgeSpec {
+            edge_id: derive_edge_id(source_node, K_CLIPBOARD_NODE_ID, "clipboard.mount"),
+            from_node: source_node,
+            to_node: K_CLIPBOARD_NODE_ID,
+            edge_type: RuntimeEdgeType::Mount,
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: Some("clipboard"),
+            capability_binding: Some("buffer"),
+            vector_ref: None,
+        };
+        gos_runtime::register_edge(edge_spec)?;
+    }
+
+    Ok(())
+}
+
+fn synchronize_legacy_graph(modules: &[BuiltinModule]) -> Result<(), BuiltinBootError> {
+    for module in modules {
+        let BuiltinModule::Legacy(module) = module else {
+            continue;
+        };
+
+        let declaration = gos_runtime::describe_legacy_node(module.node.vector)?;
+        let source_node = gos_runtime::node_id_for_vec(module.node.vector)
+            .ok_or(BuiltinBootError::Runtime(RuntimeError::NodeNotFound))?;
+
+        for (idx, edge) in declaration.edges.iter().take(declaration.edge_count).enumerate() {
+            if edge.target_vec == 0 {
+                continue;
+            }
+
+            let target_vec = VectorAddress::from_u64(edge.target_vec);
+            let Some(target_node) = gos_runtime::node_id_for_vec(target_vec) else {
+                continue;
+            };
+
+            let edge_spec = EdgeSpec {
+                edge_id: derive_edge_id(source_node, target_node, edge_key(edge.tag, idx)),
+                from_node: source_node,
+                to_node: target_node,
+                edge_type: map_legacy_edge_type(edge.edge_type),
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::Direct,
+                capability_namespace: None,
+                capability_binding: None,
+                vector_ref: None,
+            };
+            gos_runtime::register_edge(edge_spec)?;
+        }
+
+        for dependency in declaration.depends_on {
+            let target_vec = VectorAddress::from_u64(*dependency);
+            let Some(target_node) = gos_runtime::node_id_for_vec(target_vec) else {
+                continue;
+            };
+
+            let edge_spec = EdgeSpec {
+                edge_id: derive_edge_id(source_node, target_node, "depend"),
+                from_node: source_node,
+                to_node: target_node,
+                edge_type: RuntimeEdgeType::Depend,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::FailFast,
+                capability_namespace: None,
+                capability_binding: None,
+                vector_ref: None,
+            };
+            gos_runtime::register_edge(edge_spec)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn primary_node_for_module(module: BuiltinModule) -> Option<gos_protocol::NodeId> {
+    match module {
+        BuiltinModule::Legacy(module) => gos_runtime::node_id_for_vec(module.node.vector),
+        BuiltinModule::Native(module) => module
+            .nodes
+            .first()
+            .and_then(|binding| gos_runtime::node_id_for_vec(binding.vector)),
+    }
+}
+
+fn primary_node_for_plugin(
+    plugin_id: PluginId,
+    modules: &[BuiltinModule],
+) -> Option<gos_protocol::NodeId> {
+    modules
+        .iter()
+        .find(|module| module.plugin_id() == plugin_id)
+        .and_then(|module| primary_node_for_module(*module))
+}
+
+fn provider_for_import(
+    import: &ImportSpec,
+    modules: &[BuiltinModule],
+) -> Option<(gos_protocol::NodeId, CapabilitySpec)> {
+    modules.iter().find_map(|module| {
+        let capability = module
+            .manifest()
+            .exports
+            .iter()
+            .find(|export| {
+                export.namespace == import.namespace && export.name == import.capability
+            })?;
+        let node = primary_node_for_module(*module)?;
+        Some((node, *capability))
+    })
+}
+
+fn edge_key(_tag: [u8; 12], idx: usize) -> &'static str {
+    match idx {
+        0 => "edge0",
+        1 => "edge1",
+        2 => "edge2",
+        3 => "edge3",
+        4 => "edge4",
+        5 => "edge5",
+        6 => "edge6",
+        7 => "edge7",
+        8 => "edge8",
+        9 => "edge9",
+        10 => "edge10",
+        _ => "edge11",
+    }
+}
+
+fn map_legacy_edge_type(edge_type: u8) -> RuntimeEdgeType {
+    match edge_type {
+        0x01 => RuntimeEdgeType::Call,
+        0x02 => RuntimeEdgeType::Spawn,
+        0x03 => RuntimeEdgeType::Depend,
+        0x04 => RuntimeEdgeType::Signal,
+        0x05 => RuntimeEdgeType::Return,
+        0x06 => RuntimeEdgeType::Mount,
+        0x07 => RuntimeEdgeType::Sync,
+        _ => RuntimeEdgeType::Stream,
+    }
 }
 
 fn panic_entry(ctx: &mut BootContext) {

@@ -2,7 +2,8 @@
 
 use gos_protocol::{
     packet_to_signal, DISPLAY_CONTROL_POINTER_COL, DISPLAY_CONTROL_POINTER_ROW,
-    DISPLAY_CONTROL_POINTER_VISIBLE, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
+    DISPLAY_CONTROL_POINTER_VISIBLE, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
+    DISPLAY_THEME_WABI, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
     NodeExecutorVTable, Signal, VectorAddress,
 };
 use x86_64::instructions::port::Port;
@@ -21,11 +22,53 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 const VGA_TEXT_BUFFER_ADDR: usize = 0xB8000;
 const VGA_CURSOR_INDEX: u16 = 0x3D4;
 const VGA_CURSOR_DATA: u16 = 0x3D5;
+const VGA_DAC_WRITE_INDEX: u16 = 0x3C8;
+const VGA_DAC_DATA: u16 = 0x3C9;
 pub const SCREEN_WIDTH: usize = 80;
 pub const SCREEN_HEIGHT: usize = 25;
 pub const BUFFER_WIDTH: usize = SCREEN_WIDTH;
 pub const BUFFER_HEIGHT: usize = SCREEN_HEIGHT;
 const CELL_COUNT: usize = BUFFER_WIDTH * BUFFER_HEIGHT;
+
+type ThemePalette = [[u8; 3]; 16];
+
+const PALETTE_WABI: ThemePalette = [
+    [4, 4, 4],
+    [9, 14, 21],
+    [14, 21, 15],
+    [17, 24, 22],
+    [23, 16, 13],
+    [22, 18, 24],
+    [30, 24, 18],
+    [43, 40, 34],
+    [21, 21, 20],
+    [19, 27, 36],
+    [24, 34, 24],
+    [29, 37, 34],
+    [38, 26, 22],
+    [34, 29, 37],
+    [44, 37, 28],
+    [58, 56, 50],
+];
+
+const PALETTE_SHOJI: ThemePalette = [
+    [5, 4, 3],
+    [10, 16, 28],
+    [18, 24, 16],
+    [19, 29, 28],
+    [28, 18, 16],
+    [28, 18, 27],
+    [41, 32, 19],
+    [51, 47, 39],
+    [25, 22, 18],
+    [20, 32, 46],
+    [30, 40, 24],
+    [36, 46, 44],
+    [43, 29, 24],
+    [42, 30, 40],
+    [55, 48, 24],
+    [63, 60, 52],
+];
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +168,27 @@ fn update_hw_cursor(row: usize, col: usize) {
         data.write((pos & 0x00FF) as u8);
         index.write(0x0E);
         data.write((pos >> 8) as u8);
+    }
+}
+
+fn palette_for_theme(theme: u8) -> &'static ThemePalette {
+    match theme {
+        DISPLAY_THEME_SHOJI => &PALETTE_SHOJI,
+        _ => &PALETTE_WABI,
+    }
+}
+
+fn apply_theme_palette(theme: u8) {
+    let palette = palette_for_theme(theme);
+    let mut index = Port::<u8>::new(VGA_DAC_WRITE_INDEX);
+    let mut data = Port::<u8>::new(VGA_DAC_DATA);
+    unsafe {
+        index.write(0);
+        for entry in palette {
+            data.write(entry[0]);
+            data.write(entry[1]);
+            data.write(entry[2]);
+        }
     }
 }
 
@@ -355,6 +419,7 @@ fn handle_control(state: &mut VgaState, cmd: u8, val: u8) {
         }
         11 => state.scroll_top = val.min((BUFFER_HEIGHT - 1) as u8),
         12 => state.scroll_bottom = val.min((BUFFER_HEIGHT - 1) as u8),
+        DISPLAY_CONTROL_THEME => apply_theme_palette(val.min(DISPLAY_THEME_SHOJI)),
         DISPLAY_CONTROL_POINTER_COL | DISPLAY_CONTROL_POINTER_ROW | DISPLAY_CONTROL_POINTER_VISIBLE => {
             handle_pointer_move(state, cmd, val)
         }
@@ -391,6 +456,7 @@ unsafe extern "C" fn vga_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     }
 
     let state = unsafe { state_mut(ctx) };
+    apply_theme_palette(DISPLAY_THEME_WABI);
     clear_screen(state);
     ExecStatus::Done
 }

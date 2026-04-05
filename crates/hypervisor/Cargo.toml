@@ -7,7 +7,6 @@ edition = "2021"
 gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 gos-runtime = { path = "../gos-runtime" }
-gos-loader = { path = "../gos-loader" }
 gos-supervisor = { path = "../gos-supervisor" }
 k-panic = { path = "../k-panic" }
 k-serial = { path = "../k-serial" }
@@ -23,6 +22,7 @@ k-vmm = { path = "../k-vmm" }
 k-heap = { path = "../k-heap" }
 k-shell = { path = "../k-shell" }
 k-ai = { path = "../k-ai" }
+k-cuda-host = { path = "../k-cuda-host" }
 k-cypher = { path = "../k-cypher" }
 k-ime = { path = "../k-ime" }
 k-net = { path = "../k-net" }

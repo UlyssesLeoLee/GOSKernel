@@ -1,26 +1,41 @@
 # K_NET 网络节点说明
 
-`K_NET` 是 GOS 当前的原生网络驱动节点。它负责把 QEMU 提供的虚拟网卡接入图运行时，并把底层硬件状态暴露给 shell。
+`K_NET` 是 GOS 当前的原生网络 driver node。它负责把 QEMU 提供的虚拟网卡接入当前 graph-native 运行时，并把底层链路状态暴露给 shell 和其他消费者。
 
-## 当前能力
+## 一、当前能力
 
 - 扫描 PCI 配置空间，识别受支持的网卡
-- 识别并优先处理 QEMU `e1000 (8086:100E)`
+- 优先处理 QEMU `e1000 (8086:100E)`
 - 读取并启用 PCI command 位：`io-space` / `memory-space` / `bus-master`
-- 解析 BAR，区分 MMIO 和 I/O BAR
-- 通过 E1000 的 I/O BAR 读写控制寄存器
+- 解析 BAR，区分 MMIO 与 I/O BAR
+- 通过 E1000 I/O BAR 读写控制寄存器
 - 读取 MAC 地址
-- 读取链路状态、速率和双工信息
-- 支持重探测和重置初始化
+- 读取链路状态、速率与双工信息
+- 支持重探测与重置初始化
 
-## 当前限制
+## 二、当前限制
 
 - 还没有 TX/RX descriptor rings
 - 还没有以太网帧发送/接收通路
 - 还没有 ARP / DHCP / IP / TCP / UDP
-- 对 `virtio-net` 目前只做探测和报告，不做原生数据通路
+- 对 `virtio-net` 当前只做探测与报告，不做数据通路
 
-## Shell 指令
+## 三、图论定位
+
+`K_NET` 不是命令工具函数集合，而是 builtin graph 中的原生 driver node：
+
+- capability export：`net/uplink`
+- shell 通过 import/export 与 `Mount` 关系消费它
+- `net` 指令本质上是向该 node 发送控制信号
+- 设备状态由 node 自己维护，不由 shell 硬编码
+
+这意味着：
+
+- 网络状态是图中的 node 状态
+- 网络依赖关系可以通过 graph summary 或 cypher 被观察
+- 后续网络扩展也应继续走 capability + edge 模型
+
+## 四、Shell 指令
 
 ```text
 net
@@ -36,7 +51,7 @@ uplink
 - `net probe`：重新扫描 PCI 并刷新网卡状态
 - `net reset`：重新初始化当前网卡寄存器并打印报告
 
-## 典型输出
+## 五、典型输出
 
 ```text
 [NET] uplink status
@@ -50,13 +65,12 @@ uplink
       stack: nic registers live; tx/rx rings, arp, dhcp, ip pending
 ```
 
-这里的 `carrier up` 表示虚拟网卡和链路寄存器已经正常，不代表客体系统已经具备完整联网能力。
+这里的 `carrier up` 只表示虚拟网卡与链路寄存器已经正常，不代表客体系统已经具备完整联网协议栈。
 
-## 图论定位
+## 六、后续演进方向
 
-`K_NET` 不是单纯的工具函数集合，而是一个有权限声明、导出能力和运行时状态的 driver node：
+`K_NET` 的后续扩展应服从当前路线图：
 
-- capability export：`net/uplink`
-- shell 通过 edge 与它交互
-- `net` 指令本质上是向该 node 发送控制信号
-- 设备状态由 node 自己维护，不由 shell 硬编码
+1. 先完成底座清理与原子化执行模型
+2. 再把 `K_NET` 接到更稳定的资源、实例、fault 恢复模型
+3. 最后补 TX/RX rings、协议栈、上层网络服务

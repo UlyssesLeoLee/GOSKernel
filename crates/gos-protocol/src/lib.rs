@@ -262,12 +262,24 @@ pub const IME_MODE_ASCII: u8 = 0x00;
 pub const IME_MODE_ZH_PINYIN: u8 = 0x01;
 pub const INPUT_KEY_PAGE_UP: u8 = 0xF1;
 pub const INPUT_KEY_PAGE_DOWN: u8 = 0xF2;
+pub const INPUT_KEY_UP: u8 = 0xF3;
+pub const INPUT_KEY_DOWN: u8 = 0xF4;
 pub const NET_CONTROL_REPORT: u8 = 0xD0;
 pub const NET_CONTROL_PROBE: u8 = 0xD1;
 pub const NET_CONTROL_RESET: u8 = 0xD2;
+pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
+pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;
+pub const CUDA_CONTROL_REPORT: u8 = 0xE2;
+pub const CUDA_CONTROL_RESET: u8 = 0xE3;
+pub const CLIPBOARD_DATA_BEGIN: u8 = 0xF8;
+pub const CLIPBOARD_DATA_COMMIT: u8 = 0xF9;
+pub const CLIPBOARD_DATA_CLEAR: u8 = 0xFA;
 pub const DISPLAY_CONTROL_POINTER_COL: u8 = 0xC0;
 pub const DISPLAY_CONTROL_POINTER_ROW: u8 = 0xC1;
 pub const DISPLAY_CONTROL_POINTER_VISIBLE: u8 = 0xC2;
+pub const DISPLAY_CONTROL_THEME: u8 = 0xC3;
+pub const DISPLAY_THEME_WABI: u8 = 0x00;
+pub const DISPLAY_THEME_SHOJI: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CellResult {
@@ -364,7 +376,27 @@ pub struct ModuleId(pub [u8; 16]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
+pub struct NodeTemplateId(pub [u8; 16]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ResourceId(pub [u8; 16]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct ModuleHandle(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct NodeInstanceId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ClaimId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct LeaseEpoch(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -422,7 +454,55 @@ impl ModuleId {
     }
 }
 
+impl NodeTemplateId {
+    pub const ZERO: Self = Self([0; 16]);
+
+    pub const fn new(raw: [u8; 16]) -> Self {
+        Self(raw)
+    }
+
+    pub const fn from_ascii(name: &str) -> Self {
+        Self(fixed_bytes_16(name))
+    }
+}
+
+impl ResourceId {
+    pub const ZERO: Self = Self([0; 16]);
+
+    pub const fn new(raw: [u8; 16]) -> Self {
+        Self(raw)
+    }
+
+    pub const fn from_ascii(name: &str) -> Self {
+        Self(fixed_bytes_16(name))
+    }
+}
+
 impl ModuleHandle {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl NodeInstanceId {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl ClaimId {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl LeaseEpoch {
     pub const ZERO: Self = Self(0);
 
     pub const fn new(raw: u64) -> Self {
@@ -549,6 +629,7 @@ pub enum RuntimeEdgeType {
     Mount = 0x06,
     Sync = 0x07,
     Stream = 0x08,
+    Use = 0x09,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,6 +730,12 @@ pub struct ImportSpec {
 
 pub const MODULE_ABI_VERSION: u32 = 1;
 
+pub const RESOURCE_FRAME_ALLOC: ResourceId = ResourceId::from_ascii("RS.FRAME");
+pub const RESOURCE_PAGE_MAPPER: ResourceId = ResourceId::from_ascii("RS.VMM");
+pub const RESOURCE_DISPLAY_CONSOLE: ResourceId = ResourceId::from_ascii("RS.CONSOLE");
+pub const RESOURCE_HEAP_SOURCE: ResourceId = ResourceId::from_ascii("RS.HEAP");
+pub const RESOURCE_GPU_ACCEL: ResourceId = ResourceId::from_ascii("RS.GPU");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ModuleImageFormat {
@@ -678,6 +765,59 @@ pub enum ModuleFaultPolicy {
     Restart = 0x02,
     RestartAlways = 0x03,
     Manual = 0x04,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SpawnPolicy {
+    Singleton = 0x01,
+    OnDemand = 0x02,
+    OnContention = 0x03,
+    Replicated = 0x04,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClaimPolicy {
+    Shared = 0x01,
+    Exclusive = 0x02,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PreemptPolicy {
+    Never = 0x01,
+    Try = 0x02,
+    Force = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HeapClass {
+    Bootstrap = 0x01,
+    Runtime = 0x02,
+    Burst = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExecutionLaneClass {
+    Control = 0x01,
+    Io = 0x02,
+    Compute = 0x03,
+    Background = 0x04,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeInstanceLifecycle {
+    Allocated = 0x01,
+    Ready = 0x02,
+    Running = 0x03,
+    WaitingClaim = 0x04,
+    Suspended = 0x05,
+    Stopped = 0x06,
+    Faulted = 0xFF,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +858,55 @@ pub enum ModuleCallStatus {
 pub struct ModuleDependencySpec {
     pub module_id: ModuleId,
     pub required: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapQuota {
+    pub class: HeapClass,
+    pub reserved_pages: u32,
+    pub max_pages: u32,
+    pub _reserved: u32,
+}
+
+impl HeapQuota {
+    pub const EMPTY: Self = Self {
+        class: HeapClass::Runtime,
+        reserved_pages: 0,
+        max_pages: 0,
+        _reserved: 0,
+    };
+
+    pub const fn runtime(max_pages: u32) -> Self {
+        Self {
+            class: HeapClass::Runtime,
+            reserved_pages: 0,
+            max_pages,
+            _reserved: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLease {
+    pub claim_id: ClaimId,
+    pub resource_id: ResourceId,
+    pub instance_id: NodeInstanceId,
+    pub epoch: LeaseEpoch,
+    pub claim_policy: ClaimPolicy,
+    pub preempt_policy: PreemptPolicy,
+}
+
+impl ResourceLease {
+    pub const EMPTY: Self = Self {
+        claim_id: ClaimId::ZERO,
+        resource_id: ResourceId::ZERO,
+        instance_id: NodeInstanceId::ZERO,
+        epoch: LeaseEpoch::ZERO,
+        claim_policy: ClaimPolicy::Exclusive,
+        preempt_policy: PreemptPolicy::Never,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -794,6 +983,12 @@ pub struct ModuleAbiV1 {
         Option<unsafe extern "C" fn(module: ModuleHandle, page_count: usize, writable: u8, out_base: *mut u64) -> ModuleCallStatus>,
     pub free_pages:
         Option<unsafe extern "C" fn(module: ModuleHandle, base: u64, page_count: usize) -> ModuleCallStatus>,
+    pub current_instance:
+        Option<unsafe extern "C" fn(module: ModuleHandle, out: *mut NodeInstanceId) -> ModuleCallStatus>,
+    pub claim_resource:
+        Option<unsafe extern "C" fn(module: ModuleHandle, resource: ResourceId, claim_policy: ClaimPolicy, preempt_policy: PreemptPolicy, out_claim: *mut ClaimId, out_epoch: *mut LeaseEpoch) -> ModuleCallStatus>,
+    pub release_claim:
+        Option<unsafe extern "C" fn(module: ModuleHandle, claim: ClaimId) -> ModuleCallStatus>,
     pub subscribe_interrupt:
         Option<unsafe extern "C" fn(module: ModuleHandle, irq: u8, endpoint: EndpointId) -> ModuleCallStatus>,
     pub register_lifecycle:

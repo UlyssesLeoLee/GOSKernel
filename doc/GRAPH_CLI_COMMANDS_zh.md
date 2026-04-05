@@ -1,77 +1,165 @@
-# GOS Graph CLI v1 指令手册
+# GOS Graph CLI 指令手册
 
-GOS v0.2 现已内建基础图控制台。左侧主命令区可以直接在 node / edge 两种视角之间切换，并用显式向量命令控制选择。
+本文档描述当前 `k-shell` 内建的图控制终端能力。  
+口径只记录当前真实实现，不描述尚未支持的未来语法。
 
-如果你希望用 Cypher 风格来做相同的图浏览和控制，请继续看 [CYPHER_NODE_zh.md](./CYPHER_NODE_zh.md)。
+如果你希望通过 Cypher 风格浏览相同的 runtime 图，请看 [CYPHER_NODE_zh.md](./CYPHER_NODE_zh.md)。
 
-## 向量语法
+## 一、向量写法
 
-- 节点向量支持两种输入：
-  - 图坐标：`6.1.0.0`
-  - Canonical 十六进制：`0xffff806001000000`
-- 边向量在 `edge <vector>` 命令里可以直接写：
-  - 图坐标：`17.34.51.68`
-  - 兼容写法：`e:17.34.51.68`
-  - Canonical 十六进制：`0xffff811022033044`
+### 节点向量
 
-## 上下文语义
+- 图坐标：`6.1.0.0`
+- Canonical 十六进制：`0xffff806001000000`
+
+### 边向量
+
+- 图坐标：`17.34.51.68`
+- 兼容前缀：`e:17.34.51.68`
+- Canonical 十六进制：`0xffff811022033044`
+
+## 二、图上下文语义
 
 - 初始状态没有当前图上下文。
-- 这时输入 `show`，会进入 overview，同时显示当前页的 node 和 edge 摘要。
-- 输入 `node <vector>` 后，当前上下文变成 `node`，会显示该节点详情。
-- 在 `node` 上下文里输入 `show`，会切到该节点的关联 edge 视图。
-- 输入 `edge <vector>` 后，当前上下文变成 `edge`，会显示该边详情。
-- 在 `edge` 上下文里输入 `show`，会切到该边关联的 node 视图。
+- `show` 会进入 overview。
+- `node <vector>` 会进入 node 详情。
+- `show` 在 node 上下文里会切到该 node 的 edge 列表。
+- `edge <vector>` 会进入 edge 详情。
+- `show` 在 edge 上下文里会切到该 edge 关联的 node 视图。
+- `back` 会退回上一层图视图。
 
-也就是说，`show` 现在是一个“上下文切换”命令，不再只是固定列 node。
-
-## 指令表
+## 三、核心图命令
 
 | 指令 | 作用 |
 |---|---|
-| `show` | 初始时显示 overview；在 node / edge 上下文里切换到另一侧 |
+| `show` | 初始时进入 overview；在 node / edge 上下文里切换另一侧视图 |
 | `show next` | 当前 overview / list 下一页 |
 | `show prev` | 当前 overview / list 上一页 |
 | `node <vector>` | 选中并显示一个 node |
 | `edge <vector>` | 选中并显示一个 edge |
 | `node` | 显示当前已选 node 详情 |
 | `edge` | 显示当前已选 edge 详情 |
-| `where` | 显示当前选中的 node / edge |
-| `select clear` | 清空 node / edge 选择和图上下文 |
-| `activate` | 调用当前选中 node 的 `activate` 路径 |
+| `where` | 显示当前 node / edge 选择状态 |
+| `back` | 返回上一层 graph 视图 |
+| `select clear` | 清空选择与图上下文 |
+| `activate` | 激活当前选中 node |
 | `spawn` | 向当前选中 node 发送 `Spawn { payload: 0 }` |
 
-## 翻页
+### 翻页与历史
 
-- `PgUp`：当前图视图上一页
-- `PgDn`：当前图视图下一页
-- 文本兼容指令 `show next` / `show prev` 仍然可用
+- `PgUp`：图视图上一页
+- `PgDn`：图视图下一页
+- `Up`：上一条命令历史
+- `Down`：下一条命令历史，回到底时恢复当前草稿
 
-当前支持翻页的视图：
+## 四、主题图命令
 
-- overview
-- node 列表
-- edge 列表
+当前终端主题通过图里的真实关系表达：
 
-## 输出说明
+- `6.1.1.0` -> `theme.wabi`
+- `6.1.2.0` -> `theme.shoji`
+- `6.1.3.0` -> `theme.current`
 
-### 初始 `show`
+真正生效的关系始终是：
 
-会显示一个 overview：
+- `theme.current -[use]-> theme.wabi`
+- 或 `theme.current -[use]-> theme.shoji`
 
-- 上半部分是 node 摘要
-- 下半部分是 edge 摘要
+### 主题命令
 
-每页同时翻动 node 和 edge 的当前页窗口。
+| 指令 | 作用 |
+|---|---|
+| `theme` | 显示当前主题状态与主题节点 |
+| `theme wabi` | 让 `theme.current -[use]-> theme.wabi` |
+| `theme shoji` | 让 `theme.current -[use]-> theme.shoji` |
+
+### 图方式切换主题
+
+```text
+node 6.1.1.0
+activate
+```
+
+或：
+
+```text
+node 6.1.2.0
+activate
+```
+
+这里 `activate(theme.*)` 的效果不是直接修改 shell 私有变量，而是刷新 `theme.current` 的排他 `Use` 关系，然后立即切显示调色板。
+
+## 五、共享剪贴板命令
+
+当前共享剪贴板是独立的图节点：
+
+- `6.1.4.0` -> `clipboard.mount`
+
+它的关系是非排他的 `Mount`：
+
+- 任意多个 node 都可以同时 `-[mount]-> clipboard.mount`
+
+默认 builtin graph 会把以下节点挂到它上面：
+
+- `shell.entry`
+- `cypher.query`
+- `ai.supervisor`
+
+### 剪贴板命令
+
+| 指令 | 作用 |
+|---|---|
+| `clipboard` | 显示 `clipboard.mount` 状态和当前挂载边 |
+| `clipboard clear` | 清空共享剪贴板内容 |
+| `clipboard mount <vector>` | 给某个 node 增加 `-[mount]-> clipboard.mount` |
+| `clipboard unmount <vector>` | 删除某个 node 到 `clipboard.mount` 的挂载边 |
+| `clip clear` | `clipboard clear` 别名 |
+| `clip mount <vector>` | `clipboard mount` 别名 |
+| `clip unmount <vector>` | `clipboard unmount` 别名 |
+
+### 剪贴板快捷键
+
+在当前输入缓冲区或 API 编辑器里：
+
+- `Ctrl+C`：复制当前输入
+- `Ctrl+X`：剪切当前输入
+- `Ctrl+V`：粘贴共享剪贴板内容
+
+这些快捷键只有在当前节点已经挂载 `clipboard.mount` 时才会生效。
+
+## 六、Cypher、网络、CUDA、AI 入口
+
+| 指令 | 作用 |
+|---|---|
+| `cypher <query>` | 把受控 Cypher v1 查询发给 `k-cypher` |
+| `MATCH ...` | 直接输入 Cypher，无需前缀 |
+| `net` / `net status` / `uplink` | 查看 `k-net` 当前 uplink 状态 |
+| `net probe` | 重新扫描 PCI 并刷新网卡状态 |
+| `net reset` | 重新初始化当前网卡寄存器并打印状态 |
+| `cuda` / `cuda status` | 查看 host-backed CUDA bridge 状态 |
+| `cuda submit <job>` | 提交一条 host-backed job |
+| `cuda demo` | 发送示例 job |
+| `cuda reset` | 重置 bridge 计数和捕获状态 |
+| `ai` | 进入底栏 AI API 编辑器 |
+| `ask <prompt>` | 发送 prompt 到 AI chat lane |
+| `Ctrl+L` | 切换 IME 语言模式 |
+
+## 七、输出说明
+
+### `show`
+
+overview 会同时显示：
+
+- node 摘要
+- edge 摘要
 
 ### `node <vector>`
 
-会进入 node 详情视图，至少显示：
+node 详情至少会显示：
 
 - vector
-- plugin name / plugin id
-- local key
-- node type
+- plugin / local key
+- type
 - lifecycle
 - entry policy
 - executor id
@@ -79,13 +167,13 @@ GOS v0.2 现已内建基础图控制台。左侧主命令区可以直接在 node
 
 ### `show` 在 node 上下文中
 
-会进入该 node 的关联 edge 列表，每行格式：
+会显示关联 edge 列表，格式类似：
 
 ```text
 <dir> <edge-vector> <edge-type> <from-vector> -> <to-vector>
 ```
 
-如果该边由 capability mount 生成，会附加：
+如果是 capability 挂载边，会额外显示：
 
 ```text
 cap=<namespace/name>
@@ -93,50 +181,43 @@ cap=<namespace/name>
 
 ### `edge <vector>`
 
-会进入 edge 详情视图，显示：
+edge 详情至少会显示：
 
 - edge vector
 - edge type
-- from / to 向量和 local key
+- from / to 向量与 local key
 - route policy
 - ACL
 - capability 绑定
 - edge id
 
-### `show` 在 edge 上下文中
+## 八、最短示例
 
-会切到该 edge 对应的 node 视图，显示该边两端 node 的摘要。
-
-## 选择状态
-
-- `node <vector>` 会更新 `sel-node`
-- `edge <vector>` 会更新 `sel-edge`
-- `edge <vector>` 不会清掉已有 node 选择；它会让当前图上下文变成 `edge`
-- `select clear` 会同时清空 `sel-node`、`sel-edge` 和图上下文
-
-## 安全控制边界
-
-- `activate` 只作用于当前 `sel-node`
-- `spawn` 只作用于当前 `sel-node`，并固定发送 `Spawn { payload: 0 }`
-- 第一版不提供任意 payload 的边路由命令
-- 第一版不在 Graph CLI 中直接开放边执行；边执行控制优先通过 Cypher node 提供
-
-## 最短操作示例
+### 浏览主题关系
 
 ```text
+node 6.1.3.0
 show
-node 6.1.0.0
-show
-edge 17.34.51.68
-show
-where
 ```
 
-含义如下：
+### 切换主题
 
-1. `show` 先进入 graph overview
-2. `node 6.1.0.0` 选中 shell 节点并显示详情
-3. `show` 切到这个节点的 edge 列表
-4. `edge 17.34.51.68` 选中某一条 edge 并显示详情
-5. `show` 切到这条 edge 关联的 node 视图
-6. `where` 查看当前选择状态
+```text
+theme shoji
+theme
+```
+
+### 浏览剪贴板挂载关系
+
+```text
+clipboard
+node 6.1.4.0
+show
+```
+
+### 给一个 node 挂载剪贴板
+
+```text
+clipboard mount 6.1.0.0
+clipboard
+```
