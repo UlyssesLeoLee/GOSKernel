@@ -1,16 +1,25 @@
 #![no_std]
 
+use gos_hal::{meta, vaddr};
+use gos_protocol::{
+    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+    Signal, VectorAddress,
+};
 use pic8259::ChainedPics;
 use spin::Mutex;
-use gos_protocol::*;
-use gos_hal::{vaddr, meta};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 5, 0, 0);
-
-pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
+pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.pic");
+pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: EXECUTOR_ID,
+    on_init: Some(pic_on_init),
+    on_event: Some(pic_on_event),
+    on_suspend: Some(pic_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -21,60 +30,93 @@ pub enum InterruptIndex {
 }
 
 impl InterruptIndex {
-    pub fn as_u8(self) -> u8 { self as u8 }
-    pub fn as_usize(self) -> usize { usize::from(self.as_u8()) }
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
+
+#[repr(C)]
+struct PicRuntimeState {
+    init_count: u64,
+    last_signal_kind: u8,
+}
+
+pub fn node_ptr() -> *mut u8 {
+    vaddr::resolve_hal_node(NODE_VEC)
 }
 
 pub fn pics() -> &'static Mutex<ChainedPics> {
     unsafe {
         let p = node_ptr();
-        if p.is_null() { panic!("K_PIC Matrix not initialized"); }
+        if p.is_null() {
+            panic!("K_PIC Matrix not initialized");
+        }
         &*(p.add(1024) as *mut Mutex<ChainedPics>)
     }
 }
 
-pub unsafe fn init_node_state() {
+unsafe fn runtime_state_mut(ctx: *mut ExecutorContext) -> &'static mut PicRuntimeState {
+    let ctx = unsafe { &mut *ctx };
+    unsafe { &mut *(ctx.state_ptr as *mut PicRuntimeState) }
+}
+
+fn signal_kind_code(signal: Signal) -> u8 {
+    match signal {
+        Signal::Call { .. } => 0x01,
+        Signal::Spawn { .. } => 0x02,
+        Signal::Interrupt { .. } => 0x03,
+        Signal::Data { .. } => 0x04,
+        Signal::Control { .. } => 0x05,
+        Signal::Terminate => 0xFF,
+    }
+}
+
+unsafe fn init_hal_state() {
     let p = node_ptr();
     meta::burn_node_metadata(p, "HAL", "PIC");
     let state_ptr = p.add(1024) as *mut Mutex<ChainedPics>;
-    core::ptr::write(state_ptr, Mutex::new(ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)));
+    core::ptr::write(
+        state_ptr,
+        Mutex::new(ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)),
+    );
 }
 
-pub struct PicCell { state: NodeState }
-
-impl PicCell {
-    pub const fn new() -> Self { Self { state: NodeState::Unregistered } }
+unsafe extern "C" fn pic_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe {
+        init_hal_state();
+        core::ptr::write(
+            (*ctx).state_ptr as *mut PicRuntimeState,
+            PicRuntimeState {
+                init_count: 0,
+                last_signal_kind: 0,
+            },
+        );
+    }
+    ExecStatus::Done
 }
 
-impl NodeCell for PicCell {
-    fn declare(&self) -> CellDeclaration {
-        let mut edges = [CellEdge::NONE; MAX_CELL_EDGES];
-        edges[0] = CellEdge::new("MASK", 0x01, 0);
-        edges[1] = CellEdge::new("ACK", 0x01, 0);
-        CellDeclaration {
-            vec: NODE_VEC, domain_label: "HAL", name: "PIC",
-            edges, edge_count: 2, depends_on: &[],
-        }
+unsafe extern "C" fn pic_on_event(
+    ctx: *mut ExecutorContext,
+    event: *const NodeEvent,
+) -> ExecStatus {
+    let signal = unsafe { packet_to_signal((*event).signal) };
+    let state = unsafe { runtime_state_mut(ctx) };
+    state.last_signal_kind = signal_kind_code(signal);
+
+    if let Signal::Spawn { .. } = signal {
+        init_pic();
+        state.init_count = state.init_count.saturating_add(1);
     }
 
-    unsafe fn init(&mut self) { init_node_state(); self.state = NodeState::Ready; }
-
-    fn on_activate(&mut self) -> CellResult { CellResult::Done }
-    fn on_signal(&mut self, _: Signal) -> CellResult { CellResult::Done }
-    fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
-    fn state(&self) -> NodeState { self.state }
-    fn vec(&self) -> VectorAddress { NODE_VEC }
+    ExecStatus::Done
 }
 
-pub static PIC_CELL: spin::Mutex<PicCell> = spin::Mutex::new(PicCell::new());
-
-impl PluginEntry for PicCell {
-    const VEC: VectorAddress = NODE_VEC;
-    const WAVEFRONT: u32 = 1; // Unrelated to GDT/CPUID
-
-    fn plugin_main(_ctx: &mut BootContext) {
-        gos_hal::ngr::try_mount_cell(Self::VEC, &PIC_CELL);
-    }
+unsafe extern "C" fn pic_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
+    ExecStatus::Done
 }
 
 pub fn init_pic() {

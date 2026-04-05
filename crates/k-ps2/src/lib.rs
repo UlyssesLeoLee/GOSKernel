@@ -68,12 +68,6 @@ impl PluginEntry for Ps2Cell {
 }
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Diagnostic: raw serial write to confirm handler fires
-    unsafe {
-        let mut serial_port = Port::<u8>::new(0x3F8);
-        serial_port.write(b'K');
-    }
-
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
 

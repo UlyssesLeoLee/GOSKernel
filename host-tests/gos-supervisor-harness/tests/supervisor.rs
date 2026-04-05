@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Mutex,
+};
 
 use gos_protocol::{
     CapabilitySpec, ClaimId, ClaimPolicy, DomainId, ExecutionLaneClass, LeaseEpoch,
@@ -9,8 +12,9 @@ use gos_protocol::{
 };
 use gos_supervisor::{
     bootstrap, claim_resource, current_instance, dequeue_ready_instance, drain_revocation,
-    install_module, process_restart_queue, queue_restart, realize_boot_modules,
-    schedule_instance, snapshot, spawn_instance, template_for_module, SupervisorError,
+    heap_grant_summary, install_module, process_restart_queue, queue_restart, realize_boot_modules,
+    release_claim, schedule_instance, snapshot, spawn_instance, template_for_module,
+    SupervisorError, MAX_CLAIMS,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -18,6 +22,7 @@ static CALLBACK_INSTANCE: AtomicU64 = AtomicU64::new(0);
 static CALLBACK_CLAIM: AtomicU64 = AtomicU64::new(0);
 static CALLBACK_EPOCH: AtomicU64 = AtomicU64::new(0);
 static CALLBACK_HEAP_BASE: AtomicU64 = AtomicU64::new(0);
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const TEST_EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
     namespace: "demo",
@@ -139,8 +144,13 @@ fn reset_state() {
     CALLBACK_HEAP_BASE.store(0, Ordering::SeqCst);
 }
 
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 #[test]
 fn boot_realize_builds_instance_claim_and_heap_grant() {
+    let _guard = test_guard();
     reset_state();
     bootstrap(0);
     let provider = install_module(PROVIDER).expect("provider install");
@@ -169,6 +179,7 @@ fn boot_realize_builds_instance_claim_and_heap_grant() {
 
 #[test]
 fn force_preempt_generates_revocation_for_previous_owner() {
+    let _guard = test_guard();
     reset_state();
     bootstrap(0);
     let provider = install_module(PROVIDER).expect("provider install");
@@ -205,6 +216,7 @@ fn force_preempt_generates_revocation_for_previous_owner() {
 
 #[test]
 fn lane_scheduler_tracks_ready_instances_and_dequeues_background_work() {
+    let _guard = test_guard();
     reset_state();
     bootstrap(0);
     let provider = install_module(PROVIDER).expect("provider install");
@@ -232,6 +244,7 @@ fn lane_scheduler_tracks_ready_instances_and_dequeues_background_work() {
 
 #[test]
 fn queued_restart_restarts_module_through_scheduler_control_plane() {
+    let _guard = test_guard();
     reset_state();
     bootstrap(0);
     let provider = install_module(PROVIDER).expect("provider install");
@@ -258,8 +271,86 @@ fn queued_restart_restarts_module_through_scheduler_control_plane() {
 
 #[test]
 fn missing_dependency_is_rejected() {
+    let _guard = test_guard();
     reset_state();
     bootstrap(0);
     install_module(CONSUMER).expect("consumer install");
     assert_eq!(realize_boot_modules(), Err(SupervisorError::ModuleRejected));
+}
+
+#[test]
+fn released_claims_recycle_slots_across_many_rounds() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let instance = current_instance(provider).expect("primary instance");
+    release_claim(ClaimId::new(CALLBACK_CLAIM.load(Ordering::SeqCst))).expect("release boot claim");
+
+    let mut previous_epoch = LeaseEpoch::new(CALLBACK_EPOCH.load(Ordering::SeqCst));
+    for _ in 0..(MAX_CLAIMS + 4) {
+        let lease = claim_resource(
+            instance,
+            RESOURCE_DISPLAY_CONSOLE,
+            ClaimPolicy::Exclusive,
+            PreemptPolicy::Never,
+        )
+        .expect("claim");
+        assert!(lease.epoch.0 > previous_epoch.0);
+        previous_epoch = lease.epoch;
+        release_claim(lease.claim_id).expect("release");
+    }
+
+    let snap = snapshot().expect("snapshot");
+    assert_eq!(snap.active_claims, 0);
+}
+
+#[test]
+fn heap_quota_is_enforced_and_grants_can_be_freed() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let free_pages = gos_supervisor::abi().free_pages.expect("free pages");
+    let request_pages = gos_supervisor::abi().request_pages.expect("request pages");
+
+    let initial_base = CALLBACK_HEAP_BASE.load(Ordering::SeqCst);
+    let initial_grant = heap_grant_summary(provider, initial_base).expect("initial grant");
+    assert_eq!(initial_grant.page_count, 2);
+    assert!(initial_grant.writable);
+    assert_eq!(
+        unsafe { free_pages(provider, initial_base, initial_grant.page_count) },
+        ModuleCallStatus::Ok
+    );
+
+    let snap = snapshot().expect("snapshot after initial free");
+    assert_eq!(snap.heap_grants, 0);
+    assert_eq!(snap.heap_pages_used, 0);
+
+    let mut full_base = 0u64;
+    assert_eq!(
+        unsafe { request_pages(provider, 32, 1, &mut full_base) },
+        ModuleCallStatus::Ok
+    );
+    let full_grant = heap_grant_summary(provider, full_base).expect("full grant");
+    assert_eq!(full_grant.page_count, 32);
+
+    let mut denied_base = 0u64;
+    assert_eq!(
+        unsafe { request_pages(provider, 1, 1, &mut denied_base) },
+        ModuleCallStatus::Denied
+    );
+
+    assert_eq!(
+        unsafe { free_pages(provider, full_base, full_grant.page_count) },
+        ModuleCallStatus::Ok
+    );
+
+    let snap = snapshot().expect("snapshot after free");
+    assert_eq!(snap.heap_grants, 0);
+    assert_eq!(snap.heap_pages_used, 0);
 }

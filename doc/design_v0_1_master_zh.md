@@ -42,11 +42,6 @@
 
 以下 crate 仍处于 legacy migration island：
 
-- `k-panic`
-- `k-serial`
-- `k-gdt`
-- `k-cpuid`
-- `k-pic`
 - `k-pit`
 - `k-ps2`
 - `k-idt`

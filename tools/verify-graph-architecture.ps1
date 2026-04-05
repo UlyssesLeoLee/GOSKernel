@@ -41,11 +41,6 @@ function Test-VectorRefBlocks {
 }
 
 $legacyAllowlist = @(
-    "k-panic",
-    "k-serial",
-    "k-gdt",
-    "k-cpuid",
-    "k-pic",
     "k-pit",
     "k-ps2",
     "k-idt",
@@ -55,11 +50,6 @@ $legacyAllowlist = @(
 )
 
 $legacyBundleCrateAllowlist = @(
-    "k_panic",
-    "k_serial",
-    "k_gdt",
-    "k_cpuid",
-    "k_pic",
     "k_pit",
     "k_ps2",
     "k_idt",

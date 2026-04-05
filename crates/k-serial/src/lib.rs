@@ -1,74 +1,93 @@
 #![no_std]
 
-use uart_16550::SerialPort;
+use gos_hal::{meta, vaddr};
+use gos_protocol::{
+    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+    Signal, VectorAddress,
+};
 use spin::Mutex;
-use gos_protocol::*;
-use gos_hal::{vaddr, meta};
+use uart_16550::SerialPort;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 2, 0, 0);
+pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.serial");
+pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: EXECUTOR_ID,
+    on_init: Some(serial_on_init),
+    on_event: Some(serial_on_event),
+    on_suspend: Some(serial_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
 
-pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
+#[repr(C)]
+struct SerialState {
+    bytes_written: u64,
+    last_signal_kind: u8,
+}
+
+pub fn node_ptr() -> *mut u8 {
+    vaddr::resolve_hal_node(NODE_VEC)
+}
 
 pub fn serial1() -> &'static Mutex<SerialPort> {
     unsafe { &*(node_ptr().add(1024) as *mut Mutex<SerialPort>) }
 }
 
-pub unsafe fn init_node_state() {
-    let p = node_ptr();
-    meta::burn_node_metadata(p, "HAL", "SERIAL");
-
-    let mut serial_port = SerialPort::new(0x3F8);
-    serial_port.init();
-
-    let state_ptr = p.add(1024) as *mut Mutex<SerialPort>;
-    core::ptr::write(state_ptr, Mutex::new(serial_port));
+unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut SerialState {
+    let ctx = unsafe { &mut *ctx };
+    unsafe { &mut *(ctx.state_ptr as *mut SerialState) }
 }
 
-pub struct SerialCell { state: NodeState }
-
-impl SerialCell {
-    pub const fn new() -> Self { Self { state: NodeState::Unregistered } }
+fn signal_kind_code(signal: Signal) -> u8 {
+    match signal {
+        Signal::Call { .. } => 0x01,
+        Signal::Spawn { .. } => 0x02,
+        Signal::Interrupt { .. } => 0x03,
+        Signal::Data { .. } => 0x04,
+        Signal::Control { .. } => 0x05,
+        Signal::Terminate => 0xFF,
+    }
 }
 
-impl NodeCell for SerialCell {
-    fn declare(&self) -> CellDeclaration {
-        let mut edges = [CellEdge::NONE; MAX_CELL_EDGES];
-        edges[0] = CellEdge::new("WRITE", 0x08, 0);
-        CellDeclaration {
-            vec: NODE_VEC, domain_label: "HAL", name: "SERIAL",
-            edges, edge_count: 1, depends_on: &[],
-        }
+unsafe extern "C" fn serial_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
+    let hal_ptr = node_ptr();
+    unsafe {
+        meta::burn_node_metadata(hal_ptr, "HAL", "SERIAL");
+        let mut serial_port = SerialPort::new(0x3F8);
+        serial_port.init();
+        core::ptr::write(hal_ptr.add(1024) as *mut Mutex<SerialPort>, Mutex::new(serial_port));
+        core::ptr::write(
+            (*ctx).state_ptr as *mut SerialState,
+            SerialState {
+                bytes_written: 0,
+                last_signal_kind: 0,
+            },
+        );
     }
-
-    unsafe fn init(&mut self) { init_node_state(); self.state = NodeState::Ready; }
-
-    fn on_activate(&mut self) -> CellResult { CellResult::Done }
-
-    fn on_signal(&mut self, signal: Signal) -> CellResult {
-        match signal {
-            Signal::Data { byte, .. } => {
-                use core::fmt::Write;
-                let _ = serial1().lock().write_char(byte as char);
-                CellResult::Done
-            }
-            _ => CellResult::Done,
-        }
-    }
-
-    fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
-    fn state(&self) -> NodeState { self.state }
-    fn vec(&self) -> VectorAddress { NODE_VEC }
+    ExecStatus::Done
 }
 
-pub static SERIAL_CELL: spin::Mutex<SerialCell> = spin::Mutex::new(SerialCell::new());
+unsafe extern "C" fn serial_on_event(
+    ctx: *mut ExecutorContext,
+    event: *const NodeEvent,
+) -> ExecStatus {
+    let signal = unsafe { packet_to_signal((*event).signal) };
+    let state = unsafe { state_mut(ctx) };
+    state.last_signal_kind = signal_kind_code(signal);
 
-impl PluginEntry for SerialCell {
-    const VEC: VectorAddress = NODE_VEC;
-    const WAVEFRONT: u32 = 0;
-
-    fn plugin_main(_ctx: &mut BootContext) {
-        gos_hal::ngr::try_mount_cell(Self::VEC, &SERIAL_CELL);
+    if let Signal::Data { byte, .. } = signal {
+        use core::fmt::Write;
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let _ = serial1().lock().write_char(byte as char);
+        });
+        state.bytes_written = state.bytes_written.saturating_add(1);
     }
+
+    ExecStatus::Done
+}
+
+unsafe extern "C" fn serial_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
+    ExecStatus::Done
 }
 
 pub fn _serial_print(args: core::fmt::Arguments) {

@@ -72,11 +72,6 @@ steady-state 不能退化成手写过程控制。
 
 当前允许暂时保留 legacy 路径的 crate 只有：
 
-- `k-panic`
-- `k-serial`
-- `k-gdt`
-- `k-cpuid`
-- `k-pic`
 - `k-pit`
 - `k-ps2`
 - `k-idt`

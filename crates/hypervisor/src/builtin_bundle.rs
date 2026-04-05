@@ -359,8 +359,29 @@ const MOD_DEP_AI: &[ModuleDependencySpec] = &[ModuleDependencySpec {
     required: true,
 }];
 
-const PANIC_MANIFEST: PluginManifest = manifest(K_PANIC_ID, "K_PANIC", &[], NONE_PERMS, &[], &[]);
-const SERIAL_MANIFEST: PluginManifest = manifest(K_SERIAL_ID, "K_SERIAL", &[], SERIAL_PERMS, SERIAL_EXPORTS, &[]);
+const PANIC_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_PANIC_ID,
+    "K_PANIC",
+    &[],
+    NONE_PERMS,
+    &[],
+    &[],
+    PANIC_NODE_SPECS,
+);
+const SERIAL_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_SERIAL_ID,
+    "K_SERIAL",
+    &[],
+    SERIAL_PERMS,
+    SERIAL_EXPORTS,
+    &[],
+    SERIAL_NODE_SPECS,
+);
+const K_PANIC_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PANIC_ID, "panic.entry");
+const K_SERIAL_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SERIAL_ID, "serial.entry");
+const K_GDT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_GDT_ID, "gdt.entry");
+const K_CPUID_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CPUID_ID, "cpuid.entry");
+const K_PIC_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PIC_ID, "pic.entry");
 const K_VGA_NODE_ID: gos_protocol::NodeId = derive_node_id(K_VGA_ID, "vga.entry");
 const K_IME_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IME_ID, "ime.router");
 const K_NET_NODE_ID: gos_protocol::NodeId = derive_node_id(K_NET_ID, "net.uplink");
@@ -373,6 +394,66 @@ const K_THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "
 const K_THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.current");
 const K_CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "clipboard.mount");
 const K_AI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_AI_ID, "ai.supervisor");
+
+const PANIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_PANIC_NODE_ID,
+    local_node_key: "panic.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_panic::EXECUTOR_ID,
+    state_schema_hash: 0x2001,
+    permissions: NONE_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const SERIAL_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_SERIAL_NODE_ID,
+    local_node_key: "serial.entry",
+    node_type: RuntimeNodeType::Driver,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_serial::EXECUTOR_ID,
+    state_schema_hash: 0x2002,
+    permissions: SERIAL_PERMS,
+    exports: SERIAL_EXPORTS,
+    vector_ref: None,
+}];
+
+const GDT_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_GDT_NODE_ID,
+    local_node_key: "gdt.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_gdt::EXECUTOR_ID,
+    state_schema_hash: 0x2004,
+    permissions: MEM_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const CPUID_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_CPUID_NODE_ID,
+    local_node_key: "cpuid.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_cpuid::EXECUTOR_ID,
+    state_schema_hash: 0x2005,
+    permissions: NONE_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const PIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_PIC_NODE_ID,
+    local_node_key: "pic.entry",
+    node_type: RuntimeNodeType::Driver,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_pic::EXECUTOR_ID,
+    state_schema_hash: 0x2006,
+    permissions: PIC_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
 
 const VGA_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     node_id: K_VGA_NODE_ID,
@@ -510,6 +591,36 @@ const AI_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     vector_ref: None,
 }];
 
+const PANIC_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_panic::NODE_VEC,
+    local_node_key: "panic.entry",
+    executor: k_panic::EXECUTOR_VTABLE,
+}];
+
+const SERIAL_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_serial::NODE_VEC,
+    local_node_key: "serial.entry",
+    executor: k_serial::EXECUTOR_VTABLE,
+}];
+
+const GDT_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_gdt::NODE_VEC,
+    local_node_key: "gdt.entry",
+    executor: k_gdt::EXECUTOR_VTABLE,
+}];
+
+const CPUID_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_cpuid::NODE_VEC,
+    local_node_key: "cpuid.entry",
+    executor: k_cpuid::EXECUTOR_VTABLE,
+}];
+
+const PIC_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_pic::NODE_VEC,
+    local_node_key: "pic.entry",
+    executor: k_pic::EXECUTOR_VTABLE,
+}];
+
 const VGA_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_vga::NODE_VEC,
     local_node_key: "vga.entry",
@@ -583,9 +694,33 @@ const VGA_MANIFEST: PluginManifest = manifest_with_nodes(
     &[],
     VGA_NODE_SPECS,
 );
-const GDT_MANIFEST: PluginManifest = manifest(K_GDT_ID, "K_GDT", &[], MEM_PERMS, &[], &[]);
-const CPUID_MANIFEST: PluginManifest = manifest(K_CPUID_ID, "K_CPUID", &[], NONE_PERMS, &[], &[]);
-const PIC_MANIFEST: PluginManifest = manifest(K_PIC_ID, "K_PIC", &[], PIC_PERMS, &[], &[]);
+const GDT_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_GDT_ID,
+    "K_GDT",
+    &[],
+    MEM_PERMS,
+    &[],
+    &[],
+    GDT_NODE_SPECS,
+);
+const CPUID_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_CPUID_ID,
+    "K_CPUID",
+    &[],
+    NONE_PERMS,
+    &[],
+    &[],
+    CPUID_NODE_SPECS,
+);
+const PIC_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_PIC_ID,
+    "K_PIC",
+    &[],
+    PIC_PERMS,
+    &[],
+    &[],
+    PIC_NODE_SPECS,
+);
 const PIT_MANIFEST: PluginManifest = manifest(K_PIT_ID, "K_PIT", DEP_PIT, PIT_PERMS, &[], &[]);
 const PS2_MANIFEST: PluginManifest = manifest(K_PS2_ID, "K_PS2", DEP_PS2, PS2_PERMS, &[], &[]);
 const IDT_MANIFEST: PluginManifest = manifest(K_IDT_ID, "K_IDT", DEP_IDT, IRQ_PERMS, &[], &[]);
@@ -724,19 +859,17 @@ const fn manifest_with_nodes(
 }
 
 const BUILTIN_MODULES: [BuiltinModule; 19] = [
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: PANIC_MANIFEST,
         granted_permissions: NONE_PERMS,
-        node: legacy_node(k_panic::NODE_VEC, "panic.entry", RuntimeNodeType::Service, "legacy.panic", 0x1001, NONE_PERMS, &[]),
-        entry: panic_entry,
-        load_hook: None,
+        nodes: PANIC_NATIVE_NODES,
+        register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: SERIAL_MANIFEST,
         granted_permissions: SERIAL_PERMS,
-        node: legacy_node(k_serial::NODE_VEC, "serial.entry", RuntimeNodeType::Driver, "legacy.serial", 0x1002, SERIAL_PERMS, SERIAL_EXPORTS),
-        entry: serial_entry,
-        load_hook: None,
+        nodes: SERIAL_NATIVE_NODES,
+        register_hook: None,
     }),
     BuiltinModule::Native(NativeModule {
         manifest: VGA_MANIFEST,
@@ -744,26 +877,23 @@ const BUILTIN_MODULES: [BuiltinModule; 19] = [
         nodes: VGA_NATIVE_NODES,
         register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: GDT_MANIFEST,
         granted_permissions: MEM_PERMS,
-        node: legacy_node(k_gdt::NODE_VEC, "gdt.entry", RuntimeNodeType::Service, "legacy.gdt", 0x1004, MEM_PERMS, &[]),
-        entry: gdt_entry,
-        load_hook: Some(gdt_load_hook),
+        nodes: GDT_NATIVE_NODES,
+        register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: CPUID_MANIFEST,
         granted_permissions: NONE_PERMS,
-        node: legacy_node(k_cpuid::NODE_VEC, "cpuid.entry", RuntimeNodeType::Service, "legacy.cpuid", 0x1005, NONE_PERMS, &[]),
-        entry: cpuid_entry,
-        load_hook: None,
+        nodes: CPUID_NATIVE_NODES,
+        register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: PIC_MANIFEST,
         granted_permissions: PIC_PERMS,
-        node: legacy_node(k_pic::NODE_VEC, "pic.entry", RuntimeNodeType::Driver, "legacy.pic", 0x1006, PIC_PERMS, &[]),
-        entry: pic_entry,
-        load_hook: Some(pic_load_hook),
+        nodes: PIC_NATIVE_NODES,
+        register_hook: None,
     }),
     BuiltinModule::Legacy(LegacyModule {
         manifest: PIT_MANIFEST,
@@ -1443,26 +1573,6 @@ fn map_legacy_edge_type(edge_type: u8) -> RuntimeEdgeType {
     }
 }
 
-fn panic_entry(ctx: &mut BootContext) {
-    <k_panic::PanicCell as PluginEntry>::plugin_main(ctx);
-}
-
-fn serial_entry(ctx: &mut BootContext) {
-    <k_serial::SerialCell as PluginEntry>::plugin_main(ctx);
-}
-
-fn gdt_entry(ctx: &mut BootContext) {
-    <k_gdt::GdtCell as PluginEntry>::plugin_main(ctx);
-}
-
-fn cpuid_entry(ctx: &mut BootContext) {
-    <k_cpuid::CpuidCell as PluginEntry>::plugin_main(ctx);
-}
-
-fn pic_entry(ctx: &mut BootContext) {
-    <k_pic::PicCell as PluginEntry>::plugin_main(ctx);
-}
-
 fn pit_entry(ctx: &mut BootContext) {
     <k_pit::PitCell as PluginEntry>::plugin_main(ctx);
 }
@@ -1485,14 +1595,6 @@ fn vmm_entry(ctx: &mut BootContext) {
 
 fn heap_entry(ctx: &mut BootContext) {
     <k_heap::HeapCell as PluginEntry>::plugin_main(ctx);
-}
-
-fn gdt_load_hook() {
-    k_gdt::init_gdt();
-}
-
-fn pic_load_hook() {
-    k_pic::init_pic();
 }
 
 fn pit_load_hook() {

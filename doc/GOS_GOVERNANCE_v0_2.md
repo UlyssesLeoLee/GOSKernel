@@ -105,11 +105,6 @@ AI、shell、cypher 可以观察或驱动控制面，但不能绕过 supervisor 
 
 当前 legacy allowlist 仅作为迁移债务存在：
 
-- `k-panic`
-- `k-serial`
-- `k-gdt`
-- `k-cpuid`
-- `k-pic`
 - `k-pit`
 - `k-ps2`
 - `k-idt`

@@ -120,11 +120,6 @@ GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原
 
 当前仍在治理 allowlist 中的迁移岛为：
 
-- `k-panic`
-- `k-serial`
-- `k-gdt`
-- `k-cpuid`
-- `k-pic`
 - `k-pit`
 - `k-ps2`
 - `k-idt`

@@ -1,61 +1,79 @@
 #![no_std]
 
-use gos_protocol::*;
-use gos_hal::{vaddr, meta};
+use gos_hal::{meta, vaddr};
+use gos_protocol::{
+    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+    Signal, VectorAddress,
+};
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 0, 0, 0);
+pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.panic");
+pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: EXECUTOR_ID,
+    on_init: Some(panic_on_init),
+    on_event: Some(panic_on_event),
+    on_suspend: Some(panic_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
 
-pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
-
-pub unsafe fn init_node_state() {
-    let p = node_ptr();
-    meta::burn_node_metadata(p, "BOOT", "PANIC");
+#[repr(C)]
+struct PanicState {
+    halts_requested: u64,
+    last_signal_kind: u8,
 }
 
-pub struct PanicCell { state: NodeState }
-
-impl PanicCell {
-    pub const fn new() -> Self { Self { state: NodeState::Unregistered } }
+fn hal_node_ptr() -> *mut u8 {
+    vaddr::resolve_hal_node(NODE_VEC)
 }
 
-impl NodeCell for PanicCell {
-    fn declare(&self) -> CellDeclaration {
-        let mut edges = [CellEdge::NONE; MAX_CELL_EDGES];
-        edges[0] = CellEdge::new("HALT", 0x04, 0);
-        CellDeclaration {
-            vec: NODE_VEC, domain_label: "BOOT", name: "PANIC",
-            edges, edge_count: 1, depends_on: &[],
-        }
+unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut PanicState {
+    let ctx = unsafe { &mut *ctx };
+    unsafe { &mut *(ctx.state_ptr as *mut PanicState) }
+}
+
+fn signal_kind_code(signal: Signal) -> u8 {
+    match signal {
+        Signal::Call { .. } => 0x01,
+        Signal::Spawn { .. } => 0x02,
+        Signal::Interrupt { .. } => 0x03,
+        Signal::Data { .. } => 0x04,
+        Signal::Control { .. } => 0x05,
+        Signal::Terminate => 0xFF,
     }
+}
 
-    unsafe fn init(&mut self) {
-        init_node_state();
-        self.state = NodeState::Ready;
+unsafe extern "C" fn panic_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe {
+        meta::burn_node_metadata(hal_node_ptr(), "BOOT", "PANIC");
+        core::ptr::write(
+            (*ctx).state_ptr as *mut PanicState,
+            PanicState {
+                halts_requested: 0,
+                last_signal_kind: 0,
+            },
+        );
     }
+    ExecStatus::Done
+}
 
-    fn on_activate(&mut self) -> CellResult { CellResult::Done }
+unsafe extern "C" fn panic_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
+    let signal = unsafe { packet_to_signal((*event).signal) };
+    let state = unsafe { state_mut(ctx) };
+    state.last_signal_kind = signal_kind_code(signal);
 
-    fn on_signal(&mut self, signal: Signal) -> CellResult {
-        match signal {
-            Signal::Interrupt { irq: 0xFF } => {
-                loop { x86_64::instructions::hlt(); }
+    if let Signal::Interrupt { irq } = signal {
+        if irq == 0xFF {
+            state.halts_requested = state.halts_requested.saturating_add(1);
+            loop {
+                x86_64::instructions::hlt();
             }
-            _ => CellResult::Done,
         }
     }
 
-    fn on_suspend(&mut self) {}
-    fn state(&self) -> NodeState { self.state }
-    fn vec(&self) -> VectorAddress { NODE_VEC }
+    ExecStatus::Done
 }
 
-pub static PANIC_CELL: spin::Mutex<PanicCell> = spin::Mutex::new(PanicCell::new());
-
-impl PluginEntry for PanicCell {
-    const VEC: VectorAddress = NODE_VEC;
-    const WAVEFRONT: u32 = 0;
-
-    fn plugin_main(_ctx: &mut BootContext) {
-        gos_hal::ngr::try_mount_cell(Self::VEC, &PANIC_CELL);
-    }
+unsafe extern "C" fn panic_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
+    ExecStatus::Done
 }

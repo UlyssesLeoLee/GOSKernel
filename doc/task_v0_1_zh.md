@@ -14,10 +14,11 @@
 ## Phase A：清零 legacy island
 
 - [ ] 为每个 legacy crate 指定迁移 owner 和迁移顺序
-- [ ] `k-serial` 迁到 manifest-native / executor-driven
-- [ ] `k-gdt` 迁到 manifest-native / executor-driven
-- [ ] `k-cpuid` 迁到 manifest-native / executor-driven
-- [ ] `k-pic` 迁到 manifest-native / executor-driven
+- [x] `k-panic` 已迁到 manifest-native / executor-driven
+- [x] `k-serial` 已迁到 manifest-native / executor-driven
+- [x] `k-gdt` 已迁到 manifest-native / executor-driven
+- [x] `k-cpuid` 已迁到 manifest-native / executor-driven
+- [x] `k-pic` 已迁到 manifest-native / executor-driven
 - [ ] `k-pit` 迁到 manifest-native / executor-driven
 - [ ] `k-ps2` 迁到 manifest-native / executor-driven
 - [ ] `k-idt` 迁到 manifest-native / executor-driven

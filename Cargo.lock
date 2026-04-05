@@ -114,7 +114,6 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
- "spin",
 ]
 
 [[package]]
@@ -198,7 +197,6 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
- "spin",
  "x86_64",
 ]
 

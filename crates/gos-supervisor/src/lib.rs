@@ -1354,9 +1354,15 @@ impl Supervisor {
         Ok(())
     }
 
+    fn free_claim_slot(&mut self, slot: usize) -> ClaimRecord {
+        let claim = self.claims[slot];
+        self.claims[slot] = ClaimRecord::EMPTY;
+        claim
+    }
+
     fn release_claim_internal(&mut self, claim_id: ClaimId) -> Result<(), SupervisorError> {
         let slot = self.find_claim_slot(claim_id)?;
-        self.claims[slot].active = false;
+        let _ = self.free_claim_slot(slot);
         Ok(())
     }
 
@@ -1450,8 +1456,7 @@ impl Supervisor {
             let mut idx = 0usize;
             while idx < active_count {
                 let claim_slot = active_slots[idx];
-                let claim = self.claims[claim_slot];
-                self.claims[claim_slot].active = false;
+                let claim = self.free_claim_slot(claim_slot);
                 let _ = self.queue_revocation(ResourceLease {
                     claim_id: claim.id,
                     resource_id: claim.resource,
