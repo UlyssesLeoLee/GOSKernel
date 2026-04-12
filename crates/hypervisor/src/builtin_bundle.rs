@@ -382,6 +382,11 @@ const K_SERIAL_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SERIAL_ID, "seri
 const K_GDT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_GDT_ID, "gdt.entry");
 const K_CPUID_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CPUID_ID, "cpuid.entry");
 const K_PIC_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PIC_ID, "pic.entry");
+const K_IDT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IDT_ID, "idt.entry");
+const K_PS2_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PS2_ID, "ps2.entry");
+const K_PMM_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PMM_ID, "pmm.entry");
+const K_VMM_NODE_ID: gos_protocol::NodeId = derive_node_id(K_VMM_ID, "vmm.entry");
+const K_HEAP_NODE_ID: gos_protocol::NodeId = derive_node_id(K_HEAP_ID, "heap.entry");
 const K_VGA_NODE_ID: gos_protocol::NodeId = derive_node_id(K_VGA_ID, "vga.entry");
 const K_IME_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IME_ID, "ime.router");
 const K_NET_NODE_ID: gos_protocol::NodeId = derive_node_id(K_NET_ID, "net.uplink");
@@ -452,6 +457,66 @@ const PIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     state_schema_hash: 0x2006,
     permissions: PIC_PERMS,
     exports: &[],
+    vector_ref: None,
+}];
+
+const IDT_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_IDT_NODE_ID,
+    local_node_key: "idt.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_idt::EXECUTOR_ID,
+    state_schema_hash: 0x2009,
+    permissions: IRQ_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const PS2_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_PS2_NODE_ID,
+    local_node_key: "ps2.entry",
+    node_type: RuntimeNodeType::Driver,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_ps2::EXECUTOR_ID,
+    state_schema_hash: 0x2008,
+    permissions: PS2_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const PMM_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_PMM_NODE_ID,
+    local_node_key: "pmm.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_pmm::EXECUTOR_ID,
+    state_schema_hash: 0x200A,
+    permissions: MEM_PERMS,
+    exports: PMM_EXPORTS,
+    vector_ref: None,
+}];
+
+const VMM_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_VMM_NODE_ID,
+    local_node_key: "vmm.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_vmm::EXECUTOR_ID,
+    state_schema_hash: 0x200B,
+    permissions: MEM_PERMS,
+    exports: VMM_EXPORTS,
+    vector_ref: None,
+}];
+
+const HEAP_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_HEAP_NODE_ID,
+    local_node_key: "heap.entry",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_heap::EXECUTOR_ID,
+    state_schema_hash: 0x200C,
+    permissions: MEM_PERMS,
+    exports: HEAP_EXPORTS,
     vector_ref: None,
 }];
 
@@ -621,6 +686,36 @@ const PIC_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     executor: k_pic::EXECUTOR_VTABLE,
 }];
 
+const IDT_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_idt::NODE_VEC,
+    local_node_key: "idt.entry",
+    executor: k_idt::EXECUTOR_VTABLE,
+}];
+
+const PS2_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_ps2::NODE_VEC,
+    local_node_key: "ps2.entry",
+    executor: k_ps2::EXECUTOR_VTABLE,
+}];
+
+const PMM_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_pmm::NODE_VEC,
+    local_node_key: "pmm.entry",
+    executor: k_pmm::EXECUTOR_VTABLE,
+}];
+
+const VMM_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_vmm::NODE_VEC,
+    local_node_key: "vmm.entry",
+    executor: k_vmm::EXECUTOR_VTABLE,
+}];
+
+const HEAP_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_heap::NODE_VEC,
+    local_node_key: "heap.entry",
+    executor: k_heap::EXECUTOR_VTABLE,
+}];
+
 const VGA_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_vga::NODE_VEC,
     local_node_key: "vga.entry",
@@ -722,11 +817,51 @@ const PIC_MANIFEST: PluginManifest = manifest_with_nodes(
     PIC_NODE_SPECS,
 );
 const PIT_MANIFEST: PluginManifest = manifest(K_PIT_ID, "K_PIT", DEP_PIT, PIT_PERMS, &[], &[]);
-const PS2_MANIFEST: PluginManifest = manifest(K_PS2_ID, "K_PS2", DEP_PS2, PS2_PERMS, &[], &[]);
-const IDT_MANIFEST: PluginManifest = manifest(K_IDT_ID, "K_IDT", DEP_IDT, IRQ_PERMS, &[], &[]);
-const PMM_MANIFEST: PluginManifest = manifest(K_PMM_ID, "K_PMM", &[], MEM_PERMS, PMM_EXPORTS, &[]);
-const VMM_MANIFEST: PluginManifest = manifest(K_VMM_ID, "K_VMM", DEP_VMM, MEM_PERMS, VMM_EXPORTS, &[]);
-const HEAP_MANIFEST: PluginManifest = manifest(K_HEAP_ID, "K_HEAP", DEP_HEAP, MEM_PERMS, HEAP_EXPORTS, &[]);
+const PS2_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_PS2_ID,
+    "K_PS2",
+    DEP_PS2,
+    PS2_PERMS,
+    &[],
+    &[],
+    PS2_NODE_SPECS,
+);
+const IDT_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_IDT_ID,
+    "K_IDT",
+    DEP_IDT,
+    IRQ_PERMS,
+    &[],
+    &[],
+    IDT_NODE_SPECS,
+);
+const PMM_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_PMM_ID,
+    "K_PMM",
+    &[],
+    MEM_PERMS,
+    PMM_EXPORTS,
+    &[],
+    PMM_NODE_SPECS,
+);
+const VMM_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_VMM_ID,
+    "K_VMM",
+    DEP_VMM,
+    MEM_PERMS,
+    VMM_EXPORTS,
+    &[],
+    VMM_NODE_SPECS,
+);
+const HEAP_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_HEAP_ID,
+    "K_HEAP",
+    DEP_HEAP,
+    MEM_PERMS,
+    HEAP_EXPORTS,
+    &[],
+    HEAP_NODE_SPECS,
+);
 const IME_MANIFEST: PluginManifest = manifest_with_nodes(
     K_IME_ID,
     "K_IME",
@@ -902,40 +1037,35 @@ const BUILTIN_MODULES: [BuiltinModule; 19] = [
         entry: pit_entry,
         load_hook: Some(pit_load_hook),
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: PS2_MANIFEST,
         granted_permissions: PS2_PERMS,
-        node: legacy_node(k_ps2::NODE_VEC, "ps2.entry", RuntimeNodeType::Driver, "legacy.ps2", 0x1008, PS2_PERMS, &[]),
-        entry: ps2_entry,
-        load_hook: None,
+        nodes: PS2_NATIVE_NODES,
+        register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: IDT_MANIFEST,
         granted_permissions: IRQ_PERMS,
-        node: legacy_node(k_idt::NODE_VEC, "idt.entry", RuntimeNodeType::Service, "legacy.idt", 0x1009, IRQ_PERMS, &[]),
-        entry: idt_entry,
-        load_hook: Some(idt_load_hook),
+        nodes: IDT_NATIVE_NODES,
+        register_hook: Some(idt_load_hook),
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: PMM_MANIFEST,
         granted_permissions: MEM_PERMS,
-        node: legacy_node(k_pmm::NODE_VEC, "pmm.entry", RuntimeNodeType::Service, "legacy.pmm", 0x100A, MEM_PERMS, PMM_EXPORTS),
-        entry: pmm_entry,
-        load_hook: None,
+        nodes: PMM_NATIVE_NODES,
+        register_hook: Some(k_pmm::register_hook),
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: VMM_MANIFEST,
         granted_permissions: MEM_PERMS,
-        node: legacy_node(k_vmm::NODE_VEC, "vmm.entry", RuntimeNodeType::Service, "legacy.vmm", 0x100B, MEM_PERMS, VMM_EXPORTS),
-        entry: vmm_entry,
-        load_hook: None,
+        nodes: VMM_NATIVE_NODES,
+        register_hook: Some(k_vmm::register_hook),
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: HEAP_MANIFEST,
         granted_permissions: MEM_PERMS,
-        node: legacy_node(k_heap::NODE_VEC, "heap.entry", RuntimeNodeType::Service, "legacy.heap", 0x100C, MEM_PERMS, HEAP_EXPORTS),
-        entry: heap_entry,
-        load_hook: None,
+        nodes: HEAP_NATIVE_NODES,
+        register_hook: None,
     }),
     BuiltinModule::Native(NativeModule {
         manifest: IME_MANIFEST,
@@ -1577,42 +1707,43 @@ fn pit_entry(ctx: &mut BootContext) {
     <k_pit::PitCell as PluginEntry>::plugin_main(ctx);
 }
 
-fn ps2_entry(ctx: &mut BootContext) {
-    <k_ps2::Ps2Cell as PluginEntry>::plugin_main(ctx);
-}
 
-fn idt_entry(ctx: &mut BootContext) {
-    <k_idt::IdtCell as PluginEntry>::plugin_main(ctx);
-}
 
-fn pmm_entry(ctx: &mut BootContext) {
-    <k_pmm::PmmCell as PluginEntry>::plugin_main(ctx);
-}
 
-fn vmm_entry(ctx: &mut BootContext) {
-    <k_vmm::VmmCell as PluginEntry>::plugin_main(ctx);
-}
 
-fn heap_entry(ctx: &mut BootContext) {
-    <k_heap::HeapCell as PluginEntry>::plugin_main(ctx);
-}
+
+
+
+
+
 
 fn pit_load_hook() {
     k_pit::init_pit_hz(120);
 }
 
-fn idt_load_hook() {
-    k_idt::inject_irq_handler(
-        k_pic::InterruptIndex::Timer.as_usize(),
-        k_pit::timer_interrupt_handler,
+fn idt_load_hook(_ctx: &mut BootContext) {
+    // ── Graph-native IRQ routing ──────────────────────────────────────
+    // Instead of injecting per-driver extern "x86-interrupt" handler
+    // function pointers into the IDT, we register each driver's graph
+    // node as the subscriber for its IRQ vector. The unified handlers
+    // in k-idt will normalise every interrupt into a HardwareEvent
+    // token and post it through `gos_runtime::post_irq_signal()`.
+    // The supervisor's pump() loop then delivers Signal::Interrupt to
+    // the subscribed node's on_signal() callback.
+    //
+    // This removes the hard coupling between k-idt ↔ k-pit/k-ps2/k-mouse
+    // and makes IRQ ownership a first-class graph relationship.
+
+    gos_runtime::subscribe_irq(
+        k_pic::InterruptIndex::Timer.as_u8(),
+        k_pit::NODE_VEC,
     );
-    k_idt::inject_irq_handler(
-        k_pic::InterruptIndex::Keyboard.as_usize(),
-        k_ps2::keyboard_interrupt_handler,
+    gos_runtime::subscribe_irq(
+        k_pic::InterruptIndex::Keyboard.as_u8(),
+        k_ps2::NODE_VEC,
     );
-    k_idt::inject_irq_handler(
-        k_pic::InterruptIndex::Mouse.as_usize(),
-        k_mouse::mouse_interrupt_handler,
+    gos_runtime::subscribe_irq(
+        k_pic::InterruptIndex::Mouse.as_u8(),
+        k_mouse::NODE_VEC,
     );
-    k_idt::init_idt();
 }

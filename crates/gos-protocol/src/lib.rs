@@ -8,6 +8,9 @@
 pub mod stem;
 pub use stem::*;
 
+pub mod trap;
+pub use trap::{TrapFrame, TrapVector, TrapClass, HardwareEvent};
+
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const GOS_ABI_VERSION: u32 = 2;
 pub const CONTROL_PLANE_PROTOCOL_VERSION: u16 = 1;

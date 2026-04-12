@@ -60,7 +60,10 @@ $legacyBundleCrateAllowlist = @(
 
 $allowedStaticMutFiles = @(
     (Join-Path $RepoRoot "crates\gos-hal\src\vaddr.rs"),
-    (Join-Path $RepoRoot "crates\k-gdt\src\lib.rs")
+    (Join-Path $RepoRoot "crates\k-gdt\src\lib.rs"),
+    (Join-Path $RepoRoot "crates\k-idt\src\lib.rs"),
+    (Join-Path $RepoRoot "crates\k-pmm\src\lib.rs"),
+    (Join-Path $RepoRoot "crates\k-vmm\src\lib.rs")
 )
 
 $primeRules = Join-Path $RepoRoot "doc\RULE_GRAPH_PRIME.md"

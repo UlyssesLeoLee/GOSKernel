@@ -12,6 +12,18 @@ use gos_protocol::*;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(2, 2, 0, 0);
 
+pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.vmm");
+pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: EXECUTOR_ID,
+    on_init: Some(vmm_on_init),
+    on_event: Some(vmm_on_event),
+    on_suspend: Some(vmm_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
+
+static mut BOOT_INFO_PTR: u64 = 0;
+
 pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
 
 #[repr(C)]
@@ -34,55 +46,33 @@ pub unsafe fn mapper() -> OffsetPageTable<'static> {
     OffsetPageTable::new(&mut *page_table_ptr, phys_offset)
 }
 
-pub unsafe fn init_node_state(physical_memory_offset: u64) {
+pub fn register_hook(ctx: &mut BootContext) {
+    unsafe { BOOT_INFO_PTR = ctx.payload; }
+}
+
+unsafe extern "C" fn vmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     let p = node_ptr();
     meta::burn_node_metadata(p, "MEM", "VMM");
-    let state_ptr = p.add(1024) as *mut VmmState;
-    core::ptr::write(state_ptr, VmmState { phys_offset: physical_memory_offset });
-}
-
-pub struct VmmCell { state: NodeState }
-
-impl VmmCell {
-    pub const fn new() -> Self { Self { state: NodeState::Unregistered } }
-}
-
-impl NodeCell for VmmCell {
-    fn declare(&self) -> CellDeclaration {
-        let mut edges = [CellEdge::NONE; MAX_CELL_EDGES];
-        edges[0] = CellEdge::new("MAP",   0x01, 0);
-        edges[1] = CellEdge::new("UNMAP", 0x01, 0);
-        CellDeclaration {
-            vec: NODE_VEC, domain_label: "MEM", name: "VMM",
-            edges, edge_count: 2, depends_on: &[],
+    
+    let boot_info_payload = BOOT_INFO_PTR;
+    if boot_info_payload != 0 {
+        let boot_info_ptr = boot_info_payload as *const bootloader::BootInfo;
+        let offset: Option<u64> = (*boot_info_ptr).physical_memory_offset.into();
+        if let Some(o) = offset {
+            let state_ptr = p.add(1024) as *mut VmmState;
+            core::ptr::write(state_ptr, VmmState { phys_offset: o });
         }
     }
-
-    unsafe fn init(&mut self) { self.state = NodeState::Ready; }
-
-    fn on_activate(&mut self) -> CellResult { CellResult::Done }
-    fn on_signal(&mut self, _: Signal) -> CellResult { CellResult::Done }
-    fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
-    fn state(&self) -> NodeState { self.state }
-    fn vec(&self) -> VectorAddress { NODE_VEC }
+    
+    ExecStatus::Done
 }
 
-pub static VMM_CELL: spin::Mutex<VmmCell> = spin::Mutex::new(VmmCell::new());
+unsafe extern "C" fn vmm_on_event(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+    ExecStatus::Done
+}
 
-impl PluginEntry for VmmCell {
-    const VEC: VectorAddress = NODE_VEC;
-    const WAVEFRONT: u32 = 6; // Depends on PMM
-
-    fn plugin_main(ctx: &mut BootContext) {
-        unsafe {
-            let boot_info_ptr = ctx.payload as *const bootloader::BootInfo;
-            let offset: Option<u64> = (*boot_info_ptr).physical_memory_offset.into();
-            if let Some(o) = offset {
-                init_node_state(o);
-            }
-        }
-        gos_hal::ngr::try_mount_cell(Self::VEC, &VMM_CELL);
-    }
+unsafe extern "C" fn vmm_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
+    ExecStatus::Done
 }
 
 struct PmmFrameAllocatorEdge;

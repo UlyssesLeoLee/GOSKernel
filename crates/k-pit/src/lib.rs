@@ -1,9 +1,7 @@
 #![no_std]
-#![feature(abi_x86_interrupt)]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::instructions::port::Port;
-use x86_64::structures::idt::InterruptStackFrame;
 use gos_protocol::*;
 use gos_hal::{vaddr, meta};
 
@@ -48,7 +46,18 @@ impl NodeCell for PitCell {
     unsafe fn init(&mut self) { init_node_state(); self.state = NodeState::Ready; }
 
     fn on_activate(&mut self) -> CellResult { CellResult::Done }
-    fn on_signal(&mut self, _: Signal) -> CellResult { CellResult::Done }
+    fn on_signal(&mut self, signal: Signal) -> CellResult {
+        if let Signal::Interrupt { irq } = signal {
+            if irq == k_pic::InterruptIndex::Timer.as_u8() {
+                ticks().fetch_add(1, Ordering::Relaxed);
+                gos_hal::ngr::post_signal(
+                    k_shell::NODE_VEC,
+                    Signal::Interrupt { irq },
+                );
+            }
+        }
+        CellResult::Done 
+    }
     fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
     fn state(&self) -> NodeState { self.state }
     fn vec(&self) -> VectorAddress { NODE_VEC }
@@ -79,15 +88,3 @@ pub fn init_pit_hz(hz: u32) {
     }
 }
 
-pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    ticks().fetch_add(1, Ordering::Relaxed);
-    gos_hal::ngr::post_signal(
-        k_shell::NODE_VEC,
-        Signal::Interrupt { irq: k_pic::InterruptIndex::Timer.as_u8() },
-    );
-    // Remove the vga print dependency from interrupt to minimize coupling, or add it back later if needed.
-    unsafe {
-        k_pic::pics().lock()
-            .notify_end_of_interrupt(k_pic::InterruptIndex::Timer.as_u8());
-    }
-}

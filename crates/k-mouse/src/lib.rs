@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(abi_x86_interrupt)]
 
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
@@ -9,7 +8,6 @@ use gos_protocol::{
     NodeEvent, NodeExecutorVTable, Signal, VectorAddress,
 };
 use x86_64::instructions::port::Port;
-use x86_64::structures::idt::InterruptStackFrame;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(6, 5, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.mouse");
@@ -242,7 +240,35 @@ unsafe extern "C" fn mouse_on_event(ctx: *mut ExecutorContext, event: *const Nod
             ExecStatus::Done
         }
         Signal::Interrupt { irq } if irq == MOUSE_IRQ => {
-            apply_pending_motion(ctx);
+            let mut port = Port::<u8>::new(PS2_DATA_PORT);
+            let byte = unsafe { port.read() };
+            let slot = PACKET_INDEX.load(Ordering::Relaxed);
+
+            match slot {
+                0 => {
+                    PACKET0.store(byte, Ordering::Relaxed);
+                    PACKET_INDEX.store(1, Ordering::Relaxed);
+                }
+                1 => {
+                    PACKET1.store(byte, Ordering::Relaxed);
+                    PACKET_INDEX.store(2, Ordering::Relaxed);
+                }
+                _ => {
+                    PACKET2.store(byte, Ordering::Relaxed);
+                    PACKET_INDEX.store(0, Ordering::Relaxed);
+
+                    let p0 = PACKET0.load(Ordering::Relaxed);
+                    let p1 = PACKET1.load(Ordering::Relaxed);
+                    let p2 = PACKET2.load(Ordering::Relaxed);
+                    if (p0 & 0x08) != 0 && (p0 & 0xC0) == 0 {
+                        PENDING_DX.fetch_add((p1 as i8) as i32, Ordering::Relaxed);
+                        PENDING_DY.fetch_add((p2 as i8) as i32, Ordering::Relaxed);
+                        PENDING_BUTTONS.store(p0 & 0x07, Ordering::Relaxed);
+                        
+                        apply_pending_motion(ctx);
+                    }
+                }
+            }
             ExecStatus::Done
         }
         _ => ExecStatus::Done,
@@ -251,39 +277,4 @@ unsafe extern "C" fn mouse_on_event(ctx: *mut ExecutorContext, event: *const Nod
 
 unsafe extern "C" fn mouse_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
-}
-
-pub extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let mut port = Port::<u8>::new(PS2_DATA_PORT);
-    let byte = unsafe { port.read() };
-    let slot = PACKET_INDEX.load(Ordering::Relaxed);
-
-    match slot {
-        0 => {
-            PACKET0.store(byte, Ordering::Relaxed);
-            PACKET_INDEX.store(1, Ordering::Relaxed);
-        }
-        1 => {
-            PACKET1.store(byte, Ordering::Relaxed);
-            PACKET_INDEX.store(2, Ordering::Relaxed);
-        }
-        _ => {
-            PACKET2.store(byte, Ordering::Relaxed);
-            PACKET_INDEX.store(0, Ordering::Relaxed);
-
-            let p0 = PACKET0.load(Ordering::Relaxed);
-            let p1 = PACKET1.load(Ordering::Relaxed);
-            let p2 = PACKET2.load(Ordering::Relaxed);
-            if (p0 & 0x08) != 0 && (p0 & 0xC0) == 0 {
-                PENDING_DX.fetch_add((p1 as i8) as i32, Ordering::Relaxed);
-                PENDING_DY.fetch_add((p2 as i8) as i32, Ordering::Relaxed);
-                PENDING_BUTTONS.store(p0 & 0x07, Ordering::Relaxed);
-                gos_hal::ngr::post_signal(NODE_VEC, Signal::Interrupt { irq: MOUSE_IRQ });
-            }
-        }
-    }
-
-    unsafe {
-        k_pic::pics().lock().notify_end_of_interrupt(k_pic::InterruptIndex::Mouse.as_u8());
-    }
 }

@@ -8,6 +8,17 @@ use gos_protocol::*;
 use gos_hal::{vaddr, meta};
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 11, 0, 0);
+pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.pmm");
+pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: EXECUTOR_ID,
+    on_init: Some(pmm_on_init),
+    on_event: Some(pmm_on_event),
+    on_suspend: Some(pmm_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+};
+
+static mut BOOT_INFO_PTR: u64 = 0;
 
 pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
 
@@ -49,56 +60,31 @@ pub fn allocator() -> &'static Mutex<BootInfoFrameAllocator> {
     }
 }
 
-pub unsafe fn init_node_state(boot_info_payload: u64) {
-    let p = node_ptr();
-    meta::burn_node_metadata(p, "SYS", "PMM");
-
-    let boot_info_ptr = boot_info_payload as *const bootloader::BootInfo;
-    let memory_map = &(*boot_info_ptr).memory_map;
-
-    let alloc = BootInfoFrameAllocator::init(memory_map);
-
-    let state_ptr = p.add(1024) as *mut Mutex<BootInfoFrameAllocator>;
-    core::ptr::write(state_ptr, Mutex::new(alloc));
+pub fn register_hook(ctx: &mut BootContext) {
+    unsafe { BOOT_INFO_PTR = ctx.payload; }
 }
 
-pub struct PmmCell { state: NodeState }
+unsafe extern "C" fn pmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe {
+        let p = node_ptr();
+        meta::burn_node_metadata(p, "SYS", "PMM");
 
-impl PmmCell {
-    pub const fn new() -> Self { Self { state: NodeState::Unregistered } }
+        let boot_info_payload = BOOT_INFO_PTR;
+        let boot_info_ptr = boot_info_payload as *const bootloader::BootInfo;
+        let memory_map = &(*boot_info_ptr).memory_map;
+
+        let alloc = BootInfoFrameAllocator::init(memory_map);
+
+        let state_ptr = p.add(1024) as *mut Mutex<BootInfoFrameAllocator>;
+        core::ptr::write(state_ptr, Mutex::new(alloc));
+    }
+    ExecStatus::Done
 }
 
-impl NodeCell for PmmCell {
-    fn declare(&self) -> CellDeclaration {
-        let mut edges = [CellEdge::NONE; MAX_CELL_EDGES];
-        edges[0] = CellEdge::new("ALLOC", 0x01, 0);
-        edges[1] = CellEdge::new("FREE", 0x01, 0);
-        CellDeclaration {
-            vec: NODE_VEC, domain_label: "SYS", name: "PMM",
-            edges, edge_count: 2, depends_on: &[],
-        }
-    }
-
-    unsafe fn init(&mut self) { 
-        // Real init happens in plugin_main
-        self.state = NodeState::Ready; 
-    }
-
-    fn on_activate(&mut self) -> CellResult { CellResult::Done }
-    fn on_signal(&mut self, _: Signal) -> CellResult { CellResult::Done }
-    fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
-    fn state(&self) -> NodeState { self.state }
-    fn vec(&self) -> VectorAddress { NODE_VEC }
+unsafe extern "C" fn pmm_on_event(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+    ExecStatus::Done
 }
 
-pub static PMM_CELL: spin::Mutex<PmmCell> = spin::Mutex::new(PmmCell::new());
-
-impl PluginEntry for PmmCell {
-    const VEC: VectorAddress = NODE_VEC;
-    const WAVEFRONT: u32 = 5;
-
-    fn plugin_main(ctx: &mut BootContext) {
-        unsafe { init_node_state(ctx.payload); }
-        gos_hal::ngr::try_mount_cell(Self::VEC, &PMM_CELL);
-    }
+unsafe extern "C" fn pmm_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
+    ExecStatus::Done
 }

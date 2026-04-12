@@ -160,6 +160,7 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
+ "gos-runtime",
  "k-gdt",
  "spin",
  "x86_64",

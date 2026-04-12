@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
-gos-hal = { path = "../gos-hal" }
-k-gdt = { path = "../k-gdt" }
-spin = "0.9"
-x86_64 = "0.14"
+gos-hal      = { path = "../gos-hal" }
+gos-runtime  = { path = "../gos-runtime" }
+k-gdt        = { path = "../k-gdt" }
+spin         = "0.9"
+x86_64       = "0.14"

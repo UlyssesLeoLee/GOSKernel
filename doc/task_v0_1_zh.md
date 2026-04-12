@@ -19,12 +19,12 @@
 - [x] `k-gdt` 已迁到 manifest-native / executor-driven
 - [x] `k-cpuid` 已迁到 manifest-native / executor-driven
 - [x] `k-pic` 已迁到 manifest-native / executor-driven
-- [ ] `k-pit` 迁到 manifest-native / executor-driven
-- [ ] `k-ps2` 迁到 manifest-native / executor-driven
-- [ ] `k-idt` 迁到 manifest-native / executor-driven
-- [ ] `k-pmm` 迁到 manifest-native / executor-driven
-- [ ] `k-vmm` 迁到 manifest-native / executor-driven
-- [ ] `k-heap` 迁到 bootstrap/legacy-provider 过渡角色后继续收缩
+- [x] `k-pit` 迁到 manifest-native / executor-driven
+- [x] `k-ps2` 迁到 manifest-native / executor-driven
+- [x] `k-idt` 迁到 manifest-native / executor-driven
+- [x] `k-pmm` 迁到 manifest-native / executor-driven
+- [x] `k-vmm` 迁到 manifest-native / executor-driven
+- [x] `k-heap` 迁到 bootstrap/legacy-provider 过渡角色后继续收缩
 - [ ] 每迁完一个 crate，就同步收紧 verifier allowlist
 
 ## Phase B：补齐原子化底座

@@ -1315,3 +1315,76 @@ pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
 pub fn bootstrap_context(payload: u64) -> BootContext {
     BootContext::new(payload)
 }
+
+// ── Hardware IRQ → Graph routing table ───────────────────────────────────────
+//
+// Every IRQ vector (0–255) maps to a target VectorAddress in the graph.
+// Plugins register their target with `subscribe_irq(vector, node_vec)` at boot.
+//
+// Design invariants (enforced here):
+//   - At most ONE subscriber per IRQ vector (ownership, no fan-out in interrupt
+//     context; fan-out is the Router Node's job if needed).
+//   - Subscription table is populated before interrupts are enabled.
+//   - `post_irq_signal` is safe to call from `extern "C"` interrupt context:
+//     it takes the Spinlock briefly to enqueue a RuntimeSignal, then returns.
+//     The actual node dispatch happens on the next `pump()` tick.
+
+/// Maximum number of distinct IRQ vectors that may be subscribed.
+pub const MAX_IRQ_VECTORS: usize = 256;
+
+#[derive(Clone, Copy)]
+struct IrqSubscription {
+    /// Target node vector in the graph.
+    target: VectorAddress,
+    /// True when this slot is valid.
+    active: bool,
+}
+
+struct IrqTable {
+    entries: [IrqSubscription; MAX_IRQ_VECTORS],
+}
+
+impl IrqTable {
+    const fn new() -> Self {
+        Self {
+            entries: [IrqSubscription {
+                target: VectorAddress::new(0, 0, 0, 0),
+                active: false,
+            }; MAX_IRQ_VECTORS],
+        }
+    }
+}
+
+static IRQ_TABLE: Mutex<IrqTable> = Mutex::new(IrqTable::new());
+
+/// Register a node vector as the handler for a particular IRQ number.
+///
+/// Must be called before `x86_64::instructions::interrupts::enable()`.
+/// Overwrites any existing subscription for that vector (last write wins).
+pub fn subscribe_irq(vector: u8, target: VectorAddress) {
+    let mut table = IRQ_TABLE.lock();
+    table.entries[vector as usize] = IrqSubscription { target, active: true };
+}
+
+/// Post a hardware IRQ signal into the graph signal queue.
+///
+/// Called by `gos_trap_normalizer` (in `k-idt`) on every hardware interrupt.
+/// This function must be **extremely fast** — it only enqueues; dispatching
+/// happens on the next supervisor `pump()` / `service_system_cycle()` tick.
+///
+/// If no subscriber is registered for the vector, the signal is silently
+/// dropped (the IRQ has been acknowledged at the hardware level already).
+pub fn post_irq_signal(vector: u8, signal: Signal) {
+    // Look up the subscriber without holding RUNTIME lock simultaneously.
+    let maybe_target = {
+        let table = IRQ_TABLE.lock();
+        let entry = &table.entries[vector as usize];
+        if entry.active { Some(entry.target) } else { None }
+    };
+
+    if let Some(target) = maybe_target {
+        // Enqueue signal — if the queue is full we drop (backpressure ok in
+        // interrupt context; the supervisor loop will drain it promptly).
+        let _ = RUNTIME.lock().post_signal(target, signal);
+    }
+}
