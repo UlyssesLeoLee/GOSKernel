@@ -18,6 +18,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(net_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 const VGA_FALLBACK_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);

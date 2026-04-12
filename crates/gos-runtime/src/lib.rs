@@ -7,7 +7,7 @@ use gos_protocol::{
     ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, ExecStatus,
     ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
     GraphSnapshot, KernelAbi, KernelSignalPacket, NodeCell, NodeEvent, NodeExecutorVTable,
-    NodeId, NodeLifecycle, NodeSpec, NodeState, PluginId, PluginManifest, RoutePolicy,
+    NodeId, NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
     RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
     CONTROL_PLANE_PROTOCOL_VERSION,
 };
@@ -540,6 +540,18 @@ impl GraphRuntime {
         self.node_summary_from_slot(slot)
     }
 
+    /// Query a node's telemetry via its executor vtable callback.
+    pub fn node_telemetry(&self, vector: VectorAddress) -> Option<NodeTelemetry> {
+        let slot = self.node_slot_by_vec(vector)?;
+        let record = self.nodes[slot]?;
+        if let NodeBinding::Native(binding) = record.binding {
+            if let Some(telemetry_fn) = binding.vtable.on_telemetry {
+                return Some(unsafe { telemetry_fn() });
+            }
+        }
+        None
+    }
+
     pub fn edge_summary(&self, edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
         let slot = self.edge_slot_by_vector(edge_vector)?;
         self.edge_summary_from_slot(slot, GraphEdgeDirection::Outbound)
@@ -1063,6 +1075,10 @@ pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
 
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {
     RUNTIME.lock().node_summary(vector)
+}
+
+pub fn node_telemetry(vector: VectorAddress) -> Option<NodeTelemetry> {
+    RUNTIME.lock().node_telemetry(vector)
 }
 
 pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {

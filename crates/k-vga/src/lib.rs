@@ -17,6 +17,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(vga_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 const VGA_TEXT_BUFFER_ADDR: usize = 0xB8000;

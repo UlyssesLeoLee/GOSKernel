@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "gos-supervisor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
@@ -114,6 +114,14 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
+]
+
+[[package]]
+name = "k-ctx"
+version = "0.2.0"
+dependencies = [
+ "gos-protocol",
+ "x86_64",
 ]
 
 [[package]]
@@ -231,7 +239,6 @@ dependencies = [
  "bootloader",
  "gos-hal",
  "gos-protocol",
- "k-vga",
  "spin",
  "x86_64",
 ]

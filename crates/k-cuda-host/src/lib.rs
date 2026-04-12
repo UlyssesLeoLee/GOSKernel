@@ -18,6 +18,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(cuda_host_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 #[repr(C)]

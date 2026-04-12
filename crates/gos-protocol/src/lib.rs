@@ -1232,6 +1232,55 @@ pub enum ExecStatus {
     Fault = 2,
 }
 
+// ---------------------------------------------------------------------------
+// Node Telemetry - graph-native observability primitive
+// ---------------------------------------------------------------------------
+
+pub const MAX_TELEMETRY_ENTRIES: usize = 8;
+
+/// Unit hint for telemetry display.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryUnit {
+    Count   = 0,
+    Bytes   = 1,
+    KiB     = 2,
+    MiB     = 3,
+    Percent = 4,
+}
+
+/// A single telemetry key-value pair.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TelemetryEntry {
+    pub key: &'static str,
+    pub value: u64,
+    pub unit: TelemetryUnit,
+}
+
+impl TelemetryEntry {
+    pub const EMPTY: Self = Self { key: "", value: 0, unit: TelemetryUnit::Count };
+}
+
+/// Snapshot of a node's telemetry - up to 8 entries.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NodeTelemetry {
+    pub entries: [TelemetryEntry; MAX_TELEMETRY_ENTRIES],
+    pub count: usize,
+}
+
+impl NodeTelemetry {
+    pub const EMPTY: Self = Self {
+        entries: [TelemetryEntry::EMPTY; MAX_TELEMETRY_ENTRIES],
+        count: 0,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Node Executor VTable
+// ---------------------------------------------------------------------------
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NodeExecutorVTable {
@@ -1241,6 +1290,8 @@ pub struct NodeExecutorVTable {
     pub on_suspend: Option<unsafe extern "C" fn(ctx: *mut ExecutorContext) -> ExecStatus>,
     pub on_resume: Option<unsafe extern "C" fn(ctx: *mut ExecutorContext) -> ExecStatus>,
     pub on_teardown: Option<unsafe extern "C" fn(ctx: *mut ExecutorContext) -> ExecStatus>,
+    /// Optional telemetry callback - returns current metrics for graph inspection.
+    pub on_telemetry: Option<unsafe extern "C" fn() -> NodeTelemetry>,
 }
 
 #[derive(Debug, Clone, Copy)]

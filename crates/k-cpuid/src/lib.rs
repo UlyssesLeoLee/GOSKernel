@@ -17,6 +17,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(cpuid_on_suspend),
     on_resume: Some(cpuid_on_resume),
     on_teardown: None,
+    on_telemetry: None,
 };
 
 #[repr(C)]

@@ -25,6 +25,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(idt_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 // ── Per-CPU trap frame buffer ─────────────────────────────────────────────────

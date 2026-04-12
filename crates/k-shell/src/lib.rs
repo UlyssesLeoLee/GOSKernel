@@ -34,6 +34,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(shell_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 pub const THEME_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: THEME_EXECUTOR_ID,
@@ -42,6 +43,7 @@ pub const THEME_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(shell_on_suspend),
     on_resume: Some(theme_on_resume),
     on_teardown: None,
+    on_telemetry: None,
 };
 pub const CLIPBOARD_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: CLIPBOARD_EXECUTOR_ID,
@@ -50,6 +52,7 @@ pub const CLIPBOARD_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(shell_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 const SCREEN_WIDTH: usize = 80;

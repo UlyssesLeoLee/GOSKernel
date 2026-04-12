@@ -31,7 +31,7 @@ bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
 x86_64 = "0.14"
 
 [package.metadata.bootimage]
-run-args = ["-serial", "stdio", "-no-reboot", "-display", "gtk,zoom-to-fit=on,show-menubar=off,show-tabs=off", "-monitor", "telnet:127.0.0.1:55555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"]
+run-args = ["-serial", "stdio", "-no-reboot", "-monitor", "telnet:127.0.0.1:55555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"]
 test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 300

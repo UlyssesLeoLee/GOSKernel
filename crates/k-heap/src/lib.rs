@@ -21,6 +21,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(heap_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }

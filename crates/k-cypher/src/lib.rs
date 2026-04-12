@@ -19,6 +19,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(cypher_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 #[repr(C)]
@@ -209,6 +210,30 @@ fn print_node_detail(sink: &ConsoleSink, summary: &GraphNodeSummary) {
     print_str(sink, "\n  exports: ");
     print_num(sink, summary.export_count);
     print_byte(sink, b'\n');
+    // Telemetry: query node executor for live metrics
+    if let Some(telemetry) = gos_runtime::node_telemetry(summary.vector) {
+        if telemetry.count > 0 {
+            set_color(sink, 14, 0);
+            print_str(sink, "  telemetry:\n");
+            set_color(sink, 7, 0);
+            for i in 0..telemetry.count {
+                let entry = &telemetry.entries[i];
+                if entry.key.is_empty() { break; }
+                print_str(sink, "    ");
+                print_str(sink, entry.key);
+                print_str(sink, ": ");
+                print_num(sink, entry.value as usize);
+                match entry.unit {
+                    gos_protocol::TelemetryUnit::Bytes => print_str(sink, " B"),
+                    gos_protocol::TelemetryUnit::KiB => print_str(sink, " KiB"),
+                    gos_protocol::TelemetryUnit::MiB => print_str(sink, " MiB"),
+                    gos_protocol::TelemetryUnit::Percent => print_str(sink, " %"),
+                    _ => {}
+                }
+                print_byte(sink, b'\n');
+            }
+        }
+    }
 }
 
 fn print_edge_brief(sink: &ConsoleSink, summary: &GraphEdgeSummary) {

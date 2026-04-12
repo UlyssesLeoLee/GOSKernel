@@ -20,6 +20,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(vmm_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 static mut BOOT_INFO_PTR: u64 = 0;
@@ -197,6 +198,15 @@ pub unsafe fn map_page(
 
 pub unsafe fn unmap_page(page: Page<Size4KiB>) -> Result<(), &'static str> {
     let mut mapper = mapper();
-    mapper.unmap(page).map_err(|_| "unmap failed")?.1.flush();
+    let (frame, flush) = mapper.unmap(page).map_err(|_| "unmap failed")?;
+    flush.flush();
+    // Return the physical frame to the bitmap allocator.
+    k_pmm::allocator().lock().dealloc_frame(frame);
     Ok(())
+}
+
+/// Return a physical frame to the PMM without unmapping.
+/// Useful when the caller manages its own page table entries.
+pub unsafe fn deallocate_frame(frame: PhysFrame<Size4KiB>) {
+    k_pmm::allocator().lock().dealloc_frame(frame);
 }

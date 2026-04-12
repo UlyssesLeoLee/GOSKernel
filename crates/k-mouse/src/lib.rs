@@ -18,6 +18,7 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_suspend: Some(mouse_on_suspend),
     on_resume: None,
     on_teardown: None,
+    on_telemetry: None,
 };
 
 const DISPLAY_FALLBACK_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
