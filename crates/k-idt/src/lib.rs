@@ -1,25 +1,22 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-idt (native.idt)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-idt
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_IDT", name: "k-idt"})
-// SET p.executor = "native.idt", p.node_type = "Service", p.state_schema = "0x2009"
+// SET p.executor = "k_idt::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x2009"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_gdt:Plugin {id: "K_GDT"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_gdt)
-// MERGE (k_pit:Plugin {id: "K_PIT"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pit)
-// MERGE (k_ps2:Plugin {id: "K_PS2"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_ps2)
-//
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (irq_ALL:InterruptLine {irq: "ALL", label: "全局中断向量表"})
-// MERGE (p)-[:BINDS_IRQ]->(irq_ALL)
-// ==============================================================
+// -- Dependencies
+// MERGE (dep_K_GDT:Plugin {id: "K_GDT"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_GDT)
+// MERGE (dep_K_PIT:Plugin {id: "K_PIT"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PIT)
+// MERGE (dep_K_PS2:Plugin {id: "K_PS2"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PS2)
+// ============================================================
+
 
 use core::arch::asm;
 use core::arch::global_asm;
@@ -30,6 +27,9 @@ use gos_protocol::{
     TrapFrame, TrapVector, HardwareEvent,
     VectorAddress, Signal,
     ExecutorId, NodeExecutorVTable, ExecutorContext, ExecStatus, NodeEvent,
+    BuiltinPluginDescriptor, NativeNodeBinding, PluginManifest, GOS_ABI_VERSION,
+    PluginId, NodeSpec, RuntimeNodeType, EntryPolicy, PermissionSpec, PermissionKind,
+    derive_node_id,
 };
 use gos_hal::{vaddr, meta};
 
@@ -50,7 +50,8 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 };
 
 // ── Per-CPU trap frame buffer ─────────────────────────────────────────────────
-const TRAP_BUF_SLOTS: usize = 1;
+// 4 slots allow nesting: e.g. timer IRQ → page fault → double fault → NMI.
+const TRAP_BUF_SLOTS: usize = 4;
 
 #[repr(C, align(64))]
 struct TrapBuf {
@@ -83,7 +84,14 @@ pub unsafe extern "C" fn gos_trap_normalizer(frame: *mut TrapFrame) {
         frame.set_page_fault_addr(cr2);
     }
 
-    let slot = 0usize;
+    // Find the first free slot; fall back to slot 0 if all are in use.
+    let mut slot = 0usize;
+    for i in 0..TRAP_BUF_SLOTS {
+        if TRAP_BUF.in_use[i] == 0 {
+            slot = i;
+            break;
+        }
+    }
     TRAP_BUF.frames[slot] = *frame;
     TRAP_BUF.in_use[slot] = 1;
 
@@ -266,4 +274,42 @@ unsafe extern "C" fn idt_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
 
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
 
+const IDT_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::IrqBind, arg0: u64::MAX, arg1: 0 },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_IDT"),
+        name: "K_IDT",
+        version: 1,
+        depends_on: &[PluginId::from_ascii("K_GDT"), PluginId::from_ascii("K_PIT"), PluginId::from_ascii("K_PS2")],
+        permissions: IDT_PERMS,
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_IDT"), "idt.entry"),
+            local_node_key: "idt.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2009,
+            permissions: IDT_PERMS,
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: IDT_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "idt.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

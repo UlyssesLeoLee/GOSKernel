@@ -1,29 +1,32 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-ai (native.ai)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-ai
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_AI", name: "k-ai"})
-// SET p.executor = "native.ai", p.node_type = "Aggregator", p.state_schema = "0x2011"
+// SET p.executor = "k_ai::EXECUTOR_ID", p.node_type = "Aggregator", p.state_schema = "0x2011"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_shell:Plugin {id: "K_SHELL"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_shell)
+// -- Dependencies
+// MERGE (dep_K_SHELL:Plugin {id: "K_SHELL"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_SHELL)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Hardware Resources
+//
+// -- Exported Capabilities (APIs)
 // MERGE (cap_ai_supervisor:Capability {namespace: "ai", name: "supervisor"})
 // MERGE (p)-[:EXPORTS]->(cap_ai_supervisor)
 // MERGE (cap_graph_orchestrate:Capability {namespace: "graph", name: "orchestrate"})
 // MERGE (p)-[:EXPORTS]->(cap_graph_orchestrate)
 //
-// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// -- Imported Capabilities (Dependencies)
 // MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
 // MERGE (p)-[:IMPORTS]->(cap_console_write)
 // MERGE (cap_shell_input:Capability {namespace: "shell", name: "input"})
 // MERGE (p)-[:IMPORTS]->(cap_shell_input)
-// ==============================================================
+// ============================================================
+
 
 use gos_protocol::{
     packet_to_signal, signal_to_packet, AI_CONTROL_API_BEGIN, AI_CONTROL_API_COMMIT,

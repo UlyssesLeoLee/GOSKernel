@@ -14,10 +14,10 @@ use gos_protocol::{
 use spin::Mutex;
 
 pub const MAX_PLUGINS: usize = 32;
-pub const MAX_NODES: usize = 64;
-pub const MAX_EDGES: usize = 256;
-pub const MAX_READY_QUEUE: usize = 128;
-pub const MAX_SIGNAL_QUEUE: usize = 256;
+pub const MAX_NODES: usize = 128;
+pub const MAX_EDGES: usize = 512;
+pub const MAX_READY_QUEUE: usize = 256;
+pub const MAX_SIGNAL_QUEUE: usize = 512;
 pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;

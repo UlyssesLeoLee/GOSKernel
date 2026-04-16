@@ -1,23 +1,24 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-heap (native.heap)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-heap
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_HEAP", name: "k-heap"})
-// SET p.executor = "native.heap", p.node_type = "Service", p.state_schema = "0x200C"
+// SET p.executor = "k_heap::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x200C"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_pmm:Plugin {id: "K_PMM"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pmm)
-// MERGE (k_vmm:Plugin {id: "K_VMM"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vmm)
+// -- Dependencies
+// MERGE (dep_K_PMM:Plugin {id: "K_PMM"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PMM)
+// MERGE (dep_K_VMM:Plugin {id: "K_VMM"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_VMM)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Exported Capabilities (APIs)
 // MERGE (cap_memory_alloc:Capability {namespace: "memory", name: "alloc"})
 // MERGE (p)-[:EXPORTS]->(cap_memory_alloc)
-// ==============================================================
+// ============================================================
+
 
 extern crate alloc;
 
@@ -28,7 +29,7 @@ use gos_protocol::*;
 use gos_hal::{vaddr, meta};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 200 * 1024; // 200 KiB
+pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(2, 3, 0, 0);
 
@@ -77,3 +78,47 @@ unsafe extern "C" fn heap_on_event(_ctx: *mut ExecutorContext, _event: *const No
 unsafe extern "C" fn heap_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
+
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
+
+const HEAP_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PhysMap, arg0: u64::MAX, arg1: u64::MAX },
+    PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
+];
+const HEAP_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "memory", name: "alloc" },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_HEAP"),
+        name: "K_HEAP",
+        version: 1,
+        depends_on: &[PluginId::from_ascii("K_PMM"), PluginId::from_ascii("K_VMM")],
+        permissions: HEAP_PERMS,
+        exports: HEAP_EXPORTS,
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_HEAP"), "heap.entry"),
+            local_node_key: "heap.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x200C,
+            permissions: HEAP_PERMS,
+            exports: HEAP_EXPORTS,
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: HEAP_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "heap.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

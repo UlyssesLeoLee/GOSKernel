@@ -1,19 +1,17 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-panic (native.panic)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-panic
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_PANIC", name: "k-panic"})
-// SET p.executor = "native.panic", p.node_type = "Service", p.state_schema = "0x2001"
-// ==============================================================
+// SET p.executor = "k_panic::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x2001"
+// ============================================================
+
 
 use gos_hal::{meta, vaddr};
-use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
-};
+use gos_protocol::*;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 0, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.panic");
@@ -87,3 +85,37 @@ unsafe extern "C" fn panic_on_event(ctx: *mut ExecutorContext, event: *const Nod
 unsafe extern "C" fn panic_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_PANIC"),
+        name: "K_PANIC",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_PANIC"), "panic.entry"),
+            local_node_key: "panic.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2001,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: &[],
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "panic.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

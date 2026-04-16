@@ -1,19 +1,17 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-gdt (native.gdt)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-gdt
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_GDT", name: "k-gdt"})
-// SET p.executor = "native.gdt", p.node_type = "Service", p.state_schema = "0x2004"
-// ==============================================================
+// SET p.executor = "k_gdt::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x2004"
+// ============================================================
+
 
 use gos_hal::{meta, vaddr};
-use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
-};
+use gos_protocol::*;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
@@ -153,3 +151,42 @@ pub fn init_gdt() {
         load_tss(state.selectors.tss_selector);
     }
 }
+
+const GDT_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PhysMap, arg0: u64::MAX, arg1: u64::MAX },
+    PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_GDT"),
+        name: "K_GDT",
+        version: 1,
+        depends_on: &[],
+        permissions: GDT_PERMS,
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_GDT"), "gdt.entry"),
+            local_node_key: "gdt.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2004,
+            permissions: GDT_PERMS,
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: GDT_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "gdt.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

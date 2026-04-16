@@ -1,29 +1,32 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-cuda-host (native.cuda)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-cuda-host
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_CUDA", name: "k-cuda-host"})
-// SET p.executor = "native.cuda", p.node_type = "Compute", p.state_schema = "0x2016"
+// SET p.executor = "k_cuda_host::EXECUTOR_ID", p.node_type = "Compute", p.state_schema = "0x2016"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_vga:Plugin {id: "K_VGA"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vga)
-// MERGE (k_serial:Plugin {id: "K_SERIAL"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_serial)
+// -- Dependencies
+// MERGE (dep_K_VGA:Plugin {id: "K_VGA"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_VGA)
+// MERGE (dep_K_SERIAL:Plugin {id: "K_SERIAL"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_SERIAL)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Hardware Resources
+//
+// -- Exported Capabilities (APIs)
 // MERGE (cap_cuda_bridge:Capability {namespace: "cuda", name: "bridge"})
 // MERGE (p)-[:EXPORTS]->(cap_cuda_bridge)
 //
-// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// -- Imported Capabilities (Dependencies)
 // MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
 // MERGE (p)-[:IMPORTS]->(cap_console_write)
 // MERGE (cap_serial_write:Capability {namespace: "serial", name: "write"})
 // MERGE (p)-[:IMPORTS]->(cap_serial_write)
-// ==============================================================
+// ============================================================
+
 
 use gos_protocol::{
     packet_to_signal, signal_to_packet, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,

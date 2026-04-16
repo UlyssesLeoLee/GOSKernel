@@ -1,36 +1,26 @@
 #![no_std]
 
 // ============================================================
-// GOS KERNEL TOPOLOGY — k-ps2 (native.ps2)
-// 以下 Cypher 脚本描述该模块在图数据库中的完整拓扑结构。
-// 可直接复制拼接后导入 Neo4j，与其他模块脚本共同构成内核完整图谱。
+// GOS KERNEL TOPOLOGY — k-ps2
+// This Cypher script documents the plugin's place in the kernel graph.
 //
-// MERGE (ps2:Plugin {id: "K_PS2", name: "k-ps2", executor: "native.ps2"})
-// SET ps2.node_type = "Driver", ps2.entry_policy = "Bootstrap"
-// SET ps2.state_schema = "0x2008"
+// MERGE (p:Plugin {id: "K_PS2", name: "k-ps2"})
+// SET p.executor = "k_ps2::EXECUTOR_ID", p.node_type = "Driver", p.state_schema = "0x2008"
 //
-// // 硬件资源声明
-// MERGE (port_ps2:PortRange {start: "0x60", end: "0x64", label: "PS2 Data+Status"})
-// MERGE (irq_kb:InterruptLine {irq: 1, label: "IRQ1 Keyboard"})
-// MERGE (ps2)-[:REQUIRES_PORT]->(port_ps2)
-// MERGE (ps2)-[:BINDS_IRQ]->(irq_kb)
+// -- Dependencies
+// MERGE (dep_K_PIC:Plugin {id: "K_PIC"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PIC)
 //
-// // 启动依赖 (depends on K_PIC to be initialized first)
-// MERGE (pic:Plugin {id: "K_PIC"})
-// MERGE (ps2)-[:DEPENDS_ON {required: true}]->(pic)
-//
-// // 运行时 Capability 消费 (on_init 阶段通过 resolve_capability 动态绑定)
-// MERGE (shell_cap:Capability {namespace: "shell", name: "input"})
-// MERGE (ps2)-[:IMPORTS {binding: "shell_target", required: false}]->(shell_cap)
-//
-// // 信号流：PS2 捕获键盘中断 → 编码为 Signal::Data → 发往 shell::input
-// MERGE (shell:Plugin {id: "K_SHELL"})
-// MERGE (ps2)-[:EMITS_SIGNAL {signal: "Data", trigger: "IRQ1", route: "shell/input"}]->(shell)
+// -- Hardware Resources
+// MERGE (pr_60:PortRange {start: "0x60", end: "0x64"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_60)
+// MERGE (irq_1:InterruptLine {irq: "1"})
+// MERGE (p)-[:BINDS_IRQ]->(irq_1)
 // ============================================================
+
 
 use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1, DecodedKey};
 use x86_64::instructions::port::Port;
-use spin::Mutex;
 use gos_protocol::*;
 
 pub const NODE_VEC: VectorAddress = gos_protocol::vectors::CORE_PS2;
@@ -46,17 +36,10 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_telemetry: None,
 };
 
-static mut KEYBOARD: Option<Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>>> = None;
-
-pub fn keyboard() -> &'static Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> {
-    unsafe {
-        (&*core::ptr::addr_of!(KEYBOARD)).as_ref().unwrap()
-    }
-}
-
 #[repr(C)]
 struct Ps2State {
     shell_target: u64,
+    keyboard: Keyboard<layouts::Us104Key, ScancodeSet1>,
 }
 
 unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut Ps2State {
@@ -66,11 +49,6 @@ unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut Ps2State {
 
 unsafe extern "C" fn ps2_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     unsafe {
-        KEYBOARD = Some(Mutex::new(Keyboard::new(
-            ScancodeSet1::new(),
-            layouts::Us104Key,
-            HandleControl::MapLettersToUnicode,
-        )));
         let abi = &*(*ctx).abi;
         let shell_target = if let Some(resolve) = abi.resolve_capability {
             resolve(b"shell".as_ptr(), 5, b"input".as_ptr(), 5)
@@ -79,7 +57,14 @@ unsafe extern "C" fn ps2_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
         };
         core::ptr::write(
             (*ctx).state_ptr as *mut Ps2State,
-            Ps2State { shell_target },
+            Ps2State { 
+                shell_target,
+                keyboard: Keyboard::new(
+                    ScancodeSet1::new(),
+                    layouts::Us104Key,
+                    HandleControl::MapLettersToUnicode,
+                )
+            },
         );
     }
     ExecStatus::Done
@@ -92,15 +77,16 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
             let mut port = Port::new(0x60);
             let scancode: u8 = unsafe { port.read() };
 
-            let shell_target = unsafe { state_mut(ctx) }.shell_target;
-            if shell_target == 0 {
+            let state = unsafe { state_mut(ctx) };
+            if state.shell_target == 0 {
                 return ExecStatus::Done;
             }
 
-            let mut keyboard = keyboard().lock();
+            let keyboard = &mut state.keyboard;
             if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
                 if let Some(key) = keyboard.process_keyevent(key_event) {
                     let abi = unsafe { &*(*ctx).abi };
+                    let shell_target = state.shell_target;
 
                     match key {
                         DecodedKey::Unicode(character) => {
@@ -150,3 +136,47 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
 unsafe extern "C" fn ps2_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
+
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
+
+const PS2_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x60, arg1: 0x64 },
+    PermissionSpec { kind: PermissionKind::IrqBind, arg0: 1, arg1: 0 },
+];
+const PS2_IMPORTS: &[ImportSpec] = &[
+    ImportSpec { namespace: "shell", capability: "input", required: true },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_PS2"),
+        name: "K_PS2",
+        version: 1,
+        depends_on: &[PluginId::from_ascii("K_PIC")],
+        permissions: PS2_PERMS,
+        exports: &[],
+        imports: PS2_IMPORTS,
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_PS2"), "ps2.entry"),
+            local_node_key: "ps2.entry",
+            node_type: RuntimeNodeType::Driver,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2008,
+            permissions: PS2_PERMS,
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: PS2_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "ps2.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

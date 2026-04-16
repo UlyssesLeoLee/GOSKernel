@@ -1299,6 +1299,25 @@ pub struct NodeExecutorVTable {
     pub on_telemetry: Option<unsafe extern "C" fn() -> NodeTelemetry>,
 }
 
+// ── Builtin plugin descriptor ─────────────────────────────────────────────────
+// A self-contained description exported by each k-* crate so that
+// builtin_bundle.rs can iterate over them instead of hardcoding everything.
+
+#[derive(Clone, Copy)]
+pub struct NativeNodeBinding {
+    pub vector: VectorAddress,
+    pub local_node_key: &'static str,
+    pub executor: NodeExecutorVTable,
+}
+
+#[derive(Clone, Copy)]
+pub struct BuiltinPluginDescriptor {
+    pub manifest: PluginManifest,
+    pub granted_permissions: &'static [PermissionSpec],
+    pub nodes: &'static [NativeNodeBinding],
+    pub register_hook: Option<fn(&mut BootContext)>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ControlPlaneEnvelope {
     pub version: u16,

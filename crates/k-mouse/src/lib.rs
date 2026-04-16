@@ -1,31 +1,32 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-mouse (native.mouse)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-mouse
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_MOUSE", name: "k-mouse"})
-// SET p.executor = "native.mouse", p.node_type = "Driver", p.state_schema = "0x2013"
+// SET p.executor = "k_mouse::EXECUTOR_ID", p.node_type = "Driver", p.state_schema = "0x2013"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_vga:Plugin {id: "K_VGA"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vga)
-// MERGE (k_ps2:Plugin {id: "K_PS2"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_ps2)
-// MERGE (k_idt:Plugin {id: "K_IDT"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_idt)
+// -- Dependencies
+// MERGE (dep_K_VGA:Plugin {id: "K_VGA"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_VGA)
+// MERGE (dep_K_PS2:Plugin {id: "K_PS2"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PS2)
+// MERGE (dep_K_IDT:Plugin {id: "K_IDT"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_IDT)
 //
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (hw_60:PortRange {start: "0x60", end: "0x64", label: "PS/2 Data+Status"})
-// MERGE (p)-[:REQUIRES_PORT]->(hw_60)
-// MERGE (irq_12:InterruptLine {irq: "12", label: "IRQ12 Mouse"})
+// -- Hardware Resources
+// MERGE (pr_60:PortRange {start: "0x60", end: "0x64"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_60)
+// MERGE (irq_12:InterruptLine {irq: "12"})
 // MERGE (p)-[:BINDS_IRQ]->(irq_12)
 //
-// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// -- Imported Capabilities (Dependencies)
 // MERGE (cap_display_pointer:Capability {namespace: "display", name: "pointer"})
 // MERGE (p)-[:IMPORTS]->(cap_display_pointer)
-// ==============================================================
+// ============================================================
+
 
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 

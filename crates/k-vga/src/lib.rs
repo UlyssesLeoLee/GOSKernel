@@ -1,32 +1,28 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-vga (native.vga)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-vga
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_VGA", name: "k-vga"})
-// SET p.executor = "native.vga", p.node_type = "Driver", p.state_schema = "0x2003"
+// SET p.executor = "k_vga::EXECUTOR_ID", p.node_type = "Driver", p.state_schema = "0x2003"
 //
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (hw_3c8:PortRange {start: "0x3C8", end: "0x3C9", label: "VGA DAC Palette"})
-// MERGE (p)-[:REQUIRES_PORT]->(hw_3c8)
-// MERGE (physmap_a0000:PhysMap {base: "0xA0000", size: "65536", label: "VGA VRAM 64K"})
-// MERGE (p)-[:MAPS_PHYS]->(physmap_a0000)
+// -- Hardware Resources
+// MERGE (pm_A0000:PhysMap {base: "0xA0000", size: "65536"})
+// MERGE (p)-[:MAPS_PHYS]->(pm_A0000)
+// MERGE (pr_3C8:PortRange {start: "0x3C8", end: "0x3C9"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_3C8)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Exported Capabilities (APIs)
 // MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
 // MERGE (p)-[:EXPORTS]->(cap_console_write)
 // MERGE (cap_display_pointer:Capability {namespace: "display", name: "pointer"})
 // MERGE (p)-[:EXPORTS]->(cap_display_pointer)
-// ==============================================================
+// ============================================================
 
-use gos_protocol::{
-    packet_to_signal, DISPLAY_CONTROL_POINTER_COL, DISPLAY_CONTROL_POINTER_ROW,
-    DISPLAY_CONTROL_POINTER_VISIBLE, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
-    DISPLAY_THEME_WABI, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
-    NodeExecutorVTable, Signal, VectorAddress,
-};
+
+use gos_protocol::*;
 use x86_64::instructions::port::Port;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
@@ -497,3 +493,46 @@ unsafe extern "C" fn vga_on_event(ctx: *mut ExecutorContext, event: *const NodeE
 unsafe extern "C" fn vga_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
+
+const VGA_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PhysMap, arg0: 0xA0000, arg1: 65536 },
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x3C8, arg1: 0x3C9 },
+];
+const VGA_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "console", name: "write" },
+    CapabilitySpec { namespace: "display", name: "pointer" },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_VGA"),
+        name: "K_VGA",
+        version: 1,
+        depends_on: &[],
+        permissions: VGA_PERMS,
+        exports: VGA_EXPORTS,
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_VGA"), "vga.entry"),
+            local_node_key: "vga.entry",
+            node_type: RuntimeNodeType::Driver,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2003,
+            permissions: VGA_PERMS,
+            exports: VGA_EXPORTS,
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: VGA_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "vga.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

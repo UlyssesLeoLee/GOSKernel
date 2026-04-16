@@ -1,21 +1,24 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-ime (native.ime)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-ime
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_IME", name: "k-ime"})
-// SET p.executor = "native.ime", p.node_type = "Router", p.state_schema = "0x2011"
+// SET p.executor = "k_ime::EXECUTOR_ID", p.node_type = "Router", p.state_schema = "0x2011"
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Hardware Resources
+//
+// -- Exported Capabilities (APIs)
 // MERGE (cap_ime_control:Capability {namespace: "ime", name: "control"})
 // MERGE (p)-[:EXPORTS]->(cap_ime_control)
 //
-// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// -- Imported Capabilities (Dependencies)
 // MERGE (cap_shell_input:Capability {namespace: "shell", name: "input"})
 // MERGE (p)-[:IMPORTS]->(cap_shell_input)
-// ==============================================================
+// ============================================================
+
 
 use gos_hal::ngr;
 use gos_protocol::{

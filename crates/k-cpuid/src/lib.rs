@@ -1,21 +1,19 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-cpuid (native.cpuid)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-cpuid
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_CPUID", name: "k-cpuid"})
-// SET p.executor = "native.cpuid", p.node_type = "Service", p.state_schema = "0x2005"
-// ==============================================================
+// SET p.executor = "k_cpuid::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x2005"
+// ============================================================
+
 
 use core::arch::x86_64::__cpuid;
 
 use gos_hal::{meta, vaddr};
-use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
-};
+use gos_protocol::*;
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 8, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.cpuid");
@@ -154,3 +152,37 @@ unsafe extern "C" fn cpuid_on_resume(ctx: *mut ExecutorContext) -> ExecStatus {
     sample_cpuid(unsafe { state_mut(ctx) });
     ExecStatus::Done
 }
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_CPUID"),
+        name: "K_CPUID",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_CPUID"), "cpuid.entry"),
+            local_node_key: "cpuid.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2005,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: &[],
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "cpuid.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

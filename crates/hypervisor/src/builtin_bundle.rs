@@ -243,6 +243,9 @@ const NET_IMPORTS: &[ImportSpec] = &[
 const MOUSE_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "display", capability: "pointer", required: true },
 ];
+const PS2_IMPORTS: &[ImportSpec] = &[
+    ImportSpec { namespace: "shell", capability: "input", required: true },
+];
 
 const DEP_PIT: &[PluginId] = &[K_PIC_ID];
 const DEP_PS2: &[PluginId] = &[K_PIC_ID];
@@ -823,7 +826,7 @@ const PS2_MANIFEST: PluginManifest = manifest_with_nodes(
     DEP_PS2,
     PS2_PERMS,
     &[],
-    &[],
+    PS2_IMPORTS,
     PS2_NODE_SPECS,
 );
 const IDT_MANIFEST: PluginManifest = manifest_with_nodes(

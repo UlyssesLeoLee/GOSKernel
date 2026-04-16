@@ -1,21 +1,22 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-vmm (native.vmm)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-vmm
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_VMM", name: "k-vmm"})
-// SET p.executor = "native.vmm", p.node_type = "Service", p.state_schema = "0x200B"
+// SET p.executor = "k_vmm::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x200B"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_pmm:Plugin {id: "K_PMM"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pmm)
+// -- Dependencies
+// MERGE (dep_K_PMM:Plugin {id: "K_PMM"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PMM)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Exported Capabilities (APIs)
 // MERGE (cap_memory_map_page:Capability {namespace: "memory", name: "map_page"})
 // MERGE (p)-[:EXPORTS]->(cap_memory_map_page)
-// ==============================================================
+// ============================================================
+
 
 use core::ptr;
 use x86_64::registers::control::Cr3;
@@ -227,3 +228,47 @@ pub unsafe fn unmap_page(page: Page<Size4KiB>) -> Result<(), &'static str> {
 pub unsafe fn deallocate_frame(frame: PhysFrame<Size4KiB>) {
     k_pmm::allocator().lock().dealloc_frame(frame);
 }
+
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
+
+const VMM_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PhysMap, arg0: u64::MAX, arg1: u64::MAX },
+    PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
+];
+const VMM_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "memory", name: "map_page" },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_VMM"),
+        name: "K_VMM",
+        version: 1,
+        depends_on: &[PluginId::from_ascii("K_PMM")],
+        permissions: VMM_PERMS,
+        exports: VMM_EXPORTS,
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_VMM"), "vmm.entry"),
+            local_node_key: "vmm.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x200B,
+            permissions: VMM_PERMS,
+            exports: VMM_EXPORTS,
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: VMM_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "vmm.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: Some(register_hook),
+};

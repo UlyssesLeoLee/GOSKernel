@@ -1,27 +1,25 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-serial (native.serial)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-serial
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_SERIAL", name: "k-serial"})
-// SET p.executor = "native.serial", p.node_type = "Driver", p.state_schema = "0x2002"
+// SET p.executor = "k_serial::EXECUTOR_ID", p.node_type = "Driver", p.state_schema = "0x2002"
 //
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (hw_3f8:PortRange {start: "0x3F8", end: "8", label: "COM1 Serial Port"})
-// MERGE (p)-[:REQUIRES_PORT]->(hw_3f8)
+// -- Hardware Resources
+// MERGE (pr_3F8:PortRange {start: "0x3F8", end: "8"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_3F8)
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Exported Capabilities (APIs)
 // MERGE (cap_serial_write:Capability {namespace: "serial", name: "write"})
 // MERGE (p)-[:EXPORTS]->(cap_serial_write)
-// ==============================================================
+// ============================================================
+
 
 use gos_hal::{meta, vaddr};
-use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
-};
+use gos_protocol::*;
 use spin::Mutex;
 use uart_16550::SerialPort;
 
@@ -125,3 +123,44 @@ macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
     ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
 }
+
+const SERIAL_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x3F8, arg1: 8 },
+];
+const SERIAL_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "serial", name: "write" },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_SERIAL"),
+        name: "K_SERIAL",
+        version: 1,
+        depends_on: &[],
+        permissions: SERIAL_PERMS,
+        exports: SERIAL_EXPORTS,
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_SERIAL"), "serial.entry"),
+            local_node_key: "serial.entry",
+            node_type: RuntimeNodeType::Driver,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2002,
+            permissions: SERIAL_PERMS,
+            exports: SERIAL_EXPORTS,
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: SERIAL_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "serial.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

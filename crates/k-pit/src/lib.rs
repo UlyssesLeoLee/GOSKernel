@@ -1,23 +1,24 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-pit (native.pit)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-pit
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_PIT", name: "k-pit"})
-// SET p.executor = "native.pit", p.node_type = "Driver", p.state_schema = "0x2007"
+// SET p.executor = "Unknown", p.node_type = "Generic", p.state_schema = "0x0"
 //
-// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
-// MERGE (k_pic:Plugin {id: "K_PIC"})
-// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pic)
+// -- Dependencies
+// MERGE (dep_K_PIC:Plugin {id: "K_PIC"})
+// MERGE (p)-[:DEPENDS_ON]->(dep_K_PIC)
 //
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (hw_40:PortRange {start: "0x40", end: "0x43", label: "PIT Channels"})
-// MERGE (p)-[:REQUIRES_PORT]->(hw_40)
-// MERGE (irq_0:InterruptLine {irq: "0", label: "IRQ0 Timer"})
+// -- Hardware Resources
+// MERGE (pr_40:PortRange {start: "0x40", end: "0x43"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_40)
+// MERGE (irq_0:InterruptLine {irq: "0"})
 // MERGE (p)-[:BINDS_IRQ]->(irq_0)
-// ==============================================================
+// ============================================================
+
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::instructions::port::Port;

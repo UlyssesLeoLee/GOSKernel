@@ -1,25 +1,23 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-pic (native.pic)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-pic
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_PIC", name: "k-pic"})
-// SET p.executor = "native.pic", p.node_type = "Driver", p.state_schema = "0x2006"
+// SET p.executor = "k_pic::EXECUTOR_ID", p.node_type = "Driver", p.state_schema = "0x2006"
 //
-// // ── 硬件资源边界 ──────────────────────────────────────────
-// MERGE (hw_20:PortRange {start: "0x20", end: "0xA1", label: "PIC Master+Slave"})
-// MERGE (p)-[:REQUIRES_PORT]->(hw_20)
-// MERGE (irq_ALL:InterruptLine {irq: "ALL", label: "IRQ 0-15 Master"})
-// MERGE (p)-[:BINDS_IRQ]->(irq_ALL)
-// ==============================================================
+// -- Hardware Resources
+// MERGE (pr_20:PortRange {start: "0x20", end: "0xA1"})
+// MERGE (p)-[:REQUIRES_PORT]->(pr_20)
+// MERGE (irq_u64::MAX:InterruptLine {irq: "u64::MAX"})
+// MERGE (p)-[:BINDS_IRQ]->(irq_u64::MAX)
+// ============================================================
+
 
 use gos_hal::{meta, vaddr};
-use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
-};
+use gos_protocol::*;
 use pic8259::ChainedPics;
 use spin::Mutex;
 
@@ -141,3 +139,42 @@ pub fn init_pic() {
         pics().lock().write_masks(0xF8, 0xEF);
     }
 }
+
+const PIC_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x20, arg1: 0xA1 },
+    PermissionSpec { kind: PermissionKind::IrqBind, arg0: u64::MAX, arg1: 0 },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_PIC"),
+        name: "K_PIC",
+        version: 1,
+        depends_on: &[],
+        permissions: PIC_PERMS,
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_PIC"), "pic.entry"),
+            local_node_key: "pic.entry",
+            node_type: RuntimeNodeType::Driver,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x2006,
+            permissions: PIC_PERMS,
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: PIC_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "pic.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};

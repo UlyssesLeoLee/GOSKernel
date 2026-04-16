@@ -1,181 +1,177 @@
-"""
-GOS Kernel — Cypher Graph Comment Injector
-将每个内核插件的完整拓扑描述（Neo4j Cypher）以普通注释的形式注入到各 crate 的 lib.rs 顶部。
-注释格式为 `// ...`，对 Rust 编译器完全透明，不影响任何功能。
-"""
-
 import os
 import re
 
+# Paths
 bundle_path = r"e:\GOSKernel\crates\hypervisor\src\builtin_bundle.rs"
+crates_dir = r"e:\GOSKernel\crates"
+
+# Map Crate Name to Plugin ID (as defined in builtin_bundle.rs)
+crates = {
+    "k-core": "K_CORE",
+    "k-panic": "K_PANIC",
+    "k-serial": "K_SERIAL",
+    "k-gdt": "K_GDT",
+    "k-cpuid": "K_CPUID",
+    "k-pic": "K_PIC",
+    "k-pit": "K_PIT",
+    "k-ps2": "K_PS2",
+    "k-idt": "K_IDT",
+    "k-pmm": "K_PMM",
+    "k-vmm": "K_VMM",
+    "k-heap": "K_HEAP",
+    "k-vga": "K_VGA",
+    "k-ime": "K_IME",
+    "k-net": "K_NET",
+    "k-mouse": "K_MOUSE",
+    "k-cypher": "K_CYPHER",
+    "k-cuda-host": "K_CUDA",
+    "k-shell": "K_SHELL",
+    "k-ai": "K_AI"
+}
+
 with open(bundle_path, "r", encoding="utf-8") as f:
     bundle = f.read()
 
-# ── 所有模块的静态补充描述，用于 Cypher 注释生成 ──────────────────────────────
-MODULE_META = {
-    "K_CORE":   {"crate": "k-core",       "executor": "native.core",    "node_type": "Service",     "schema": "0x2021", "hw": []},
-    "K_PANIC":  {"crate": "k-panic",      "executor": "native.panic",   "node_type": "Service",     "schema": "0x2001", "hw": []},
-    "K_SERIAL": {"crate": "k-serial",     "executor": "native.serial",  "node_type": "Driver",      "schema": "0x2002",
-                 "hw": [("PortRange", "0x3F8", "8", "COM1 Serial Port")]},
-    "K_GDT":    {"crate": "k-gdt",        "executor": "native.gdt",     "node_type": "Service",     "schema": "0x2004", "hw": []},
-    "K_CPUID":  {"crate": "k-cpuid",      "executor": "native.cpuid",   "node_type": "Service",     "schema": "0x2005", "hw": []},
-    "K_PIC":    {"crate": "k-pic",        "executor": "native.pic",     "node_type": "Driver",      "schema": "0x2006",
-                 "hw": [("PortRange", "0x20", "0xA1", "PIC Master+Slave"),
-                         ("InterruptLine", "ALL", "", "IRQ 0-15 Master")]},
-    "K_PIT":    {"crate": "k-pit",        "executor": "native.pit",     "node_type": "Driver",      "schema": "0x2007",
-                 "hw": [("PortRange", "0x40", "0x43", "PIT Channels"),
-                         ("InterruptLine", "0", "", "IRQ0 Timer")]},
-    "K_PS2":    {"crate": "k-ps2",        "executor": "native.ps2",     "node_type": "Driver",      "schema": "0x2008",
-                 "hw": [("PortRange", "0x60", "0x64", "PS/2 Data+Status"),
-                         ("InterruptLine", "1", "", "IRQ1 Keyboard")]},
-    "K_IDT":    {"crate": "k-idt",        "executor": "native.idt",     "node_type": "Service",     "schema": "0x2009",
-                 "hw": [("InterruptLine", "ALL", "", "全局中断向量表")]},
-    "K_PMM":    {"crate": "k-pmm",        "executor": "native.pmm",     "node_type": "Service",     "schema": "0x200A", "hw": []},
-    "K_VMM":    {"crate": "k-vmm",        "executor": "native.vmm",     "node_type": "Service",     "schema": "0x200B", "hw": []},
-    "K_HEAP":   {"crate": "k-heap",       "executor": "native.heap",    "node_type": "Service",     "schema": "0x200C", "hw": []},
-    "K_VGA":    {"crate": "k-vga",        "executor": "native.vga",     "node_type": "Driver",      "schema": "0x2003",
-                 "hw": [("PortRange", "0x3C8", "0x3C9", "VGA DAC Palette"),
-                         ("PhysMap",   "0xA0000", "65536", "VGA VRAM 64K")]},
-    "K_IME":    {"crate": "k-ime",        "executor": "native.ime",     "node_type": "Router",      "schema": "0x2011", "hw": []},
-    "K_NET":    {"crate": "k-net",        "executor": "native.net",     "node_type": "Driver",      "schema": "0x2015",
-                 "hw": [("PortRange", "0xCF8", "8", "PCI Config Address+Data")]},
-    "K_MOUSE":  {"crate": "k-mouse",      "executor": "native.mouse",   "node_type": "Driver",      "schema": "0x2013",
-                 "hw": [("PortRange", "0x60", "0x64", "PS/2 Data+Status"),
-                         ("InterruptLine", "12", "", "IRQ12 Mouse")]},
-    "K_CYPHER": {"crate": "k-cypher",     "executor": "native.cypher",  "node_type": "Router",      "schema": "0x2014", "hw": []},
-    "K_CUDA":   {"crate": "k-cuda-host",  "executor": "native.cuda",    "node_type": "Compute",     "schema": "0x2016", "hw": []},
-    "K_SHELL":  {"crate": "k-shell",      "executor": "native.shell",   "node_type": "PluginEntry", "schema": "0x200E", "hw": []},
-    "K_AI":     {"crate": "k-ai",         "executor": "native.ai",      "node_type": "Aggregator",  "schema": "0x2011", "hw": []},
-}
+def extract_array(name):
+    """Extracts the contents of a constant array from the bundle."""
+    # Find something like: const NAME: &[...] = &[ ... ];
+    pattern = r"const\s+" + name + r"\s*(?::\s*&\[[^\]]+\])?\s*=\s*(?:&|)\s*\[(.*?)(?=\];)"
+    m = re.search(pattern, bundle, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
 
-def extract_array(block_name):
-    m = re.search(r"const\s+" + re.escape(block_name) + r"\s*:[^=]+=\s*&\[(.*?)\];", bundle, re.DOTALL)
-    return m.group(1).strip() if m else ""
+def get_node_specs(plugin_id):
+    """Extracts node specs for a plugin."""
+    spec_key = plugin_id.replace("K_", "") + "_NODE_SPECS"
+    block = extract_array(spec_key)
+    # Search for executor_id and type
+    execs = re.findall(r"executor_id:\s*([a-zA-Z0-9_:]+::EXECUTOR_ID|ExecutorId::from_ascii\(\"([^\"]+)\"\))", block)
+    node_types = re.findall(r"node_type:\s*RuntimeNodeType::(\w+)", block)
+    schemas = re.findall(r"state_schema_hash:\s*(0x[0-9A-Fa-f]+)", block)
+    
+    results = []
+    for i in range(len(execs)):
+        executor = execs[i][1] if execs[i][1] else execs[i][0]
+        ntype = node_types[i] if i < len(node_types) else "Unknown"
+        schema = schemas[i] if i < len(schemas) else "0x0"
+        results.append((executor, ntype, schema))
+    return results
 
-def parse_dep_plugins(dep_constant):
-    block = extract_array(dep_constant)
-    return re.findall(r"K_[A-Z0-9]+(?=_ID)", block)
+def get_perms(plugin_id):
+    """Extracts permissions (HW resources)."""
+    perm_key = plugin_id.replace("K_", "") + "_PERMS"
+    block = extract_array(perm_key)
+    items = []
+    # PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x60, arg1: 0x64 }
+    pattern = r"PermissionSpec\s*{\s*kind:\s*PermissionKind::(\w+),\s*arg0:\s*([^,]+),\s*arg1:\s*([^ ]+)\s*}"
+    for m in re.finditer(pattern, block):
+        items.append((m.group(1), m.group(2), m.group(3)))
+    return items
 
-def parse_exports(exp_constant):
-    block = extract_array(exp_constant)
-    return re.findall(r'namespace:\s*"([^"]+)",\s*name:\s*"([^"]+)"', block)
+def get_capabilities(plugin_id, suffix="EXPORTS"):
+    """Extracts exported or imported capabilities."""
+    key = plugin_id.replace("K_", "") + "_" + suffix
+    block = extract_array(key)
+    # CapabilitySpec { namespace: "console", name: "write" } or ImportSpec { namespace: "console", capability: "write", ... }
+    pattern = r"(?:CapabilitySpec|ImportSpec)\s*{\s*namespace:\s*\"([^\"]+)\",\s*(?:name|capability):\s*\"([^\"]+)\""
+    return re.findall(pattern, block)
 
-def parse_imports(imp_constant):
-    block = extract_array(imp_constant)
-    return re.findall(r'namespace:\s*"([^"]+)",\s*capability:\s*"([^"]+)"', imp_constant_expanded := extract_array(imp_constant))
+def get_dependencies(plugin_id):
+    """Extracts plugin dependencies."""
+    key = "DEP_" + plugin_id.replace("K_", "")
+    block = extract_array(key)
+    return re.findall(r"(K_[A-Z0-9_]+)_ID", block)
 
-def parse_imports_from_bundle(plugin_id):
-    imp_key = plugin_id.replace("K_", "") + "_IMPORTS"
-    block = extract_array(imp_key)
-    return re.findall(r'namespace:\s*"([^"]+)",\s*capability:\s*"([^"]+)"', block)
+for crate, pid in crates.items():
+    specs = get_node_specs(pid)
+    perms = get_perms(pid)
+    exports = get_capabilities(pid, "EXPORTS")
+    imports = get_capabilities(pid, "IMPORTS")
+    deps = get_dependencies(pid)
+    
+    if not specs:
+        # Fallback for simple manifests
+        manifest_name = pid.replace("K_", "") + "_MANIFEST"
+        # manifest(K_PIT_ID, "K_PIT", DEP_PIT, PIT_PERMS, &[], &[])
+        m = re.search(manifest_name + r"\s*:\s*PluginManifest\s*=\s*(?:manifest|manifest_with_nodes)\(\s*" + pid + r"_ID,\s*\"([^\"]+)\",\s*([^,]+),\s*([^,]+),\s*([^,]+),\s*([^,]+)", bundle)
+        if m:
+            deps = re.findall(r"K_[A-Z0-9_]+(?=_ID)", extract_array(m.group(2)) if "DEP_" in m.group(2) else m.group(2))
+            perms = get_perms(pid) # try again with PID
+            exports = get_capabilities(pid, "EXPORTS")
+            imports = get_capabilities(pid, "IMPORTS")
+            specs = [("Unknown", "Generic", "0x0")]
 
-def parse_exports_from_bundle(plugin_id):
-    exp_key = plugin_id.replace("K_", "") + "_EXPORTS"
-    block = extract_array(exp_key)
-    return re.findall(r'namespace:\s*"([^"]+)",\s*name:\s*"([^"]+)"', block)
-
-def parse_deps_from_bundle(plugin_id):
-    dep_key = "DEP_" + plugin_id.replace("K_", "")
-    block = extract_array(dep_key)
-    return re.findall(r"K_[A-Z0-9]+(?=_ID)", block)
-
-def build_cypher_comment(plugin_id, meta):
-    crate       = meta["crate"]
-    executor    = meta["executor"]
-    node_type   = meta["node_type"]
-    schema      = meta["schema"]
-    hw_list     = meta["hw"]
-    deps        = parse_deps_from_bundle(plugin_id)
-    exports     = parse_exports_from_bundle(plugin_id)
-    imports     = parse_imports_from_bundle(plugin_id)
-
-    # Also check CLIPBOARD_EXPORTS for shell
-    if plugin_id == "K_SHELL":
-        exports += parse_exports_from_bundle("CLIPBOARD")
-
+    # Build Cypher
     lines = []
-    div = "=" * 62
-    lines.append(f"// {div}")
-    lines.append(f"// GOS KERNEL TOPOLOGY — {crate} ({executor})")
-    lines.append(f"// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。")
-    lines.append(f"//")
-    lines.append(f"// MERGE (p:Plugin {{id: \"{plugin_id}\", name: \"{crate}\"}})")
-    lines.append(f"// SET p.executor = \"{executor}\", p.node_type = \"{node_type}\", p.state_schema = \"{schema}\"")
+    lines.append("// " + "="*60)
+    lines.append(f"// GOS KERNEL TOPOLOGY — {crate}")
+    lines.append("// This Cypher script documents the plugin's place in the kernel graph.")
+    lines.append("//")
+    lines.append(f"MERGE (p:Plugin {{id: \"{pid}\", name: \"{crate}\"}})")
+    
+    for i, (executor, ntype, schema) in enumerate(specs):
+        lines.append(f"SET p.executor = \"{executor}\", p.node_type = \"{ntype}\", p.state_schema = \"{schema}\"")
     
     if deps:
-        lines.append(f"//")
-        lines.append(f"// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────")
-        for dep in deps:
-            var = dep.lower()
-            lines.append(f"// MERGE ({var}:Plugin {{id: \"{dep}\"}})")
-            lines.append(f"// MERGE (p)-[:DEPENDS_ON {{required: true}}]->({var})")
-
-    if hw_list:
-        lines.append(f"//")
-        lines.append(f"// // ── 硬件资源边界 ──────────────────────────────────────────")
-        for hw in hw_list:
-            kind, a, b, label = hw
-            if kind == "PortRange":
-                lines.append(f"// MERGE (hw_{a.replace('0x','').lower()}:PortRange {{start: \"{a}\", end: \"{b}\", label: \"{label}\"}})")
-                lines.append(f"// MERGE (p)-[:REQUIRES_PORT]->(hw_{a.replace('0x','').lower()})")
-            elif kind == "InterruptLine":
-                lines.append(f"// MERGE (irq_{a}:InterruptLine {{irq: \"{a}\", label: \"{label}\"}})")
-                lines.append(f"// MERGE (p)-[:BINDS_IRQ]->(irq_{a})")
+        lines.append("//")
+        lines.append("// -- Dependencies")
+        for d in deps:
+            lines.append(f"MERGE (dep_{d}:Plugin {{id: \"{d}\"}})")
+            lines.append(f"MERGE (p)-[:DEPENDS_ON]->(dep_{d})")
+            
+    if perms:
+        lines.append("//")
+        lines.append("// -- Hardware Resources")
+        for kind, a0, a1 in perms:
+            if kind == "PortIo":
+                lines.append(f"MERGE (pr_{a0.replace('0x','')}:PortRange {{start: \"{a0}\", end: \"{a1}\"}})")
+                lines.append(f"MERGE (p)-[:REQUIRES_PORT]->(pr_{a0.replace('0x','')})")
+            elif kind == "IrqBind":
+                lines.append(f"MERGE (irq_{a0}:InterruptLine {{irq: \"{a0}\"}})")
+                lines.append(f"MERGE (p)-[:BINDS_IRQ]->(irq_{a0})")
             elif kind == "PhysMap":
-                lines.append(f"// MERGE (physmap_{a.replace('0x','').lower()}:PhysMap {{base: \"{a}\", size: \"{b}\", label: \"{label}\"}})")
-                lines.append(f"// MERGE (p)-[:MAPS_PHYS]->(physmap_{a.replace('0x','').lower()})")
+                lines.append(f"MERGE (pm_{a0.replace('0x','')}:PhysMap {{base: \"{a0}\", size: \"{a1}\"}})")
+                lines.append(f"MERGE (p)-[:MAPS_PHYS]->(pm_{a0.replace('0x','')})")
 
     if exports:
-        lines.append(f"//")
-        lines.append(f"// // ── 能力导出 (EXPORTS Capability) ────────────────────────")
+        lines.append("//")
+        lines.append("// -- Exported Capabilities (APIs)")
         for ns, nm in exports:
-            var = f"cap_{ns}_{nm}".replace("-", "_")
-            lines.append(f"// MERGE ({var}:Capability {{namespace: \"{ns}\", name: \"{nm}\"}})")
-            lines.append(f"// MERGE (p)-[:EXPORTS]->({var})")
+            lines.append(f"MERGE (cap_{ns}_{nm}:Capability {{namespace: \"{ns}\", name: \"{nm}\"}})")
+            lines.append(f"MERGE (p)-[:EXPORTS]->(cap_{ns}_{nm})")
 
     if imports:
-        lines.append(f"//")
-        lines.append(f"// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───")
+        lines.append("//")
+        lines.append("// -- Imported Capabilities (Dependencies)")
         for ns, nm in imports:
-            var = f"cap_{ns}_{nm}".replace("-", "_")
-            lines.append(f"// MERGE ({var}:Capability {{namespace: \"{ns}\", name: \"{nm}\"}})")
-            lines.append(f"// MERGE (p)-[:IMPORTS]->({var})")
+            lines.append(f"MERGE (cap_{ns}_{nm}:Capability {{namespace: \"{ns}\", name: \"{nm}\"}})")
+            lines.append(f"MERGE (p)-[:IMPORTS]->(cap_{ns}_{nm})")
 
-    lines.append(f"// {div}")
-    return "\n".join(lines) + "\n"
-
-def inject_into_file(file_path, cypher_block):
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    # Idempotent guard
-    if "GOS KERNEL TOPOLOGY" in content:
-        print(f"  [SKIP] Already has topology header: {file_path}")
-        return
-
-    lines = content.split("\n")
-
-    # Find insert position: after all #![...] inner attributes and blank lines
-    insert_idx = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("#!["):
-            insert_idx = i + 1
-        elif i == insert_idx and stripped == "":
-            insert_idx = i + 1  # skip blank lines immediately after attrs
-
-    lines.insert(insert_idx, "\n" + cypher_block)
-    with open(file_path, "w", encoding="utf-8", newline="\r\n") as f:
-        f.write("\n".join(lines))
-    print(f"  [OK] Injected into {file_path}")
-
-for plugin_id, meta in MODULE_META.items():
-    crate = meta["crate"]
-    file_path = os.path.join(r"e:\GOSKernel\crates", crate, "src", "lib.rs")
-    if not os.path.exists(file_path):
-        print(f"  [MISS] {file_path}")
-        continue
-    cypher = build_cypher_comment(plugin_id, meta)
-    inject_into_file(file_path, cypher)
-
-print("\nDone. Run 'cargo check' to verify compilation is unaffected.")
+    lines.append("// " + "="*60)
+    
+    cypher_block = "\n".join(["// " + l if not l.startswith("//") else l for l in lines]) + "\n"
+    
+    # Inject
+    file_path = os.path.join(crates_dir, crate, "src", "lib.rs")
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Identity logic: if it has the header, replace it. Otherwise prepend.
+        if "// GOS KERNEL TOPOLOGY" in content:
+            # Replace existing block
+            new_content = re.sub(r"// =+.*?// =+", cypher_block, content, flags=re.DOTALL)
+        else:
+            # Prepend after #![no_std]
+            m = re.search(r"(#![no_std]\s*)", content)
+            if m:
+                new_content = content[:m.end()] + "\n" + cypher_block + content[m.end():]
+            else:
+                new_content = cypher_block + "\n" + content
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"Updated {crate}")
+    else:
+        print(f"Skipping {crate}: file not found")

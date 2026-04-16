@@ -1,17 +1,18 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-pmm (native.pmm)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-pmm
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_PMM", name: "k-pmm"})
-// SET p.executor = "native.pmm", p.node_type = "Service", p.state_schema = "0x200A"
+// SET p.executor = "k_pmm::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x200A"
 //
-// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// -- Exported Capabilities (APIs)
 // MERGE (cap_memory_frame_alloc:Capability {namespace: "memory", name: "frame_alloc"})
 // MERGE (p)-[:EXPORTS]->(cap_memory_frame_alloc)
-// ==============================================================
+// ============================================================
+
 
 //! GOS Physical Memory Manager — Two-Level Bitmap Frame Allocator
 //!
@@ -411,6 +412,54 @@ unsafe extern "C" fn pmm_on_event(
 unsafe extern "C" fn pmm_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
+
+const PMM_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PhysMap, arg0: u64::MAX, arg1: u64::MAX },
+    PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
+];
+const PMM_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "memory", name: "frame_alloc" },
+];
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_PMM"),
+        name: "K_PMM",
+        version: 1,
+        depends_on: &[],
+        permissions: PMM_PERMS,
+        exports: PMM_EXPORTS,
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_PMM"), "pmm.entry"),
+            local_node_key: "pmm.entry",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x200A,
+            permissions: PMM_PERMS,
+            exports: PMM_EXPORTS,
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: PMM_PERMS,
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "pmm.entry",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: Some(register_hook),
+};
 
 // ---------------------------------------------------------------------------
 // Tests

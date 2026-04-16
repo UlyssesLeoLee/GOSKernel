@@ -1,13 +1,13 @@
 #![no_std]
 
 
-// ==============================================================
-// GOS KERNEL TOPOLOGY — k-core (native.core)
-// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-core
+// This Cypher script documents the plugin's place in the kernel graph.
 //
 // MERGE (p:Plugin {id: "K_CORE", name: "k-core"})
-// SET p.executor = "native.core", p.node_type = "Service", p.state_schema = "0x2021"
-// ==============================================================
+// ============================================================
+
 
 // MERGE (p:Plugin {id: "K_CORE"})
 // SET p.name = "k-core"
@@ -16,6 +16,8 @@ use core::arch::global_asm;
 use gos_protocol::{
     packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
     Signal, VectorAddress, CORE_CONTROL_SWITCH_CONTEXT,
+    BuiltinPluginDescriptor, NativeNodeBinding, PluginManifest, GOS_ABI_VERSION,
+    PluginId, NodeSpec, RuntimeNodeType, EntryPolicy, derive_node_id,
 };
 
 // Link the assembly context switch routine.
@@ -122,3 +124,39 @@ extern "C" {
 extern "C" fn thread_exit() -> ! {
     panic!("Kernel thread returned! Unhandled graceful exit.");
 }
+
+// ── Plugin Descriptor ────────────────────────────────────────────────────────
+
+pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
+    manifest: PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PluginId::from_ascii("K_CORE"),
+        name: "K_CORE",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[NodeSpec {
+            node_id: derive_node_id(PluginId::from_ascii("K_CORE"), "core.ctx"),
+            local_node_key: "core.ctx",
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Bootstrap,
+            executor_id: EXECUTOR_ID,
+            state_schema_hash: 0x200D,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        }],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    },
+    granted_permissions: &[],
+    nodes: &[NativeNodeBinding {
+        vector: NODE_VEC,
+        local_node_key: "core.ctx",
+        executor: EXECUTOR_VTABLE,
+    }],
+    register_hook: None,
+};
