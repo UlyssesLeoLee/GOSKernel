@@ -1,5 +1,20 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-pic (native.pic)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_PIC", name: "k-pic"})
+// SET p.executor = "native.pic", p.node_type = "Driver", p.state_schema = "0x2006"
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (hw_20:PortRange {start: "0x20", end: "0xA1", label: "PIC Master+Slave"})
+// MERGE (p)-[:REQUIRES_PORT]->(hw_20)
+// MERGE (irq_ALL:InterruptLine {irq: "ALL", label: "IRQ 0-15 Master"})
+// MERGE (p)-[:BINDS_IRQ]->(irq_ALL)
+// ==============================================================
+
 use gos_hal::{meta, vaddr};
 use gos_protocol::{
     packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,

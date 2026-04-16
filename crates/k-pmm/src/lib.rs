@@ -1,5 +1,18 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-pmm (native.pmm)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_PMM", name: "k-pmm"})
+// SET p.executor = "native.pmm", p.node_type = "Service", p.state_schema = "0x200A"
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_memory_frame_alloc:Capability {namespace: "memory", name: "frame_alloc"})
+// MERGE (p)-[:EXPORTS]->(cap_memory_frame_alloc)
+// ==============================================================
+
 //! GOS Physical Memory Manager — Two-Level Bitmap Frame Allocator
 //!
 //! Every physical 4 KiB frame maps to a single bit in a static bitmap.

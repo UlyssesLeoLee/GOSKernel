@@ -1,5 +1,30 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-net (native.net)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_NET", name: "k-net"})
+// SET p.executor = "native.net", p.node_type = "Driver", p.state_schema = "0x2015"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_vga:Plugin {id: "K_VGA"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vga)
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (hw_cf8:PortRange {start: "0xCF8", end: "8", label: "PCI Config Address+Data"})
+// MERGE (p)-[:REQUIRES_PORT]->(hw_cf8)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_net_uplink:Capability {namespace: "net", name: "uplink"})
+// MERGE (p)-[:EXPORTS]->(cap_net_uplink)
+//
+// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
+// MERGE (p)-[:IMPORTS]->(cap_console_write)
+// ==============================================================
+
 use core::hint::spin_loop;
 
 use gos_protocol::{

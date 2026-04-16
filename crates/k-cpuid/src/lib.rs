@@ -1,5 +1,14 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-cpuid (native.cpuid)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_CPUID", name: "k-cpuid"})
+// SET p.executor = "native.cpuid", p.node_type = "Service", p.state_schema = "0x2005"
+// ==============================================================
+
 use core::arch::x86_64::__cpuid;
 
 use gos_hal::{meta, vaddr};

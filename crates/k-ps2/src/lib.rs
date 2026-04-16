@@ -1,12 +1,39 @@
 #![no_std]
 
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-ps2 (native.ps2)
+// 以下 Cypher 脚本描述该模块在图数据库中的完整拓扑结构。
+// 可直接复制拼接后导入 Neo4j，与其他模块脚本共同构成内核完整图谱。
+//
+// MERGE (ps2:Plugin {id: "K_PS2", name: "k-ps2", executor: "native.ps2"})
+// SET ps2.node_type = "Driver", ps2.entry_policy = "Bootstrap"
+// SET ps2.state_schema = "0x2008"
+//
+// // 硬件资源声明
+// MERGE (port_ps2:PortRange {start: "0x60", end: "0x64", label: "PS2 Data+Status"})
+// MERGE (irq_kb:InterruptLine {irq: 1, label: "IRQ1 Keyboard"})
+// MERGE (ps2)-[:REQUIRES_PORT]->(port_ps2)
+// MERGE (ps2)-[:BINDS_IRQ]->(irq_kb)
+//
+// // 启动依赖 (depends on K_PIC to be initialized first)
+// MERGE (pic:Plugin {id: "K_PIC"})
+// MERGE (ps2)-[:DEPENDS_ON {required: true}]->(pic)
+//
+// // 运行时 Capability 消费 (on_init 阶段通过 resolve_capability 动态绑定)
+// MERGE (shell_cap:Capability {namespace: "shell", name: "input"})
+// MERGE (ps2)-[:IMPORTS {binding: "shell_target", required: false}]->(shell_cap)
+//
+// // 信号流：PS2 捕获键盘中断 → 编码为 Signal::Data → 发往 shell::input
+// MERGE (shell:Plugin {id: "K_SHELL"})
+// MERGE (ps2)-[:EMITS_SIGNAL {signal: "Data", trigger: "IRQ1", route: "shell/input"}]->(shell)
+// ============================================================
+
 use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1, DecodedKey};
 use x86_64::instructions::port::Port;
 use spin::Mutex;
 use gos_protocol::*;
-use gos_hal::{vaddr, meta};
 
-pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 7, 0, 0);
+pub const NODE_VEC: VectorAddress = gos_protocol::vectors::CORE_PS2;
 
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.ps2");
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
@@ -19,25 +46,42 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_telemetry: None,
 };
 
-pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
+static mut KEYBOARD: Option<Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>>> = None;
 
 pub fn keyboard() -> &'static Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> {
     unsafe {
-        let p = node_ptr();
-        if p.is_null() { panic!("K_PS2 Matrix not initialized"); }
-        &*(p.add(1024) as *mut Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>>)
+        (&*core::ptr::addr_of!(KEYBOARD)).as_ref().unwrap()
     }
 }
 
-unsafe extern "C" fn ps2_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
-    let p = node_ptr();
-    meta::burn_node_metadata(p, "HAL", "PS2");
-    let state_ptr = p.add(1024) as *mut Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>>;
-    core::ptr::write(state_ptr, Mutex::new(Keyboard::new(
-        ScancodeSet1::new(),
-        layouts::Us104Key,
-        HandleControl::MapLettersToUnicode,
-    )));
+#[repr(C)]
+struct Ps2State {
+    shell_target: u64,
+}
+
+unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut Ps2State {
+    let ctx = unsafe { &mut *ctx };
+    unsafe { &mut *(ctx.state_ptr as *mut Ps2State) }
+}
+
+unsafe extern "C" fn ps2_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe {
+        KEYBOARD = Some(Mutex::new(Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Us104Key,
+            HandleControl::MapLettersToUnicode,
+        )));
+        let abi = &*(*ctx).abi;
+        let shell_target = if let Some(resolve) = abi.resolve_capability {
+            resolve(b"shell".as_ptr(), 5, b"input".as_ptr(), 5)
+        } else {
+            0
+        };
+        core::ptr::write(
+            (*ctx).state_ptr as *mut Ps2State,
+            Ps2State { shell_target },
+        );
+    }
     ExecStatus::Done
 }
 
@@ -48,12 +92,16 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
             let mut port = Port::new(0x60);
             let scancode: u8 = unsafe { port.read() };
 
+            let shell_target = unsafe { state_mut(ctx) }.shell_target;
+            if shell_target == 0 {
+                return ExecStatus::Done;
+            }
+
             let mut keyboard = keyboard().lock();
             if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
                 if let Some(key) = keyboard.process_keyevent(key_event) {
                     let abi = unsafe { &*(*ctx).abi };
-                    let shell_vec = VectorAddress::new(6, 1, 0, 0);
-                    
+
                     match key {
                         DecodedKey::Unicode(character) => {
                             let mut b = [0; 4];
@@ -61,7 +109,7 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
                             for byte in s.bytes() {
                                 if let Some(emit) = abi.emit_signal {
                                     unsafe {
-                                        let _ = emit(shell_vec.as_u64(), signal_to_packet(Signal::Data { from: NODE_VEC.as_u64(), byte }));
+                                        let _ = emit(shell_target, signal_to_packet(Signal::Data { from: NODE_VEC.as_u64(), byte }));
                                     }
                                 }
                             }
@@ -86,7 +134,7 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
                             if let Some(byte) = special {
                                 if let Some(emit) = abi.emit_signal {
                                     unsafe {
-                                        let _ = emit(shell_vec.as_u64(), signal_to_packet(Signal::Data { from: NODE_VEC.as_u64(), byte }));
+                                        let _ = emit(shell_target, signal_to_packet(Signal::Data { from: NODE_VEC.as_u64(), byte }));
                                     }
                                 }
                             }

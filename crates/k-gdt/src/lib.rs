@@ -1,5 +1,14 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-gdt (native.gdt)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_GDT", name: "k-gdt"})
+// SET p.executor = "native.gdt", p.node_type = "Service", p.state_schema = "0x2004"
+// ==============================================================
+
 use gos_hal::{meta, vaddr};
 use gos_protocol::{
     packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,

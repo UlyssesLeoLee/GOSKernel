@@ -1,5 +1,26 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-cypher (native.cypher)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_CYPHER", name: "k-cypher"})
+// SET p.executor = "native.cypher", p.node_type = "Router", p.state_schema = "0x2014"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_vga:Plugin {id: "K_VGA"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vga)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_cypher_query:Capability {namespace: "cypher", name: "query"})
+// MERGE (p)-[:EXPORTS]->(cap_cypher_query)
+//
+// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
+// MERGE (p)-[:IMPORTS]->(cap_console_write)
+// ==============================================================
+
 use gos_protocol::{
     packet_to_signal, signal_to_packet, CYPHER_CONTROL_QUERY_BEGIN, CYPHER_CONTROL_QUERY_COMMIT,
     EdgeVector, ExecStatus, ExecutorContext, ExecutorId, GraphEdgeSummary, GraphNodeSummary,

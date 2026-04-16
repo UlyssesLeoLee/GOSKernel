@@ -1,5 +1,24 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-pit (native.pit)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_PIT", name: "k-pit"})
+// SET p.executor = "native.pit", p.node_type = "Driver", p.state_schema = "0x2007"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_pic:Plugin {id: "K_PIC"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pic)
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (hw_40:PortRange {start: "0x40", end: "0x43", label: "PIT Channels"})
+// MERGE (p)-[:REQUIRES_PORT]->(hw_40)
+// MERGE (irq_0:InterruptLine {irq: "0", label: "IRQ0 Timer"})
+// MERGE (p)-[:BINDS_IRQ]->(irq_0)
+// ==============================================================
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::instructions::port::Port;
 use gos_protocol::*;

@@ -1,5 +1,26 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-idt (native.idt)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_IDT", name: "k-idt"})
+// SET p.executor = "native.idt", p.node_type = "Service", p.state_schema = "0x2009"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_gdt:Plugin {id: "K_GDT"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_gdt)
+// MERGE (k_pit:Plugin {id: "K_PIT"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pit)
+// MERGE (k_ps2:Plugin {id: "K_PS2"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_ps2)
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (irq_ALL:InterruptLine {irq: "ALL", label: "全局中断向量表"})
+// MERGE (p)-[:BINDS_IRQ]->(irq_ALL)
+// ==============================================================
+
 use core::arch::asm;
 use core::arch::global_asm;
 use core::arch::naked_asm;

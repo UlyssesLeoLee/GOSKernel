@@ -1,5 +1,22 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-serial (native.serial)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_SERIAL", name: "k-serial"})
+// SET p.executor = "native.serial", p.node_type = "Driver", p.state_schema = "0x2002"
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (hw_3f8:PortRange {start: "0x3F8", end: "8", label: "COM1 Serial Port"})
+// MERGE (p)-[:REQUIRES_PORT]->(hw_3f8)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_serial_write:Capability {namespace: "serial", name: "write"})
+// MERGE (p)-[:EXPORTS]->(cap_serial_write)
+// ==============================================================
+
 use gos_hal::{meta, vaddr};
 use gos_protocol::{
     packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,

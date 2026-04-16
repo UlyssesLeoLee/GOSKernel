@@ -11,6 +11,8 @@ pub use stem::*;
 pub mod trap;
 pub use trap::{TrapFrame, TrapVector, TrapClass, HardwareEvent};
 
+pub mod vectors;
+
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const GOS_ABI_VERSION: u32 = 2;
 pub const CONTROL_PLANE_PROTOCOL_VERSION: u16 = 1;
@@ -283,6 +285,9 @@ pub const DISPLAY_CONTROL_POINTER_VISIBLE: u8 = 0xC2;
 pub const DISPLAY_CONTROL_THEME: u8 = 0xC3;
 pub const DISPLAY_THEME_WABI: u8 = 0x00;
 pub const DISPLAY_THEME_SHOJI: u8 = 0x01;
+
+/// Control command sent to k-core's native.core executor to perform a cooperative context switch.
+pub const CORE_CONTROL_SWITCH_CONTEXT: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CellResult {

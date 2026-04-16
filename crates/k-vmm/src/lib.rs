@@ -1,5 +1,22 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-vmm (native.vmm)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_VMM", name: "k-vmm"})
+// SET p.executor = "native.vmm", p.node_type = "Service", p.state_schema = "0x200B"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_pmm:Plugin {id: "K_PMM"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pmm)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_memory_map_page:Capability {namespace: "memory", name: "map_page"})
+// MERGE (p)-[:EXPORTS]->(cap_memory_map_page)
+// ==============================================================
+
 use core::ptr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{

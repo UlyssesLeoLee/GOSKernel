@@ -1,5 +1,24 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-heap (native.heap)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_HEAP", name: "k-heap"})
+// SET p.executor = "native.heap", p.node_type = "Service", p.state_schema = "0x200C"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_pmm:Plugin {id: "K_PMM"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_pmm)
+// MERGE (k_vmm:Plugin {id: "K_VMM"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vmm)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_memory_alloc:Capability {namespace: "memory", name: "alloc"})
+// MERGE (p)-[:EXPORTS]->(cap_memory_alloc)
+// ==============================================================
+
 extern crate alloc;
 
 use x86_64::structures::paging::{Page, PageTableFlags, FrameAllocator};

@@ -1,5 +1,26 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-vga (native.vga)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_VGA", name: "k-vga"})
+// SET p.executor = "native.vga", p.node_type = "Driver", p.state_schema = "0x2003"
+//
+// // ── 硬件资源边界 ──────────────────────────────────────────
+// MERGE (hw_3c8:PortRange {start: "0x3C8", end: "0x3C9", label: "VGA DAC Palette"})
+// MERGE (p)-[:REQUIRES_PORT]->(hw_3c8)
+// MERGE (physmap_a0000:PhysMap {base: "0xA0000", size: "65536", label: "VGA VRAM 64K"})
+// MERGE (p)-[:MAPS_PHYS]->(physmap_a0000)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
+// MERGE (p)-[:EXPORTS]->(cap_console_write)
+// MERGE (cap_display_pointer:Capability {namespace: "display", name: "pointer"})
+// MERGE (p)-[:EXPORTS]->(cap_display_pointer)
+// ==============================================================
+
 use gos_protocol::{
     packet_to_signal, DISPLAY_CONTROL_POINTER_COL, DISPLAY_CONTROL_POINTER_ROW,
     DISPLAY_CONTROL_POINTER_VISIBLE, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,

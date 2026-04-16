@@ -1,5 +1,50 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-shell (native.shell)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_SHELL", name: "k-shell"})
+// SET p.executor = "native.shell", p.node_type = "PluginEntry", p.state_schema = "0x200E"
+//
+// // ── 启动依赖 (DEPENDS_ON) ──────────────────────────────────
+// MERGE (k_vga:Plugin {id: "K_VGA"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_vga)
+// MERGE (k_ps2:Plugin {id: "K_PS2"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_ps2)
+// MERGE (k_heap:Plugin {id: "K_HEAP"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_heap)
+// MERGE (k_ime:Plugin {id: "K_IME"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_ime)
+// MERGE (k_net:Plugin {id: "K_NET"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_net)
+// MERGE (k_cypher:Plugin {id: "K_CYPHER"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_cypher)
+// MERGE (k_cuda:Plugin {id: "K_CUDA"})
+// MERGE (p)-[:DEPENDS_ON {required: true}]->(k_cuda)
+//
+// // ── 能力导出 (EXPORTS Capability) ────────────────────────
+// MERGE (cap_shell_input:Capability {namespace: "shell", name: "input"})
+// MERGE (p)-[:EXPORTS]->(cap_shell_input)
+// MERGE (cap_clipboard_buffer:Capability {namespace: "clipboard", name: "buffer"})
+// MERGE (p)-[:EXPORTS]->(cap_clipboard_buffer)
+//
+// // ── 能力消费 (IMPORTS Capability, resolved at on_init) ───
+// MERGE (cap_console_write:Capability {namespace: "console", name: "write"})
+// MERGE (p)-[:IMPORTS]->(cap_console_write)
+// MERGE (cap_ime_control:Capability {namespace: "ime", name: "control"})
+// MERGE (p)-[:IMPORTS]->(cap_ime_control)
+// MERGE (cap_ai_supervisor:Capability {namespace: "ai", name: "supervisor"})
+// MERGE (p)-[:IMPORTS]->(cap_ai_supervisor)
+// MERGE (cap_cypher_query:Capability {namespace: "cypher", name: "query"})
+// MERGE (p)-[:IMPORTS]->(cap_cypher_query)
+// MERGE (cap_net_uplink:Capability {namespace: "net", name: "uplink"})
+// MERGE (p)-[:IMPORTS]->(cap_net_uplink)
+// MERGE (cap_cuda_bridge:Capability {namespace: "cuda", name: "bridge"})
+// MERGE (p)-[:IMPORTS]->(cap_cuda_bridge)
+// ==============================================================
+
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use gos_protocol::{

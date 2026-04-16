@@ -1,5 +1,14 @@
 #![no_std]
 
+
+// ==============================================================
+// GOS KERNEL TOPOLOGY — k-panic (native.panic)
+// 以下 Cypher 脚本可直接导入 Neo4j，与其他模块共同还原内核完整图谱。
+//
+// MERGE (p:Plugin {id: "K_PANIC", name: "k-panic"})
+// SET p.executor = "native.panic", p.node_type = "Service", p.state_schema = "0x2001"
+// ==============================================================
+
 use gos_hal::{meta, vaddr};
 use gos_protocol::{
     packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,

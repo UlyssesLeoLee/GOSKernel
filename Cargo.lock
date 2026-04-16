@@ -109,19 +109,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "k-core"
+version = "0.2.0"
+dependencies = [
+ "gos-protocol",
+ "x86_64",
+]
+
+[[package]]
 name = "k-cpuid"
 version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
-]
-
-[[package]]
-name = "k-ctx"
-version = "0.2.0"
-dependencies = [
- "gos-protocol",
- "x86_64",
 ]
 
 [[package]]

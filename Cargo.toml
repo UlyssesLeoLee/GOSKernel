@@ -25,5 +25,6 @@ members = [
     "crates/k-cypher",
     "crates/k-ime",
     "crates/k-net",
-    "crates/k-mouse", "crates/k-ctx",
+    "crates/k-mouse",
+    "crates/k-core",
 ]
