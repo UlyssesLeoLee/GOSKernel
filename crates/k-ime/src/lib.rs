@@ -180,6 +180,18 @@ unsafe extern "C" fn ime_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 
 unsafe extern "C" fn ime_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
     let state = unsafe { state_mut(ctx) };
+
+    // Lazy resolution: IME boots before Shell, so shell_target may be 0.
+    if state.shell_target == 0 {
+        let abi = abi_from_ctx(ctx);
+        if let Some(resolve) = abi.resolve_capability {
+            let resolved = unsafe { resolve(b"shell".as_ptr(), 5, b"input".as_ptr(), 5) };
+            if resolved != 0 {
+                state.shell_target = resolved;
+            }
+        }
+    }
+
     let signal = packet_to_signal(unsafe { (*event).signal });
 
     match signal {

@@ -78,8 +78,21 @@ unsafe extern "C" fn ps2_on_event(ctx: *mut ExecutorContext, event: *const NodeE
             let scancode: u8 = unsafe { port.read() };
 
             let state = unsafe { state_mut(ctx) };
+
+            // Lazy resolution: PS2 boots before Shell, so shell_target may
+            // still be 0 from on_init.  Re-resolve on every event until the
+            // capability appears in the graph.
             if state.shell_target == 0 {
-                return ExecStatus::Done;
+                let abi = unsafe { &*(*ctx).abi };
+                if let Some(resolve) = abi.resolve_capability {
+                    let resolved = unsafe { resolve(b"shell".as_ptr(), 5, b"input".as_ptr(), 5) };
+                    if resolved != 0 {
+                        state.shell_target = resolved;
+                    }
+                }
+                if state.shell_target == 0 {
+                    return ExecStatus::Done;
+                }
             }
 
             let keyboard = &mut state.keyboard;
