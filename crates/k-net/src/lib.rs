@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-net
@@ -29,9 +32,8 @@
 use core::hint::spin_loop;
 
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
-    NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress,
+    signal_to_packet, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
+    NodeEvent, NodeExecutorVTable, Signal, VectorAddress,
 };
 use x86_64::instructions::port::Port;
 
@@ -734,43 +736,9 @@ unsafe extern "C" fn net_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn net_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let sink = sink_from_ctx(ctx);
-    let state = unsafe { state_mut(ctx) };
-    let signal = packet_to_signal(unsafe { (*event).signal });
-
-    match signal {
-        Signal::Spawn { .. } => {
-            refresh_network_state(state);
-            print_probe_report(&sink, state, "uplink boot sync");
-            ExecStatus::Done
-        }
-        Signal::Control { cmd, .. } => {
-            match cmd {
-                NET_CONTROL_REPORT => {
-                    if state.probe_complete == 0 {
-                        refresh_network_state(state);
-                    }
-                    print_probe_report(&sink, state, "uplink status");
-                }
-                NET_CONTROL_RESET => {
-                    refresh_network_state(state);
-                    print_probe_report(&sink, state, "uplink reset");
-                }
-                NET_CONTROL_PROBE | 1 => {
-                    refresh_network_state(state);
-                    print_probe_report(&sink, state, "uplink reprobe");
-                }
-                _ => {
-                    if state.probe_complete == 0 {
-                        refresh_network_state(state);
-                    }
-                    print_probe_report(&sink, state, "uplink status");
-                }
-            }
-            ExecStatus::Done
-        }
-        _ => ExecStatus::Done,
-    }
+    let Some(input)  = (unsafe { pre::prepare(ctx, event) })  else { return ExecStatus::Done; };
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn net_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

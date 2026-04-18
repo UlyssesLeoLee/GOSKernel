@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-vmm
@@ -86,8 +89,10 @@ unsafe extern "C" fn vmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
 
-unsafe extern "C" fn vmm_on_event(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
-    ExecStatus::Done
+unsafe extern "C" fn vmm_on_event(_ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    let Some(output) = proc::process(input) else { return ExecStatus::Done; };
+    post::emit(output)
 }
 
 unsafe extern "C" fn vmm_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

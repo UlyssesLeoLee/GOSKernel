@@ -1,5 +1,9 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
+
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-ai
@@ -29,8 +33,7 @@
 
 
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, AI_CONTROL_API_BEGIN, AI_CONTROL_API_COMMIT,
-    AI_CONTROL_CHAT_BEGIN, AI_CONTROL_CHAT_COMMIT, ControlPlaneMessageKind, ExecStatus,
+    signal_to_packet, ControlPlaneMessageKind, ExecStatus,
     ExecutorContext, ExecutorId, KernelAbi, NodeEvent, NodeExecutorVTable, Signal,
     VectorAddress,
 };
@@ -450,48 +453,9 @@ unsafe extern "C" fn ai_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn ai_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let sink = sink_from_ctx(ctx);
-    let state = unsafe { state_mut(ctx) };
-    let signal = packet_to_signal(unsafe { (*event).signal });
-
-    match signal {
-        Signal::Spawn { .. } => {
-            drain_control_plane_into(state);
-            print_runtime_brief(&sink, state);
-            handoff_shell(&sink, state);
-            emit_shell_chat_line(&sink, state, "ai> supervisor online");
-            emit_shell_chat_line(&sink, state, "ai> type ask <prompt> on the left");
-            ExecStatus::Done
-        }
-        Signal::Control { .. } => {
-            if let Signal::Control { cmd, .. } = signal {
-                if cmd == AI_CONTROL_API_BEGIN {
-                    begin_api_capture(state);
-                } else if cmd == AI_CONTROL_API_COMMIT {
-                    commit_api_capture(state);
-                    emit_shell_chat_line(&sink, state, "ai> uplink key armed");
-                } else if cmd == AI_CONTROL_CHAT_BEGIN {
-                    begin_chat_capture(state);
-                } else if cmd == AI_CONTROL_CHAT_COMMIT {
-                    commit_chat_capture(&sink, state);
-                } else {
-                    drain_control_plane_into(state);
-                }
-            }
-            ExecStatus::Done
-        }
-        Signal::Data { byte, .. } => {
-            if state.api_capture_active {
-                append_api_byte(state, byte);
-            } else if state.prompt_capture_active {
-                append_chat_byte(state, byte);
-            }
-            ExecStatus::Done
-        }
-        Signal::Call { .. } | Signal::Interrupt { .. } | Signal::Terminate => {
-            ExecStatus::Done
-        }
-    }
+    let Some(input)  = (unsafe { pre::prepare(ctx, event) })   else { return ExecStatus::Done; };
+    let Some(output) = (unsafe { proc::process(ctx, input) })  else { return ExecStatus::Done; };
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn ai_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

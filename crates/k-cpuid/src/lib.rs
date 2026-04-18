@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-cpuid
@@ -48,17 +51,6 @@ fn hal_node_ptr() -> *mut u8 {
 unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut CpuidState {
     let ctx = unsafe { &mut *ctx };
     unsafe { &mut *(ctx.state_ptr as *mut CpuidState) }
-}
-
-fn signal_kind_code(signal: Signal) -> u8 {
-    match signal {
-        Signal::Call { .. } => 0x01,
-        Signal::Spawn { .. } => 0x02,
-        Signal::Interrupt { .. } => 0x03,
-        Signal::Data { .. } => 0x04,
-        Signal::Control { .. } => 0x05,
-        Signal::Terminate => 0xFF,
-    }
 }
 
 fn copy_brand_leaf(brand: &mut [u8; 48], index: usize, eax: u32, ebx: u32, ecx: u32, edx: u32) {
@@ -137,11 +129,12 @@ unsafe extern "C" fn cpuid_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn cpuid_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let signal = unsafe { packet_to_signal((*event).signal) };
-    let state = unsafe { state_mut(ctx) };
-    state.last_signal_kind = signal_kind_code(signal);
-    sample_cpuid(state);
-    ExecStatus::Done
+    // ── Pre-processing: decode signal kind ────────────────────────────────────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: re-sample CPUID ──────────────────────────────────────
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    // ── Post-processing: commit telemetry ─────────────────────────────────────
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn cpuid_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

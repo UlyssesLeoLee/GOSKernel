@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-vga
@@ -480,14 +483,12 @@ unsafe extern "C" fn vga_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn vga_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let state = unsafe { state_mut(ctx) };
-    let signal = packet_to_signal(unsafe { (*event).signal });
-    match signal {
-        Signal::Data { byte, .. } => write_byte(state, byte),
-        Signal::Control { cmd, val } => handle_control(state, cmd, val),
-        _ => {}
-    }
-    ExecStatus::Done
+    // ── Pre-processing: classify the signal as a Data or Control operation ────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: apply the operation to VgaState / hardware buffer ────
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    // ── Post-processing: signal Done ──────────────────────────────────────────
+    post::emit(output)
 }
 
 unsafe extern "C" fn vga_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

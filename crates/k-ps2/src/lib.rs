@@ -1,5 +1,9 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
+
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-ps2
 // This Cypher script documents the plugin's place in the kernel graph.
@@ -24,8 +28,7 @@
 // MERGE (p)-[:ROUTES {key: 1}]->(r1)-[:TO]->(ime:Plugin {id: "K_IME"})
 // ============================================================
 
-use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1, DecodedKey};
-use x86_64::instructions::port::Port;
+use pc_keyboard::{layouts, HandleControl, Keyboard, ScancodeSet1};
 use gos_protocol::*;
 
 pub const NODE_VEC: VectorAddress = gos_protocol::vectors::CORE_PS2;
@@ -93,90 +96,17 @@ unsafe extern "C" fn ps2_on_event(
     ctx: *mut ExecutorContext,
     event: *const NodeEvent,
 ) -> ExecStatus {
-    let signal = packet_to_signal(unsafe { (*event).signal });
-    let Signal::Interrupt { irq } = signal else {
+    // ── Pre-processing: validate IRQ and read scancode ────────────────────────
+    let Some(input) = (unsafe { pre::prepare(event) }) else {
         return ExecStatus::Done;
     };
-    if irq != k_pic::InterruptIndex::Keyboard.as_u8() {
-        return ExecStatus::Done;
-    }
-
-    let mut port = Port::new(0x60u16);
-    let scancode: u8 = unsafe { port.read() };
-
+    // ── Main processing: decode scancode through keyboard state machine ────────
     let state = unsafe { state_mut(ctx) };
-
-    // ── Decode scancode ───────────────────────────────────────────────────────
-    let keyboard = &mut state.keyboard;
-    let Ok(Some(key_event)) = keyboard.add_byte(scancode) else {
+    let Some(output) = proc::process(&mut state.keyboard, &input) else {
         return ExecStatus::Done;
     };
-    let Some(key) = keyboard.process_keyevent(key_event) else {
-        return ExecStatus::Done;
-    };
-
-    // ── Resolve the output byte(s) ────────────────────────────────────────────
-    let byte = match key {
-        DecodedKey::Unicode(ch) => {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            let bytes = s.as_bytes();
-
-            if bytes.len() == 1 {
-                // Fast path: single-byte ASCII — use conditional routing.
-                // ctx.route_signal is set below; ctx.route_key selects the
-                // target from the route table registered in register_hook.
-                Some(bytes[0])
-            } else {
-                // Multi-byte UTF-8 (e.g. exotic composed characters on
-                // non-US layouts): fall back to direct emit so every byte
-                // reaches Shell in order.
-                lazy_resolve_shell(ctx, state);
-                if state.shell_target != 0 {
-                    let abi = unsafe { &*(*ctx).abi };
-                    for &b in bytes {
-                        if let Some(emit) = abi.emit_signal {
-                            unsafe {
-                                let _ = emit(
-                                    state.shell_target,
-                                    signal_to_packet(Signal::Data {
-                                        from: NODE_VEC.as_u64(),
-                                        byte: b,
-                                    }),
-                                );
-                            }
-                        }
-                    }
-                }
-                return ExecStatus::Done;
-            }
-        }
-        DecodedKey::RawKey(k) => match k {
-            pc_keyboard::KeyCode::Backspace => Some(0x08),
-            pc_keyboard::KeyCode::ArrowUp   => Some(INPUT_KEY_UP),
-            pc_keyboard::KeyCode::ArrowDown => Some(INPUT_KEY_DOWN),
-            pc_keyboard::KeyCode::PageUp    => Some(INPUT_KEY_PAGE_UP),
-            pc_keyboard::KeyCode::PageDown  => Some(INPUT_KEY_PAGE_DOWN),
-            pc_keyboard::KeyCode::Escape    => Some(0x1B),
-            _ => None,
-        },
-    };
-
-    let Some(b) = byte else {
-        return ExecStatus::Done;
-    };
-
-    // ── Conditional routing ───────────────────────────────────────────────────
-    // Write the Data signal into ctx.route_signal so the runtime forwards
-    // the *decoded* byte (not the raw Interrupt) to the chosen target.
-    // The route table (key 0 → Shell, key 1 → IME) is registered in
-    // register_hook and stored in the runtime's NodeRecord.
-    unsafe {
-        (*ctx).route_signal =
-            signal_to_packet(Signal::Data { from: NODE_VEC.as_u64(), byte: b });
-        (*ctx).route_key = PS2_ROUTE_SHELL;
-    }
-    ExecStatus::Route
+    // ── Post-processing: route decoded key to shell or IME ────────────────────
+    unsafe { post::emit(ctx, state, output) }
 }
 
 /// Lazy-resolve shell_target via capability lookup (fallback for multi-byte path).

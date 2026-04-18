@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-pit
@@ -67,16 +70,12 @@ impl NodeCell for PitCell {
 
     fn on_activate(&mut self) -> CellResult { CellResult::Done }
     fn on_signal(&mut self, signal: Signal) -> CellResult {
-        if let Signal::Interrupt { irq } = signal {
-            if irq == k_pic::InterruptIndex::Timer.as_u8() {
-                ticks().fetch_add(1, Ordering::Relaxed);
-                gos_hal::ngr::post_signal(
-                    k_shell::NODE_VEC,
-                    Signal::Interrupt { irq },
-                );
-            }
-        }
-        CellResult::Done 
+        // ── Pre-processing: check for timer IRQ ────────────────────────────────
+        let Some(input) = pre::prepare(signal) else { return CellResult::Done; };
+        // ── Main processing: increment tick counter ────────────────────────────
+        let Some(output) = proc::process(input) else { return CellResult::Done; };
+        // ── Post-processing: forward signal to Shell ───────────────────────────
+        post::emit(output)
     }
     fn on_suspend(&mut self) { self.state = NodeState::Suspended; }
     fn state(&self) -> NodeState { self.state }

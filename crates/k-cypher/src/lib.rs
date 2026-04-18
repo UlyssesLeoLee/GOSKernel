@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-cypher
@@ -25,7 +28,7 @@
 
 
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, CYPHER_CONTROL_QUERY_BEGIN, CYPHER_CONTROL_QUERY_COMMIT,
+    signal_to_packet,
     EdgeVector, ExecStatus, ExecutorContext, ExecutorId, GraphEdgeSummary, GraphNodeSummary,
     KernelAbi, NodeEvent, NodeExecutorVTable, RuntimeEdgeType, Signal, VectorAddress,
 };
@@ -703,42 +706,9 @@ unsafe extern "C" fn cypher_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn cypher_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let sink = sink_from_ctx(ctx);
-    let state = unsafe { state_mut(ctx) };
-    let signal = packet_to_signal(unsafe { (*event).signal });
-
-    match signal {
-        Signal::Spawn { .. } => ExecStatus::Done,
-        Signal::Control { cmd, .. } if cmd == CYPHER_CONTROL_QUERY_BEGIN => {
-            state.query = [0; 224];
-            state.query_len = 0;
-            state.capture_active = true;
-            ExecStatus::Done
-        }
-        Signal::Control { cmd, .. } if cmd == CYPHER_CONTROL_QUERY_COMMIT => {
-            state.capture_active = false;
-            let query_len = state.query_len.min(state.query.len());
-            let mut query_buf = [0u8; 224];
-            query_buf[..query_len].copy_from_slice(&state.query[..query_len]);
-            if let Ok(query) = core::str::from_utf8(&query_buf[..query_len]) {
-                run_query(&sink, state, query);
-            } else {
-                set_color(&sink, 12, 0);
-                print_str(&sink, "cypher> query payload must be utf-8 ascii subset\n");
-                set_color(&sink, 7, 0);
-                state.faults = state.faults.saturating_add(1);
-            }
-            ExecStatus::Done
-        }
-        Signal::Data { byte, .. } => {
-            if state.capture_active && state.query_len < state.query.len() {
-                state.query[state.query_len] = byte;
-                state.query_len += 1;
-            }
-            ExecStatus::Done
-        }
-        _ => ExecStatus::Done,
-    }
+    let Some(input)  = (unsafe { pre::prepare(ctx, event) })  else { return ExecStatus::Done; };
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn cypher_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

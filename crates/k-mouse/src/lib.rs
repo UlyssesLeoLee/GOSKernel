@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-mouse
@@ -28,10 +31,10 @@
 // ============================================================
 
 
-use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8};
 
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, DISPLAY_CONTROL_POINTER_COL, DISPLAY_CONTROL_POINTER_ROW,
+    signal_to_packet, DISPLAY_CONTROL_POINTER_COL, DISPLAY_CONTROL_POINTER_ROW,
     DISPLAY_CONTROL_POINTER_VISIBLE, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
     NodeEvent, NodeExecutorVTable, Signal, VectorAddress,
 };
@@ -53,7 +56,6 @@ const DISPLAY_FALLBACK_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
 const PS2_COMMAND_PORT: u16 = 0x64;
-const MOUSE_IRQ: u8 = k_pic::InterruptIndex::Mouse as u8;
 
 static PACKET_INDEX: AtomicU8 = AtomicU8::new(0);
 static PACKET0: AtomicU8 = AtomicU8::new(0);
@@ -196,26 +198,6 @@ fn push_pointer_state(sink: &DisplaySink, state: &MouseState) {
     sink.emit_control(DISPLAY_CONTROL_POINTER_VISIBLE, state.visible);
 }
 
-fn apply_pending_motion(ctx: *mut ExecutorContext) {
-    let sink = sink_from_ctx(ctx);
-    let state = unsafe { state_mut(ctx) };
-    let dx = PENDING_DX.swap(0, Ordering::Relaxed);
-    let dy = PENDING_DY.swap(0, Ordering::Relaxed);
-    let buttons = PENDING_BUTTONS.load(Ordering::Relaxed);
-
-    if dx == 0 && dy == 0 && buttons == state.buttons {
-        return;
-    }
-
-    state.x_px = clamp(state.x_px + dx, 0, 639);
-    state.y_px = clamp(state.y_px - dy, 0, 399);
-    state.col = (state.x_px / 8) as u8;
-    state.row = (state.y_px / 16) as u8;
-    state.buttons = buttons;
-    state.visible = 1;
-    push_pointer_state(&sink, state);
-}
-
 unsafe extern "C" fn mouse_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     let display_target = {
         let ctx_ref = unsafe { &*ctx };
@@ -262,46 +244,12 @@ unsafe extern "C" fn mouse_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn mouse_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let signal = packet_to_signal(unsafe { (*event).signal });
-    match signal {
-        Signal::Spawn { .. } => {
-            apply_pending_motion(ctx);
-            ExecStatus::Done
-        }
-        Signal::Interrupt { irq } if irq == MOUSE_IRQ => {
-            let mut port = Port::<u8>::new(PS2_DATA_PORT);
-            let byte = unsafe { port.read() };
-            let slot = PACKET_INDEX.load(Ordering::Relaxed);
-
-            match slot {
-                0 => {
-                    PACKET0.store(byte, Ordering::Relaxed);
-                    PACKET_INDEX.store(1, Ordering::Relaxed);
-                }
-                1 => {
-                    PACKET1.store(byte, Ordering::Relaxed);
-                    PACKET_INDEX.store(2, Ordering::Relaxed);
-                }
-                _ => {
-                    PACKET2.store(byte, Ordering::Relaxed);
-                    PACKET_INDEX.store(0, Ordering::Relaxed);
-
-                    let p0 = PACKET0.load(Ordering::Relaxed);
-                    let p1 = PACKET1.load(Ordering::Relaxed);
-                    let p2 = PACKET2.load(Ordering::Relaxed);
-                    if (p0 & 0x08) != 0 && (p0 & 0xC0) == 0 {
-                        PENDING_DX.fetch_add((p1 as i8) as i32, Ordering::Relaxed);
-                        PENDING_DY.fetch_add((p2 as i8) as i32, Ordering::Relaxed);
-                        PENDING_BUTTONS.store(p0 & 0x07, Ordering::Relaxed);
-                        
-                        apply_pending_motion(ctx);
-                    }
-                }
-            }
-            ExecStatus::Done
-        }
-        _ => ExecStatus::Done,
-    }
+    // ── Pre-processing: classify signal and read PS/2 byte if needed ──────────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: accumulate packet / compute pointer delta ────────────
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    // ── Post-processing: emit pointer Control signals to display ──────────────
+    post::emit(ctx, output)
 }
 
 unsafe extern "C" fn mouse_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

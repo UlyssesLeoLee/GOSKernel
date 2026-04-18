@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-cuda-host
@@ -29,8 +32,7 @@
 
 
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,
-    CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
+    signal_to_packet, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
     NodeEvent, NodeExecutorVTable, Signal, VectorAddress,
 };
 
@@ -417,43 +419,9 @@ unsafe extern "C" fn cuda_host_on_init(ctx: *mut ExecutorContext) -> ExecStatus 
 }
 
 unsafe extern "C" fn cuda_host_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let sink = sink_from_ctx(ctx);
-    let state = unsafe { state_mut(ctx) };
-    let signal = packet_to_signal(unsafe { (*event).signal });
-
-    match signal {
-        Signal::Spawn { .. } => {
-            set_color(&sink, 13, 0);
-            emit_console_str(&sink, "\n[CUDA] host bridge online\n");
-            set_color(&sink, 7, 0);
-            emit_console_str(&sink, "       graph-native bridge for host-backed CUDA jobs via serial\n");
-            emit_serial_hello(&sink, state);
-            ExecStatus::Done
-        }
-        Signal::Control { cmd, .. } => {
-            match cmd {
-                CUDA_CONTROL_JOB_BEGIN => begin_capture(state),
-                CUDA_CONTROL_JOB_COMMIT => commit_capture(&sink, state),
-                CUDA_CONTROL_REPORT => emit_status_report(&sink, state),
-                CUDA_CONTROL_RESET => {
-                    emit_reset_frame(&sink, state);
-                    clear_capture(state);
-                    state.jobs_submitted = 0;
-                    state.last_payload_len = 0;
-                    set_color(&sink, 11, 0);
-                    emit_console_str(&sink, "cuda> bridge counters reset\n");
-                    set_color(&sink, 7, 0);
-                }
-                _ => {}
-            }
-            ExecStatus::Done
-        }
-        Signal::Data { byte, .. } => {
-            append_capture_byte(state, byte);
-            ExecStatus::Done
-        }
-        Signal::Call { .. } | Signal::Interrupt { .. } | Signal::Terminate => ExecStatus::Done,
-    }
+    let Some(input)  = (unsafe { pre::prepare(ctx, event) })  else { return ExecStatus::Done; };
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else { return ExecStatus::Done; };
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn cuda_host_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

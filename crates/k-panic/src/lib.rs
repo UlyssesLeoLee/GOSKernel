@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-panic
@@ -40,17 +43,6 @@ unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut PanicState {
     unsafe { &mut *(ctx.state_ptr as *mut PanicState) }
 }
 
-fn signal_kind_code(signal: Signal) -> u8 {
-    match signal {
-        Signal::Call { .. } => 0x01,
-        Signal::Spawn { .. } => 0x02,
-        Signal::Interrupt { .. } => 0x03,
-        Signal::Data { .. } => 0x04,
-        Signal::Control { .. } => 0x05,
-        Signal::Terminate => 0xFF,
-    }
-}
-
 unsafe extern "C" fn panic_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     unsafe {
         meta::burn_node_metadata(hal_node_ptr(), "BOOT", "PANIC");
@@ -66,20 +58,12 @@ unsafe extern "C" fn panic_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn panic_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let signal = unsafe { packet_to_signal((*event).signal) };
-    let state = unsafe { state_mut(ctx) };
-    state.last_signal_kind = signal_kind_code(signal);
-
-    if let Signal::Interrupt { irq } = signal {
-        if irq == 0xFF {
-            state.halts_requested = state.halts_requested.saturating_add(1);
-            loop {
-                x86_64::instructions::hlt();
-            }
-        }
-    }
-
-    ExecStatus::Done
+    // ── Pre-processing: decode signal, detect halt sentinel ───────────────────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: halt CPU if requested (diverges on halt) ─────────────
+    let Some(output) = proc::process(input) else { return ExecStatus::Done; };
+    // ── Post-processing: update telemetry ─────────────────────────────────────
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn panic_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-idt
@@ -266,8 +269,11 @@ unsafe extern "C" fn idt_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     ExecStatus::Done
 }
 
-unsafe extern "C" fn idt_on_event(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
-    ExecStatus::Done
+unsafe extern "C" fn idt_on_event(_ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
+    // Interrupt dispatch is handled by assembly trampolines, not by on_event.
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    let Some(output) = proc::process(input) else { return ExecStatus::Done; };
+    post::emit(output)
 }
 
 unsafe extern "C" fn idt_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

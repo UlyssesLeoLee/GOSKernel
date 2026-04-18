@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-core
@@ -14,8 +17,8 @@
 
 use core::arch::global_asm;
 use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
-    Signal, VectorAddress, CORE_CONTROL_SWITCH_CONTEXT,
+    ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+    VectorAddress,
     BuiltinPluginDescriptor, NativeNodeBinding, PluginManifest, GOS_ABI_VERSION,
     PluginId, NodeSpec, RuntimeNodeType, EntryPolicy, derive_node_id,
 };
@@ -44,22 +47,12 @@ unsafe extern "C" fn core_on_event(
     _ctx: *mut ExecutorContext,
     event: *const NodeEvent,
 ) -> ExecStatus {
-    // Decode the incoming signal and act on context-switch control messages.
-    let signal = unsafe { packet_to_signal((*event).signal) };
-    if let Signal::Control { cmd, val: _ } = signal {
-        if cmd == CORE_CONTROL_SWITCH_CONTEXT {
-            let packet = unsafe { (*event).signal };
-            let prev = packet.arg1 as *mut TaskContext;
-            let next = packet.arg2 as *const TaskContext;
-
-            if !prev.is_null() && !next.is_null() {
-                unsafe {
-                    switch_context(prev, next);
-                }
-            }
-        }
-    }
-    ExecStatus::Done
+    // ── Pre-processing: extract context-switch pointers ───────────────────────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: execute assembly context switch ──────────────────────
+    let Some(output) = (unsafe { proc::process(input) }) else { return ExecStatus::Done; };
+    // ── Post-processing: signal Done ──────────────────────────────────────────
+    post::emit(output)
 }
 
 unsafe extern "C" fn core_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

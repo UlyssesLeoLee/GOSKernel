@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-ime
@@ -22,9 +25,8 @@
 
 use gos_hal::ngr;
 use gos_protocol::{
-    packet_to_signal, ExecStatus, ExecutorContext, ExecutorId, IME_CONTROL_SET_MODE,
-    IME_MODE_ASCII, IME_MODE_ZH_PINYIN, KernelAbi, NodeEvent, NodeExecutorVTable, Signal,
-    VectorAddress,
+    ExecStatus, ExecutorContext, ExecutorId, IME_MODE_ASCII,
+    KernelAbi, NodeEvent, NodeExecutorVTable, Signal, VectorAddress,
 };
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(6, 3, 0, 0);
@@ -125,28 +127,6 @@ fn post_shell_byte(target: u64, byte: u8) {
     );
 }
 
-fn post_shell_bytes(target: u64, bytes: &[u8]) {
-    for byte in bytes {
-        post_shell_byte(target, *byte);
-    }
-}
-
-fn commit_selection(state: &mut ImeState, selector: usize) {
-    if state.len == 0 {
-        return;
-    }
-
-    let composing = &state.composing[..state.len];
-    if let Some(entry) = lookup_candidate(composing) {
-        let index = selector.min(entry.choices.len().saturating_sub(1));
-        post_shell_bytes(state.shell_target, entry.choices[index].as_bytes());
-    } else {
-        post_shell_bytes(state.shell_target, composing);
-    }
-
-    clear_composition(state);
-}
-
 unsafe extern "C" fn ime_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     let shell_target = {
         let abi = abi_from_ctx(ctx);
@@ -179,67 +159,16 @@ unsafe extern "C" fn ime_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 }
 
 unsafe extern "C" fn ime_on_event(ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
-    let state = unsafe { state_mut(ctx) };
-
-    // Lazy resolution: IME boots before Shell, so shell_target may be 0.
-    if state.shell_target == 0 {
-        let abi = abi_from_ctx(ctx);
-        if let Some(resolve) = abi.resolve_capability {
-            let resolved = unsafe { resolve(b"shell".as_ptr(), 5, b"input".as_ptr(), 5) };
-            if resolved != 0 {
-                state.shell_target = resolved;
-            }
-        }
-    }
-
-    let signal = packet_to_signal(unsafe { (*event).signal });
-
-    match signal {
-        Signal::Control { cmd, val } => {
-            if cmd == IME_CONTROL_SET_MODE {
-                state.mode = if val == IME_MODE_ZH_PINYIN {
-                    IME_MODE_ZH_PINYIN
-                } else {
-                    IME_MODE_ASCII
-                };
-                clear_composition(state);
-            }
-            ExecStatus::Done
-        }
-        Signal::Data { byte, .. } => {
-            if state.mode == IME_MODE_ASCII {
-                post_shell_byte(state.shell_target, byte);
-                return ExecStatus::Done;
-            }
-
-            match byte {
-                b'a'..=b'z' | b'A'..=b'Z' => {
-                    if state.len < state.composing.len() {
-                        state.composing[state.len] = normalize_letter(byte);
-                        state.len += 1;
-                    }
-                }
-                0x08 | 0x7F => {
-                    if state.len > 0 {
-                        state.len -= 1;
-                        state.composing[state.len] = 0;
-                    }
-                }
-                0x1B | 0x03 => clear_composition(state),
-                b'1'..=b'9' => commit_selection(state, usize::from(byte - b'1')),
-                b' ' | b'\n' | b'\r' => commit_selection(state, 0),
-                _ if is_ascii_punctuation(byte) => {
-                    if state.len > 0 {
-                        commit_selection(state, 0);
-                    }
-                    post_shell_byte(state.shell_target, byte);
-                }
-                _ => {}
-            }
-            ExecStatus::Done
-        }
-        _ => ExecStatus::Done,
-    }
+    // ── Pre-processing: lazy resolve shell target, decode signal ──────────────
+    let Some(input) = (unsafe { pre::prepare(ctx, event) }) else {
+        return ExecStatus::Done;
+    };
+    // ── Main processing: run IME state machine ────────────────────────────────
+    let Some(output) = (unsafe { proc::process(ctx, input) }) else {
+        return ExecStatus::Done;
+    };
+    // ── Post-processing: emit bytes to Shell ──────────────────────────────────
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn ime_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

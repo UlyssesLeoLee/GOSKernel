@@ -1,19 +1,5 @@
 #![no_std]
 
-
-// ============================================================
-// GOS KERNEL TOPOLOGY — k-pmm
-// This Cypher script documents the plugin's place in the kernel graph.
-//
-// MERGE (p:Plugin {id: "K_PMM", name: "k-pmm"})
-// SET p.executor = "k_pmm::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x200A"
-//
-// -- Exported Capabilities (APIs)
-// MERGE (cap_memory_frame_alloc:Capability {namespace: "memory", name: "frame_alloc"})
-// MERGE (p)-[:EXPORTS]->(cap_memory_frame_alloc)
-// ============================================================
-
-
 //! GOS Physical Memory Manager — Two-Level Bitmap Frame Allocator
 //!
 //! Every physical 4 KiB frame maps to a single bit in a static bitmap.
@@ -26,6 +12,22 @@
 //!   max-ram-4g → 4 GiB  (bitmap ≈ 128 KiB)
 //!
 //! The allocator lives as a graph-native plugin node at vector [1.11.0.0].
+
+mod pre;
+mod proc;
+mod post;
+
+// ============================================================
+// GOS KERNEL TOPOLOGY — k-pmm
+// This Cypher script documents the plugin's place in the kernel graph.
+//
+// MERGE (p:Plugin {id: "K_PMM", name: "k-pmm"})
+// SET p.executor = "k_pmm::EXECUTOR_ID", p.node_type = "Service", p.state_schema = "0x200A"
+//
+// -- Exported Capabilities (APIs)
+// MERGE (cap_memory_frame_alloc:Capability {namespace: "memory", name: "frame_alloc"})
+// MERGE (p)-[:EXPORTS]->(cap_memory_frame_alloc)
+// ============================================================
 
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use gos_hal::{meta, vaddr};
@@ -402,11 +404,13 @@ unsafe extern "C" fn pmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
 
 unsafe extern "C" fn pmm_on_event(
     _ctx: *mut ExecutorContext,
-    _event: *const NodeEvent,
+    event: *const NodeEvent,
 ) -> ExecStatus {
     // Future: handle Signal::Control { cmd: PMM_CONTROL_QUERY_STATS, .. }
-    // to emit telemetry or adjust ceiling via set_ceiling().
-    ExecStatus::Done
+    // via proc::process when pre::prepare returns Some.
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    let Some(output) = proc::process(input) else { return ExecStatus::Done; };
+    post::emit(output)
 }
 
 unsafe extern "C" fn pmm_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {

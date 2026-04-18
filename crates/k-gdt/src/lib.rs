@@ -1,5 +1,8 @@
 #![no_std]
 
+mod pre;
+mod proc;
+mod post;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-gdt
@@ -66,17 +69,6 @@ unsafe fn runtime_state_mut(ctx: *mut ExecutorContext) -> &'static mut GdtRuntim
     unsafe { &mut *(ctx.state_ptr as *mut GdtRuntimeState) }
 }
 
-fn signal_kind_code(signal: Signal) -> u8 {
-    match signal {
-        Signal::Call { .. } => 0x01,
-        Signal::Spawn { .. } => 0x02,
-        Signal::Interrupt { .. } => 0x03,
-        Signal::Data { .. } => 0x04,
-        Signal::Control { .. } => 0x05,
-        Signal::Terminate => 0xFF,
-    }
-}
-
 unsafe fn init_hal_state() {
     let p = node_ptr();
     meta::burn_node_metadata(p, "HAL", "GDT");
@@ -124,16 +116,12 @@ unsafe extern "C" fn gdt_on_event(
     ctx: *mut ExecutorContext,
     event: *const NodeEvent,
 ) -> ExecStatus {
-    let signal = unsafe { packet_to_signal((*event).signal) };
-    let state = unsafe { runtime_state_mut(ctx) };
-    state.last_signal_kind = signal_kind_code(signal);
-
-    if let Signal::Spawn { .. } = signal {
-        init_gdt();
-        state.load_count = state.load_count.saturating_add(1);
-    }
-
-    ExecStatus::Done
+    // ── Pre-processing: decode signal, check for Spawn ────────────────────────
+    let Some(input) = pre::prepare(event) else { return ExecStatus::Done; };
+    // ── Main processing: load GDT if requested ────────────────────────────────
+    let Some(output) = proc::process(input) else { return ExecStatus::Done; };
+    // ── Post-processing: commit telemetry and return ──────────────────────────
+    unsafe { post::emit(ctx, output) }
 }
 
 unsafe extern "C" fn gdt_on_suspend(_ctx: *mut ExecutorContext) -> ExecStatus {
