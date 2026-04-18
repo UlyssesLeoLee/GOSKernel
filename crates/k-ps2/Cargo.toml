@@ -5,9 +5,12 @@ edition = "2021"
 
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
-gos-hal = { path = "../gos-hal" }
-k-pic = { path = "../k-pic" }
-k-vga = { path = "../k-vga" }
-pc-keyboard = "0.7.0"
-spin = "0.9"
-x86_64 = "0.14"
+gos-hal      = { path = "../gos-hal" }
+gos-runtime  = { path = "../gos-runtime" }
+k-pic        = { path = "../k-pic" }
+k-vga        = { path = "../k-vga" }
+k-shell      = { path = "../k-shell" }
+k-ime        = { path = "../k-ime" }
+pc-keyboard  = "0.7.0"
+spin         = "0.9"
+x86_64       = "0.14"

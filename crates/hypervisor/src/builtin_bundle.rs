@@ -1044,7 +1044,7 @@ const BUILTIN_MODULES: [BuiltinModule; 19] = [
         manifest: PS2_MANIFEST,
         granted_permissions: PS2_PERMS,
         nodes: PS2_NATIVE_NODES,
-        register_hook: None,
+        register_hook: Some(k_ps2::register_hook),
     }),
     BuiltinModule::Native(NativeModule {
         manifest: IDT_MANIFEST,

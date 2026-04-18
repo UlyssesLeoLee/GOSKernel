@@ -1219,6 +1219,16 @@ pub struct ExecutorContext {
     pub vector: VectorAddress,
     pub state_ptr: *mut u8,
     pub state_len: usize,
+    /// Set by on_event when returning ExecStatus::Route.
+    /// The runtime looks up this key in the node's conditional-route table
+    /// and posts `route_signal` (below) to the resolved target.
+    /// 0xFF means "no route" (default).
+    pub route_key: u8,
+    /// The signal to forward when ExecStatus::Route is returned.
+    /// Initialised to the current event's packet before on_event is called.
+    /// The node may overwrite this to emit a *different* signal than the
+    /// one that triggered it — enabling signal-transformation pipelines.
+    pub route_signal: KernelSignalPacket,
 }
 
 #[repr(C)]
@@ -1229,12 +1239,35 @@ pub struct NodeEvent {
     pub signal: KernelSignalPacket,
 }
 
+/// Maximum number of conditional routes a node may declare.
+pub const MAX_CONDITIONAL_ROUTES: usize = 8;
+
+/// One branch in a node's conditional-route table.
+///
+/// When `on_event` returns `ExecStatus::Route`, the runtime looks up
+/// `ctx.route_key` in the table and posts the current signal to the
+/// matching `target`.  If no entry matches the key the signal is dropped
+/// (same semantics as returning `Done` with no route registered).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ConditionalRoute {
+    /// The u8 token the node writes into `ctx.route_key`.
+    pub key: u8,
+    /// Destination node vector.
+    pub target: VectorAddress,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecStatus {
+    /// Processing complete; no further routing.
     Done = 0,
+    /// Node is waiting for a future wakeup.
     Yield = 1,
+    /// Unrecoverable error; supervisor may restart.
     Fault = 2,
+    /// Conditional route: read `ctx.route_key` to find the next target.
+    /// The original signal is forwarded to the resolved node.
+    Route = 3,
 }
 
 // ---------------------------------------------------------------------------

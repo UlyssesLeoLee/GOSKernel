@@ -4,12 +4,12 @@ use core::mem::transmute;
 
 use gos_protocol::{
     packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
-    ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, ExecStatus,
-    ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
-    GraphSnapshot, KernelAbi, KernelSignalPacket, NodeCell, NodeEvent, NodeExecutorVTable,
-    NodeId, NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
-    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
-    CONTROL_PLANE_PROTOCOL_VERSION,
+    ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
+    EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
+    GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
+    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeLifecycle,
+    NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType,
+    Signal, StateDelta, VectorAddress, derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
 
@@ -145,6 +145,10 @@ struct NodeRecord {
     lifecycle: NodeLifecycle,
     runtime_page: usize,
     binding: NodeBinding,
+    /// Conditional-route table (LangGraph-style edge fan-out).
+    /// Populated via `register_node_routes` after the node is registered.
+    routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
+    route_count: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -452,6 +456,8 @@ impl GraphRuntime {
             lifecycle: NodeLifecycle::Allocated,
             runtime_page,
             binding: NodeBinding::Unbound,
+            routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
+            route_count: 0,
         });
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
@@ -473,6 +479,28 @@ impl GraphRuntime {
         });
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         Ok(spec.edge_id)
+    }
+
+    /// Register a conditional-route table for a node (LangGraph-style edge fan-out).
+    ///
+    /// When the node's `on_event` returns `ExecStatus::Route`, the runtime
+    /// reads `ctx.route_key` and posts the current signal to the matching
+    /// `ConditionalRoute::target`.  Calling this more than once overwrites
+    /// the previous table.  Routes beyond `MAX_CONDITIONAL_ROUTES` are silently
+    /// truncated.
+    pub fn register_node_routes(
+        &mut self,
+        vector: VectorAddress,
+        routes: &[ConditionalRoute],
+    ) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+        let count = routes.len().min(MAX_CONDITIONAL_ROUTES);
+        record.route_count = count as u8;
+        for (i, r) in routes.iter().take(count).enumerate() {
+            record.routes[i] = *r;
+        }
+        Ok(())
     }
 
     pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
@@ -757,11 +785,33 @@ impl GraphRuntime {
             }
             RuntimeEdgeType::Spawn
             | RuntimeEdgeType::Signal
-            | RuntimeEdgeType::Stream
             | RuntimeEdgeType::Mount
             | RuntimeEdgeType::Use => {
                 let target_vec = self.node_vector(edge.to_node)?;
                 self.post_signal(target_vec, signal)?;
+            }
+            // ── Stream: fan-out to ALL outbound Stream edges from source ──
+            // Mimics LangGraph's multi-target edge: one signal, N subscribers.
+            RuntimeEdgeType::Stream => {
+                let source_node = edge.from_node;
+                // Collect targets first to avoid borrow issues.
+                let mut targets = [VectorAddress::new(0, 0, 0, 0); MAX_EDGES];
+                let mut target_count = 0usize;
+                for slot in 0..MAX_EDGES {
+                    let Some(e) = self.edges[slot] else { continue };
+                    if e.spec.from_node == source_node
+                        && e.spec.edge_type == RuntimeEdgeType::Stream
+                        && target_count < MAX_EDGES
+                    {
+                        if let Ok(v) = self.node_vector(e.spec.to_node) {
+                            targets[target_count] = v;
+                            target_count += 1;
+                        }
+                    }
+                }
+                for i in 0..target_count {
+                    let _ = self.post_signal(targets[i], signal);
+                }
             }
             RuntimeEdgeType::Depend => {
                 self.alloc_wait_set(edge.from_node, edge.to_node)?;
@@ -931,7 +981,7 @@ fn map_legacy_state(state: NodeState) -> NodeLifecycle {
 
 fn map_exec_status(status: ExecStatus) -> NodeLifecycle {
     match status {
-        ExecStatus::Done => NodeLifecycle::Ready,
+        ExecStatus::Done | ExecStatus::Route => NodeLifecycle::Ready,
         ExecStatus::Yield => NodeLifecycle::Waiting,
         ExecStatus::Fault => NodeLifecycle::Faulted,
     }
@@ -1111,6 +1161,19 @@ pub fn resolve_capability(namespace: &[u8], capability: &[u8]) -> Option<VectorA
     RUNTIME.lock().resolve_capability(namespace, capability)
 }
 
+/// Register a conditional-route table for a node (LangGraph-style fan-out).
+///
+/// Call this after the node is registered (e.g. in a `register_hook`).
+/// When the node's `on_event` returns `ExecStatus::Route`, the runtime
+/// looks up `ctx.route_key` in this table and posts the original signal
+/// to the matched `ConditionalRoute::target`.
+pub fn register_node_routes(
+    vector: VectorAddress,
+    routes: &[ConditionalRoute],
+) -> Result<(), RuntimeError> {
+    RUNTIME.lock().register_node_routes(vector, routes)
+}
+
 pub fn enqueue_ready(node_id: NodeId) -> Result<(), RuntimeError> {
     RUNTIME.lock().enqueue_ready(node_id)
 }
@@ -1148,12 +1211,19 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 let mut runtime = RUNTIME.lock();
                 runtime.node_arena.page_ptr(dispatch.runtime_page)?
             };
+
+            // Pre-encode the incoming signal so the node can read or replace it
+            // via ctx.route_signal before returning ExecStatus::Route.
+            let event_packet = signal_to_packet(signal);
+
             let mut ctx = ExecutorContext {
                 abi: &KERNEL_ABI,
                 node_id: dispatch.node_id,
                 vector: dispatch.vector,
                 state_ptr,
                 state_len: 4096,
+                route_key: 0xFF,       // sentinel — no conditional route
+                route_signal: event_packet, // default: forward the original signal
             };
 
             let mut initialized = binding.initialized;
@@ -1180,12 +1250,41 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                     let event = NodeEvent {
                         edge_id: EdgeId::ZERO,
                         source_node: NodeId::ZERO,
-                        signal: signal_to_packet(signal),
+                        signal: event_packet,
                     };
                     unsafe { on_event(&mut ctx, &event) }
                 } else {
                     ExecStatus::Done
                 };
+            }
+
+            // ── Conditional routing (LangGraph-style) ────────────────────────
+            // When on_event returns Route:
+            //   1. Look up ctx.route_key in the node's registered route table.
+            //   2. Forward ctx.route_signal (default = original signal, but the
+            //      node may have overwritten it for signal-transformation cases).
+            if status == ExecStatus::Route {
+                let route_key = ctx.route_key;
+                let forwarded = packet_to_signal(ctx.route_signal);
+                let maybe_target = {
+                    let runtime = RUNTIME.lock();
+                    if let Some(slot) = runtime.node_slot_by_vec(dispatch.vector) {
+                        if let Some(record) = runtime.nodes[slot] {
+                            let count = record.route_count as usize;
+                            record.routes[..count]
+                                .iter()
+                                .find(|r| r.key == route_key)
+                                .map(|r| r.target)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(target) = maybe_target {
+                    let _ = RUNTIME.lock().post_signal(target, forwarded);
+                }
             }
 
             {
@@ -1194,7 +1293,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             }
 
             Ok(match status {
-                ExecStatus::Done => CellResult::Done,
+                ExecStatus::Done | ExecStatus::Route => CellResult::Done,
                 ExecStatus::Yield => CellResult::Yield,
                 ExecStatus::Fault => CellResult::Fault("native executor fault"),
             })
@@ -1235,6 +1334,8 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
                 vector: dispatch.vector,
                 state_ptr,
                 state_len: 4096,
+                route_key: 0xFF,
+                route_signal: signal_to_packet(Signal::Spawn { payload: 0 }),
             };
 
             let mut initialized = binding.initialized;
@@ -1263,7 +1364,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             }
 
             Ok(match status {
-                ExecStatus::Done => CellResult::Done,
+                ExecStatus::Done | ExecStatus::Route => CellResult::Done,
                 ExecStatus::Yield => CellResult::Yield,
                 ExecStatus::Fault => CellResult::Fault("native executor fault"),
             })
