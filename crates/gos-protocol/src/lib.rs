@@ -280,6 +280,17 @@ pub const NET_CONTROL_SET_IP1: u8 = 0xD5;
 pub const NET_CONTROL_SET_IP2: u8 = 0xD6;
 /// Set target IP byte 3 (least-significant) before issuing NET_CONTROL_PING.
 pub const NET_CONTROL_SET_IP3: u8 = 0xD7;
+
+// ── Chat bridge commands (k-chat ↔ k-shell) ──────────────────────────────────
+/// Shell → k-chat: submit the buffered user message to the AI bridge.
+pub const CHAT_CONTROL_SEND: u8 = 0xC0;
+/// Shell → k-chat: exit the chat session and return to normal shell.
+pub const CHAT_CONTROL_EXIT: u8 = 0xC1;
+/// Shell → k-chat: begin streaming an API-key byte-by-byte.
+pub const CHAT_CONTROL_KEY_BEGIN: u8 = 0xC2;
+/// Shell → k-chat: commit the streamed API key.
+pub const CHAT_CONTROL_KEY_COMMIT: u8 = 0xC3;
+
 pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
 pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;
 pub const CUDA_CONTROL_REPORT: u8 = 0xE2;

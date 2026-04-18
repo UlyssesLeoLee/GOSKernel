@@ -27,4 +27,5 @@ members = [
     "crates/k-net",
     "crates/k-mouse",
     "crates/k-core",
+    "crates/k-chat",
 ]

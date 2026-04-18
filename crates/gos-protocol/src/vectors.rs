@@ -40,3 +40,4 @@ pub const SVC_NET: VectorAddress = VectorAddress::new(6, 4, 0, 0);
 pub const SVC_MOUSE: VectorAddress = VectorAddress::new(6, 5, 0, 0);
 pub const SVC_CYPHER: VectorAddress = VectorAddress::new(6, 6, 0, 0);
 pub const SVC_CUDA: VectorAddress = VectorAddress::new(6, 7, 0, 0);
+pub const SVC_CHAT: VectorAddress = VectorAddress::new(6, 8, 0, 0);

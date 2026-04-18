@@ -49,11 +49,12 @@ mod post;
 // ============================================================
 
 
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use gos_protocol::{
     derive_edge_id, derive_node_id, packet_to_signal, signal_to_packet,
     AI_CONTROL_API_BEGIN, AI_CONTROL_API_COMMIT,
+    CHAT_CONTROL_EXIT, CHAT_CONTROL_SEND,
     CLIPBOARD_DATA_BEGIN, CLIPBOARD_DATA_CLEAR,
     CLIPBOARD_DATA_COMMIT, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,
     CYPHER_CONTROL_QUERY_BEGIN,
@@ -186,6 +187,10 @@ const CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, 
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(THEME_KIND_WABI);
 static CLIPBOARD_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// Resolved vector address of the k-chat node (0 = not available).
+static CHAT_TARGET: AtomicU64 = AtomicU64::new(0);
+/// 0 = normal shell, 1 = chat mode.
+static CHAT_MODE: AtomicU8 = AtomicU8::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -3739,6 +3744,26 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
             0
         }
     };
+
+    // Resolve k-chat capability
+    let chat_target = {
+        let ctx_ref = unsafe { &*ctx };
+        let abi = unsafe { &*ctx_ref.abi };
+        if let Some(resolve_capability) = abi.resolve_capability {
+            unsafe {
+                resolve_capability(
+                    b"chat".as_ptr(),
+                    b"chat".len(),
+                    b"bridge".as_ptr(),
+                    b"bridge".len(),
+                )
+            }
+        } else {
+            0
+        }
+    };
+    CHAT_TARGET.store(chat_target, Ordering::SeqCst);
+    CHAT_MODE.store(0, Ordering::SeqCst);
 
     unsafe {
         core::ptr::write(

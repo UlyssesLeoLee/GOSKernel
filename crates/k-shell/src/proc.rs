@@ -344,6 +344,50 @@ fn process_enter(
     sink: &super::ConsoleSink,
     state: &mut super::ShellState,
 ) -> ExecStatus {
+    // ── Chat mode: route Enter to k-chat instead of shell dispatch ────────────
+    use gos_protocol::Signal;
+    if super::CHAT_MODE.load(core::sync::atomic::Ordering::SeqCst) == 1 {
+        let cmd_len = state.len.min(state.buffer.len());
+        let mut tmp = [0u8; 128];
+        tmp[..cmd_len].copy_from_slice(&state.buffer[..cmd_len]);
+        let cmd = core::str::from_utf8(&tmp[..cmd_len]).unwrap_or("").trim();
+        if cmd == "exit" || cmd == "quit" || cmd == ":q" {
+            // Exit chat mode
+            super::CHAT_MODE.store(0, core::sync::atomic::Ordering::SeqCst);
+            let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+            super::emit_target_signal_raw(
+                sink.abi,
+                chat_target,
+                Signal::Control { cmd: super::CHAT_CONTROL_EXIT, val: 0 },
+            );
+            state.len = 0;
+            super::redraw_console(sink, state);
+            return ExecStatus::Done;
+        }
+        // Forward each byte then CHAT_CONTROL_SEND
+        if state.len > 0 {
+            let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+            for i in 0..cmd_len {
+                super::emit_target_signal_raw(
+                    sink.abi,
+                    chat_target,
+                    Signal::Data { from: super::NODE_VEC.as_u64(), byte: state.buffer[i] },
+                );
+            }
+            super::emit_target_signal_raw(
+                sink.abi,
+                chat_target,
+                Signal::Control { cmd: super::CHAT_CONTROL_SEND, val: 0 },
+            );
+        }
+        state.len = 0;
+        // Re-draw the chat input prompt (k-chat's post already printed the response)
+        super::set_color(sink, 14, 0);
+        super::print_str(sink, "You ▸ ");
+        super::set_color(sink, 7, 0);
+        return ExecStatus::Done;
+    }
+
     let cmd_len = state.len.min(state.buffer.len());
     let mut cmd_buf = [0u8; 128];
     cmd_buf[..cmd_len].copy_from_slice(&state.buffer[..cmd_len]);
@@ -439,6 +483,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  theme              show theme.current and its active use edge\n");
         super::print_str(sink, "  theme wabi         repoint theme.current -> theme.wabi\n");
         super::print_str(sink, "  theme shoji        repoint theme.current -> theme.shoji\n");
+        super::print_str(sink, "  chat    enter AI chat mode (COM2 bridge, type 'exit' to quit)\n");
         super::print_str(sink, "  ai      open bottom ai api editor\n");
         super::print_str(sink, "  ask     send prompt into ai chat lane\n");
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
@@ -723,6 +768,28 @@ fn dispatch_text_command(
         } else {
             let _ = super::dispatch_cuda_submit(sink, state, trimmed);
         }
+    } else if cmd == "chat" {
+        // Enter interactive AI chat mode via the COM2 bridge.
+        let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+        if chat_target == 0 {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " [chat] k-chat node not available\n");
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "   Start tools/chat-bridge.py on the host, then restart.\n");
+        } else {
+            super::CHAT_MODE.store(1, core::sync::atomic::Ordering::SeqCst);
+            // Draw chat banner via VGA
+            super::set_color(sink, 0, 11);  // black on cyan
+            super::print_str(sink, "  GOS CHAT — AI Bridge                                                          ");
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  Type a message + Enter  |  'exit' to return to shell                          \n");
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+            super::set_color(sink, 14, 0); // yellow
+            super::print_str(sink, "You ▸ ");
+            super::set_color(sink, 7, 0);
+        }
+        state.len = 0;
     } else if cmd == "ai" || cmd == "api" || cmd == "ai-api" {
         state.len = 0;
         super::enter_ai_api_mode(sink, state);

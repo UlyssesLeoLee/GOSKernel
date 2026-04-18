@@ -105,6 +105,7 @@ const K_CYPHER_ID: PluginId = PluginId::from_ascii("K_CYPHER");
 const K_CUDA_ID: PluginId = PluginId::from_ascii("K_CUDA");
 const K_SHELL_ID: PluginId = PluginId::from_ascii("K_SHELL");
 const K_AI_ID: PluginId = PluginId::from_ascii("K_AI");
+const K_CHAT_ID: PluginId = PluginId::from_ascii("K_CHAT");
 
 const NONE_PERMS: &[PermissionSpec] = &[];
 
@@ -144,6 +145,12 @@ const CYPHER_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphRead, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
+];
+const CHAT_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x2F8, arg1: 8 }, // COM2
+    PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
 ];
 const AI_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphRead, arg0: 0, arg1: 0 },
@@ -198,6 +205,9 @@ const SHELL_EXPORTS: &[CapabilitySpec] = &[
 const CLIPBOARD_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "clipboard", name: "buffer" },
 ];
+const CHAT_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "chat", name: "bridge" },
+];
 const AI_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "ai", name: "supervisor" },
     CapabilitySpec { namespace: "graph", name: "orchestrate" },
@@ -230,6 +240,10 @@ const CUDA_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
     ImportSpec { namespace: "serial", capability: "write", required: true },
 ];
+const CHAT_IMPORTS: &[ImportSpec] = &[
+    ImportSpec { namespace: "console", capability: "write", required: true },
+    ImportSpec { namespace: "net",     capability: "uplink", required: false },
+];
 const AI_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
     ImportSpec { namespace: "shell", capability: "input", required: true },
@@ -257,6 +271,7 @@ const DEP_MOUSE: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_IDT_ID];
 const DEP_CYPHER: &[PluginId] = &[K_VGA_ID];
 const DEP_CUDA: &[PluginId] = &[K_VGA_ID, K_SERIAL_ID];
 const DEP_SHELL: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_HEAP_ID, K_IME_ID, K_NET_ID, K_CYPHER_ID, K_CUDA_ID];
+const DEP_CHAT: &[PluginId] = &[K_VGA_ID, K_NET_ID];
 const DEP_AI: &[PluginId] = &[K_SHELL_ID];
 
 const MOD_DEP_PIT: &[ModuleDependencySpec] = &[ModuleDependencySpec {
@@ -357,6 +372,10 @@ const MOD_DEP_SHELL: &[ModuleDependencySpec] = &[
         required: true,
     },
 ];
+const MOD_DEP_CHAT: &[ModuleDependencySpec] = &[
+    ModuleDependencySpec { module_id: module_id(K_VGA_ID), required: true },
+    ModuleDependencySpec { module_id: module_id(K_NET_ID), required: false },
+];
 const MOD_DEP_AI: &[ModuleDependencySpec] = &[ModuleDependencySpec {
     module_id: module_id(K_SHELL_ID),
     required: true,
@@ -402,6 +421,7 @@ const K_THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "
 const K_THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.current");
 const K_CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "clipboard.mount");
 const K_AI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_AI_ID, "ai.supervisor");
+const K_CHAT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CHAT_ID, "chat.bridge");
 
 const PANIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     node_id: K_PANIC_NODE_ID,
@@ -659,6 +679,18 @@ const AI_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     vector_ref: None,
 }];
 
+const CHAT_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_CHAT_NODE_ID,
+    local_node_key: "chat.bridge",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::OnDemand,
+    executor_id: k_chat::EXECUTOR_ID,
+    state_schema_hash: 0x2010,
+    permissions: CHAT_PERMS,
+    exports: CHAT_EXPORTS,
+    vector_ref: None,
+}];
+
 const PANIC_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_panic::NODE_VEC,
     local_node_key: "panic.entry",
@@ -781,6 +813,12 @@ const AI_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_ai::NODE_VEC,
     local_node_key: "ai.supervisor",
     executor: k_ai::EXECUTOR_VTABLE,
+}];
+
+const CHAT_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_chat::NODE_VEC,
+    local_node_key: "chat.bridge",
+    executor: k_chat::EXECUTOR_VTABLE,
 }];
 
 const VGA_MANIFEST: PluginManifest = manifest_with_nodes(
@@ -928,6 +966,15 @@ const AI_MANIFEST: PluginManifest = manifest_with_nodes(
     AI_IMPORTS,
     AI_NODE_SPECS,
 );
+const CHAT_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_CHAT_ID,
+    "K_CHAT",
+    DEP_CHAT,
+    CHAT_PERMS,
+    CHAT_EXPORTS,
+    CHAT_IMPORTS,
+    CHAT_NODE_SPECS,
+);
 
 const fn module_id(plugin_id: PluginId) -> ModuleId {
     ModuleId::new(plugin_id.0)
@@ -996,7 +1043,7 @@ const fn manifest_with_nodes(
     }
 }
 
-const BUILTIN_MODULES: [BuiltinModule; 19] = [
+const BUILTIN_MODULES: [BuiltinModule; 20] = [
     BuiltinModule::Native(NativeModule {
         manifest: PANIC_MANIFEST,
         granted_permissions: NONE_PERMS,
@@ -1112,9 +1159,15 @@ const BUILTIN_MODULES: [BuiltinModule; 19] = [
         nodes: AI_NATIVE_NODES,
         register_hook: None,
     }),
+    BuiltinModule::Native(NativeModule {
+        manifest: CHAT_MANIFEST,
+        granted_permissions: CHAT_PERMS,
+        nodes: CHAT_NATIVE_NODES,
+        register_hook: None,
+    }),
 ];
 
-const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 19] = [
+const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 20] = [
     module_descriptor(
         K_PANIC_ID,
         "K_PANIC",
@@ -1284,6 +1337,15 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 19] = [
         AI_PERMS,
         AI_EXPORTS,
         AI_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_CHAT_ID,
+        "K_CHAT",
+        MOD_DEP_CHAT,
+        CHAT_PERMS,
+        CHAT_EXPORTS,
+        CHAT_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
 ];
