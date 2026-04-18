@@ -3,3 +3,4 @@
 pub mod vaddr;
 pub mod meta;
 pub mod ngr;
+pub mod phys;

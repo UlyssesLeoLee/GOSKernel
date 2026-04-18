@@ -14,13 +14,54 @@
 
 use gos_protocol::{ExecStatus, ExecutorContext};
 
-use super::{print_probe_report, proc, sink_from_ctx, state_mut};
+use super::{print_probe_report, print_str, set_color, proc, sink_from_ctx, state_mut};
 
-/// Stage 3 — Emit the network probe report to the console sink and signal
-/// completion to the executor runtime.
+fn print_ping_result(
+    sink: &super::ConsoleSink,
+    state: &super::NetState,
+    reply: bool,
+    rtt_polls: u32,
+) {
+    if reply {
+        set_color(sink, 10, 0); // green
+        print_str(sink, "\n[NET] ping ");
+        // print target IP
+        for (i, &byte) in state.ping_target_ip.iter().enumerate() {
+            if i != 0 { print_str(sink, "."); }
+            super::print_num_u64(sink, byte as u64);
+        }
+        print_str(sink, " — reply received");
+        if rtt_polls > 0 {
+            print_str(sink, " (");
+            super::print_num_u64(sink, rtt_polls as u64);
+            print_str(sink, " poll cycles)");
+        }
+        print_str(sink, "\n\n");
+    } else {
+        set_color(sink, 12, 0); // red
+        print_str(sink, "\n[NET] ping ");
+        for (i, &byte) in state.ping_target_ip.iter().enumerate() {
+            if i != 0 { print_str(sink, "."); }
+            super::print_num_u64(sink, byte as u64);
+        }
+        print_str(sink, " — request timed out\n\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// Stage 3 — Emit the result to the console sink.
 pub unsafe fn emit(ctx: *mut ExecutorContext, output: proc::Output) -> ExecStatus {
-    let sink = sink_from_ctx(ctx);
+    let sink  = sink_from_ctx(ctx);
     let state = unsafe { state_mut(ctx) };
-    print_probe_report(&sink, state, output.title);
+
+    match output {
+        proc::Output::Report { title } => {
+            print_probe_report(&sink, state, title);
+        }
+        proc::Output::Ping { reply, rtt_polls } => {
+            print_ping_result(&sink, state, reply, rtt_polls);
+        }
+    }
+
     ExecStatus::Done
 }

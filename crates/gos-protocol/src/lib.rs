@@ -272,6 +272,14 @@ pub const INPUT_KEY_DOWN: u8 = 0xF4;
 pub const NET_CONTROL_REPORT: u8 = 0xD0;
 pub const NET_CONTROL_PROBE: u8 = 0xD1;
 pub const NET_CONTROL_RESET: u8 = 0xD2;
+/// Trigger an ICMP echo (ping) to the configured target IP (default: QEMU gateway 10.0.2.2).
+pub const NET_CONTROL_PING: u8 = 0xD3;
+/// Set target IP byte 0 (most-significant) before issuing NET_CONTROL_PING.
+pub const NET_CONTROL_SET_IP0: u8 = 0xD4;
+pub const NET_CONTROL_SET_IP1: u8 = 0xD5;
+pub const NET_CONTROL_SET_IP2: u8 = 0xD6;
+/// Set target IP byte 3 (least-significant) before issuing NET_CONTROL_PING.
+pub const NET_CONTROL_SET_IP3: u8 = 0xD7;
 pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
 pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;
 pub const CUDA_CONTROL_REPORT: u8 = 0xE2;

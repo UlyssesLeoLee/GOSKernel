@@ -30,7 +30,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Minimal bootstrap only owns compatibility addressing and metadata schemas.
     gos_hal::vaddr::init();
     gos_hal::meta::init();
-    raw_serial_println(format_args!("boot: vaddr/meta initialized"));
+    // Store the physical memory offset for DMA address translation in k-net and other drivers.
+    gos_hal::phys::set_phys_offset(boot_info.physical_memory_offset);
+    raw_serial_println(format_args!("boot: vaddr/meta initialized, phys_offset={:#x}", boot_info.physical_memory_offset));
 
     raw_serial_println(format_args!("boot: staging supervisor domains"));
     gos_supervisor::bootstrap(boot_info as *const _ as u64);

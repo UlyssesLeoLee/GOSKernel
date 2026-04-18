@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(static_mut_refs)] // E1000 DMA statics are accessed only from single-threaded kernel paths
 
 mod pre;
 mod proc;
@@ -30,6 +31,7 @@ mod post;
 
 
 use core::hint::spin_loop;
+use core::sync::atomic::{fence, Ordering};
 
 use gos_protocol::{
     signal_to_packet, ExecStatus, ExecutorContext, ExecutorId, KernelAbi,
@@ -93,6 +95,98 @@ const E1000_STATUS_SPEED_1000: u32 = 0x0000_0080;
 const E1000_EERD_START: u32 = 1 << 0;
 const E1000_EERD_DONE: u32 = 1 << 4;
 
+// ── Descriptor-ring registers ────────────────────────────────────────────────
+const E1000_REG_RCTL:  u32 = 0x0100;
+const E1000_REG_RDBAL: u32 = 0x2800;
+const E1000_REG_RDBAH: u32 = 0x2804;
+const E1000_REG_RDLEN: u32 = 0x2808;
+const E1000_REG_RDH:   u32 = 0x2810;
+const E1000_REG_RDT:   u32 = 0x2818;
+const E1000_REG_TCTL:  u32 = 0x0400;
+const E1000_REG_TIPG:  u32 = 0x0410;
+const E1000_REG_TDBAL: u32 = 0x3800;
+const E1000_REG_TDBAH: u32 = 0x3804;
+const E1000_REG_TDLEN: u32 = 0x3808;
+const E1000_REG_TDH:   u32 = 0x3810;
+const E1000_REG_TDT:   u32 = 0x3818;
+
+const E1000_RCTL_EN:    u32 = 1 << 1;
+const E1000_RCTL_BAM:   u32 = 1 << 15; // accept broadcast
+const E1000_RCTL_SECRC: u32 = 1 << 26; // strip CRC from received frames
+
+const E1000_TCTL_EN:   u32 = 1 << 1;
+const E1000_TCTL_PSP:  u32 = 1 << 3;   // pad short packets
+const E1000_TCTL_CT:   u32 = 0x10 << 4;
+const E1000_TCTL_COLD: u32 = 0x40 << 12;
+
+const E1000_TXD_CMD_EOP:  u8 = 1 << 0; // End of Packet
+const E1000_TXD_CMD_IFCS: u8 = 1 << 1; // Insert FCS / CRC
+const E1000_TXD_CMD_RS:   u8 = 1 << 3; // Report Status when done
+const E1000_TXD_STAT_DD:  u8 = 1 << 0; // Descriptor Done
+
+const E1000_RXD_STAT_DD:  u8 = 1 << 0; // Descriptor Done / packet arrived
+#[allow(dead_code)]
+const E1000_RXD_STAT_EOP: u8 = 1 << 1; // End of Packet (unused; kept for documentation)
+
+// ── DMA descriptor types ─────────────────────────────────────────────────────
+const RX_DESC_COUNT: usize = 8;
+const TX_DESC_COUNT: usize = 8;
+const PACKET_SIZE:   usize = 1522; // max Ethernet frame
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct E1000RxDesc {
+    addr:     u64,
+    length:   u16,
+    checksum: u16,
+    status:   u8,
+    errors:   u8,
+    special:  u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct E1000TxDesc {
+    addr:    u64,
+    length:  u16,
+    cso:     u8,
+    cmd:     u8,
+    status:  u8,
+    css:     u8,
+    special: u16,
+}
+
+/// Aligned wrappers so E1000 16-byte alignment requirement is met.
+#[repr(C, align(16))]
+struct AlignedRxRing([E1000RxDesc; RX_DESC_COUNT]);
+
+#[repr(C, align(16))]
+struct AlignedTxRing([E1000TxDesc; TX_DESC_COUNT]);
+
+static mut RX_RING: AlignedRxRing = AlignedRxRing([E1000RxDesc {
+    addr: 0, length: 0, checksum: 0, status: 0, errors: 0, special: 0,
+}; RX_DESC_COUNT]);
+
+static mut TX_RING: AlignedTxRing = AlignedTxRing([E1000TxDesc {
+    addr: 0, length: 0, cso: 0, cmd: 0, status: 0, css: 0, special: 0,
+}; TX_DESC_COUNT]);
+
+static mut RX_BUFS: [[u8; PACKET_SIZE]; RX_DESC_COUNT] = [[0u8; PACKET_SIZE]; RX_DESC_COUNT];
+static mut TX_BUF:  [u8; PACKET_SIZE] = [0u8; PACKET_SIZE];
+
+// ── Network addressing constants (QEMU user-network defaults) ─────────────────
+#[allow(dead_code)]
+const GUEST_MAC:     [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]; // QEMU-configured MAC (for reference)
+const GUEST_IP:      [u8; 4] = [10, 0, 2, 15];
+const GATEWAY_IP:    [u8; 4] = [10, 0, 2, 2];
+const BCAST_MAC:     [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+
+const ETHERTYPE_ARP:  u16 = 0x0806;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const IP_PROTO_ICMP:  u8  = 1;
+const ICMP_ECHO_REQ:  u8  = 8;
+const ICMP_ECHO_REP:  u8  = 0;
+
 #[repr(C)]
 struct NetState {
     console_target: u64,
@@ -120,6 +214,15 @@ struct NetState {
     full_duplex: u8,
     mac_valid: u8,
     mac: [u8; 6],
+    // ── DMA ring state ────────────────────────────────────────────────────
+    ring_initialized: u8,
+    rx_tail: u8,
+    tx_tail: u8,
+    // ── Ping target (default: QEMU gateway 10.0.2.2) ─────────────────────
+    ping_target_ip: [u8; 4],
+    // ── Last ARP-resolved gateway MAC ────────────────────────────────────
+    gw_mac: [u8; 6],
+    gw_mac_valid: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -544,6 +647,9 @@ fn e1000_attach(state: &mut NetState) {
     state.full_duplex = u8::from((state.status_reg & E1000_STATUS_FD) != 0);
     e1000_load_mac(state, state.mmio_bar);
     state.stage = STAGE_DEVICE_READY;
+
+    // ── Initialise DMA descriptor rings ──────────────────────────────────
+    e1000_ring_init(state);
 }
 
 fn reset_state(state: &mut NetState) {
@@ -571,6 +677,12 @@ fn reset_state(state: &mut NetState) {
     state.full_duplex = 0;
     state.mac_valid = 0;
     state.mac = [0; 6];
+    state.ring_initialized = 0;
+    state.rx_tail = 0;
+    state.tx_tail = 0;
+    state.gw_mac = [0; 6];
+    state.gw_mac_valid = 0;
+    // ping_target_ip is NOT reset — the user may have set it via SET_IP* commands
 }
 
 fn refresh_network_state(state: &mut NetState) {
@@ -608,6 +720,387 @@ fn refresh_network_state(state: &mut NetState) {
     }
 }
 
+// ── DMA descriptor ring initialisation ───────────────────────────────────────
+
+fn e1000_ring_init(state: &mut NetState) {
+    if state.io_bar == 0 || state.stage != STAGE_DEVICE_READY {
+        return;
+    }
+
+    // ── RX ring ──────────────────────────────────────────────────────────────
+    unsafe {
+        for i in 0..RX_DESC_COUNT {
+            let buf_virt = RX_BUFS[i].as_ptr() as u64;
+            let buf_phys = match gos_hal::phys::virt_to_phys(buf_virt) {
+                Some(p) => p,
+                None => return, // page-table miss — abort ring init
+            };
+            RX_RING.0[i] = E1000RxDesc {
+                addr: buf_phys,
+                length: 0,
+                checksum: 0,
+                status: 0,
+                errors: 0,
+                special: 0,
+            };
+        }
+        let ring_virt = RX_RING.0.as_ptr() as u64;
+        let ring_phys = match gos_hal::phys::virt_to_phys(ring_virt) {
+            Some(p) => p,
+            None => return,
+        };
+        fence(Ordering::SeqCst);
+        e1000_reg_write(state, E1000_REG_RDBAL, (ring_phys & 0xFFFF_FFFF) as u32);
+        e1000_reg_write(state, E1000_REG_RDBAH, (ring_phys >> 32) as u32);
+        e1000_reg_write(state, E1000_REG_RDLEN, (RX_DESC_COUNT * 16) as u32);
+        e1000_reg_write(state, E1000_REG_RDH, 0);
+        e1000_reg_write(state, E1000_REG_RDT, (RX_DESC_COUNT - 1) as u32);
+        e1000_reg_write(state, E1000_REG_RCTL,
+            E1000_RCTL_EN | E1000_RCTL_BAM | E1000_RCTL_SECRC);
+    }
+
+    // ── TX ring ──────────────────────────────────────────────────────────────
+    unsafe {
+        for i in 0..TX_DESC_COUNT {
+            TX_RING.0[i] = E1000TxDesc {
+                addr: 0, length: 0, cso: 0, cmd: 0,
+                status: E1000_TXD_STAT_DD, // mark all initially done
+                css: 0, special: 0,
+            };
+        }
+        let ring_virt = TX_RING.0.as_ptr() as u64;
+        let ring_phys = match gos_hal::phys::virt_to_phys(ring_virt) {
+            Some(p) => p,
+            None => return,
+        };
+        fence(Ordering::SeqCst);
+        e1000_reg_write(state, E1000_REG_TDBAL, (ring_phys & 0xFFFF_FFFF) as u32);
+        e1000_reg_write(state, E1000_REG_TDBAH, (ring_phys >> 32) as u32);
+        e1000_reg_write(state, E1000_REG_TDLEN, (TX_DESC_COUNT * 16) as u32);
+        e1000_reg_write(state, E1000_REG_TDH, 0);
+        e1000_reg_write(state, E1000_REG_TDT, 0);
+        e1000_reg_write(state, E1000_REG_TCTL,
+            E1000_TCTL_EN | E1000_TCTL_PSP | E1000_TCTL_CT | E1000_TCTL_COLD);
+        // Inter-packet gap: recommended value from Intel e1000 SDM
+        e1000_reg_write(state, E1000_REG_TIPG, 0x0060200A);
+    }
+
+    state.rx_tail = (RX_DESC_COUNT - 1) as u8;
+    state.tx_tail = 0;
+    state.ring_initialized = 1;
+}
+
+// ── Packet transmission ───────────────────────────────────────────────────────
+
+/// Transmit `len` bytes from `TX_BUF`.  Returns true if the descriptor was
+/// submitted successfully (does not wait for hardware completion).
+unsafe fn tx_send(state: &mut NetState, len: usize) -> bool {
+    if state.ring_initialized == 0 || len == 0 || len > PACKET_SIZE {
+        return false;
+    }
+    let tail = state.tx_tail as usize;
+
+    // Wait for the slot to be free (status DD set by HW when previous TX done)
+    let mut spins = 0usize;
+    loop {
+        let status = unsafe { TX_RING.0[tail].status };
+        if status & E1000_TXD_STAT_DD != 0 {
+            break;
+        }
+        if spins >= 500_000 {
+            return false;
+        }
+        spin_loop();
+        spins += 1;
+    }
+
+    let buf_virt = unsafe { TX_BUF.as_ptr() as u64 };
+    let buf_phys = match gos_hal::phys::virt_to_phys(buf_virt) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    unsafe {
+        TX_RING.0[tail] = E1000TxDesc {
+            addr:    buf_phys,
+            length:  len as u16,
+            cso:     0,
+            cmd:     E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS,
+            status:  0,
+            css:     0,
+            special: 0,
+        };
+    }
+
+    fence(Ordering::SeqCst);
+    let next_tail = (tail + 1) % TX_DESC_COUNT;
+    state.tx_tail = next_tail as u8;
+    e1000_reg_write(state, E1000_REG_TDT, next_tail as u32);
+    true
+}
+
+// ── Packet reception ──────────────────────────────────────────────────────────
+
+/// Poll the RX ring for one completed frame.  On success, copies the frame
+/// into `out_buf[..frame_len]` and returns `Some(frame_len)`.
+unsafe fn rx_poll(state: &mut NetState, out_buf: &mut [u8]) -> Option<usize> {
+    if state.ring_initialized == 0 {
+        return None;
+    }
+    // The head the hardware will write next is RDH; check the slot after our tail.
+    let check = ((state.rx_tail as usize) + 1) % RX_DESC_COUNT;
+    let status = unsafe { RX_RING.0[check].status };
+    if status & E1000_RXD_STAT_DD == 0 {
+        return None;
+    }
+    let length = unsafe { RX_RING.0[check].length } as usize;
+    if length == 0 || length > PACKET_SIZE || length > out_buf.len() {
+        // recycle
+        unsafe { RX_RING.0[check].status = 0; }
+        fence(Ordering::SeqCst);
+        e1000_reg_write(state, E1000_REG_RDT, check as u32);
+        state.rx_tail = check as u8;
+        return None;
+    }
+
+    // Copy frame out
+    out_buf[..length].copy_from_slice(unsafe { &RX_BUFS[check][..length] });
+
+    // Recycle descriptor
+    unsafe { RX_RING.0[check] = E1000RxDesc {
+        addr: RX_RING.0[check].addr,
+        length: 0, checksum: 0, status: 0, errors: 0, special: 0,
+    }; }
+    fence(Ordering::SeqCst);
+    e1000_reg_write(state, E1000_REG_RDT, check as u32);
+    state.rx_tail = check as u8;
+
+    Some(length)
+}
+
+// ── Network protocol helpers ──────────────────────────────────────────────────
+
+fn checksum_ip(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut i = 0usize;
+    while i + 1 < data.len() {
+        sum += u32::from(u16::from_be_bytes([data[i], data[i + 1]]));
+        i += 2;
+    }
+    if i < data.len() {
+        sum += u32::from(data[i]) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn write_u16_be(buf: &mut [u8], offset: usize, val: u16) {
+    buf[offset]     = (val >> 8) as u8;
+    buf[offset + 1] = val as u8;
+}
+
+
+// ── ARP ───────────────────────────────────────────────────────────────────────
+
+/// Build an ARP request in `TX_BUF` and transmit it.
+/// Returns true on successful queue; false if ring not ready.
+unsafe fn arp_request(state: &mut NetState, target_ip: [u8; 4]) -> bool {
+    let src_mac = state.mac;
+    let src_ip  = GUEST_IP;
+    let buf = unsafe { &mut TX_BUF };
+
+    // Ethernet header
+    buf[0..6].copy_from_slice(&BCAST_MAC);
+    buf[6..12].copy_from_slice(&src_mac);
+    write_u16_be(buf, 12, ETHERTYPE_ARP);
+
+    // ARP payload
+    write_u16_be(buf, 14, 1);            // HTYPE = Ethernet
+    write_u16_be(buf, 16, 0x0800);       // PTYPE = IPv4
+    buf[18] = 6;                         // HLEN
+    buf[19] = 4;                         // PLEN
+    write_u16_be(buf, 20, 1);            // OPER = request
+    buf[22..28].copy_from_slice(&src_mac);
+    buf[28..32].copy_from_slice(&src_ip);
+    buf[32..38].copy_from_slice(&[0; 6]);
+    buf[38..42].copy_from_slice(&target_ip);
+
+    unsafe { tx_send(state, 42) }
+}
+
+/// Poll the RX ring looking for an ARP reply from `sender_ip`.
+/// On success fills `out_mac` and returns true.  Gives up after
+/// `max_polls` iterations.
+unsafe fn arp_wait_reply(
+    state: &mut NetState,
+    sender_ip: [u8; 4],
+    out_mac: &mut [u8; 6],
+    max_polls: usize,
+) -> bool {
+    let mut frame = [0u8; PACKET_SIZE];
+    let mut polls = 0usize;
+
+    while polls < max_polls {
+        if let Some(len) = unsafe { rx_poll(state, &mut frame) } {
+            // ARP EtherType at offset 12
+            if len >= 42 && frame[12] == 0x08 && frame[13] == 0x06 {
+                // OPER = reply (0x0002) at offset 20
+                if frame[20] == 0x00 && frame[21] == 0x02 {
+                    // Sender IP at offset 28
+                    if frame[28..32] == sender_ip {
+                        out_mac.copy_from_slice(&frame[22..28]);
+                        return true;
+                    }
+                }
+            }
+        }
+        spin_loop();
+        polls += 1;
+    }
+    false
+}
+
+// ── ICMP echo ─────────────────────────────────────────────────────────────────
+
+/// Build and send an ICMP echo request to `dst_ip` via `dst_mac`.
+/// The payload is the 8-byte ASCII string "GOSPING!".
+unsafe fn icmp_echo_request(
+    state: &mut NetState,
+    dst_mac: [u8; 6],
+    dst_ip:  [u8; 4],
+    id: u16,
+    seq: u16,
+) -> bool {
+    let src_mac = state.mac;
+    let src_ip  = GUEST_IP;
+    let buf = unsafe { &mut TX_BUF };
+    let payload = b"GOSPING!";
+
+    // Ethernet header (14 bytes)
+    buf[0..6].copy_from_slice(&dst_mac);
+    buf[6..12].copy_from_slice(&src_mac);
+    write_u16_be(buf, 12, ETHERTYPE_IPV4);
+
+    // IP header (20 bytes) at offset 14
+    let ip_total_len: u16 = 20 + 8 + payload.len() as u16; // hdr + icmp_hdr + payload
+    buf[14] = 0x45;                      // Version 4, IHL 5
+    buf[15] = 0;                         // DSCP/ECN
+    write_u16_be(buf, 16, ip_total_len);
+    write_u16_be(buf, 18, id);           // Identification reuse id
+    buf[20] = 0x40;                      // Don't fragment
+    buf[21] = 0;
+    buf[22] = 64;                        // TTL
+    buf[23] = IP_PROTO_ICMP;
+    write_u16_be(buf, 24, 0);            // checksum placeholder
+    buf[26..30].copy_from_slice(&src_ip);
+    buf[30..34].copy_from_slice(&dst_ip);
+    let ip_csum = checksum_ip(&buf[14..34]);
+    write_u16_be(buf, 24, ip_csum);
+
+    // ICMP header + payload at offset 34
+    buf[34] = ICMP_ECHO_REQ;             // Type 8
+    buf[35] = 0;                         // Code 0
+    write_u16_be(buf, 36, 0);            // checksum placeholder
+    write_u16_be(buf, 38, id);
+    write_u16_be(buf, 40, seq);
+    buf[42..50].copy_from_slice(payload);
+    let icmp_csum = checksum_ip(&buf[34..50]);
+    write_u16_be(buf, 36, icmp_csum);
+
+    unsafe { tx_send(state, 50) }
+}
+
+/// Poll the RX ring for an ICMP echo reply matching `id` and `seq`.
+/// Returns Some(polls_taken) on success, None on timeout.
+unsafe fn icmp_wait_reply(
+    state: &mut NetState,
+    src_ip:  [u8; 4],
+    id: u16,
+    seq: u16,
+    max_polls: usize,
+) -> Option<u32> {
+    let mut frame = [0u8; PACKET_SIZE];
+    let mut polls = 0usize;
+
+    while polls < max_polls {
+        if let Some(len) = unsafe { rx_poll(state, &mut frame) } {
+            // Must be IPv4 (EtherType 0x0800 at offset 12)
+            if len >= 42 && frame[12] == 0x08 && frame[13] == 0x00 {
+                // IP protocol at offset 23; ICMP = 1
+                if frame[23] == IP_PROTO_ICMP {
+                    // Source IP at offset 26
+                    if frame[26..30] == src_ip {
+                        // ICMP type at offset 34; type 0 = echo reply
+                        if frame[34] == ICMP_ECHO_REP {
+                            let rep_id  = u16::from_be_bytes([frame[38], frame[39]]);
+                            let rep_seq = u16::from_be_bytes([frame[40], frame[41]]);
+                            if rep_id == id && rep_seq == seq {
+                                return Some(polls as u32);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        spin_loop();
+        polls += 1;
+    }
+    None
+}
+
+// ── Top-level ping operation ──────────────────────────────────────────────────
+
+/// Send a single ICMP ping to `state.ping_target_ip` and return whether
+/// a reply was received plus a rough poll-count latency estimate.
+///
+/// Performs (in order): E1000 ring init if needed → ARP → ICMP echo →
+/// wait for reply.  All steps are blocking busy-polls with timeouts.
+pub(crate) unsafe fn do_ping(state: &mut NetState) -> (bool, u32) {
+    if state.stage != STAGE_DEVICE_READY || state.mac_valid == 0 {
+        return (false, 0);
+    }
+    if state.ring_initialized == 0 {
+        e1000_ring_init(state);
+        if state.ring_initialized == 0 {
+            return (false, 0);
+        }
+    }
+
+    let target_ip = state.ping_target_ip;
+
+    // ── Step 1: ARP to resolve gateway MAC ───────────────────────────────
+    let gw_mac = if state.gw_mac_valid != 0 {
+        state.gw_mac
+    } else {
+        if !unsafe { arp_request(state, target_ip) } {
+            return (false, 0);
+        }
+        let mut mac = [0u8; 6];
+        if !unsafe { arp_wait_reply(state, target_ip, &mut mac, 2_000_000) } {
+            return (false, 0);
+        }
+        state.gw_mac = mac;
+        state.gw_mac_valid = 1;
+        mac
+    };
+
+    // ── Step 2: ICMP echo request ─────────────────────────────────────────
+    let id: u16  = 0x6F73;  // 'os'
+    let seq: u16 = 1;
+
+    if !unsafe { icmp_echo_request(state, gw_mac, target_ip, id, seq) } {
+        return (false, 0);
+    }
+
+    // ── Step 3: Wait for reply ────────────────────────────────────────────
+    match unsafe { icmp_wait_reply(state, target_ip, id, seq, 3_000_000) } {
+        Some(polls) => (true, polls),
+        None => (false, 0),
+    }
+}
+
 fn print_link_stage(sink: &ConsoleSink, state: &NetState) {
     if state.driver_kind == DRIVER_E1000 {
         print_str(sink, "      carrier: ");
@@ -626,7 +1119,14 @@ fn print_link_stage(sink: &ConsoleSink, state: &NetState) {
         } else {
             print_str(sink, "down");
         }
-        print_str(sink, "\n      stack: nic registers live; tx/rx rings, arp, dhcp, ip pending\n");
+        let ring_status = if state.ring_initialized != 0 {
+            "tx/rx rings live"
+        } else {
+            "tx/rx rings pending"
+        };
+        print_str(sink, "\n      stack: ");
+        print_str(sink, ring_status);
+        print_str(sink, "; dhcp, ip pending\n");
     } else if state.driver_kind == DRIVER_VIRTIO {
         print_str(sink, "      driver: virtio-net discovered; native datapath still pending\n");
     }
@@ -728,6 +1228,12 @@ unsafe extern "C" fn net_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 full_duplex: 0,
                 mac_valid: 0,
                 mac: [0; 6],
+                ring_initialized: 0,
+                rx_tail: 0,
+                tx_tail: 0,
+                ping_target_ip: GATEWAY_IP,
+                gw_mac: [0; 6],
+                gw_mac_valid: 0,
             },
         );
     }

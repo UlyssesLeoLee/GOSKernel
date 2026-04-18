@@ -15,56 +15,75 @@
 // ============================================================
 
 use gos_protocol::{
-    ExecutorContext, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET, Signal,
+    ExecutorContext, Signal,
+    NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET, NET_CONTROL_PING,
+    NET_CONTROL_SET_IP0, NET_CONTROL_SET_IP1, NET_CONTROL_SET_IP2, NET_CONTROL_SET_IP3,
 };
 
-use super::{pre, refresh_network_state, state_mut};
+use super::{pre, do_ping, refresh_network_state, state_mut};
 
-/// The resolved title for the probe report to be emitted in the post stage.
-pub struct Output {
-    pub title: &'static str,
+/// The output produced by the proc stage.
+pub enum Output {
+    /// A probe/status/reset report — post will print a summary.
+    Report { title: &'static str },
+    /// An ICMP ping result.
+    Ping { reply: bool, rtt_polls: u32 },
 }
 
-/// Stage 2 — Core business logic: drive PCI enumeration, NIC initialisation, and
-/// routing decisions based on the incoming signal.
-///
-/// Updates `NetState` in place via the shared `super` helpers, then returns an
-/// `Output` describing what the post stage should report.  Returns `None` only
-/// when no report is warranted (currently unreachable given pre-stage filtering,
-/// but kept for extensibility).
+/// Stage 2 — Core business logic.
 pub unsafe fn process(ctx: *mut ExecutorContext, input: pre::Input) -> Option<Output> {
     let state = unsafe { state_mut(ctx) };
 
-    let title = match input.signal {
+    match input.signal {
         Signal::Spawn { .. } => {
             refresh_network_state(state);
-            "uplink boot sync"
+            Some(Output::Report { title: "uplink boot sync" })
         }
-        Signal::Control { cmd, .. } => match cmd {
+
+        Signal::Control { cmd, val } => match cmd {
             NET_CONTROL_REPORT => {
                 if state.probe_complete == 0 {
                     refresh_network_state(state);
                 }
-                "uplink status"
+                Some(Output::Report { title: "uplink status" })
             }
             NET_CONTROL_RESET => {
                 refresh_network_state(state);
-                "uplink reset"
+                Some(Output::Report { title: "uplink reset" })
             }
-            NET_CONTROL_PROBE | 1 => {
+            NET_CONTROL_PROBE => {
                 refresh_network_state(state);
-                "uplink reprobe"
+                Some(Output::Report { title: "uplink reprobe" })
             }
+
+            // ── Target IP configuration ───────────────────────────────────
+            NET_CONTROL_SET_IP0 => {
+                state.ping_target_ip[0] = val;
+                state.gw_mac_valid = 0; // invalidate cached ARP entry on IP change
+                None
+            }
+            NET_CONTROL_SET_IP1 => { state.ping_target_ip[1] = val; None }
+            NET_CONTROL_SET_IP2 => { state.ping_target_ip[2] = val; None }
+            NET_CONTROL_SET_IP3 => {
+                state.ping_target_ip[3] = val;
+                state.gw_mac_valid = 0;
+                None
+            }
+
+            // ── ICMP ping ─────────────────────────────────────────────────
+            NET_CONTROL_PING => {
+                let (reply, rtt_polls) = unsafe { do_ping(state) };
+                Some(Output::Ping { reply, rtt_polls })
+            }
+
             _ => {
                 if state.probe_complete == 0 {
                     refresh_network_state(state);
                 }
-                "uplink status"
+                Some(Output::Report { title: "uplink status" })
             }
         },
-        // pre::prepare only passes Spawn and Control; this branch is unreachable.
-        _ => return None,
-    };
 
-    Some(Output { title })
+        _ => None,
+    }
 }

@@ -13,7 +13,7 @@ use gos_protocol::{
     AI_CONTROL_CHAT_BEGIN, AI_CONTROL_CHAT_COMMIT,
     CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET,
     IME_MODE_ASCII, IME_MODE_ZH_PINYIN,
-    NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
+    NET_CONTROL_PING, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
     RuntimeEdgeType,
 };
 
@@ -427,6 +427,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  net / net status  print uplink status\n");
         super::print_str(sink, "  net probe         rescan pci and refresh nic state\n");
         super::print_str(sink, "  net reset         re-init nic registers and report\n");
+        super::print_str(sink, "  net ping / ping   ICMP echo to qemu gateway (10.0.2.2)\n");
         super::print_str(sink, "  cuda / cuda status  print host bridge status\n");
         super::print_str(sink, "  cuda submit <job>   submit one host-backed cuda job\n");
         super::print_str(sink, "  cuda demo           send a sample saxpy-style job\n");
@@ -665,6 +666,19 @@ fn dispatch_text_command(
         ) {
             super::set_color(sink, 11, 0);
             super::print_str(sink, " net reset dispatched\n");
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " net uplink unresolved\n");
+        }
+    } else if cmd == "net ping" || cmd == "ping" {
+        if super::emit_target_signal(
+            sink,
+            state.net_target,
+            Signal::Control { cmd: NET_CONTROL_PING, val: 0 },
+        ) {
+            gos_runtime::pump();
+            super::set_color(sink, 11, 0);
+            super::print_str(sink, " pinging 10.0.2.2 (qemu gateway)...\n");
         } else {
             super::set_color(sink, 12, 0);
             super::print_str(sink, " net uplink unresolved\n");
