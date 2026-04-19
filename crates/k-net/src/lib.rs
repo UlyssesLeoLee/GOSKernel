@@ -3,6 +3,7 @@
 mod pre;
 mod proc;
 mod post;
+pub(crate) mod tcp;
 
 // ============================================================
 // GOS KERNEL TOPOLOGY — k-net
@@ -195,6 +196,8 @@ const BCAST_MAC:     [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 const ETHERTYPE_ARP:  u16 = 0x0806;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IP_PROTO_ICMP:  u8  = 1;
+#[allow(dead_code)]
+pub(crate) const IP_PROTO_TCP: u8 = 6;
 const ICMP_ECHO_REQ:  u8  = 8;
 const ICMP_ECHO_REP:  u8  = 0;
 
@@ -808,7 +811,7 @@ fn e1000_ring_init(state: &mut NetState) {
 
 /// Transmit `len` bytes from `TX_BUF`.  Returns true if the descriptor was
 /// submitted successfully (does not wait for hardware completion).
-unsafe fn tx_send(state: &mut NetState, len: usize) -> bool {
+pub(crate) unsafe fn tx_send(state: &mut NetState, len: usize) -> bool {
     if state.ring_initialized == 0 || len == 0 || len > PACKET_SIZE {
         return false;
     }
@@ -857,7 +860,7 @@ unsafe fn tx_send(state: &mut NetState, len: usize) -> bool {
 
 /// Poll the RX ring for one completed frame.  On success, copies the frame
 /// into `out_buf[..frame_len]` and returns `Some(frame_len)`.
-unsafe fn rx_poll(state: &mut NetState, out_buf: &mut [u8]) -> Option<usize> {
+pub(crate) unsafe fn rx_poll(state: &mut NetState, out_buf: &mut [u8]) -> Option<usize> {
     if state.ring_initialized == 0 {
         return None;
     }
@@ -898,7 +901,7 @@ unsafe fn rx_poll(state: &mut NetState, out_buf: &mut [u8]) -> Option<usize> {
 
 // ── Network protocol helpers ──────────────────────────────────────────────────
 
-fn checksum_ip(data: &[u8]) -> u16 {
+pub(crate) fn checksum_ip(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let mut i = 0usize;
     while i + 1 < data.len() {
@@ -914,7 +917,7 @@ fn checksum_ip(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-fn write_u16_be(buf: &mut [u8], offset: usize, val: u16) {
+pub(crate) fn write_u16_be(buf: &mut [u8], offset: usize, val: u16) {
     buf[offset]     = (val >> 8) as u8;
     buf[offset + 1] = val as u8;
 }
@@ -924,7 +927,7 @@ fn write_u16_be(buf: &mut [u8], offset: usize, val: u16) {
 
 /// Build an ARP request in `TX_BUF` and transmit it.
 /// Returns true on successful queue; false if ring not ready.
-unsafe fn arp_request(state: &mut NetState, target_ip: [u8; 4]) -> bool {
+pub(crate) unsafe fn arp_request(state: &mut NetState, target_ip: [u8; 4]) -> bool {
     let src_mac = state.mac;
     let src_ip  = GUEST_IP;
     let buf = unsafe { &mut *TX_BUF.0.get() };
@@ -951,7 +954,7 @@ unsafe fn arp_request(state: &mut NetState, target_ip: [u8; 4]) -> bool {
 /// Poll the RX ring looking for an ARP reply from `sender_ip`.
 /// On success fills `out_mac` and returns true.  Gives up after
 /// `max_polls` iterations.
-unsafe fn arp_wait_reply(
+pub(crate) unsafe fn arp_wait_reply(
     state: &mut NetState,
     sender_ip: [u8; 4],
     out_mac: &mut [u8; 6],
@@ -1119,6 +1122,46 @@ pub(crate) unsafe fn do_ping(state: &mut NetState) -> (bool, u32) {
     }
 }
 
+// ── NET_STATE_PTR: stored at init so external crates can call net_http_post_sync ─
+
+/// Holds the `*mut NetState` obtained from `ExecutorContext::state_ptr` at
+/// `net_on_init` time.  Written once, read by `net_http_post_sync` at any
+/// later point.  Safe in the cooperative uniprocessor model.
+struct NetStatePtrCell(UnsafeCell<*mut u8>);
+// SAFETY: uniprocessor cooperative kernel — no concurrent access.
+unsafe impl Sync for NetStatePtrCell {}
+
+static NET_STATE_PTR: NetStatePtrCell =
+    NetStatePtrCell(UnsafeCell::new(core::ptr::null_mut()));
+
+/// Direct HTTP/1.0 POST over e1000 TCP to `dst_ip:dst_port`.
+///
+/// `http_request` must be a **complete** HTTP/1.0 request (headers + blank
+/// line + body) that fits in one TCP segment (≤ `tcp::TCP_MAX_PAYLOAD` bytes).
+/// The raw HTTP response (including status line and response headers) is
+/// written into `resp`; the number of bytes written is returned.
+///
+/// Returns `None` if the NIC has not been initialised yet, the request is too
+/// large, or the TCP connection fails.
+///
+/// # Safety
+/// Must be called from a single-threaded context while the NIC is not
+/// actively handling another request.  In GOS this is guaranteed by the
+/// cooperative scheduler.
+pub unsafe fn net_http_post_sync(
+    dst_ip:       [u8; 4],
+    dst_port:     u16,
+    http_request: &[u8],
+    resp:         &mut [u8],
+) -> Option<usize> {
+    let state_ptr = unsafe { *NET_STATE_PTR.0.get() };
+    if state_ptr.is_null() {
+        return None;
+    }
+    let state = unsafe { &mut *(state_ptr as *mut NetState) };
+    unsafe { tcp::tcp_http_post(state, dst_ip, dst_port, http_request, resp) }
+}
+
 fn print_link_stage(sink: &ConsoleSink, state: &NetState) {
     if state.driver_kind == DRIVER_E1000 {
         print_str(sink, "      carrier: ");
@@ -1255,6 +1298,9 @@ unsafe extern "C" fn net_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
             },
         );
     }
+
+    // Store state pointer so net_http_post_sync can reach it later.
+    unsafe { *NET_STATE_PTR.0.get() = (*ctx).state_ptr; }
 
     ExecStatus::Done
 }

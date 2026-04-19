@@ -191,6 +191,8 @@ static CLIPBOARD_BYTES: AtomicUsize = AtomicUsize::new(0);
 static CHAT_TARGET: AtomicU64 = AtomicU64::new(0);
 /// 0 = normal shell, 1 = chat mode.
 static CHAT_MODE: AtomicU8 = AtomicU8::new(0);
+/// 0 = COM2 bridge mode, 1 = direct TCP/HTTP mode.
+static CHAT_HTTP_MODE: AtomicU8 = AtomicU8::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",

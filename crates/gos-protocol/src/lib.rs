@@ -290,6 +290,14 @@ pub const CHAT_CONTROL_EXIT: u8 = 0xC1;
 pub const CHAT_CONTROL_KEY_BEGIN: u8 = 0xC2;
 /// Shell → k-chat: commit the streamed API key.
 pub const CHAT_CONTROL_KEY_COMMIT: u8 = 0xC3;
+/// Shell → k-chat: begin streaming a model-name byte-by-byte.
+pub const CHAT_CONTROL_MODEL_BEGIN: u8 = 0xC4;
+/// Shell → k-chat: commit the streamed model name.
+pub const CHAT_CONTROL_MODEL_COMMIT: u8 = 0xC5;
+/// Shell → k-chat: set the AI backend type (val: 0=ollama, 1=openai, 2=anthropic).
+pub const CHAT_CONTROL_API_TYPE: u8 = 0xC6;
+/// Shell → k-chat: toggle direct-HTTP mode (val: 0=bridge, 1=direct).
+pub const CHAT_CONTROL_HTTP_TOGGLE: u8 = 0xC7;
 
 pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
 pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;

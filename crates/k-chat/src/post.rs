@@ -59,9 +59,9 @@ pub unsafe fn emit(ctx: *mut ExecutorContext, output: proc::Output) -> ExecStatu
             set_color(&sink, 7, 0);
         }
 
-        proc::Output::KeyStored => {
+        proc::Output::ConfigChanged => {
             set_color(&sink, 10, 0);
-            print_str(&sink, "[CHAT] API key updated\n");
+            print_str(&sink, "[CHAT] config updated\n");
             set_color(&sink, 7, 0);
         }
 

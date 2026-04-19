@@ -97,6 +97,11 @@ pub const API_KEY_BUF: usize = 256;
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
+/// API backend selector.
+pub const API_OLLAMA:    u8 = 0;
+pub const API_OPENAI:    u8 = 1;
+pub const API_ANTHROPIC: u8 = 2;
+
 /// All runtime state for the chat plugin.
 #[repr(C)]
 pub struct ChatState {
@@ -115,6 +120,21 @@ pub struct ChatState {
     /// Stored API key (passed to bridge on each call if non-empty).
     pub api_key: [u8; API_KEY_BUF],
     pub api_key_len: u8,
+    // ── Direct HTTP mode (bypasses the COM2 Python bridge) ───────────────────
+    /// 0 = COM2 bridge (default), 1 = direct TCP/HTTP via e1000
+    pub http_mode: u8,
+    /// API backend: 0=ollama, 1=openai, 2=anthropic
+    pub api_type: u8,
+    /// Model name for direct-HTTP mode.
+    pub model: [u8; 64],
+    pub model_len: u8,
+    /// Destination IP for direct HTTP (default: QEMU gateway 10.0.2.2).
+    pub http_host_ip: [u8; 4],
+    /// Destination port for direct HTTP (default: 11434 for Ollama).
+    pub http_port: u16,
+    // ── Streaming mode ────────────────────────────────────────────────────────
+    /// 0=none, 1=streaming api_key, 2=streaming model name.
+    pub streaming_mode: u8,
 }
 
 /// DMA-safe static wrapper (same pattern as k-net).
@@ -132,6 +152,13 @@ static CHAT_STATE: ChatCell<ChatState> = ChatCell(UnsafeCell::new(ChatState {
     resp_len: 0,
     api_key: [0u8; API_KEY_BUF],
     api_key_len: 0,
+    http_mode: 0,
+    api_type: API_OLLAMA,
+    model: [0u8; 64],
+    model_len: 0,
+    http_host_ip: [10, 0, 2, 2], // QEMU SLIRP gateway = host 127.0.0.1
+    http_port: 11434,
+    streaming_mode: 0,
 }));
 
 // ── State accessors ────────────────────────────────────────────────────────────
@@ -467,6 +494,252 @@ fn abi_cache_store(val: Option<*const KernelAbi>) {
 #[inline(always)]
 fn abi_cache_load() -> Option<*const KernelAbi> {
     unsafe { *ABI_CACHE.0.get() }
+}
+
+// ── Direct HTTP mode ───────────────────────────────────────────────────────────
+
+/// Scratch buffer for building the HTTP request in direct-HTTP mode.
+/// 2048 bytes: headers (~300) + JSON body (message ≤512 + model + overhead).
+const HTTP_REQ_BUF: usize = 2048;
+/// HTTP response scratch buffer.
+const HTTP_RESP_BUF: usize = 8192;
+
+struct HttpReqCell(UnsafeCell<[u8; HTTP_REQ_BUF]>);
+unsafe impl Sync for HttpReqCell {}
+static HTTP_REQ: HttpReqCell = HttpReqCell(UnsafeCell::new([0u8; HTTP_REQ_BUF]));
+
+struct HttpRespCell(UnsafeCell<[u8; HTTP_RESP_BUF]>);
+unsafe impl Sync for HttpRespCell {}
+static HTTP_RESP: HttpRespCell = HttpRespCell(UnsafeCell::new([0u8; HTTP_RESP_BUF]));
+
+/// Append a byte slice into `buf[*pos..]`, advancing `*pos`.
+/// Returns false if the buffer is too small.
+fn buf_append(buf: &mut [u8], pos: &mut usize, data: &[u8]) -> bool {
+    if *pos + data.len() > buf.len() { return false; }
+    buf[*pos..*pos + data.len()].copy_from_slice(data);
+    *pos += data.len();
+    true
+}
+
+/// Append a decimal u32 into `buf`.
+fn buf_append_u32(buf: &mut [u8], pos: &mut usize, mut val: u32) -> bool {
+    let mut tmp = [0u8; 10];
+    let mut len = 0usize;
+    if val == 0 {
+        tmp[0] = b'0'; len = 1;
+    } else {
+        while val > 0 {
+            tmp[len] = b'0' + (val % 10) as u8;
+            val /= 10; len += 1;
+        }
+    }
+    // Reverse
+    let mut out = [0u8; 10];
+    for i in 0..len { out[i] = tmp[len - 1 - i]; }
+    buf_append(buf, pos, &out[..len])
+}
+
+/// Append a JSON-escaped string into `buf`.
+fn buf_append_json_str(buf: &mut [u8], pos: &mut usize, s: &[u8]) -> bool {
+    for &b in s {
+        let ok = match b {
+            b'"'  => buf_append(buf, pos, b"\\\""),
+            b'\\' => buf_append(buf, pos, b"\\\\"),
+            b'\n' => buf_append(buf, pos, b"\\n"),
+            b'\r' => buf_append(buf, pos, b"\\r"),
+            b'\t' => buf_append(buf, pos, b"\\t"),
+            other => {
+                if *pos < buf.len() { buf[*pos] = other; *pos += 1; true }
+                else { false }
+            }
+        };
+        if !ok { return false; }
+    }
+    true
+}
+
+/// Build an Ollama `/api/chat` JSON body into `body_buf`.
+/// Returns the body length or 0 on overflow.
+fn build_ollama_body(
+    body_buf:  &mut [u8],
+    model:     &[u8],
+    user_msg:  &[u8],
+) -> usize {
+    let mut p = 0usize;
+    if !buf_append(body_buf, &mut p, b"{\"model\":\"") { return 0; }
+    if !buf_append_json_str(body_buf, &mut p, model)   { return 0; }
+    if !buf_append(body_buf, &mut p, b"\",\"messages\":[{\"role\":\"system\",\"content\":\"") { return 0; }
+    if !buf_append_json_str(body_buf, &mut p, b"You are a helpful AI assistant embedded in the GOS bare-metal kernel. Reply concisely in plain prose, no markdown.") { return 0; }
+    if !buf_append(body_buf, &mut p, b"\"},{\"role\":\"user\",\"content\":\"") { return 0; }
+    if !buf_append_json_str(body_buf, &mut p, user_msg) { return 0; }
+    if !buf_append(body_buf, &mut p, b"\"}],\"stream\":false}") { return 0; }
+    p
+}
+
+/// Build a full HTTP/1.0 POST request into `req_buf`.
+/// Returns the request length or 0 on overflow.
+fn build_http_request(
+    req_buf:    &mut [u8],
+    path:       &[u8],
+    host_ip:    [u8; 4],
+    host_port:  u16,
+    extra_hdr:  &[u8],  // e.g. "Authorization: Bearer <key>\r\n"
+    body:       &[u8],
+) -> usize {
+    let mut p = 0usize;
+    // Request line
+    if !buf_append(req_buf, &mut p, b"POST ") { return 0; }
+    if !buf_append(req_buf, &mut p, path)      { return 0; }
+    if !buf_append(req_buf, &mut p, b" HTTP/1.0\r\nHost: ") { return 0; }
+    // Host: <ip>:<port>
+    for (i, &octet) in host_ip.iter().enumerate() {
+        if i > 0 { req_buf[p] = b'.'; p += 1; }
+        buf_append_u32(req_buf, &mut p, octet as u32);
+    }
+    req_buf[p] = b':'; p += 1;
+    buf_append_u32(req_buf, &mut p, host_port as u32);
+    if !buf_append(req_buf, &mut p, b"\r\nContent-Type: application/json\r\n") { return 0; }
+    if !extra_hdr.is_empty() {
+        if !buf_append(req_buf, &mut p, extra_hdr) { return 0; }
+    }
+    if !buf_append(req_buf, &mut p, b"Content-Length: ") { return 0; }
+    if !buf_append_u32(req_buf, &mut p, body.len() as u32) { return 0; }
+    if !buf_append(req_buf, &mut p, b"\r\n\r\n") { return 0; }
+    if !buf_append(req_buf, &mut p, body) { return 0; }
+    p
+}
+
+/// Find the first occurrence of `needle` in `haystack`.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() { return Some(0); }
+    'outer: for i in 0..haystack.len().saturating_sub(needle.len() - 1) {
+        for j in 0..needle.len() {
+            if haystack[i + j] != needle[j] { continue 'outer; }
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Extract the value of a JSON string field named `key` from `json`.
+/// Looks for `"key":"<value>"` and returns a slice of `json` for `<value>`.
+/// Handles basic `\"` escape sequences (skips escaped quotes).
+fn extract_json_str<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    // Build the search pattern  "key":"
+    // We search for `key` (with surrounding quotes) followed by `":`
+    // then skip the opening `"` to find the value.
+    let mut search = [0u8; 128];
+    let mut sp = 0usize;
+    search[sp] = b'"'; sp += 1;
+    for &b in key { if sp < search.len() { search[sp] = b; sp += 1; } }
+    if sp + 3 > search.len() { return None; }
+    search[sp] = b'"'; sp += 1;
+    search[sp] = b':'; sp += 1;
+    search[sp] = b'"'; sp += 1;
+
+    let pattern = &search[..sp];
+    let start = find_bytes(json, pattern)? + sp;
+    // Read until unescaped `"`
+    let mut end = start;
+    while end < json.len() {
+        if json[end] == b'\\' {
+            end += 2; // skip escaped character
+        } else if json[end] == b'"' {
+            return Some(&json[start..end]);
+        } else {
+            end += 1;
+        }
+    }
+    None
+}
+
+/// Perform a direct HTTP POST to Ollama and populate `state.resp_buf`.
+pub(crate) unsafe fn chat_direct_http(state: &mut ChatState) {
+    state.resp_len = 0;
+
+    // Pick model: use state.model if set, else default "qwen2.5:7b"
+    let model: &[u8] = if state.model_len > 0 {
+        &state.model[..state.model_len as usize]
+    } else {
+        b"qwen2.5:7b"
+    };
+
+    let user_msg = &state.input_buf[..state.input_len];
+
+    // Build JSON body into a temporary slice inside HTTP_REQ (first half)
+    let req_buf  = unsafe { &mut *HTTP_REQ.0.get() };
+    let resp_raw = unsafe { &mut *HTTP_RESP.0.get() };
+
+    // Body into second half of req_buf as scratch space
+    let body_start = HTTP_REQ_BUF / 2;
+    let body_len = build_ollama_body(&mut req_buf[body_start..], model, user_msg);
+    if body_len == 0 {
+        let err = b"[chat] request too large for direct HTTP";
+        let n = err.len().min(RESP_BUF_SIZE);
+        state.resp_buf[..n].copy_from_slice(&err[..n]);
+        state.resp_len = n;
+        return;
+    }
+
+    // Copy body into a local scratch to avoid aliasing
+    let mut body = [0u8; 1024];
+    let body_len = body_len.min(body.len());
+    body[..body_len].copy_from_slice(&req_buf[body_start..body_start + body_len]);
+
+    // Build HTTP request
+    let req_len = build_http_request(
+        req_buf,
+        b"/api/chat",
+        state.http_host_ip,
+        state.http_port,
+        b"",
+        &body[..body_len],
+    );
+    if req_len == 0 {
+        let err = b"[chat] HTTP request overflow";
+        let n = err.len().min(RESP_BUF_SIZE);
+        state.resp_buf[..n].copy_from_slice(&err[..n]);
+        state.resp_len = n;
+        return;
+    }
+
+    // Send via k-net TCP
+    let result = unsafe {
+        k_net::net_http_post_sync(
+            state.http_host_ip,
+            state.http_port,
+            &req_buf[..req_len],
+            resp_raw,
+        )
+    };
+
+    match result {
+        None => {
+            let err = b"[chat] TCP connection failed (NIC not ready or timeout)";
+            let n = err.len().min(RESP_BUF_SIZE);
+            state.resp_buf[..n].copy_from_slice(&err[..n]);
+            state.resp_len = n;
+        }
+        Some(raw_len) => {
+            let raw = &resp_raw[..raw_len];
+            // Skip HTTP headers (find \r\n\r\n)
+            let body_off = find_bytes(raw, b"\r\n\r\n")
+                .map(|o| o + 4)
+                .unwrap_or(0);
+            let json = &raw[body_off..];
+            // Extract "content" field from Ollama response JSON
+            if let Some(content) = extract_json_str(json, b"content") {
+                let n = content.len().min(RESP_BUF_SIZE);
+                state.resp_buf[..n].copy_from_slice(&content[..n]);
+                state.resp_len = n;
+            } else {
+                // Fallback: return raw body
+                let n = json.len().min(RESP_BUF_SIZE);
+                state.resp_buf[..n].copy_from_slice(&json[..n]);
+                state.resp_len = n;
+            }
+        }
+    }
 }
 
 // ── Chat UI helpers ────────────────────────────────────────────────────────────

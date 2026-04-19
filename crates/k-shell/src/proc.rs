@@ -11,6 +11,9 @@
 use gos_protocol::{
     ExecutorContext, ExecStatus,
     AI_CONTROL_CHAT_BEGIN, AI_CONTROL_CHAT_COMMIT,
+    CHAT_CONTROL_KEY_BEGIN, CHAT_CONTROL_KEY_COMMIT,
+    CHAT_CONTROL_MODEL_BEGIN, CHAT_CONTROL_MODEL_COMMIT,
+    CHAT_CONTROL_API_TYPE, CHAT_CONTROL_HTTP_TOGGLE,
     CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET,
     IME_MODE_ASCII, IME_MODE_ZH_PINYIN,
     NET_CONTROL_PING, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
@@ -483,7 +486,12 @@ fn dispatch_text_command(
         super::print_str(sink, "  theme              show theme.current and its active use edge\n");
         super::print_str(sink, "  theme wabi         repoint theme.current -> theme.wabi\n");
         super::print_str(sink, "  theme shoji        repoint theme.current -> theme.shoji\n");
-        super::print_str(sink, "  chat    enter AI chat mode (COM2 bridge, type 'exit' to quit)\n");
+        super::print_str(sink, "  chat    enter AI chat mode (type 'exit' to quit)\n");
+        super::print_str(sink, "  chat key <k>     set AI API key for current session\n");
+        super::print_str(sink, "  chat model <m>   set model name (e.g. qwen2.5:7b)\n");
+        super::print_str(sink, "  chat api <type>  set backend: ollama | openai | anthropic\n");
+        super::print_str(sink, "  chat http        toggle direct TCP mode (Ollama at 10.0.2.2)\n");
+        super::print_str(sink, "  chat status      show current chat configuration\n");
         super::print_str(sink, "  ai      open bottom ai api editor\n");
         super::print_str(sink, "  ask     send prompt into ai chat lane\n");
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
@@ -790,6 +798,21 @@ fn dispatch_text_command(
             super::set_color(sink, 7, 0);
         }
         state.len = 0;
+    } else if let Some(key_str) = cmd.strip_prefix("chat key ") {
+        // chat key <api-key>  — stream the API key into k-chat
+        dispatch_chat_key(sink, state, key_str.trim().as_bytes());
+    } else if let Some(model_str) = cmd.strip_prefix("chat model ") {
+        // chat model <model>  — set the direct-HTTP model name in k-chat
+        dispatch_chat_model(sink, state, model_str.trim().as_bytes());
+    } else if let Some(api_str) = cmd.strip_prefix("chat api ") {
+        // chat api <ollama|openai|anthropic>  — set the API backend
+        dispatch_chat_api(sink, state, api_str.trim());
+    } else if cmd == "chat http" {
+        // chat http  — toggle direct TCP/HTTP mode (bypasses COM2 bridge)
+        dispatch_chat_http_toggle(sink, state);
+    } else if cmd == "chat status" || cmd == "chat info" {
+        // chat status  — display current chat configuration
+        dispatch_chat_status(sink, state);
     } else if cmd == "ai" || cmd == "api" || cmd == "ai-api" {
         state.len = 0;
         super::enter_ai_api_mode(sink, state);
@@ -862,4 +885,166 @@ fn dispatch_text_command(
             super::print_str(sink, " unknown command payload contains non-ascii bytes\n");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// chat subcommand helpers
+// ---------------------------------------------------------------------------
+
+/// Send `bytes` to k-chat as a streamed API key (KEY_BEGIN → Data × N → KEY_COMMIT).
+fn dispatch_chat_key(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+    bytes: &[u8],
+) {
+    use gos_protocol::Signal;
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_KEY_BEGIN, val: 0 },
+    );
+    for &b in bytes {
+        super::emit_target_signal_raw(
+            sink.abi,
+            chat_target,
+            Signal::Data { from: super::NODE_VEC.as_u64(), byte: b },
+        );
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_KEY_COMMIT, val: 0 },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [chat] api key set (");
+    super::print_num_inline(sink, bytes.len());
+    super::print_str(sink, " bytes)\n");
+    super::set_color(sink, 7, 0);
+    let _ = state; // unused but kept for API consistency
+}
+
+/// Stream a model name to k-chat (MODEL_BEGIN → Data × N → MODEL_COMMIT).
+fn dispatch_chat_model(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+    bytes: &[u8],
+) {
+    use gos_protocol::Signal;
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_MODEL_BEGIN, val: 0 },
+    );
+    for &b in bytes {
+        super::emit_target_signal_raw(
+            sink.abi,
+            chat_target,
+            Signal::Data { from: super::NODE_VEC.as_u64(), byte: b },
+        );
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_MODEL_COMMIT, val: 0 },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [chat] model set: ");
+    for &b in bytes { super::print_byte(sink, b); }
+    super::print_str(sink, "\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Send CHAT_CONTROL_API_TYPE with the encoded backend index.
+fn dispatch_chat_api(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+    name:  &str,
+) {
+    use gos_protocol::Signal;
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    let (val, label): (u8, &str) = match name {
+        "openai"    => (1, "openai"),
+        "anthropic" => (2, "anthropic"),
+        _           => (0, "ollama"),
+    };
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_API_TYPE, val },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [chat] api backend -> ");
+    super::print_str(sink, label);
+    super::print_str(sink, "\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Toggle direct-HTTP mode in k-chat.
+fn dispatch_chat_http_toggle(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+) {
+    use gos_protocol::Signal;
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    // We toggle: read current mode from the atomic we stored, flip it.
+    let current_http = super::CHAT_HTTP_MODE.load(core::sync::atomic::Ordering::SeqCst);
+    let next_http = if current_http == 0 { 1u8 } else { 0u8 };
+    super::CHAT_HTTP_MODE.store(next_http, core::sync::atomic::Ordering::SeqCst);
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        Signal::Control { cmd: CHAT_CONTROL_HTTP_TOGGLE, val: next_http },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [chat] http mode -> ");
+    super::print_str(sink, if next_http == 1 { "direct TCP (Ollama 10.0.2.2:11434)" } else { "COM2 bridge" });
+    super::print_str(sink, "\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Print current chat configuration.
+fn dispatch_chat_status(
+    sink:  &super::ConsoleSink,
+    _state: &mut super::ShellState,
+) {
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    let http_mode   = super::CHAT_HTTP_MODE.load(core::sync::atomic::Ordering::SeqCst);
+    super::set_color(sink, 11, 0);
+    super::print_str(sink, " chat status\n");
+    super::set_color(sink, 7, 0);
+    super::print_str(sink, "  node:    ");
+    if chat_target == 0 {
+        super::print_str(sink, "offline\n");
+    } else {
+        super::print_str(sink, "online\n");
+    }
+    super::print_str(sink, "  mode:    ");
+    super::print_str(sink, if http_mode == 1 { "direct TCP/HTTP (Ollama)" } else { "COM2 bridge" });
+    super::print_str(sink, "\n  cmds:    chat key <k>  chat model <m>  chat api <type>  chat http\n");
+    super::print_str(sink, "  types:   ollama (default)  openai  anthropic\n");
 }
