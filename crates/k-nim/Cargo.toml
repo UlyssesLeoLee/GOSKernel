@@ -1,0 +1,9 @@
+[package]
+name = "k-nim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-hal = { path = "../gos-hal" }
+k-net = { path = "../k-net" }

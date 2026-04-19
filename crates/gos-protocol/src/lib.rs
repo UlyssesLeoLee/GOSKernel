@@ -299,6 +299,22 @@ pub const CHAT_CONTROL_API_TYPE: u8 = 0xC6;
 /// Shell → k-chat: toggle direct-HTTP mode (val: 0=bridge, 1=direct).
 pub const CHAT_CONTROL_HTTP_TOGGLE: u8 = 0xC7;
 
+// ── NIM (NVIDIA NIM / OpenAI-compatible) commands (k-nim ↔ k-shell) ─────────
+/// Shell → k-nim: submit the buffered user message to the NIM endpoint.
+pub const NIM_CONTROL_SEND: u8 = 0xB8;
+/// Shell → k-nim: exit the NIM session and return to normal shell.
+pub const NIM_CONTROL_EXIT: u8 = 0xB9;
+/// Shell → k-nim: begin streaming a model-name byte-by-byte.
+pub const NIM_CONTROL_MODEL_BEGIN: u8 = 0xBA;
+/// Shell → k-nim: commit the streamed model name.
+pub const NIM_CONTROL_MODEL_COMMIT: u8 = 0xBB;
+/// Shell → k-nim: clear the multi-turn conversation history.
+pub const NIM_CONTROL_CLEAR_HISTORY: u8 = 0xBC;
+/// Shell → k-nim: begin streaming a port number (decimal digits).
+pub const NIM_CONTROL_PORT_BEGIN: u8 = 0xBD;
+/// Shell → k-nim: commit the streamed port number.
+pub const NIM_CONTROL_PORT_COMMIT: u8 = 0xBE;
+
 pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
 pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;
 pub const CUDA_CONTROL_REPORT: u8 = 0xE2;

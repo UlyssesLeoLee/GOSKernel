@@ -193,6 +193,10 @@ static CHAT_TARGET: AtomicU64 = AtomicU64::new(0);
 static CHAT_MODE: AtomicU8 = AtomicU8::new(0);
 /// 0 = COM2 bridge mode, 1 = direct TCP/HTTP mode.
 static CHAT_HTTP_MODE: AtomicU8 = AtomicU8::new(0);
+/// Resolved vector address of the k-nim node (0 = not available).
+static NIM_TARGET: AtomicU64 = AtomicU64::new(0);
+/// 0 = normal shell, 1 = NIM inference mode.
+static NIM_MODE: AtomicU8 = AtomicU8::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -3766,6 +3770,26 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     };
     CHAT_TARGET.store(chat_target, Ordering::SeqCst);
     CHAT_MODE.store(0, Ordering::SeqCst);
+
+    // Resolve k-nim capability
+    let nim_target = {
+        let ctx_ref = unsafe { &*ctx };
+        let abi = unsafe { &*ctx_ref.abi };
+        if let Some(resolve_capability) = abi.resolve_capability {
+            unsafe {
+                resolve_capability(
+                    b"nim".as_ptr(),
+                    b"nim".len(),
+                    b"inference".as_ptr(),
+                    b"inference".len(),
+                )
+            }
+        } else {
+            0
+        }
+    };
+    NIM_TARGET.store(nim_target, Ordering::SeqCst);
+    NIM_MODE.store(0, Ordering::SeqCst);
 
     unsafe {
         core::ptr::write(

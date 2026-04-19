@@ -17,6 +17,10 @@ use gos_protocol::{
     CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET,
     IME_MODE_ASCII, IME_MODE_ZH_PINYIN,
     NET_CONTROL_PING, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
+    NIM_CONTROL_SEND, NIM_CONTROL_EXIT,
+    NIM_CONTROL_MODEL_BEGIN, NIM_CONTROL_MODEL_COMMIT,
+    NIM_CONTROL_PORT_BEGIN, NIM_CONTROL_PORT_COMMIT,
+    NIM_CONTROL_CLEAR_HISTORY,
     RuntimeEdgeType,
 };
 
@@ -391,6 +395,46 @@ fn process_enter(
         return ExecStatus::Done;
     }
 
+    // ── NIM mode: route Enter to k-nim ──────────────────────────────────────
+    if super::NIM_MODE.load(core::sync::atomic::Ordering::SeqCst) == 1 {
+        let cmd_len = state.len.min(state.buffer.len());
+        let mut tmp = [0u8; 128];
+        tmp[..cmd_len].copy_from_slice(&state.buffer[..cmd_len]);
+        let cmd = core::str::from_utf8(&tmp[..cmd_len]).unwrap_or("").trim();
+        if cmd == "exit" || cmd == "quit" || cmd == ":q" {
+            super::NIM_MODE.store(0, core::sync::atomic::Ordering::SeqCst);
+            let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+            super::emit_target_signal_raw(
+                sink.abi,
+                nim_target,
+                Signal::Control { cmd: NIM_CONTROL_EXIT, val: 0 },
+            );
+            state.len = 0;
+            super::redraw_console(sink, state);
+            return ExecStatus::Done;
+        }
+        if state.len > 0 {
+            let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+            for i in 0..cmd_len {
+                super::emit_target_signal_raw(
+                    sink.abi,
+                    nim_target,
+                    Signal::Data { from: super::NODE_VEC.as_u64(), byte: state.buffer[i] },
+                );
+            }
+            super::emit_target_signal_raw(
+                sink.abi,
+                nim_target,
+                Signal::Control { cmd: NIM_CONTROL_SEND, val: 0 },
+            );
+        }
+        state.len = 0;
+        super::set_color(sink, 14, 0); // yellow
+        super::print_str(sink, "You \u{25B8} "); // "You ▸ "
+        super::set_color(sink, 7, 0);
+        return ExecStatus::Done;
+    }
+
     let cmd_len = state.len.min(state.buffer.len());
     let mut cmd_buf = [0u8; 128];
     cmd_buf[..cmd_len].copy_from_slice(&state.buffer[..cmd_len]);
@@ -492,6 +536,11 @@ fn dispatch_text_command(
         super::print_str(sink, "  chat api <type>  set backend: ollama | openai | anthropic\n");
         super::print_str(sink, "  chat http        toggle direct TCP mode (Ollama at 10.0.2.2)\n");
         super::print_str(sink, "  chat status      show current chat configuration\n");
+        super::print_str(sink, "  nim     enter NIM inference mode (type 'exit' to quit)\n");
+        super::print_str(sink, "  nim model <m>    set NIM model (e.g. meta/llama-3.1-8b-instruct)\n");
+        super::print_str(sink, "  nim port <n>     set NIM host port (default 8000)\n");
+        super::print_str(sink, "  nim clear        clear NIM conversation history\n");
+        super::print_str(sink, "  nim status       show current NIM configuration\n");
         super::print_str(sink, "  ai      open bottom ai api editor\n");
         super::print_str(sink, "  ask     send prompt into ai chat lane\n");
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
@@ -813,6 +862,38 @@ fn dispatch_text_command(
     } else if cmd == "chat status" || cmd == "chat info" {
         // chat status  — display current chat configuration
         dispatch_chat_status(sink, state);
+    } else if cmd == "nim" {
+        // Enter interactive NIM inference mode.
+        let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+        if nim_target == 0 {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " [nim] k-nim node not available\n");
+            super::set_color(sink, 7, 0);
+        } else {
+            super::NIM_MODE.store(1, core::sync::atomic::Ordering::SeqCst);
+            super::set_color(sink, 0, 13); // black on magenta
+            super::print_str(sink, "  GOS NIM -- NVIDIA NIM / OpenAI-compatible inference                            ");
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  Type a message + Enter  |  'exit' to return to shell                          \n");
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+            super::set_color(sink, 14, 0); // yellow
+            super::print_str(sink, "You \u{25B8} "); // "You ▸ "
+            super::set_color(sink, 7, 0);
+        }
+        state.len = 0;
+    } else if let Some(model_str) = cmd.strip_prefix("nim model ") {
+        // nim model <model>  — set the NIM model name
+        dispatch_nim_model(sink, state, model_str.trim().as_bytes());
+    } else if let Some(port_str) = cmd.strip_prefix("nim port ") {
+        // nim port <n>  — set the NIM host port
+        dispatch_nim_port(sink, state, port_str.trim().as_bytes());
+    } else if cmd == "nim clear" {
+        // nim clear  — clear NIM conversation history
+        dispatch_nim_clear(sink, state);
+    } else if cmd == "nim status" || cmd == "nim info" {
+        // nim status  — display current NIM configuration
+        dispatch_nim_status(sink, state);
     } else if cmd == "ai" || cmd == "api" || cmd == "ai-api" {
         state.len = 0;
         super::enter_ai_api_mode(sink, state);
@@ -1047,4 +1128,133 @@ fn dispatch_chat_status(
     super::print_str(sink, if http_mode == 1 { "direct TCP/HTTP (Ollama)" } else { "COM2 bridge" });
     super::print_str(sink, "\n  cmds:    chat key <k>  chat model <m>  chat api <type>  chat http\n");
     super::print_str(sink, "  types:   ollama (default)  openai  anthropic\n");
+}
+
+// ---------------------------------------------------------------------------
+// nim subcommand helpers
+// ---------------------------------------------------------------------------
+
+/// Stream a model name to k-nim (MODEL_BEGIN → Data × N → MODEL_COMMIT).
+fn dispatch_nim_model(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+    bytes: &[u8],
+) {
+    use gos_protocol::Signal;
+    let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if nim_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [nim] k-nim not available\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        nim_target,
+        Signal::Control { cmd: NIM_CONTROL_MODEL_BEGIN, val: 0 },
+    );
+    for &b in bytes {
+        super::emit_target_signal_raw(
+            sink.abi,
+            nim_target,
+            Signal::Data { from: super::NODE_VEC.as_u64(), byte: b },
+        );
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        nim_target,
+        Signal::Control { cmd: NIM_CONTROL_MODEL_COMMIT, val: 0 },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [nim] model set: ");
+    for &b in bytes { super::print_byte(sink, b); }
+    super::print_str(sink, "\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Stream port digits to k-nim (PORT_BEGIN → Data × N → PORT_COMMIT).
+fn dispatch_nim_port(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+    bytes: &[u8],
+) {
+    use gos_protocol::Signal;
+    let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if nim_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [nim] k-nim not available\n");
+        return;
+    }
+    // Validate: must be ASCII digits only
+    if bytes.iter().any(|&b| b < b'0' || b > b'9') || bytes.is_empty() {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [nim] port must be decimal digits (e.g. 8000)\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        nim_target,
+        Signal::Control { cmd: NIM_CONTROL_PORT_BEGIN, val: 0 },
+    );
+    for &b in bytes {
+        super::emit_target_signal_raw(
+            sink.abi,
+            nim_target,
+            Signal::Data { from: super::NODE_VEC.as_u64(), byte: b },
+        );
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        nim_target,
+        Signal::Control { cmd: NIM_CONTROL_PORT_COMMIT, val: 0 },
+    );
+    super::set_color(sink, 10, 0);
+    super::print_str(sink, " [nim] port set: ");
+    for &b in bytes { super::print_byte(sink, b); }
+    super::print_str(sink, "\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Send NIM_CONTROL_CLEAR_HISTORY to k-nim.
+fn dispatch_nim_clear(
+    sink:  &super::ConsoleSink,
+    state: &mut super::ShellState,
+) {
+    use gos_protocol::Signal;
+    let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if nim_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [nim] k-nim not available\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        nim_target,
+        Signal::Control { cmd: NIM_CONTROL_CLEAR_HISTORY, val: 0 },
+    );
+    super::set_color(sink, 11, 0);
+    super::print_str(sink, " [nim] conversation history cleared\n");
+    super::set_color(sink, 7, 0);
+    let _ = state;
+}
+
+/// Print current NIM configuration.
+fn dispatch_nim_status(
+    sink:  &super::ConsoleSink,
+    _state: &mut super::ShellState,
+) {
+    let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    super::set_color(sink, 11, 0);
+    super::print_str(sink, " nim status\n");
+    super::set_color(sink, 7, 0);
+    super::print_str(sink, "  node:    ");
+    if nim_target == 0 {
+        super::print_str(sink, "offline\n");
+    } else {
+        super::print_str(sink, "online\n");
+    }
+    super::print_str(sink, "  endpoint: 10.0.2.2:8000  (NVIDIA NIM default)\n");
+    super::print_str(sink, "  cmds:    nim model <m>  nim port <n>  nim clear\n");
+    super::print_str(sink, "  example: nim model meta/llama-3.1-8b-instruct\n");
 }

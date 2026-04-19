@@ -28,6 +28,7 @@ k-ime = { path = "../k-ime" }
 k-net = { path = "../k-net" }
 k-mouse = { path = "../k-mouse" }
 k-chat = { path = "../k-chat" }
+k-nim  = { path = "../k-nim" }
 bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
 x86_64 = "0.14"
 

@@ -57,6 +57,7 @@ dependencies = [
  "k-ime",
  "k-mouse",
  "k-net",
+ "k-nim",
  "k-panic",
  "k-pic",
  "k-pit",
@@ -209,6 +210,15 @@ dependencies = [
  "gos-hal",
  "gos-protocol",
  "x86_64",
+]
+
+[[package]]
+name = "k-nim"
+version = "0.1.0"
+dependencies = [
+ "gos-hal",
+ "gos-protocol",
+ "k-net",
 ]
 
 [[package]]
