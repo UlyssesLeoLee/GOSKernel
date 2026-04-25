@@ -1434,6 +1434,13 @@ impl Supervisor {
             self.teardown_instance(victims[idx]);
             idx += 1;
         }
+        // Clear the runtime-side instance binding for this module's nodes
+        // so any pending dispatches stop accounting against a destroyed
+        // instance.  start_module re-binds on restart.
+        if let Ok(slot) = self.find_module_slot(handle) {
+            let plugin_id = PluginId(self.modules[slot].source.module_id().0);
+            let _ = gos_runtime::bind_plugin_instance(plugin_id, NodeInstanceId::ZERO);
+        }
     }
 
     fn claim_resource(
@@ -1717,6 +1724,13 @@ impl Supervisor {
                 self.start_module(handle)?;
             }
         }
+        // Defense-in-depth: after every module has been started, sweep
+        // through the module table and reaffirm the runtime instance
+        // binding for everything that ended up Running.  This makes the
+        // post-realize invariant explicit ("every running module's nodes
+        // have a non-zero NodeInstanceId") rather than relying on the
+        // per-module bind in start_module.
+        self.rebind_all_running_modules();
         let snapshot = self.snapshot();
         Ok(SupervisorBootReport {
             discovered_modules: snapshot.installed_modules,
@@ -1724,6 +1738,19 @@ impl Supervisor {
             isolated_domains: snapshot.isolated_domains,
             published_capabilities: snapshot.published_capabilities,
         })
+    }
+
+    fn rebind_all_running_modules(&self) {
+        for record in self.modules.iter() {
+            if !record.occupied || record.state != ModuleLifecycle::Running {
+                continue;
+            }
+            let Some(instance_id) = self.primary_instance_for_module(record.handle) else {
+                continue;
+            };
+            let plugin_id = PluginId(record.source.module_id().0);
+            let _ = gos_runtime::bind_plugin_instance(plugin_id, instance_id);
+        }
     }
 
     fn snapshot(&self) -> SupervisorSnapshot {
