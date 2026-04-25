@@ -2589,6 +2589,30 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     }
     draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 2, 4, 15, 0, &line);
 
+    // Surface supervisor instance + heap quota state for the selected
+    // node when one is present.  Reads through the B.2/B.3 bridges:
+    //   selected_node -> runtime instance binding -> supervisor quota.
+    if let Some(vector) = state.selected_node {
+        let mut quota_line = LineBuf::<72>::new();
+        quota_line.push_str("quota: ");
+        match gos_runtime::instance_id_for_vec(vector) {
+            Some(instance_id) if instance_id.0 != 0 => {
+                match gos_supervisor::instance_heap_usage(instance_id) {
+                    Some((used, max)) => {
+                        quota_line.push_dec(used as u64);
+                        quota_line.push_byte(b'/');
+                        quota_line.push_dec(max as u64);
+                        quota_line.push_str(" pages  inst#");
+                        quota_line.push_dec(instance_id.0);
+                    }
+                    None => quota_line.push_str("instance not registered"),
+                }
+            }
+            _ => quota_line.push_str("unbound (boot fallback)"),
+        }
+        draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 3, 4, 15, 0, &quota_line);
+    }
+
     render_graph_footer(sink, state, "where  select clear");
 }
 

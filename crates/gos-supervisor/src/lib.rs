@@ -2170,6 +2170,16 @@ pub fn credit_heap(instance_id: NodeInstanceId, page_count: u32) {
     SUPERVISOR.lock().credit_heap(instance_id, page_count)
 }
 
+/// Report (used_pages, max_pages) for the given instance, or None if
+/// the instance is not registered.  Used by the shell `where` command
+/// to surface per-node heap quota state.
+pub fn instance_heap_usage(instance_id: NodeInstanceId) -> Option<(u32, u32)> {
+    let guard = SUPERVISOR.lock();
+    let slot = guard.find_instance_slot(instance_id).ok()?;
+    let record = guard.instances[slot];
+    Some((record.heap_pages_used, record.heap_quota.max_pages))
+}
+
 pub fn service_system_cycle() {
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
