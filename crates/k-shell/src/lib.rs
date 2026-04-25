@@ -2604,6 +2604,12 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
                         quota_line.push_dec(max as u64);
                         quota_line.push_str(" pages  inst#");
                         quota_line.push_dec(instance_id.0);
+                        if let Some(restart_gen) =
+                            gos_supervisor::instance_restart_generation(instance_id)
+                        {
+                            quota_line.push_str("  restarts=");
+                            quota_line.push_dec(restart_gen as u64);
+                        }
                     }
                     None => quota_line.push_str("instance not registered"),
                 }

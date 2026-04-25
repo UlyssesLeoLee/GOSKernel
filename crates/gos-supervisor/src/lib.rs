@@ -2180,6 +2180,18 @@ pub fn instance_heap_usage(instance_id: NodeInstanceId) -> Option<(u32, u32)> {
     Some((record.heap_pages_used, record.heap_quota.max_pages))
 }
 
+/// Report the owning module's restart generation for an instance, or
+/// None if the instance / module cannot be resolved.  Each entry in
+/// `process_next_restart` bumps this by 1, so it doubles as a per-module
+/// fault counter for diagnostics.
+pub fn instance_restart_generation(instance_id: NodeInstanceId) -> Option<u32> {
+    let guard = SUPERVISOR.lock();
+    let inst_slot = guard.find_instance_slot(instance_id).ok()?;
+    let module = guard.instances[inst_slot].module;
+    let mod_slot = guard.find_module_slot(module).ok()?;
+    Some(guard.modules[mod_slot].restart_generation)
+}
+
 pub fn service_system_cycle() {
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
