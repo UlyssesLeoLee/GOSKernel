@@ -726,6 +726,12 @@ impl Supervisor {
         })
     }
 
+    fn find_module_by_module_id(&self, module_id: ModuleId) -> Option<ModuleHandle> {
+        self.modules.iter().find_map(|record| {
+            (record.occupied && record.source.module_id() == module_id).then_some(record.handle)
+        })
+    }
+
     fn register_default_resources(&mut self) {
         let _ = self.register_resource(RESOURCE_FRAME_ALLOC);
         let _ = self.register_resource(RESOURCE_PAGE_MAPPER);
@@ -2051,6 +2057,15 @@ pub fn service_system_cycle() {
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
         gos_runtime::pump();
+        // Drain node faults produced by this pump tick and apply fault policy.
+        while let Some(fault_vec) = gos_runtime::drain_next_fault() {
+            if let Some(pid) = gos_runtime::plugin_id_for_vec(fault_vec) {
+                let module_id = ModuleId(pid.0);
+                if let Some(handle) = SUPERVISOR.lock().find_module_by_module_id(module_id) {
+                    let _ = SUPERVISOR.lock().fault_module(handle);
+                }
+            }
+        }
         if !restarted {
             break;
         }

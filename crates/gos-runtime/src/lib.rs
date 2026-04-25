@@ -18,6 +18,7 @@ pub const MAX_NODES: usize = 128;
 pub const MAX_EDGES: usize = 512;
 pub const MAX_READY_QUEUE: usize = 256;
 pub const MAX_SIGNAL_QUEUE: usize = 512;
+pub const MAX_FAULT_QUEUE: usize = 32;
 pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
@@ -266,6 +267,7 @@ pub struct GraphRuntime {
     edges: [Option<EdgeRecord>; MAX_EDGES],
     ready_queue: RingQueue<NodeId, MAX_READY_QUEUE>,
     signal_queue: RingQueue<RuntimeSignal, MAX_SIGNAL_QUEUE>,
+    fault_queue: RingQueue<VectorAddress, MAX_FAULT_QUEUE>,
     call_frames: [Option<CallFrame>; MAX_CALL_FRAMES],
     wait_sets: [Option<WaitSet>; MAX_WAITSETS],
     barriers: [Option<Barrier>; MAX_BARRIERS],
@@ -283,6 +285,7 @@ impl GraphRuntime {
             edges: [None; MAX_EDGES],
             ready_queue: RingQueue::new(),
             signal_queue: RingQueue::new(),
+            fault_queue: RingQueue::new(),
             call_frames: [None; MAX_CALL_FRAMES],
             wait_sets: [None; MAX_WAITSETS],
             barriers: [None; MAX_BARRIERS],
@@ -902,7 +905,20 @@ impl GraphRuntime {
 
             self.nodes[slot] = Some(record);
             self.state_delta(record.spec.node_id, record.lifecycle);
+
+            if status == ExecStatus::Fault {
+                let _ = self.fault_queue.push(record.vector);
+            }
         }
+    }
+
+    pub fn drain_next_fault(&mut self) -> Option<VectorAddress> {
+        self.fault_queue.pop()
+    }
+
+    pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
     }
 
     fn next_work_item(&mut self) -> Option<WorkItem> {
@@ -1422,6 +1438,14 @@ pub fn drain_control_plane() -> Option<ControlPlaneEnvelope> {
 
 pub fn last_state_delta(node_id: NodeId) -> Option<StateDelta> {
     RUNTIME.lock().last_state_delta(node_id)
+}
+
+pub fn drain_next_fault() -> Option<VectorAddress> {
+    RUNTIME.lock().drain_next_fault()
+}
+
+pub fn plugin_id_for_vec(vector: VectorAddress) -> Option<PluginId> {
+    RUNTIME.lock().plugin_id_for_vec(vector)
 }
 
 pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
