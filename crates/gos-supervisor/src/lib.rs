@@ -7,12 +7,13 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 
 use gos_protocol::{
-    fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy, DomainId,
-    EndpointId, ExecutionLaneClass, HeapQuota, ImportSpec, LeaseEpoch, ModuleAbiV1,
-    ModuleCallStatus, ModuleDescriptor, ModuleEntry, ModuleFaultPolicy, ModuleHandle,
-    ModuleId, ModuleLifecycle, ModuleMessage, NodeInstanceId, NodeInstanceLifecycle,
-    NodeTemplateId, PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease,
-    SpawnPolicy, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL,
+    fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy,
+    ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, HeapQuota,
+    ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
+    ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleLifecycle,
+    ModuleMessage, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
+    PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease, SpawnPolicy,
+    RESOURCE_DISPLAY_CONSOLE, RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL,
     RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, MODULE_ABI_VERSION,
 };
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
@@ -26,6 +27,11 @@ pub const MAX_RESOURCES: usize = 32;
 pub const MAX_CLAIMS: usize = 128;
 pub const MAX_REVOKES: usize = 128;
 pub const MAX_HEAP_GRANTS: usize = 256;
+/// Maximum number of consecutive restarts before a Restart/RestartAlways
+/// module is forcibly demoted to degraded mode.  Prevents tight fault
+/// loops from dominating system-cycle work when a plugin is consistently
+/// faulting on init.
+pub const MAX_RESTARTS_BEFORE_DEGRADE: u32 = 5;
 pub const MAX_CAPABILITIES: usize = 128;
 pub const MAX_ENDPOINTS: usize = 128;
 pub const MAX_SUBSCRIPTIONS: usize = 128;
@@ -1293,10 +1299,52 @@ impl Supervisor {
     fn fault_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
         let slot = self.find_module_slot(handle)?;
         self.modules[slot].state = ModuleLifecycle::Faulted;
-        match self.modules[slot].source.fault_policy() {
-            ModuleFaultPolicy::Restart | ModuleFaultPolicy::RestartAlways => self.restart_module(handle),
-            ModuleFaultPolicy::FaultKernelDegraded | ModuleFaultPolicy::Manual => Ok(()),
+        let policy = self.modules[slot].source.fault_policy();
+        let restart_count = self.modules[slot].restart_generation;
+        let module_id = self.modules[slot].source.module_id();
+        // Emit a Fault control-plane envelope so shell/observer can show
+        // the most recent fault subject + policy + restart count.
+        gos_runtime::with_runtime(|rt| {
+            rt.emit_control_plane(
+                ControlPlaneMessageKind::Fault,
+                module_id.0,
+                policy as u64,
+                restart_count as u64,
+            );
+        });
+        match policy {
+            ModuleFaultPolicy::Restart | ModuleFaultPolicy::RestartAlways => {
+                if restart_count >= MAX_RESTARTS_BEFORE_DEGRADE {
+                    // Tight fault loop — give up restarting and degrade.
+                    self.degrade_module(handle)
+                } else {
+                    self.restart_module(handle)
+                }
+            }
+            ModuleFaultPolicy::FaultKernelDegraded => self.degrade_module(handle),
+            ModuleFaultPolicy::Manual => Ok(()),
         }
+    }
+
+    /// Real Degraded-mode path: revoke capabilities, drain queued
+    /// messages, tear down live instances (which clears the runtime
+    /// instance binding), and leave the module in Faulted state so
+    /// future claims are rejected by `is_module_faulted`.
+    fn degrade_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        self.revoke_capabilities(handle);
+        self.drain_messages(handle);
+        self.teardown_module_instances(handle);
+        // Stay in Faulted — `Manual` re-arming or `uninstall_module` can
+        // recover it; in steady state the module produces no more work.
+        self.modules[slot].state = ModuleLifecycle::Faulted;
+        Ok(())
+    }
+
+    fn is_module_faulted(&self, handle: ModuleHandle) -> bool {
+        self.find_module_slot(handle)
+            .map(|slot| self.modules[slot].state == ModuleLifecycle::Faulted)
+            .unwrap_or(true)
     }
 
     fn uninstall_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
@@ -1452,6 +1500,11 @@ impl Supervisor {
     ) -> Result<ResourceLease, SupervisorError> {
         let instance_slot = self.find_instance_slot(instance_id)?;
         let module = self.instances[instance_slot].module;
+        // Degraded modules may not acquire fresh resource leases — the
+        // existing claim machinery handles in-flight leases via revoke.
+        if self.is_module_faulted(module) {
+            return Err(SupervisorError::ModuleRejected);
+        }
         let resource_slot = self.find_resource_slot(resource_id)?;
 
         for record in self.claims {
@@ -1560,6 +1613,11 @@ impl Supervisor {
         page_count: u32,
     ) -> Result<(), SupervisorError> {
         let slot = self.find_instance_slot(instance_id)?;
+        let module = self.instances[slot].module;
+        // Degraded modules cannot acquire new heap pages.
+        if self.is_module_faulted(module) {
+            return Err(SupervisorError::ModuleRejected);
+        }
         let projected = self.instances[slot].heap_pages_used.saturating_add(page_count);
         if projected > self.instances[slot].heap_quota.max_pages {
             return Err(SupervisorError::HeapQuotaExceeded);
@@ -2190,6 +2248,18 @@ pub fn instance_restart_generation(instance_id: NodeInstanceId) -> Option<u32> {
     let module = guard.instances[inst_slot].module;
     let mod_slot = guard.find_module_slot(module).ok()?;
     Some(guard.modules[mod_slot].restart_generation)
+}
+
+/// Report whether the owning module of an instance is currently in
+/// Faulted (degraded) state.  Used by the shell to render a 'DEGRADED'
+/// marker next to the quota line.
+pub fn instance_is_degraded(instance_id: NodeInstanceId) -> bool {
+    let guard = SUPERVISOR.lock();
+    let Ok(inst_slot) = guard.find_instance_slot(instance_id) else {
+        return false;
+    };
+    let module = guard.instances[inst_slot].module;
+    guard.is_module_faulted(module)
 }
 
 pub fn service_system_cycle() {

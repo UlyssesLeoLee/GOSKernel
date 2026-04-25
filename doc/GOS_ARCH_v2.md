@@ -251,6 +251,14 @@ GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原
 
 这一阶段完成前，不插入新的高层 feature phase。
 
+### Phase B.5：Degraded mode + fault telemetry ✅ 已完成（2026-04-25）
+
+- `ModuleFaultPolicy::FaultKernelDegraded` 走真实路径：撤销能力、清空消息、销毁实例、保持 Faulted 状态
+- `Restart / RestartAlways` 在连续重启达到 `MAX_RESTARTS_BEFORE_DEGRADE`（5）后自动降级
+- `claim_resource` 与 `charge_heap` 对 Faulted 模块返回 `ModuleRejected`
+- `fault_module` 在每次失败时发出 `ControlPlaneMessageKind::Fault` envelope
+- shell `where` 视图显示 `DEGRADED` marker、`restarts=N`、`audit: boot-fallback allocs N`
+
 ### Phase C：底座完成后的图原生控制面
 
 在 Phase A/B 收口后，再推进：

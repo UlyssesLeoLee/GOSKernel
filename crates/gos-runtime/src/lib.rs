@@ -304,7 +304,7 @@ impl GraphRuntime {
         }
     }
 
-    fn emit_control_plane(
+    pub fn emit_control_plane(
         &mut self,
         kind: ControlPlaneMessageKind,
         subject: [u8; 16],

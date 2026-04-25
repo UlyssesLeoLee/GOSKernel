@@ -2610,6 +2610,9 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
                             quota_line.push_str("  restarts=");
                             quota_line.push_dec(restart_gen as u64);
                         }
+                        if gos_supervisor::instance_is_degraded(instance_id) {
+                            quota_line.push_str("  DEGRADED");
+                        }
                     }
                     None => quota_line.push_str("instance not registered"),
                 }
