@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
+gos-runtime = { path = "../gos-runtime" }
 k-pmm = { path = "../k-pmm" }
 k-vmm = { path = "../k-vmm" }
 spin = "0.9"

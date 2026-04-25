@@ -25,11 +25,14 @@ mod post;
 
 extern crate alloc;
 
+use core::alloc::{GlobalAlloc, Layout};
 use x86_64::structures::paging::{Page, PageTableFlags, FrameAllocator};
 use x86_64::VirtAddr;
 use linked_list_allocator::LockedHeap;
 use gos_protocol::*;
 use gos_hal::{vaddr, meta};
+
+const PAGE_SIZE: usize = 4096;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
@@ -70,8 +73,36 @@ unsafe extern "C" fn heap_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     }
 
     ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
-    
+
+    // Install ourselves as the runtime's heap backend so plugin
+    // ctx.abi.alloc_pages calls land here (after supervisor quota
+    // accounting in gos-runtime).
+    gos_runtime::install_heap_backend(gos_runtime::HeapBackend {
+        alloc: heap_backend_alloc,
+        free: heap_backend_free,
+    });
+
     ExecStatus::Done
+}
+
+unsafe extern "C" fn heap_backend_alloc(page_count: usize) -> *mut u8 {
+    if page_count == 0 {
+        return core::ptr::null_mut();
+    }
+    let Ok(layout) = Layout::from_size_align(page_count * PAGE_SIZE, PAGE_SIZE) else {
+        return core::ptr::null_mut();
+    };
+    unsafe { ALLOCATOR.alloc(layout) }
+}
+
+unsafe extern "C" fn heap_backend_free(ptr: *mut u8, page_count: usize) {
+    if ptr.is_null() || page_count == 0 {
+        return;
+    }
+    let Ok(layout) = Layout::from_size_align(page_count * PAGE_SIZE, PAGE_SIZE) else {
+        return;
+    };
+    unsafe { ALLOCATOR.dealloc(ptr, layout) };
 }
 
 unsafe extern "C" fn heap_on_event(_ctx: *mut ExecutorContext, event: *const NodeEvent) -> ExecStatus {
