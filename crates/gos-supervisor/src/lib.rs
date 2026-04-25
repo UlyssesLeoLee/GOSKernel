@@ -900,6 +900,27 @@ impl Supervisor {
         self.restart_queue.push(handle)
     }
 
+    /// Drain ready instances (in lane priority order) into the runtime
+    /// ready queue, returning the number of instances dispatched.
+    /// Each dispatched instance enqueues every node of its module so the
+    /// next `gos_runtime::pump()` activates them.
+    fn drain_ready_to_runtime(&mut self) -> usize {
+        let mut dispatched = 0usize;
+        while let Ok(Some(instance_id)) = self.dequeue_ready_instance(None) {
+            let Ok(instance_slot) = self.find_instance_slot(instance_id) else {
+                continue;
+            };
+            let module = self.instances[instance_slot].module;
+            let Ok(module_slot) = self.find_module_slot(module) else {
+                continue;
+            };
+            let plugin_id = PluginId(self.modules[module_slot].source.module_id().0);
+            let _ = gos_runtime::enqueue_ready_for_plugin(plugin_id);
+            dispatched += 1;
+        }
+        dispatched
+    }
+
     fn process_next_restart(&mut self) -> Result<Option<ModuleHandle>, SupervisorError> {
         while let Some(handle) = self.restart_queue.pop() {
             let slot = self.find_module_slot(handle)?;
@@ -2062,6 +2083,9 @@ pub fn process_restart_queue() -> Result<Option<ModuleHandle>, SupervisorError> 
 pub fn service_system_cycle() {
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
+        // Drain supervisor lane-class ready queues into the runtime ready
+        // queue so that pump() picks up scheduled instances on this tick.
+        let dispatched = SUPERVISOR.lock().drain_ready_to_runtime();
         gos_runtime::pump();
         // Drain node faults produced by this pump tick and apply fault policy.
         while let Some(fault_vec) = gos_runtime::drain_next_fault() {
@@ -2072,7 +2096,7 @@ pub fn service_system_cycle() {
                 }
             }
         }
-        if !restarted {
+        if !restarted && dispatched == 0 {
             break;
         }
     }

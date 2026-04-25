@@ -822,6 +822,27 @@ impl GraphRuntime {
         bound
     }
 
+    /// Enqueue every node belonging to a plugin onto the ready queue.
+    /// Used by the supervisor when draining its lane-class ready queues
+    /// into runtime dispatch.  Returns the number of nodes enqueued.
+    pub fn enqueue_ready_for_plugin(&mut self, plugin_id: PluginId) -> usize {
+        let mut ids: [Option<NodeId>; MAX_NODES] = [None; MAX_NODES];
+        let mut count = 0usize;
+        for record in self.nodes.iter().flatten() {
+            if record.plugin_id == plugin_id && count < MAX_NODES {
+                ids[count] = Some(record.spec.node_id);
+                count += 1;
+            }
+        }
+        let mut enqueued = 0usize;
+        for id in ids.iter().flatten() {
+            if self.ready_queue.push(*id).is_ok() {
+                enqueued += 1;
+            }
+        }
+        enqueued
+    }
+
     pub fn route_edge(&mut self, edge_id: EdgeId, signal: Signal) -> Result<(), RuntimeError> {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
         let edge = self.edges[slot].ok_or(RuntimeError::EdgeNotFound)?.spec;
@@ -1509,6 +1530,10 @@ pub fn instance_id_for_vec(vector: VectorAddress) -> Option<NodeInstanceId> {
 
 pub fn bind_plugin_instance(plugin_id: PluginId, instance_id: NodeInstanceId) -> usize {
     RUNTIME.lock().bind_plugin_instance(plugin_id, instance_id)
+}
+
+pub fn enqueue_ready_for_plugin(plugin_id: PluginId) -> usize {
+    RUNTIME.lock().enqueue_ready_for_plugin(plugin_id)
 }
 
 pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
