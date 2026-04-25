@@ -1088,6 +1088,142 @@ fn control_plane_kind_from_u8(raw: u8) -> ControlPlaneMessageKind {
     }
 }
 
+// ── Pluggable heap backend ──────────────────────────────────────────────────
+//
+// `kernel_alloc_pages` / `kernel_free_pages` only enforce supervisor quota.
+// The actual page-frame allocation is delegated to a backend that the kernel
+// installs at boot (typically forwarding to k-pmm / k-heap).  Until a backend
+// is installed, alloc returns null and a plugin's failed allocation surfaces
+// as `ExecStatus::Fault`, which the B.1 fault bridge then routes to the
+// supervisor's restart policy.
+
+#[derive(Clone, Copy)]
+pub struct HeapBackend {
+    pub alloc: unsafe extern "C" fn(page_count: usize) -> *mut u8,
+    pub free: unsafe extern "C" fn(ptr: *mut u8, page_count: usize),
+}
+
+static HEAP_BACKEND: Mutex<Option<HeapBackend>> = Mutex::new(None);
+
+pub fn install_heap_backend(backend: HeapBackend) {
+    *HEAP_BACKEND.lock() = Some(backend);
+}
+
+// Tracks the vector currently dispatching a native plugin so the heap ABI
+// can resolve the active instance.  The kernel is single-threaded, so a
+// plain Mutex<Option<_>> is sufficient.
+static CURRENT_DISPATCH: Mutex<Option<VectorAddress>> = Mutex::new(None);
+
+fn set_current_dispatch(vector: VectorAddress) {
+    *CURRENT_DISPATCH.lock() = Some(vector);
+}
+
+fn clear_current_dispatch() {
+    *CURRENT_DISPATCH.lock() = None;
+}
+
+fn current_dispatch_instance() -> Option<NodeInstanceId> {
+    let vector = (*CURRENT_DISPATCH.lock())?;
+    RUNTIME.lock().instance_id_for_vec(vector)
+}
+
+unsafe extern "C" fn kernel_alloc_pages(page_count: usize) -> *mut u8 {
+    if page_count == 0 {
+        return core::ptr::null_mut();
+    }
+    let Some(instance_id) = current_dispatch_instance() else {
+        return core::ptr::null_mut();
+    };
+    if instance_id == NodeInstanceId::ZERO {
+        // Boot-time builtin nodes have no instance binding yet — let them
+        // through unaccounted for now.  Once every builtin is mapped to an
+        // instance this branch can be removed.
+        let backend = *HEAP_BACKEND.lock();
+        return match backend {
+            Some(backend) => unsafe { (backend.alloc)(page_count) },
+            None => core::ptr::null_mut(),
+        };
+    }
+    // Charge supervisor quota first; refuse on exceed.
+    if gos_supervisor_charge_heap(instance_id, page_count as u32).is_err() {
+        return core::ptr::null_mut();
+    }
+    let backend = *HEAP_BACKEND.lock();
+    match backend {
+        Some(backend) => {
+            let ptr = unsafe { (backend.alloc)(page_count) };
+            if ptr.is_null() {
+                gos_supervisor_credit_heap(instance_id, page_count as u32);
+            }
+            ptr
+        }
+        None => {
+            // No backend installed — give back the accounting and fail.
+            gos_supervisor_credit_heap(instance_id, page_count as u32);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+unsafe extern "C" fn kernel_free_pages(ptr: *mut u8, page_count: usize) {
+    if ptr.is_null() || page_count == 0 {
+        return;
+    }
+    let backend = *HEAP_BACKEND.lock();
+    if let Some(backend) = backend {
+        unsafe { (backend.free)(ptr, page_count) };
+    }
+    if let Some(instance_id) = current_dispatch_instance() {
+        if instance_id != NodeInstanceId::ZERO {
+            gos_supervisor_credit_heap(instance_id, page_count as u32);
+        }
+    }
+}
+
+// Heap accounting hooks installed by the supervisor at bootstrap.  The
+// runtime cannot depend on the supervisor crate directly (that would form
+// a dependency cycle), so we use an installable hook table.  When unset,
+// allocation is unaccounted (boot-time fallback).
+#[derive(Clone, Copy)]
+pub struct HeapAccounting {
+    pub charge:
+        unsafe extern "C" fn(instance_id: NodeInstanceId, page_count: u32) -> i32,
+    pub credit: unsafe extern "C" fn(instance_id: NodeInstanceId, page_count: u32),
+}
+
+static HEAP_ACCOUNTING: Mutex<Option<HeapAccounting>> = Mutex::new(None);
+
+pub fn install_heap_accounting(hooks: HeapAccounting) {
+    *HEAP_ACCOUNTING.lock() = Some(hooks);
+}
+
+#[inline]
+fn gos_supervisor_charge_heap(
+    instance_id: NodeInstanceId,
+    page_count: u32,
+) -> Result<(), ()> {
+    let hooks = *HEAP_ACCOUNTING.lock();
+    match hooks {
+        Some(hooks) => {
+            if unsafe { (hooks.charge)(instance_id, page_count) } == 0 {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+        // No supervisor wired yet — accept everything (boot-time fallback).
+        None => Ok(()),
+    }
+}
+
+#[inline]
+fn gos_supervisor_credit_heap(instance_id: NodeInstanceId, page_count: u32) {
+    let hooks = *HEAP_ACCOUNTING.lock();
+    if let Some(hooks) = hooks {
+        unsafe { (hooks.credit)(instance_id, page_count) };
+    }
+}
+
 unsafe extern "C" fn kernel_emit_signal(target: u64, packet: KernelSignalPacket) -> i32 {
     match route_signal(VectorAddress::from_u64(target), packet_to_signal(packet)) {
         Ok(CellResult::Fault(_)) | Err(_) => -1,
@@ -1134,8 +1270,8 @@ unsafe extern "C" fn kernel_emit_control_plane(
 static KERNEL_ABI: KernelAbi = KernelAbi {
     abi_version: GOS_ABI_VERSION,
     log: None,
-    alloc_pages: None,
-    free_pages: None,
+    alloc_pages: Some(kernel_alloc_pages),
+    free_pages: Some(kernel_free_pages),
     emit_signal: Some(kernel_emit_signal),
     resolve_capability: Some(kernel_resolve_capability),
     emit_control_plane: Some(kernel_emit_control_plane),
@@ -1314,6 +1450,8 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             let mut status = ExecStatus::Done;
             let terminated = matches!(signal, Signal::Terminate);
 
+            set_current_dispatch(dispatch.vector);
+
             if !binding.initialized {
                 if let Some(on_init) = binding.vtable.on_init {
                     status = unsafe { on_init(&mut ctx) };
@@ -1341,6 +1479,8 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                     ExecStatus::Done
                 };
             }
+
+            clear_current_dispatch();
 
             // ── Conditional routing (LangGraph-style) ────────────────────────
             // When on_event returns Route:
@@ -1426,6 +1566,8 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             let mut initialized = binding.initialized;
             let mut status = ExecStatus::Done;
 
+            set_current_dispatch(dispatch.vector);
+
             if !binding.initialized {
                 if let Some(on_init) = binding.vtable.on_init {
                     status = unsafe { on_init(&mut ctx) };
@@ -1442,6 +1584,8 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
                     ExecStatus::Done
                 };
             }
+
+            clear_current_dispatch();
 
             {
                 let mut runtime = RUNTIME.lock();

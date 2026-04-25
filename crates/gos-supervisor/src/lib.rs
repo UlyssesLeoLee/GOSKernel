@@ -1542,6 +1542,34 @@ impl Supervisor {
         })
     }
 
+    /// Charge `page_count` pages against an instance's heap quota.
+    /// Returns `HeapQuotaExceeded` if the instance would exceed its limit.
+    /// This is the accounting half of `request_pages` — it does not touch
+    /// page tables, leaving the actual mapping/allocation to the caller's
+    /// chosen backend (kernel slab allocator or domain-mapped frames).
+    fn charge_heap(
+        &mut self,
+        instance_id: NodeInstanceId,
+        page_count: u32,
+    ) -> Result<(), SupervisorError> {
+        let slot = self.find_instance_slot(instance_id)?;
+        let projected = self.instances[slot].heap_pages_used.saturating_add(page_count);
+        if projected > self.instances[slot].heap_quota.max_pages {
+            return Err(SupervisorError::HeapQuotaExceeded);
+        }
+        self.instances[slot].heap_pages_used = projected;
+        Ok(())
+    }
+
+    /// Reverse of `charge_heap` — credits pages back to the instance.
+    fn credit_heap(&mut self, instance_id: NodeInstanceId, page_count: u32) {
+        if let Ok(slot) = self.find_instance_slot(instance_id) {
+            self.instances[slot].heap_pages_used = self.instances[slot]
+                .heap_pages_used
+                .saturating_sub(page_count);
+        }
+    }
+
     fn drain_revocation(&mut self, instance_id: NodeInstanceId) -> Option<ResourceLease> {
         let slot = self
             .revocations
@@ -2001,6 +2029,30 @@ pub fn abi() -> &'static ModuleAbiV1 {
 
 pub fn bootstrap(boot_payload: u64) {
     SUPERVISOR.lock().reset(boot_payload);
+    // Wire heap quota enforcement into the runtime ABI.  Once installed,
+    // every plugin call to `ctx.abi.alloc_pages` is gated on the calling
+    // instance's HeapQuota.
+    gos_runtime::install_heap_accounting(gos_runtime::HeapAccounting {
+        charge: heap_accounting_charge,
+        credit: heap_accounting_credit,
+    });
+}
+
+unsafe extern "C" fn heap_accounting_charge(
+    instance_id: NodeInstanceId,
+    page_count: u32,
+) -> i32 {
+    match SUPERVISOR.lock().charge_heap(instance_id, page_count) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn heap_accounting_credit(
+    instance_id: NodeInstanceId,
+    page_count: u32,
+) {
+    SUPERVISOR.lock().credit_heap(instance_id, page_count);
 }
 
 pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {
@@ -2078,6 +2130,17 @@ pub fn queue_restart(handle: ModuleHandle) -> Result<(), SupervisorError> {
 
 pub fn process_restart_queue() -> Result<Option<ModuleHandle>, SupervisorError> {
     SUPERVISOR.lock().process_next_restart()
+}
+
+pub fn charge_heap(
+    instance_id: NodeInstanceId,
+    page_count: u32,
+) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().charge_heap(instance_id, page_count)
+}
+
+pub fn credit_heap(instance_id: NodeInstanceId, page_count: u32) {
+    SUPERVISOR.lock().credit_heap(instance_id, page_count)
 }
 
 pub fn service_system_cycle() {
