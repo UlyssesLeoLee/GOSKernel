@@ -2613,6 +2613,14 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
         draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 3, 4, 15, 0, &quota_line);
     }
 
+    // Boot-fallback audit: any non-zero count after realize_boot_modules
+    // indicates a builtin that escaped B.3.3's rebind sweep.  Useful as a
+    // boot-conformance check from the live shell.
+    let mut audit = LineBuf::<72>::new();
+    audit.push_str("audit: boot-fallback allocs ");
+    audit.push_dec(gos_runtime::boot_fallback_alloc_count());
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 4, 4, 15, 0, &audit);
+
     render_graph_footer(sink, state, "where  select clear");
 }
 

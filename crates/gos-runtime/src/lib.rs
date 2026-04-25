@@ -1,6 +1,7 @@
 #![no_std]
 
 use core::mem::transmute;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use gos_protocol::{
     packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
@@ -1109,6 +1110,20 @@ pub fn install_heap_backend(backend: HeapBackend) {
     *HEAP_BACKEND.lock() = Some(backend);
 }
 
+// Audit counter: every alloc_pages call that takes the NodeInstanceId::ZERO
+// fallback (no supervisor instance bound) increments this counter.  After
+// realize_boot_modules + the rebind sweep, additional increments mean a
+// builtin slipped past B.3.3 — surfaced via shell `where` for verification.
+static BOOT_FALLBACK_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn boot_fallback_alloc_count() -> u64 {
+    BOOT_FALLBACK_ALLOC_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn reset_boot_fallback_alloc_count() {
+    BOOT_FALLBACK_ALLOC_COUNT.store(0, Ordering::Relaxed);
+}
+
 // Tracks the vector currently dispatching a native plugin so the heap ABI
 // can resolve the active instance.  The kernel is single-threaded, so a
 // plain Mutex<Option<_>> is sufficient.
@@ -1137,7 +1152,9 @@ unsafe extern "C" fn kernel_alloc_pages(page_count: usize) -> *mut u8 {
     if instance_id == NodeInstanceId::ZERO {
         // Boot-time builtin nodes have no instance binding yet — let them
         // through unaccounted for now.  Once every builtin is mapped to an
-        // instance this branch can be removed.
+        // instance this branch can be removed.  Audit count: every hit
+        // here after realize_boot_modules indicates an unbound builtin.
+        BOOT_FALLBACK_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         let backend = *HEAP_BACKEND.lock();
         return match backend {
             Some(backend) => unsafe { (backend.alloc)(page_count) },
