@@ -116,18 +116,14 @@ GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原
 | `k-mouse` | 指针与显示输入 node |
 | `k-vga` | 显示与调色板输出 node |
 
-### 4.3 当前 legacy island
+### 4.3 legacy island 状态
 
-当前仍在治理 allowlist 中的迁移岛为：
+**Phase A 已完成（2026-04-25）**。所有 crate 已完成迁出：
 
-- `k-pit`
-- `k-ps2`
-- `k-idt`
-- `k-pmm`
-- `k-vmm`
-- `k-heap`
+- `k-pit` — 最后一个 NodeCell/PluginEntry 使用者，已迁移至 `NodeExecutorVTable`
+- `k-ps2`, `k-idt`, `k-pmm`, `k-vmm`, `k-heap` — 此前已完成迁出
 
-这些 crate 仍允许保留 `NodeCell` / `PluginEntry` / `try_mount_cell` 形式，但不再被视为推荐插件模型。
+`builtin_bundle::BuiltinModule` 枚举现在仅包含 `Native` 变体。`LegacyModule`、`LegacyNodeTemplate`、`legacy_node()`、`synchronize_legacy_graph()` 等 legacy 基础设施已完全移除。allowlist 为零。
 
 ## 五、当前用户可见图控制面
 
@@ -236,18 +232,12 @@ GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原
 
 ## 八、后续路线图
 
-### Phase A：清零剩余 legacy island
+### Phase A：清零剩余 legacy island ✅ 已完成（2026-04-25）
 
-目标：
-
-- 把剩余 allowlist 中的 legacy crate 全部迁出主架构模型
-- native-first 启动链成为唯一推荐与唯一主要实现路线
-
-完成标志：
-
-- `NodeCell / PluginEntry / try_mount_cell` 不再出现在权威架构主线
-- allowlist 缩到零或接近零
-- 文档中的 legacy 只保留为 debt backlog
+- 所有 crate 已迁移至 `NodeExecutorVTable` 原生插件模型
+- `NodeCell / PluginEntry / try_mount_cell` 已从主线代码库清除
+- `BuiltinModule` 仅剩 `Native` 变体，allowlist 为零
+- 文档已更新，legacy 仅作为历史记录存在
 
 ### Phase B：补齐原子化底座
 
