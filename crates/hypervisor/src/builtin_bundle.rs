@@ -1,9 +1,9 @@
 use gos_protocol::{
     derive_edge_id, derive_node_id, BootContext, CapabilitySpec, EdgeSpec, EntryPolicy,
-    ExecutorId, ImportSpec, ModuleDependencySpec, ModuleDescriptor, ModuleEntry,
+    ImportSpec, ModuleDependencySpec, ModuleDescriptor, ModuleEntry,
     ModuleFaultPolicy, ModuleId, ModuleImageFormat, NodeExecutorVTable, NodeSpec,
-    PermissionKind, PermissionSpec, PluginId, PluginManifest, PluginEntry, RoutePolicy,
-    RuntimeEdgeType, RuntimeNodeType, Signal, VectorAddress, VectorRef, GOS_ABI_VERSION,
+    PermissionKind, PermissionSpec, PluginId, PluginManifest, RoutePolicy,
+    RuntimeEdgeType, RuntimeNodeType, Signal, VectorAddress, GOS_ABI_VERSION,
     MODULE_ABI_VERSION,
 };
 use gos_runtime::{self, RuntimeError};
@@ -31,28 +31,6 @@ pub struct BuiltinBootReport {
 }
 
 #[derive(Clone, Copy)]
-struct LegacyNodeTemplate {
-    vector: VectorAddress,
-    local_node_key: &'static str,
-    node_type: RuntimeNodeType,
-    entry_policy: EntryPolicy,
-    executor_id: ExecutorId,
-    state_schema_hash: u64,
-    permissions: &'static [PermissionSpec],
-    exports: &'static [CapabilitySpec],
-    vector_ref: Option<VectorRef>,
-}
-
-#[derive(Clone, Copy)]
-struct LegacyModule {
-    manifest: PluginManifest,
-    granted_permissions: &'static [PermissionSpec],
-    node: LegacyNodeTemplate,
-    entry: fn(&mut BootContext),
-    load_hook: Option<fn()>,
-}
-
-#[derive(Clone, Copy)]
 struct NativeNodeBinding {
     vector: VectorAddress,
     local_node_key: &'static str,
@@ -69,14 +47,12 @@ struct NativeModule {
 
 #[derive(Clone, Copy)]
 enum BuiltinModule {
-    Legacy(LegacyModule),
     Native(NativeModule),
 }
 
 impl BuiltinModule {
     const fn manifest(&self) -> PluginManifest {
         match *self {
-            Self::Legacy(module) => module.manifest,
             Self::Native(module) => module.manifest,
         }
     }
@@ -422,6 +398,7 @@ const K_SERIAL_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SERIAL_ID, "seri
 const K_GDT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_GDT_ID, "gdt.entry");
 const K_CPUID_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CPUID_ID, "cpuid.entry");
 const K_PIC_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PIC_ID, "pic.entry");
+const K_PIT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PIT_ID, "pit.entry");
 const K_IDT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IDT_ID, "idt.entry");
 const K_PS2_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PS2_ID, "ps2.entry");
 const K_PMM_NODE_ID: gos_protocol::NodeId = derive_node_id(K_PMM_ID, "pmm.entry");
@@ -498,6 +475,18 @@ const PIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     executor_id: k_pic::EXECUTOR_ID,
     state_schema_hash: 0x2006,
     permissions: PIC_PERMS,
+    exports: &[],
+    vector_ref: None,
+}];
+
+const PIT_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_PIT_NODE_ID,
+    local_node_key: "pit.entry",
+    node_type: RuntimeNodeType::Driver,
+    entry_policy: EntryPolicy::Bootstrap,
+    executor_id: k_pit::EXECUTOR_ID,
+    state_schema_hash: 0x2007,
+    permissions: PIT_PERMS,
     exports: &[],
     vector_ref: None,
 }];
@@ -751,6 +740,12 @@ const PIC_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     executor: k_pic::EXECUTOR_VTABLE,
 }];
 
+const PIT_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_pit::NODE_VEC,
+    local_node_key: "pit.entry",
+    executor: k_pit::EXECUTOR_VTABLE,
+}];
+
 const IDT_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_idt::NODE_VEC,
     local_node_key: "idt.entry",
@@ -892,7 +887,7 @@ const PIC_MANIFEST: PluginManifest = manifest_with_nodes(
     &[],
     PIC_NODE_SPECS,
 );
-const PIT_MANIFEST: PluginManifest = manifest(K_PIT_ID, "K_PIT", DEP_PIT, PIT_PERMS, &[], &[]);
+const PIT_MANIFEST: PluginManifest = manifest_with_nodes(K_PIT_ID, "K_PIT", DEP_PIT, PIT_PERMS, &[], &[], PIT_NODE_SPECS);
 const PS2_MANIFEST: PluginManifest = manifest_with_nodes(
     K_PS2_ID,
     "K_PS2",
@@ -1051,17 +1046,6 @@ const fn module_descriptor(
     }
 }
 
-const fn manifest(
-    plugin_id: PluginId,
-    name: &'static str,
-    depends_on: &'static [PluginId],
-    permissions: &'static [PermissionSpec],
-    exports: &'static [CapabilitySpec],
-    imports: &'static [ImportSpec],
-) -> PluginManifest {
-    manifest_with_nodes(plugin_id, name, depends_on, permissions, exports, imports, &[])
-}
-
 const fn manifest_with_nodes(
     plugin_id: PluginId,
     name: &'static str,
@@ -1124,12 +1108,11 @@ const BUILTIN_MODULES: [BuiltinModule; 21] = [
         nodes: PIC_NATIVE_NODES,
         register_hook: None,
     }),
-    BuiltinModule::Legacy(LegacyModule {
+    BuiltinModule::Native(NativeModule {
         manifest: PIT_MANIFEST,
         granted_permissions: PIT_PERMS,
-        node: legacy_node(k_pit::NODE_VEC, "pit.entry", RuntimeNodeType::Driver, "legacy.pit", 0x1007, PIT_PERMS, &[]),
-        entry: pit_entry,
-        load_hook: Some(pit_load_hook),
+        nodes: PIT_NATIVE_NODES,
+        register_hook: Some(pit_register_hook),
     }),
     BuiltinModule::Native(NativeModule {
         manifest: PS2_MANIFEST,
@@ -1409,28 +1392,6 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
     ),
 ];
 
-const fn legacy_node(
-    vector: gos_protocol::VectorAddress,
-    local_node_key: &'static str,
-    node_type: RuntimeNodeType,
-    executor: &'static str,
-    state_schema_hash: u64,
-    permissions: &'static [PermissionSpec],
-    exports: &'static [CapabilitySpec],
-) -> LegacyNodeTemplate {
-    LegacyNodeTemplate {
-        vector,
-        local_node_key,
-        node_type,
-        entry_policy: EntryPolicy::Bootstrap,
-        executor_id: ExecutorId::from_ascii(executor),
-        state_schema_hash,
-        permissions,
-        exports,
-        vector_ref: None,
-    }
-}
-
 pub fn boot_builtin_graph(boot_payload: u64) -> Result<BuiltinBootReport, BuiltinBootError> {
     gos_runtime::reset();
     gos_runtime::emit_hello();
@@ -1456,7 +1417,6 @@ pub fn boot_builtin_graph(boot_payload: u64) -> Result<BuiltinBootReport, Builti
 
     synchronize_manifest_graph(&BUILTIN_MODULES)?;
     synchronize_clipboard_mount_graph()?;
-    synchronize_legacy_graph(&BUILTIN_MODULES)?;
     gos_supervisor::service_system_cycle();
 
     Ok(BuiltinBootReport {
@@ -1518,58 +1478,8 @@ fn first_missing_dependency(
 }
 
 fn load_builtin_module(module: BuiltinModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
-    match module {
-        BuiltinModule::Legacy(module) => load_legacy_module(module, ctx),
-        BuiltinModule::Native(module) => load_native_module(module, ctx),
-    }
-}
-
-fn load_legacy_module(module: LegacyModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
-    ensure_permissions(
-        module.manifest.plugin_id,
-        module.manifest.permissions,
-        module.granted_permissions,
-    )?;
-
-    for spec in module.manifest.nodes {
-        gos_runtime::register_node(module.manifest.plugin_id, module.node.vector, *spec)?;
-    }
-
-    for edge in module.manifest.edges {
-        gos_runtime::register_edge(*edge)?;
-    }
-
-    let node_id = derive_node_id(module.manifest.plugin_id, module.node.local_node_key);
-    let node_spec = NodeSpec {
-        node_id,
-        local_node_key: module.node.local_node_key,
-        node_type: module.node.node_type,
-        entry_policy: module.node.entry_policy,
-        executor_id: module.node.executor_id,
-        state_schema_hash: module.node.state_schema_hash,
-        permissions: module.node.permissions,
-        exports: module.node.exports,
-        vector_ref: module.node.vector_ref,
-    };
-
-    gos_runtime::register_node(module.manifest.plugin_id, module.node.vector, node_spec)?;
-    gos_runtime::mark_plugin_loaded(module.manifest.plugin_id)?;
-
-    (module.entry)(ctx);
-
-    if matches!(
-        module.node.entry_policy,
-        EntryPolicy::Bootstrap | EntryPolicy::Background
-    ) {
-        gos_runtime::post_signal(module.node.vector, Signal::Spawn { payload: 0 })?;
-        gos_supervisor::service_system_cycle();
-    }
-
-    if let Some(load_hook) = module.load_hook {
-        load_hook();
-    }
-
-    Ok(())
+    let BuiltinModule::Native(module) = module;
+    load_native_module(module, ctx)
 }
 
 fn load_native_module(module: NativeModule, ctx: &mut BootContext) -> Result<(), BuiltinBootError> {
@@ -1700,74 +1610,9 @@ fn synchronize_clipboard_mount_graph() -> Result<(), BuiltinBootError> {
     Ok(())
 }
 
-fn synchronize_legacy_graph(modules: &[BuiltinModule]) -> Result<(), BuiltinBootError> {
-    for module in modules {
-        let BuiltinModule::Legacy(module) = module else {
-            continue;
-        };
-
-        let declaration = gos_runtime::describe_legacy_node(module.node.vector)?;
-        let source_node = gos_runtime::node_id_for_vec(module.node.vector)
-            .ok_or(BuiltinBootError::Runtime(RuntimeError::NodeNotFound))?;
-
-        for (idx, edge) in declaration.edges.iter().take(declaration.edge_count).enumerate() {
-            if edge.target_vec == 0 {
-                continue;
-            }
-
-            let target_vec = VectorAddress::from_u64(edge.target_vec);
-            let Some(target_node) = gos_runtime::node_id_for_vec(target_vec) else {
-                continue;
-            };
-
-            let edge_spec = EdgeSpec {
-                edge_id: derive_edge_id(source_node, target_node, edge_key(edge.tag, idx)),
-                from_node: source_node,
-                to_node: target_node,
-                edge_type: map_legacy_edge_type(edge.edge_type),
-                weight: 1.0,
-                acl_mask: u64::MAX,
-                route_policy: RoutePolicy::Direct,
-                capability_namespace: None,
-                capability_binding: None,
-                vector_ref: None,
-            };
-            gos_runtime::register_edge(edge_spec)?;
-        }
-
-        for dependency in declaration.depends_on {
-            let target_vec = VectorAddress::from_u64(*dependency);
-            let Some(target_node) = gos_runtime::node_id_for_vec(target_vec) else {
-                continue;
-            };
-
-            let edge_spec = EdgeSpec {
-                edge_id: derive_edge_id(source_node, target_node, "depend"),
-                from_node: source_node,
-                to_node: target_node,
-                edge_type: RuntimeEdgeType::Depend,
-                weight: 1.0,
-                acl_mask: u64::MAX,
-                route_policy: RoutePolicy::FailFast,
-                capability_namespace: None,
-                capability_binding: None,
-                vector_ref: None,
-            };
-            gos_runtime::register_edge(edge_spec)?;
-        }
-    }
-
-    Ok(())
-}
-
 fn primary_node_for_module(module: BuiltinModule) -> Option<gos_protocol::NodeId> {
-    match module {
-        BuiltinModule::Legacy(module) => gos_runtime::node_id_for_vec(module.node.vector),
-        BuiltinModule::Native(module) => module
-            .nodes
-            .first()
-            .and_then(|binding| gos_runtime::node_id_for_vec(binding.vector)),
-    }
+    let BuiltinModule::Native(module) = module;
+    module.nodes.first().and_then(|binding| gos_runtime::node_id_for_vec(binding.vector))
 }
 
 fn primary_node_for_plugin(
@@ -1797,51 +1642,13 @@ fn provider_for_import(
     })
 }
 
-fn edge_key(_tag: [u8; 12], idx: usize) -> &'static str {
-    match idx {
-        0 => "edge0",
-        1 => "edge1",
-        2 => "edge2",
-        3 => "edge3",
-        4 => "edge4",
-        5 => "edge5",
-        6 => "edge6",
-        7 => "edge7",
-        8 => "edge8",
-        9 => "edge9",
-        10 => "edge10",
-        _ => "edge11",
-    }
-}
-
-fn map_legacy_edge_type(edge_type: u8) -> RuntimeEdgeType {
-    match edge_type {
-        0x01 => RuntimeEdgeType::Call,
-        0x02 => RuntimeEdgeType::Spawn,
-        0x03 => RuntimeEdgeType::Depend,
-        0x04 => RuntimeEdgeType::Signal,
-        0x05 => RuntimeEdgeType::Return,
-        0x06 => RuntimeEdgeType::Mount,
-        0x07 => RuntimeEdgeType::Sync,
-        _ => RuntimeEdgeType::Stream,
-    }
-}
-
-fn pit_entry(ctx: &mut BootContext) {
-    <k_pit::PitCell as PluginEntry>::plugin_main(ctx);
-}
 
 
 
 
 
 
-
-
-
-
-
-fn pit_load_hook() {
+fn pit_register_hook(_ctx: &mut BootContext) {
     k_pit::init_pit_hz(120);
 }
 

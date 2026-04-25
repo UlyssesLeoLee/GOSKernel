@@ -1,16 +1,14 @@
 // ── Pre-processing ────────────────────────────────────────────────────────────
-// Responsibility: filter the incoming signal and identify timer IRQ events.
-// PIT only reacts to Interrupt { irq: TIMER } signals.
+// Responsibility: decode the incoming NodeEvent and filter for the timer IRQ.
 
-use gos_protocol::Signal;
+use gos_protocol::{packet_to_signal, NodeEvent, Signal};
 
-/// Decoded PIT input: the timer IRQ number to forward.
 pub struct Input {
     pub irq: u8,
 }
 
-/// Returns `Some(Input)` only for timer IRQ signals.
-pub fn prepare(signal: Signal) -> Option<Input> {
+pub fn prepare(event: *const NodeEvent) -> Option<Input> {
+    let signal = unsafe { packet_to_signal((*event).signal) };
     if let Signal::Interrupt { irq } = signal {
         if irq == k_pic::InterruptIndex::Timer.as_u8() {
             return Some(Input { irq });
