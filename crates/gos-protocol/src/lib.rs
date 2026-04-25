@@ -1262,6 +1262,10 @@ pub struct ExecutorContext {
     pub vector: VectorAddress,
     pub state_ptr: *mut u8,
     pub state_len: usize,
+    /// Active supervisor-issued instance for this dispatch.
+    /// `NodeInstanceId::ZERO` means the node is not (yet) bound to a
+    /// supervisor instance — typical for boot-time builtin nodes.
+    pub instance_id: NodeInstanceId,
     /// Set by on_event when returning ExecStatus::Route.
     /// The runtime looks up this key in the node's conditional-route table
     /// and posts `route_signal` (below) to the resolved target.

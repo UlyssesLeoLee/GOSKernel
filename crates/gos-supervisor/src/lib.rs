@@ -11,7 +11,7 @@ use gos_protocol::{
     EndpointId, ExecutionLaneClass, HeapQuota, ImportSpec, LeaseEpoch, ModuleAbiV1,
     ModuleCallStatus, ModuleDescriptor, ModuleEntry, ModuleFaultPolicy, ModuleHandle,
     ModuleId, ModuleLifecycle, ModuleMessage, NodeInstanceId, NodeInstanceLifecycle,
-    NodeTemplateId, PermissionSpec, PreemptPolicy, ResourceId, ResourceLease,
+    NodeTemplateId, PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease,
     SpawnPolicy, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL,
     RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, MODULE_ABI_VERSION,
 };
@@ -1192,6 +1192,12 @@ impl Supervisor {
         self.call_entry(handle, instance_id, entry.module_start)?;
         let _ = self.enqueue_ready_instance(instance_id);
         self.publish_exports(handle)?;
+        // Propagate instance identity into the runtime so dispatched
+        // ExecutorContexts carry the active NodeInstanceId.  Plugins that
+        // run multiple instances will overwrite per spawn — for now every
+        // module owns one primary instance.
+        let plugin_id = PluginId(self.modules[slot].source.module_id().0);
+        let _ = gos_runtime::bind_plugin_instance(plugin_id, instance_id);
         self.modules[slot].state = ModuleLifecycle::Running;
         Ok(())
     }

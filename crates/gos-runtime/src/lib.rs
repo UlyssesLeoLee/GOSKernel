@@ -7,9 +7,10 @@ use gos_protocol::{
     ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
     EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
     GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
-    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeLifecycle,
-    NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType,
-    Signal, StateDelta, VectorAddress, derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
+    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId,
+    NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
+    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
+    CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
 
@@ -146,6 +147,11 @@ struct NodeRecord {
     lifecycle: NodeLifecycle,
     runtime_page: usize,
     binding: NodeBinding,
+    /// Active supervisor-issued instance for this node, if any.
+    /// `NodeInstanceId::ZERO` means "no instance bound" — boot-time
+    /// builtin nodes operate in this mode until the supervisor calls
+    /// `bind_instance`.
+    instance_id: NodeInstanceId,
     /// Conditional-route table (LangGraph-style edge fan-out).
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
@@ -196,6 +202,7 @@ struct PreparedDispatch {
     vector: VectorAddress,
     runtime_page: usize,
     binding: NodeBinding,
+    instance_id: NodeInstanceId,
 }
 
 struct NodeArena {
@@ -459,6 +466,7 @@ impl GraphRuntime {
             lifecycle: NodeLifecycle::Allocated,
             runtime_page,
             binding: NodeBinding::Unbound,
+            instance_id: NodeInstanceId::ZERO,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
         });
@@ -755,6 +763,7 @@ impl GraphRuntime {
             vector: record.vector,
             runtime_page: record.runtime_page,
             binding: record.binding,
+            instance_id: record.instance_id,
         })
     }
 
@@ -773,7 +782,44 @@ impl GraphRuntime {
             vector: record.vector,
             runtime_page: record.runtime_page,
             binding: record.binding,
+            instance_id: record.instance_id,
         })
+    }
+
+    pub fn bind_instance(
+        &mut self,
+        vector: VectorAddress,
+        instance_id: NodeInstanceId,
+    ) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
+        record.instance_id = instance_id;
+        self.nodes[slot] = Some(record);
+        Ok(())
+    }
+
+    pub fn instance_id_for_vec(&self, vector: VectorAddress) -> Option<NodeInstanceId> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|r| r.instance_id))
+    }
+
+    /// Bind every node of a plugin to a given supervisor instance.
+    /// Returns the count of nodes bound.  No-op for unknown plugins.
+    pub fn bind_plugin_instance(
+        &mut self,
+        plugin_id: PluginId,
+        instance_id: NodeInstanceId,
+    ) -> usize {
+        let mut bound = 0usize;
+        for slot in self.nodes.iter_mut() {
+            if let Some(record) = slot.as_mut() {
+                if record.plugin_id == plugin_id {
+                    record.instance_id = instance_id;
+                    bound += 1;
+                }
+            }
+        }
+        bound
     }
 
     pub fn route_edge(&mut self, edge_id: EdgeId, signal: Signal) -> Result<(), RuntimeError> {
@@ -1238,6 +1284,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 vector: dispatch.vector,
                 state_ptr,
                 state_len: 4096,
+                instance_id: dispatch.instance_id,
                 route_key: 0xFF,       // sentinel — no conditional route
                 route_signal: event_packet, // default: forward the original signal
             };
@@ -1350,6 +1397,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
                 vector: dispatch.vector,
                 state_ptr,
                 state_len: 4096,
+                instance_id: dispatch.instance_id,
                 route_key: 0xFF,
                 route_signal: signal_to_packet(Signal::Spawn { payload: 0 }),
             };
@@ -1446,6 +1494,21 @@ pub fn drain_next_fault() -> Option<VectorAddress> {
 
 pub fn plugin_id_for_vec(vector: VectorAddress) -> Option<PluginId> {
     RUNTIME.lock().plugin_id_for_vec(vector)
+}
+
+pub fn bind_instance(
+    vector: VectorAddress,
+    instance_id: NodeInstanceId,
+) -> Result<(), RuntimeError> {
+    RUNTIME.lock().bind_instance(vector, instance_id)
+}
+
+pub fn instance_id_for_vec(vector: VectorAddress) -> Option<NodeInstanceId> {
+    RUNTIME.lock().instance_id_for_vec(vector)
+}
+
+pub fn bind_plugin_instance(plugin_id: PluginId, instance_id: NodeInstanceId) -> usize {
+    RUNTIME.lock().bind_plugin_instance(plugin_id, instance_id)
 }
 
 pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
