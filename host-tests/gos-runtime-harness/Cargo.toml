@@ -1,0 +1,10 @@
+[package]
+name = "gos-runtime-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-runtime = { path = "../../crates/gos-runtime" }
