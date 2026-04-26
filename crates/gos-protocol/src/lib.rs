@@ -1140,7 +1140,39 @@ pub struct ModuleDescriptor {
     pub segments: &'static [ModuleImageSegment],
     pub entry: ModuleEntry,
     pub signature: Option<&'static [u8]>,
+    /// Bit-packed module attributes.
+    ///
+    ///   bit 0  -> privilege: 0 = Kernel (Ring 0), 1 = User (Ring 3).
+    ///             See `Privilege` and `ModuleDescriptor::privilege`.
+    ///   bits 1..63 reserved.
+    ///
+    /// Encoded into the existing `flags: u64` so every pre-E.3 descriptor
+    /// (`flags: 0`) reads back as `Privilege::Kernel` — zero source
+    /// breakage.
     pub flags: u64,
+}
+
+/// Phase E.3 — execution-level privilege a module's instances run at.
+/// Today every builtin is `Kernel`; user-level requires both an
+/// ELF-loaded module image (B.4.6.x) and the syscall trampoline
+/// (E.2, already wired).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Privilege {
+    Kernel = 0,
+    User = 1,
+}
+
+pub const MODULE_FLAG_USER: u64 = 1 << 0;
+
+impl ModuleDescriptor {
+    pub const fn privilege(&self) -> Privilege {
+        if self.flags & MODULE_FLAG_USER != 0 {
+            Privilege::User
+        } else {
+            Privilege::Kernel
+        }
+    }
 }
 
 impl ModuleDescriptor {

@@ -208,6 +208,17 @@ impl ModuleSource {
         }
     }
 
+    /// Phase E.3 — what privilege ring the module's instances should
+    /// dispatch at.  Empty/Kernel is the safe default; today no
+    /// builtin sets `MODULE_FLAG_USER` and no ELF loader produces
+    /// User-level images yet (B.4.6.x deferred).
+    fn privilege(&self) -> gos_protocol::Privilege {
+        match *self {
+            Self::Descriptor(descriptor) => descriptor.privilege(),
+            Self::Empty => gos_protocol::Privilege::Kernel,
+        }
+    }
+
     fn permissions(&self) -> &'static [PermissionSpec] {
         match *self {
             Self::Descriptor(descriptor) => descriptor.permissions,
@@ -1225,6 +1236,12 @@ impl Supervisor {
         let slot = self.find_module_slot(handle)?;
         if !matches!(self.modules[slot].state, ModuleLifecycle::Instantiated | ModuleLifecycle::Stopped) {
             return Err(SupervisorError::InvalidState);
+        }
+        // Phase E.3: User-level modules require the Ring 3 dispatch
+        // trampoline (B.4.6.x + E.2 sysret path).  Until that lands we
+        // refuse to start them — same shape as a missing dependency.
+        if matches!(self.modules[slot].source.privilege(), gos_protocol::Privilege::User) {
+            return Err(SupervisorError::ModuleRejected);
         }
         if self.modules[slot].state == ModuleLifecycle::Stopped {
             self.validate_module(handle)?;

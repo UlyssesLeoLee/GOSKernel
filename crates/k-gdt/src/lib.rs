@@ -43,6 +43,12 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 pub struct Selectors {
     pub code_selector: SegmentSelector,
     pub tss_selector: SegmentSelector,
+    /// Phase E.2 — user-mode code descriptor.  Populated alongside the
+    /// kernel selectors so `IA32_STAR` can be programmed with both
+    /// halves at once.  Until an ELF-loaded plugin runs in Ring 3,
+    /// this descriptor exists in the GDT but is unused.
+    pub user_code_selector: SegmentSelector,
+    pub user_data_selector: SegmentSelector,
 }
 
 #[repr(C)]
@@ -90,6 +96,8 @@ unsafe fn init_hal_state() {
             selectors: Selectors {
                 code_selector: SegmentSelector(0),
                 tss_selector: SegmentSelector(0),
+                user_code_selector: SegmentSelector(0),
+                user_data_selector: SegmentSelector(0),
             },
         },
     );
@@ -125,6 +133,18 @@ unsafe fn init_hal_state() {
     };
 
     state.selectors.code_selector = state.gdt.add_entry(Descriptor::kernel_code_segment());
+    // Phase E.2: order is significant.  IA32_STAR encodes user CS/SS as
+    // (selector_base, selector_base + 8) for sysret, so the descriptors
+    // must be installed contiguously in this order:
+    //   N+0: user 32-bit code (placeholder, unused on x86_64)
+    //   N+1: user data
+    //   N+2: user 64-bit code
+    // x86_64 crate's user_data_segment / user_code_segment helpers
+    // produce DPL=3 entries and we register them right after the kernel
+    // descriptors so the layout is well-defined.
+    let _user_code_compat = state.gdt.add_entry(Descriptor::user_data_segment());
+    state.selectors.user_data_selector = state.gdt.add_entry(Descriptor::user_data_segment());
+    state.selectors.user_code_selector = state.gdt.add_entry(Descriptor::user_code_segment());
     state.selectors.tss_selector = state.gdt.add_entry(Descriptor::tss_segment(&state.tss));
 }
 

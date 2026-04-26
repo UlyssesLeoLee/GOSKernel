@@ -356,6 +356,45 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     assert_eq!(snap.heap_pages_used, 0);
 }
 
+// ── Phase E.3 regression: User-level modules are rejected at start ───────────
+//
+// Until the Ring 3 dispatch trampoline (B.4.6.x + E.2 sysret path)
+// lands, supervisor must refuse to start User-level modules — running
+// them in Ring 0 would defeat the privilege separation entirely.
+#[test]
+fn user_level_module_is_rejected_at_start() {
+    use gos_protocol::MODULE_FLAG_USER;
+
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+
+    const USER_MODULE: ModuleDescriptor = ModuleDescriptor {
+        abi_version: MODULE_ABI_VERSION,
+        module_id: ModuleId::from_ascii("MOD.USER"),
+        name: "MOD_USER",
+        version: 1,
+        image_format: ModuleImageFormat::Builtin,
+        fault_policy: ModuleFaultPolicy::Manual,
+        dependencies: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        segments: TEST_SEGMENTS,
+        entry: TEST_ENTRY,
+        signature: None,
+        flags: MODULE_FLAG_USER,
+    };
+
+    install_module(USER_MODULE).expect("install");
+    // realize_boot_modules calls start_module per descriptor; ours
+    // must surface ModuleRejected because it's tagged Privilege::User.
+    assert_eq!(
+        realize_boot_modules(),
+        Err(SupervisorError::ModuleRejected)
+    );
+}
+
 // ── Phase B.4.3 regression: CPU fault dispatch hook ──────────────────────────
 //
 // gos_supervisor::bootstrap installs a fault-dispatch hook into

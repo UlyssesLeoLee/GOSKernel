@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod builtin_bundle;
+mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
@@ -78,6 +79,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     raw_serial_println(format_args!("boot: supervisor owns system cycle"));
     gos_supervisor::service_system_cycle();
+
+    // Phase E.2: program the syscall MSRs after the GDT has been loaded
+    // (k-gdt's Spawn dispatch ran during the system cycle above).  Until
+    // an ELF-loaded plugin runs in Ring 3 (B.4.6.x + E.3) no `syscall`
+    // is issued; we wire it now so the moment a user-mode .gosmod
+    // dispatches its first call lands on a working trampoline.
+    unsafe { ring3::init(); }
+    raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
     x86_64::instructions::interrupts::enable();
 
