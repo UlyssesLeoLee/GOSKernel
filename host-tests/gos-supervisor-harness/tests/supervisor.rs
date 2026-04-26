@@ -357,6 +357,88 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     assert_eq!(snap.heap_pages_used, 0);
 }
 
+// ── Phase G.2 regression: install-time signature gate ────────────────────────
+//
+// Default policy is Permissive — every existing builtin (signature:
+// None) installs without complaint.  Switching to RequireSigned must
+// reject unsigned modules; switching back must restore acceptance.
+// Bad signatures with an installed verifier always rejected.
+#[test]
+fn signature_gate_honours_security_policy() {
+    use gos_sign::{install_verifier, set_policy, SecurityPolicy, SignatureVerifier};
+
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+
+    // Permissive default: unsigned install OK.
+    set_policy(SecurityPolicy::Permissive);
+    install_module(PROVIDER).expect("permissive unsigned install");
+    reset_state();
+    bootstrap(0);
+
+    // RequireSigned + unsigned -> rejected.
+    set_policy(SecurityPolicy::RequireSigned);
+    assert_eq!(
+        install_module(PROVIDER),
+        Err(SupervisorError::ModuleRejected)
+    );
+
+    // Restore Permissive so subsequent tests see baseline behavior.
+    set_policy(SecurityPolicy::Permissive);
+
+    // With a verifier installed and a signed (synthetic) descriptor,
+    // a verifier returning failure rejects the install.
+    static SIG: &[u8] = b"sig-bytes";
+    const SIGNED: ModuleDescriptor = ModuleDescriptor {
+        abi_version: MODULE_ABI_VERSION,
+        module_id: ModuleId::from_ascii("MOD.SIGNED"),
+        name: "MOD_SIGNED",
+        version: 1,
+        image_format: ModuleImageFormat::Builtin,
+        fault_policy: ModuleFaultPolicy::Manual,
+        dependencies: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        segments: TEST_SEGMENTS,
+        entry: TEST_ENTRY,
+        signature: Some(SIG),
+        flags: 0,
+    };
+
+    unsafe extern "C" fn always_reject(
+        _sig: *const u8,
+        _len: usize,
+        _hash: *const u8,
+    ) -> i32 {
+        -1
+    }
+    install_verifier(SignatureVerifier { verify: always_reject });
+
+    reset_state();
+    bootstrap(0);
+    set_policy(SecurityPolicy::Permissive);
+    assert_eq!(
+        install_module(SIGNED),
+        Err(SupervisorError::ModuleRejected),
+        "verifier rejection always wins"
+    );
+
+    unsafe extern "C" fn always_accept(
+        _sig: *const u8,
+        _len: usize,
+        _hash: *const u8,
+    ) -> i32 {
+        0
+    }
+    install_verifier(SignatureVerifier { verify: always_accept });
+    reset_state();
+    bootstrap(0);
+    set_policy(SecurityPolicy::Permissive);
+    install_module(SIGNED).expect("verifier acceptance allows signed install");
+}
+
 // ── Phase F regression: persistence resources are registered ─────────────────
 //
 // RESOURCE_BLOCK_DEVICE and RESOURCE_FILE_HANDLE must be registered at

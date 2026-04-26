@@ -11,6 +11,7 @@ host-testing = []
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-runtime = { path = "../gos-runtime" }
+gos-sign = { path = "../gos-sign" }
 k-vmm = { path = "../k-vmm", optional = true }
 spin = "0.9"
 x86_64 = "0.14"

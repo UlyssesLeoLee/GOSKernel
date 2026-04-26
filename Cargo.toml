@@ -8,6 +8,7 @@ members = [
     "crates/gos-hal",
     "crates/gos-journal",
     "crates/gos-log",
+    "crates/gos-sign",
     "crates/gos-supervisor",
     "crates/gos-vfs",
     "crates/k-fat32",

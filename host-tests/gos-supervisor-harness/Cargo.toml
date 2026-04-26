@@ -8,4 +8,5 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
+gos-sign = { path = "../../crates/gos-sign" }
 gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }

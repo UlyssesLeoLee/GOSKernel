@@ -1128,6 +1128,15 @@ impl Supervisor {
     }
 
     fn install_descriptor(&mut self, descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {
+        // Phase G.2: signature gate.  Refuse to install modules that
+        // fail the active SecurityPolicy check.  Default is
+        // Permissive — every existing builtin (signature: None) keeps
+        // installing.  Once kernel boot opts into RequireSigned /
+        // Strict, unsigned/bad-signed modules surface as
+        // ModuleRejected — same shape as a missing dependency.
+        if gos_sign::verify_module(&descriptor).is_err() {
+            return Err(SupervisorError::ModuleRejected);
+        }
         self.install_source(ModuleSource::Descriptor(descriptor))
     }
 

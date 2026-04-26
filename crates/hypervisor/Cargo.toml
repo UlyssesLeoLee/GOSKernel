@@ -9,6 +9,7 @@ gos-hal = { path = "../gos-hal" }
 gos-runtime = { path = "../gos-runtime" }
 gos-journal = { path = "../gos-journal" }
 gos-log = { path = "../gos-log" }
+gos-sign = { path = "../gos-sign" }
 gos-supervisor = { path = "../gos-supervisor" }
 gos-vfs = { path = "../gos-vfs" }
 k-panic = { path = "../k-panic" }

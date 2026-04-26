@@ -27,11 +27,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gos-sign"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+ "gos-sign",
  "spin",
  "x86_64",
 ]
@@ -42,6 +51,7 @@ version = "0.1.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+ "gos-sign",
  "gos-supervisor",
 ]
 
