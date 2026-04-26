@@ -237,9 +237,14 @@ impl<'a> ParsedElf<'a> {
 // symbol references — exactly what GOS plugins are constrained to.
 
 pub const DT_NULL: u64 = 0;
+pub const DT_HASH: u64 = 4;
+pub const DT_STRTAB: u64 = 5;
+pub const DT_SYMTAB: u64 = 6;
 pub const DT_RELA: u64 = 7;
 pub const DT_RELASZ: u64 = 8;
 pub const DT_RELAENT: u64 = 9;
+pub const DT_STRSZ: u64 = 10;
+pub const DT_SYMENT: u64 = 11;
 
 pub const R_X86_64_RELATIVE: u32 = 8;
 
@@ -250,6 +255,18 @@ pub struct DynamicTable {
     pub rela_offset: Option<u64>,
     pub rela_size: u64,
     pub rela_entry_size: u64,
+    /// Phase B.4.6.2 — `.dynsym` virtual address (the loader subtracts
+    /// PT_LOAD's p_vaddr to get a file offset).
+    pub symtab_vaddr: Option<u64>,
+    pub syment_size: u64,
+    /// `.dynstr` virtual address + size.  Symbols' name fields are
+    /// byte offsets into this table.
+    pub strtab_vaddr: Option<u64>,
+    pub strtab_size: u64,
+    /// `.hash` virtual address — when present we can use it to skip
+    /// the linear sym-table walk; in B.4.6.2 we always linear-scan,
+    /// hash table support is a follow-up.
+    pub hash_vaddr: Option<u64>,
 }
 
 impl DynamicTable {
@@ -258,9 +275,16 @@ impl DynamicTable {
             rela_offset: None,
             rela_size: 0,
             rela_entry_size: ELF64_RELA_SIZE as u64,
+            symtab_vaddr: None,
+            syment_size: ELF64_SYM_SIZE as u64,
+            strtab_vaddr: None,
+            strtab_size: 0,
+            hash_vaddr: None,
         }
     }
 }
+
+pub const ELF64_SYM_SIZE: usize = 24;
 
 impl<'a> ParsedElf<'a> {
     /// Walk PT_DYNAMIC and collect the RELA-table descriptors.
@@ -289,7 +313,12 @@ impl<'a> ParsedElf<'a> {
                 DT_RELA => table.rela_offset = Some(val),
                 DT_RELASZ => table.rela_size = val,
                 DT_RELAENT => table.rela_entry_size = val,
-                _ => {} // ignored — we handle only RELATIVE for now
+                DT_SYMTAB => table.symtab_vaddr = Some(val),
+                DT_SYMENT => table.syment_size = val,
+                DT_STRTAB => table.strtab_vaddr = Some(val),
+                DT_STRSZ => table.strtab_size = val,
+                DT_HASH => table.hash_vaddr = Some(val),
+                _ => {} // ignored
             }
             cur += 16;
         }
@@ -298,8 +327,109 @@ impl<'a> ParsedElf<'a> {
                 return Err(ElfError::BadDynamic);
             }
         }
+        if table.symtab_vaddr.is_some() && table.syment_size as usize != ELF64_SYM_SIZE {
+            return Err(ElfError::BadDynamic);
+        }
         Ok(table)
     }
+
+    /// Phase B.4.6.2 — resolve a dynamic symbol name to its
+    /// `(vaddr, size)`.  Walks `.dynsym` linearly; uses `.dynstr`
+    /// (DT_STRTAB) for the name comparison.
+    ///
+    /// The `image` byte slice is the *file* image.  Symbol vaddrs in
+    /// ELF are absolute virtual addresses against the image base; for
+    /// a position-independent ET_DYN the loader adds `image_base`
+    /// after relocation, so what we return here is the *file-relative*
+    /// offset suitable for jumping to once the segment is mapped at
+    /// image_base.
+    ///
+    /// Returns `None` if the symbol isn't in the table.
+    pub fn lookup_dynamic_symbol(&self, name: &[u8]) -> Result<Option<u64>, ElfError> {
+        let table = self.parse_dynamic()?;
+        let (Some(symtab_vaddr), Some(strtab_vaddr)) =
+            (table.symtab_vaddr, table.strtab_vaddr)
+        else {
+            return Ok(None);
+        };
+        let symtab_off = vaddr_to_file_offset(self, symtab_vaddr)?;
+        let strtab_off = vaddr_to_file_offset(self, strtab_vaddr)?;
+        let strtab_end = strtab_off
+            .checked_add(table.strtab_size as usize)
+            .ok_or(ElfError::BadDynamic)?;
+        if strtab_end > self.data.len() {
+            return Err(ElfError::BadDynamic);
+        }
+        let strtab = &self.data[strtab_off..strtab_end];
+
+        // We don't know the sym-table count from PT_DYNAMIC alone (no
+        // DT_SYMSZ in spec).  Walk until we hit a symbol whose name
+        // offset is out-of-range or whose entry would extend past the
+        // file — both are corruption signals.
+        let mut cur = symtab_off;
+        loop {
+            if cur + ELF64_SYM_SIZE > self.data.len() {
+                break;
+            }
+            let st_name = read_u32(self.data, cur).ok_or(ElfError::BadDynamic)?;
+            // Symbol 0 is reserved (STN_UNDEF) — name=0 means empty.
+            if st_name as usize >= strtab.len() {
+                break;
+            }
+            let st_value = read_u64(self.data, cur + 8).ok_or(ElfError::BadDynamic)?;
+            let st_size = read_u64(self.data, cur + 16).ok_or(ElfError::BadDynamic)?;
+            // Compare name (NUL-terminated within strtab).
+            let sym_name = c_str_at(strtab, st_name as usize);
+            if sym_name == name {
+                let _ = st_size;
+                return Ok(Some(st_value));
+            }
+            // Stop when we hit the symbol-table terminator (st_name=0
+            // and st_value=0); first symbol legitimately has st_name=0.
+            if st_name == 0 && st_value == 0 && cur != symtab_off {
+                break;
+            }
+            cur += ELF64_SYM_SIZE;
+        }
+        Ok(None)
+    }
+}
+
+/// Translate an ELF virtual address (image-relative, since ET_DYN's
+/// PT_LOAD usually has p_vaddr == p_offset) to a file offset.  Walks
+/// PT_LOAD segments to find which one contains the address.
+fn vaddr_to_file_offset(parsed: &ParsedElf, vaddr: u64) -> Result<usize, ElfError> {
+    let phoff = read_u64(parsed.data, 32).ok_or(ElfError::BadDynamic)? as usize;
+    let phentsize = 56usize;
+    for idx in 0..parsed.program_headers as usize {
+        let off = phoff + idx * phentsize;
+        let p_type = read_u32(parsed.data, off).unwrap_or(0);
+        if p_type != PT_LOAD {
+            continue;
+        }
+        let p_offset = read_u64(parsed.data, off + 8).unwrap_or(0);
+        let p_vaddr = read_u64(parsed.data, off + 16).unwrap_or(0);
+        let p_filesz = read_u64(parsed.data, off + 32).unwrap_or(0);
+        if vaddr >= p_vaddr && vaddr < p_vaddr + p_filesz {
+            let delta = vaddr - p_vaddr;
+            return Ok((p_offset + delta) as usize);
+        }
+    }
+    Err(ElfError::BadDynamic)
+}
+
+fn c_str_at(buf: &[u8], offset: usize) -> &[u8] {
+    if offset >= buf.len() {
+        return &[];
+    }
+    let mut end = offset;
+    while end < buf.len() && buf[end] != 0 {
+        end += 1;
+    }
+    &buf[offset..end]
+}
+
+impl<'a> ParsedElf<'a> {
 
     /// Apply R_X86_64_RELATIVE relocations against an in-memory image.
     ///

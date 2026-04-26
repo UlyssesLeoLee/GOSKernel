@@ -679,6 +679,118 @@ fn vfs_trait_drives_a_synthetic_in_memory_filesystem() {
     let _src = MountSource::from_block(vtable);
 }
 
+// Phase B.4.6.2 — dynamic symbol resolution.
+//
+// Hand-craft an ET_DYN with PT_LOAD covering the symtab + strtab and
+// PT_DYNAMIC pointing at them.  Verify lookup_dynamic_symbol returns
+// the right vaddr for "module_init" and None for unknown names.
+#[test]
+fn elf_lookup_dynamic_symbol_resolves_named_entries() {
+    use gos_loader::elf::{
+        parse, DT_NULL, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB, ELF64_SYM_SIZE,
+        PT_DYNAMIC, PT_LOAD,
+    };
+
+    // We lay everything end-to-end inside a single PT_LOAD so vaddrs
+    // and file offsets coincide (p_vaddr = p_offset = 0).  Layout:
+    //   0x000  ELF header                (64 bytes)
+    //   0x040  program headers (2 * 56)  (112 bytes)
+    //   0x0B0  PT_DYNAMIC payload (5*16) (80 bytes)
+    //   0x100  symtab — 3 sym entries    (3 * 24 = 72 bytes)
+    //   0x148  strtab                    (variable)
+    //          "\0module_init\0module_event\0"
+    let mut elf = vec![0u8; 0x200];
+    let phoff: u64 = 0x40;
+    let dyn_offset: u64 = 0xB0;
+    let symtab_offset: u64 = 0x100;
+    let strtab_offset: u64 = 0x148;
+    let strtab_bytes = b"\0module_init\0module_event\0";
+    let strtab_size: u64 = strtab_bytes.len() as u64;
+
+    // ── ELF header ───────────────────────────────────────────────────
+    elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[7] = 0;
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    elf[24..32].copy_from_slice(&0u64.to_le_bytes());
+    elf[32..40].copy_from_slice(&phoff.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&2u16.to_le_bytes());
+
+    // ── PT_LOAD covering everything: vaddr=0, filesz=0x200 ──────────
+    let ph0 = phoff as usize;
+    elf[ph0..ph0 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+    elf[ph0 + 4..ph0 + 8].copy_from_slice(&5u32.to_le_bytes());
+    elf[ph0 + 8..ph0 + 16].copy_from_slice(&0u64.to_le_bytes());   // p_offset
+    elf[ph0 + 16..ph0 + 24].copy_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf[ph0 + 24..ph0 + 32].copy_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf[ph0 + 32..ph0 + 40].copy_from_slice(&0x200u64.to_le_bytes()); // p_filesz
+    elf[ph0 + 40..ph0 + 48].copy_from_slice(&0x200u64.to_le_bytes()); // p_memsz
+
+    // ── PT_DYNAMIC ───────────────────────────────────────────────────
+    let ph1 = ph0 + 56;
+    elf[ph1..ph1 + 4].copy_from_slice(&PT_DYNAMIC.to_le_bytes());
+    elf[ph1 + 4..ph1 + 8].copy_from_slice(&6u32.to_le_bytes());
+    elf[ph1 + 8..ph1 + 16].copy_from_slice(&dyn_offset.to_le_bytes());
+    elf[ph1 + 16..ph1 + 24].copy_from_slice(&dyn_offset.to_le_bytes());
+    elf[ph1 + 24..ph1 + 32].copy_from_slice(&0u64.to_le_bytes());
+    elf[ph1 + 32..ph1 + 40].copy_from_slice(&80u64.to_le_bytes());
+    elf[ph1 + 40..ph1 + 48].copy_from_slice(&80u64.to_le_bytes());
+
+    // ── PT_DYNAMIC payload: SYMTAB / SYMENT / STRTAB / STRSZ / NULL
+    let dyn_off = dyn_offset as usize;
+    let mut put = |i: usize, tag: u64, val: u64| {
+        let base = dyn_off + i * 16;
+        elf[base..base + 8].copy_from_slice(&tag.to_le_bytes());
+        elf[base + 8..base + 16].copy_from_slice(&val.to_le_bytes());
+    };
+    put(0, DT_SYMTAB, symtab_offset);
+    put(1, DT_SYMENT, ELF64_SYM_SIZE as u64);
+    put(2, DT_STRTAB, strtab_offset);
+    put(3, DT_STRSZ, strtab_size);
+    put(4, DT_NULL, 0);
+
+    // ── Symbol table: STN_UNDEF, module_init, module_event ──────────
+    let sym_off = symtab_offset as usize;
+    let mut put_sym = |i: usize, name_off: u32, value: u64| {
+        let base = sym_off + i * ELF64_SYM_SIZE;
+        elf[base..base + 4].copy_from_slice(&name_off.to_le_bytes());
+        elf[base + 4] = 0; // st_info
+        elf[base + 5] = 0; // st_other
+        elf[base + 6..base + 8].copy_from_slice(&0u16.to_le_bytes()); // st_shndx
+        elf[base + 8..base + 16].copy_from_slice(&value.to_le_bytes()); // st_value
+        elf[base + 16..base + 24].copy_from_slice(&0u64.to_le_bytes()); // st_size
+    };
+    put_sym(0, 0, 0);
+    // strtab offset 1 -> "module_init"
+    put_sym(1, 1, 0xCAFE);
+    // strtab offset 13 -> "module_event"
+    put_sym(2, 13, 0xBEEF);
+
+    let strtab_off = strtab_offset as usize;
+    elf[strtab_off..strtab_off + strtab_bytes.len()].copy_from_slice(strtab_bytes);
+
+    // ── Resolve ─────────────────────────────────────────────────────
+    let parsed = parse(&elf).expect("valid ELF");
+    let init = parsed
+        .lookup_dynamic_symbol(b"module_init")
+        .expect("dyn lookup")
+        .expect("symbol present");
+    assert_eq!(init, 0xCAFE);
+    let event = parsed
+        .lookup_dynamic_symbol(b"module_event")
+        .expect("dyn lookup")
+        .expect("symbol present");
+    assert_eq!(event, 0xBEEF);
+    let stop = parsed
+        .lookup_dynamic_symbol(b"module_stop")
+        .expect("dyn lookup");
+    assert!(stop.is_none(), "missing symbol must return None");
+}
+
 // Phase B.4.6.1 — R_X86_64_RELATIVE relocation walker.  Hand-craft an
 // ET_DYN ELF with one PT_LOAD + one PT_DYNAMIC pointing at a one-entry
 // .rela.dyn table; apply against a loaded-image buffer; verify the
