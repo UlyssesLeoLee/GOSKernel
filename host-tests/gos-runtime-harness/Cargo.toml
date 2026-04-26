@@ -11,3 +11,4 @@ gos-runtime = { path = "../../crates/gos-runtime" }
 gos-loader = { path = "../../crates/gos-loader" }
 gos-log = { path = "../../crates/gos-log" }
 gos-vfs = { path = "../../crates/gos-vfs" }
+k-fat32 = { path = "../../crates/k-fat32" }

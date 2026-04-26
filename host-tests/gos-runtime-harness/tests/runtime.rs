@@ -171,6 +171,159 @@ fn gos_log_routes_to_serial_and_structured_backends_with_filtering() {
     assert_eq!(LAST_TRUNCATED.load(AOrd::SeqCst), 1);
 }
 
+// Phase F.3.1: minimal FAT32 reader — hand-craft a 32 KiB FAT32 image
+// in memory, expose it through BlockDeviceVTable, mount via k-fat32,
+// and exercise the FileSystem trait end-to-end (lookup, read, readdir).
+//
+// Layout:
+//   sector  0      — boot sector + BPB
+//   sector  1      — FSInfo (we don't read it, just zero-fill)
+//   sectors 2..3   — FAT 1 (single sector, 128 entries)
+//   sectors 3..4   — FAT 2 (mirror)
+//   sectors 4+     — data region; cluster N maps to sector 4 + (N-2)
+//   cluster 2 (sector 4) — root directory: one file entry "HELLO.TXT"
+//   cluster 3 (sector 5) — file content: b"hello, fat32"
+#[test]
+fn fat32_minimal_image_round_trips_lookup_read_and_readdir() {
+    use gos_protocol::block::{
+        BlockDeviceVTable, BlockGeometry, BlockIoStatus, BLOCK_SECTOR_SIZE_DEFAULT,
+    };
+    use gos_vfs::{DirEntry, FileSystem, InodeKind, MountId};
+    use k_fat32::Fat32;
+    use std::sync::Mutex as StdMutex;
+
+    const TOTAL_SECTORS: usize = 64;
+    const SECTOR_SIZE: usize = 512;
+    static IMAGE: StdMutex<Vec<u8>> = StdMutex::new(Vec::new());
+
+    {
+        let mut img = IMAGE.lock().unwrap();
+        img.clear();
+        img.resize(TOTAL_SECTORS * SECTOR_SIZE, 0u8);
+
+        // ── sector 0: boot sector + BPB ──────────────────────────────
+        // OEM name (irrelevant)
+        img[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]); // jmp short
+        img[3..0x0B].copy_from_slice(b"GOS_FAT3");
+
+        img[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes()); // bytes/sector
+        img[0x0D] = 1; // sectors/cluster
+        img[0x0E..0x10].copy_from_slice(&2u16.to_le_bytes()); // reserved sectors
+        img[0x10] = 2; // num FATs
+        img[0x11..0x13].copy_from_slice(&0u16.to_le_bytes()); // root entry count (FAT32 = 0)
+        img[0x13..0x15].copy_from_slice(&0u16.to_le_bytes()); // total sectors 16
+        img[0x15] = 0xF8; // media descriptor
+        img[0x16..0x18].copy_from_slice(&0u16.to_le_bytes()); // FATSz16 (FAT32 = 0)
+        img[0x20..0x24].copy_from_slice(&(TOTAL_SECTORS as u32).to_le_bytes()); // total sectors 32
+        img[0x24..0x28].copy_from_slice(&1u32.to_le_bytes()); // FATSz32
+        img[0x2C..0x30].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+        img[0x1FE] = 0x55;
+        img[0x1FF] = 0xAA;
+
+        // ── FAT 1 + FAT 2: cluster 0 reserved, cluster 1 reserved,
+        //    cluster 2 (root dir) = EOC, cluster 3 (file) = EOC ──────
+        for fat in 0..2 {
+            let off = (2 + fat) * SECTOR_SIZE;
+            // entry 0/1: media + EOC sentinels
+            img[off..off + 4].copy_from_slice(&0x0FFFFFF8u32.to_le_bytes());
+            img[off + 4..off + 8].copy_from_slice(&0x0FFFFFFFu32.to_le_bytes());
+            // entry 2 (root dir cluster): EOC
+            img[off + 8..off + 12].copy_from_slice(&0x0FFFFFFFu32.to_le_bytes());
+            // entry 3 (file cluster):    EOC
+            img[off + 12..off + 16].copy_from_slice(&0x0FFFFFFFu32.to_le_bytes());
+        }
+
+        // ── root directory at sector 4 (cluster 2): one entry ───────
+        let root_off = 4 * SECTOR_SIZE;
+        let entry = &mut img[root_off..root_off + 32];
+        entry[0..8].copy_from_slice(b"HELLO   "); // name padded with spaces
+        entry[8..11].copy_from_slice(b"TXT"); // ext
+        entry[11] = 0x20; // ATTR_ARCHIVE
+        // first cluster split: high@20..22, low@26..28
+        entry[20..22].copy_from_slice(&0u16.to_le_bytes());
+        entry[26..28].copy_from_slice(&3u16.to_le_bytes()); // cluster 3
+        entry[28..32].copy_from_slice(&12u32.to_le_bytes()); // file size
+
+        // ── file content at sector 5 (cluster 3) ────────────────────
+        let file_off = 5 * SECTOR_SIZE;
+        img[file_off..file_off + 12].copy_from_slice(b"hello, fat32");
+    }
+
+    // BlockDevice vtable backed by the static IMAGE buffer.
+    unsafe extern "C" fn read(_h: u64, lba: u64, buf: *mut u8, len: u32) -> i32 {
+        if len != BLOCK_SECTOR_SIZE_DEFAULT {
+            return BlockIoStatus::BadBuffer as i32;
+        }
+        let img = IMAGE.lock().unwrap();
+        let off = (lba as usize) * SECTOR_SIZE;
+        if off + SECTOR_SIZE > img.len() {
+            return BlockIoStatus::OutOfBounds as i32;
+        }
+        let dst = unsafe { core::slice::from_raw_parts_mut(buf, SECTOR_SIZE) };
+        dst.copy_from_slice(&img[off..off + SECTOR_SIZE]);
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn write(_h: u64, _lba: u64, _buf: *const u8, _len: u32) -> i32 {
+        BlockIoStatus::DeviceError as i32 // read-only
+    }
+    unsafe extern "C" fn flush(_h: u64) -> i32 {
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn geometry(_h: u64) -> BlockGeometry {
+        BlockGeometry {
+            sector_count: TOTAL_SECTORS as u64,
+            sector_size: BLOCK_SECTOR_SIZE_DEFAULT,
+            flags: 1, // RO
+        }
+    }
+    let vtable = BlockDeviceVTable {
+        handle: 0,
+        read_sector: read,
+        write_sector: write,
+        flush,
+        geometry,
+    };
+
+    // ── Mount + verify BPB ───────────────────────────────────────────
+    let fs = Fat32::mount(MountId(1), vtable).expect("mount FAT32");
+    let bpb = fs.bpb();
+    assert_eq!(bpb.bytes_per_sector, 512);
+    assert_eq!(bpb.sectors_per_cluster, 1);
+    assert_eq!(bpb.num_fats, 2);
+    assert_eq!(bpb.root_cluster, 2);
+    assert_eq!(bpb.data_start_sector, 4);
+
+    // ── readdir ─────────────────────────────────────────────────────
+    let root = fs.root();
+    let mut entries = [DirEntry::empty(); 8];
+    let (n, next) = fs.read_dir(root, 0, &mut entries).expect("readdir");
+    assert_eq!(n, 1);
+    assert_eq!(next, u64::MAX);
+    assert_eq!(entries[0].name(), b"HELLO.TXT");
+    assert_eq!(entries[0].inode.kind, InodeKind::File);
+    assert_eq!(entries[0].inode.size_bytes, 12);
+
+    // ── lookup + read ────────────────────────────────────────────────
+    let hello = fs.lookup(root, b"HELLO.TXT").expect("lookup");
+    assert_eq!(hello.kind, InodeKind::File);
+    let mut buf = [0u8; 32];
+    let n = fs.read(hello, 0, &mut buf).expect("read");
+    assert_eq!(n, 12);
+    assert_eq!(&buf[..n], b"hello, fat32");
+
+    // ── partial read at offset ───────────────────────────────────────
+    let n = fs.read(hello, 7, &mut buf).expect("offset read");
+    assert_eq!(n, 5);
+    assert_eq!(&buf[..n], b"fat32");
+
+    // ── lookup miss ──────────────────────────────────────────────────
+    use gos_vfs::VfsError;
+    match fs.lookup(root, b"NOPE") {
+        Err(VfsError::NotFound) => {}
+        other => panic!("expected NotFound, got {:?}", other.map(|i| i.num.0)),
+    }
+}
+
 // Phase F.1 / F.2: BlockDevice ABI + VFS trait surface compile cleanly
 // and round-trip through a synthetic ramdisk implementation.  Locks in
 // the contract so the FAT32 implementation slated for F.3 can build

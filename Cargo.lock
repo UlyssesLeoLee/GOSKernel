@@ -53,6 +53,7 @@ dependencies = [
  "k-cpuid",
  "k-cuda-host",
  "k-cypher",
+ "k-fat32",
  "k-gdt",
  "k-heap",
  "k-idt",
@@ -165,6 +166,14 @@ version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+]
+
+[[package]]
+name = "k-fat32"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "gos-vfs",
 ]
 
 [[package]]

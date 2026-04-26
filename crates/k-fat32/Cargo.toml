@@ -1,0 +1,8 @@
+[package]
+name = "k-fat32"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-vfs = { path = "../gos-vfs" }

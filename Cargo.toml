@@ -9,6 +9,7 @@ members = [
     "crates/gos-log",
     "crates/gos-supervisor",
     "crates/gos-vfs",
+    "crates/k-fat32",
     "crates/k-panic",
     "crates/k-vga",
     "crates/k-serial",

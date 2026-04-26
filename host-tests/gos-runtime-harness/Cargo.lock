@@ -39,6 +39,7 @@ dependencies = [
  "gos-protocol",
  "gos-runtime",
  "gos-vfs",
+ "k-fat32",
 ]
 
 [[package]]
@@ -46,6 +47,14 @@ name = "gos-vfs"
 version = "0.1.0"
 dependencies = [
  "gos-protocol",
+]
+
+[[package]]
+name = "k-fat32"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "gos-vfs",
 ]
 
 [[package]]
