@@ -324,6 +324,200 @@ fn fat32_minimal_image_round_trips_lookup_read_and_readdir() {
     }
 }
 
+// Phase F.3.2 / F.3.3: FAT chain walking + subdirectory traversal.
+// Build a 64 KiB image (128 sectors) with:
+//   * a multi-cluster file (3 clusters, 1500-byte content)
+//   * a subdirectory containing one file
+// Verify read() walks the chain, lookup() recurses into the subdir,
+// and read_dir() resumes correctly across cluster boundaries.
+#[test]
+fn fat32_walks_cluster_chains_and_subdirectories() {
+    use gos_protocol::block::{
+        BlockDeviceVTable, BlockGeometry, BlockIoStatus, BLOCK_SECTOR_SIZE_DEFAULT,
+    };
+    use gos_vfs::{DirEntry, FileSystem, InodeKind, MountId};
+    use k_fat32::Fat32;
+    use std::sync::Mutex as StdMutex;
+
+    const TOTAL_SECTORS: usize = 128;
+    const SECTOR_SIZE: usize = 512;
+    static IMAGE2: StdMutex<Vec<u8>> = StdMutex::new(Vec::new());
+
+    {
+        let mut img = IMAGE2.lock().unwrap();
+        img.clear();
+        img.resize(TOTAL_SECTORS * SECTOR_SIZE, 0u8);
+
+        // Layout
+        //   sector 0       BPB
+        //   sectors 2..4   FAT 1 (2 sectors)  — chain entries below
+        //   sectors 4..6   FAT 2 (mirror)
+        //   sector 6+      data, cluster N -> sector 6 + (N-2)
+        //
+        //   cluster 2 (root dir):    dir entries (BIGFILE, SUB, ...)
+        //   clusters 3,4,5 (BIGFILE) chained: 3 -> 4 -> 5 -> EOC
+        //   cluster 6 (SUB dir):     contains "INNER" file
+        //   cluster 7 (INNER):       "from-subdir"
+        // BPB
+        img[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+        img[3..0x0B].copy_from_slice(b"GOS_FAT3");
+        img[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        img[0x0D] = 1; // sectors/cluster
+        img[0x0E..0x10].copy_from_slice(&2u16.to_le_bytes()); // reserved
+        img[0x10] = 2;
+        img[0x15] = 0xF8;
+        img[0x16..0x18].copy_from_slice(&0u16.to_le_bytes());
+        img[0x20..0x24].copy_from_slice(&(TOTAL_SECTORS as u32).to_le_bytes());
+        img[0x24..0x28].copy_from_slice(&2u32.to_le_bytes()); // FATSz32 = 2 sectors
+        img[0x2C..0x30].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+        img[0x1FE] = 0x55;
+        img[0x1FF] = 0xAA;
+
+        // FAT layout: cluster 0/1 reserved; 2 EOC; 3->4; 4->5; 5 EOC;
+        // 6 EOC (subdir single cluster); 7 EOC (inner file).
+        for fat in 0..2 {
+            let off = (2 + fat * 2) * SECTOR_SIZE;
+            // Reserved sentinels
+            let put = |off: usize, idx: u32, val: u32, img: &mut [u8]| {
+                let p = off + (idx as usize) * 4;
+                img[p..p + 4].copy_from_slice(&val.to_le_bytes());
+            };
+            put(off, 0, 0x0FFFFFF8, &mut img);
+            put(off, 1, 0x0FFFFFFF, &mut img);
+            put(off, 2, 0x0FFFFFFF, &mut img); // root
+            put(off, 3, 4, &mut img);            // BIGFILE chain
+            put(off, 4, 5, &mut img);
+            put(off, 5, 0x0FFFFFFF, &mut img);
+            put(off, 6, 0x0FFFFFFF, &mut img); // SUB
+            put(off, 7, 0x0FFFFFFF, &mut img); // INNER
+        }
+
+        // Root dir (sector 6 = cluster 2)
+        let root_off = 6 * SECTOR_SIZE;
+        // Entry 0: BIGFILE.BIN, cluster 3, size 1500
+        {
+            let e = &mut img[root_off..root_off + 32];
+            e[0..8].copy_from_slice(b"BIGFILE ");
+            e[8..11].copy_from_slice(b"BIN");
+            e[11] = 0x20;
+            e[26..28].copy_from_slice(&3u16.to_le_bytes());
+            e[28..32].copy_from_slice(&1500u32.to_le_bytes());
+        }
+        // Entry 1: SUB (directory), cluster 6
+        {
+            let e = &mut img[root_off + 32..root_off + 64];
+            e[0..8].copy_from_slice(b"SUB     ");
+            e[8..11].copy_from_slice(b"   ");
+            e[11] = ATTR_DIRECTORY_TEST;
+            e[26..28].copy_from_slice(&6u16.to_le_bytes());
+            e[28..32].copy_from_slice(&0u32.to_le_bytes());
+        }
+
+        // BIGFILE clusters (3,4,5).  Sectors 7,8,9.  Fill with
+        // increasing pattern so we can detect crossing boundaries.
+        for sec in 7..=9 {
+            let off = sec * SECTOR_SIZE;
+            for i in 0..512 {
+                img[off + i] = ((sec - 7) * 100 + (i & 0xFF)) as u8;
+            }
+        }
+
+        // SUB dir (cluster 6 = sector 10).
+        {
+            let sub_off = 10 * SECTOR_SIZE;
+            let e = &mut img[sub_off..sub_off + 32];
+            e[0..8].copy_from_slice(b"INNER   ");
+            e[8..11].copy_from_slice(b"TXT");
+            e[11] = 0x20;
+            e[26..28].copy_from_slice(&7u16.to_le_bytes());
+            e[28..32].copy_from_slice(&11u32.to_le_bytes());
+        }
+
+        // INNER content (cluster 7 = sector 11).
+        let inner_off = 11 * SECTOR_SIZE;
+        img[inner_off..inner_off + 11].copy_from_slice(b"from-subdir");
+    }
+    const ATTR_DIRECTORY_TEST: u8 = 0x10;
+
+    unsafe extern "C" fn read(_h: u64, lba: u64, buf: *mut u8, len: u32) -> i32 {
+        if len != BLOCK_SECTOR_SIZE_DEFAULT {
+            return BlockIoStatus::BadBuffer as i32;
+        }
+        let img = IMAGE2.lock().unwrap();
+        let off = (lba as usize) * SECTOR_SIZE;
+        if off + SECTOR_SIZE > img.len() {
+            return BlockIoStatus::OutOfBounds as i32;
+        }
+        let dst = unsafe { core::slice::from_raw_parts_mut(buf, SECTOR_SIZE) };
+        dst.copy_from_slice(&img[off..off + SECTOR_SIZE]);
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn nowrite(_h: u64, _: u64, _: *const u8, _: u32) -> i32 {
+        BlockIoStatus::DeviceError as i32
+    }
+    unsafe extern "C" fn flush(_h: u64) -> i32 {
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn geometry(_h: u64) -> BlockGeometry {
+        BlockGeometry {
+            sector_count: TOTAL_SECTORS as u64,
+            sector_size: BLOCK_SECTOR_SIZE_DEFAULT,
+            flags: 1,
+        }
+    }
+    let vtable = BlockDeviceVTable {
+        handle: 0,
+        read_sector: read,
+        write_sector: nowrite,
+        flush,
+        geometry,
+    };
+
+    let fs = Fat32::mount(MountId(2), vtable).expect("mount");
+    let root = fs.root();
+
+    // ── 1. Multi-cluster file: 1500 bytes spans clusters 3,4,5. ─────
+    let big = fs.lookup(root, b"BIGFILE.BIN").expect("lookup BIGFILE");
+    assert_eq!(big.size_bytes, 1500);
+    let mut buf = vec![0u8; 2048];
+    let n = fs.read(big, 0, &mut buf).expect("read BIGFILE");
+    assert_eq!(n, 1500);
+    // First byte of cluster 4 is at offset 512 — should encode (1*100 + 0)
+    assert_eq!(buf[512], 100);
+    // First byte of cluster 5 is at offset 1024 — should encode (2*100 + 0)
+    assert_eq!(buf[1024], 200);
+    // Past-EOF read returns 0
+    let n2 = fs.read(big, 1500, &mut buf).expect("eof read");
+    assert_eq!(n2, 0);
+    // Mid-chain offset
+    let n3 = fs.read(big, 1024, &mut buf).expect("offset read");
+    assert_eq!(n3, 476);
+    assert_eq!(buf[0], 200);
+
+    // ── 2. Subdirectory traversal. ───────────────────────────────────
+    let sub = fs.lookup(root, b"SUB").expect("lookup SUB");
+    assert_eq!(sub.kind, InodeKind::Directory);
+    let inner = fs.lookup(sub, b"INNER.TXT").expect("lookup INNER");
+    assert_eq!(inner.kind, InodeKind::File);
+    let n = fs.read(inner, 0, &mut buf).expect("read INNER");
+    assert_eq!(&buf[..n], b"from-subdir");
+
+    // ── 3. read_dir resumes across the cursor encoding. ─────────────
+    let mut entries = [DirEntry::empty(); 1];
+    let (n, cursor) = fs.read_dir(root, 0, &mut entries).expect("readdir page 1");
+    assert_eq!(n, 1);
+    assert_eq!(entries[0].name(), b"BIGFILE.BIN");
+    assert_ne!(cursor, u64::MAX, "must continue with cursor");
+    let (n, cursor) =
+        fs.read_dir(root, cursor, &mut entries).expect("readdir page 2");
+    assert_eq!(n, 1);
+    assert_eq!(entries[0].name(), b"SUB");
+    let (n, cursor) =
+        fs.read_dir(root, cursor, &mut entries).expect("readdir page 3");
+    assert_eq!(n, 0);
+    assert_eq!(cursor, u64::MAX);
+}
+
 // Phase F.1 / F.2: BlockDevice ABI + VFS trait surface compile cleanly
 // and round-trip through a synthetic ramdisk implementation.  Locks in
 // the contract so the FAT32 implementation slated for F.3 can build

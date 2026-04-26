@@ -174,6 +174,34 @@ impl Fat32 {
             Ok(())
         }
     }
+
+    /// Phase F.3.2 — FAT chain walking.  Reads the FAT entry for
+    /// `cluster` and returns `Some(next)` when the chain continues,
+    /// or `None` when this was the final cluster (FAT32 EOC values
+    /// are 0x0FFFFFF8..0x0FFFFFFF).  Bad clusters (0x0FFFFFF7) and
+    /// reserved values also map to `None`.
+    fn next_cluster(&self, cluster: u32) -> Result<Option<u32>, VfsError> {
+        // 4 bytes per FAT32 entry.
+        let fat_byte_offset = cluster as u64 * 4;
+        let fat_sector = self.bpb.reserved_sectors as u64
+            + (fat_byte_offset / BLOCK_SECTOR_SIZE_DEFAULT as u64);
+        let in_sector = (fat_byte_offset % BLOCK_SECTOR_SIZE_DEFAULT as u64) as usize;
+        let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
+        self.read_sector(fat_sector as u32, &mut sector)?;
+        let raw = u32::from_le_bytes([
+            sector[in_sector],
+            sector[in_sector + 1],
+            sector[in_sector + 2],
+            sector[in_sector + 3],
+        ]);
+        // FAT32 entries are 28-bit; high nibble is reserved.
+        let next = raw & 0x0FFF_FFFF;
+        if next >= 0x0FFF_FFF8 || next == 0x0FFF_FFF7 || next < 2 {
+            Ok(None)
+        } else {
+            Ok(Some(next))
+        }
+    }
 }
 
 fn copy_8_3_name(raw: &[u8], dst: &mut [u8; 64]) -> u8 {
@@ -217,49 +245,40 @@ impl FileSystem for Fat32 {
         if parent.kind != InodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
-        // F.3.1 limitation: only the first cluster of the directory is
-        // walked — fine for tiny root dirs (the FAT32 spec puts up to
-        // 16 entries per 512-byte sector; 1-cluster root = thousands
-        // of entries on default formats).
-        let cluster = parent.num.0 as u32;
-        let first_sector = self.bpb.cluster_to_sector(cluster);
+        // Phase F.3.2/F.3.3: walk the cluster chain so directories
+        // larger than one cluster (or any non-root subdirectory) are
+        // readable to the end.
+        let mut cluster = parent.num.0 as u32;
         let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
-        for s in 0..self.bpb.sectors_per_cluster {
-            self.read_sector(first_sector + s, &mut sector)?;
-            let entries = sector.len() / FAT_DIR_ENTRY_SIZE;
-            for e in 0..entries {
-                let off = e * FAT_DIR_ENTRY_SIZE;
-                let entry = &sector[off..off + FAT_DIR_ENTRY_SIZE];
-                if entry[0] == 0x00 {
-                    return Err(VfsError::NotFound); // end-of-directory
-                }
-                if entry[0] == 0xE5 || entry[11] == ATTR_LFN || entry[11] & ATTR_VOLUME_ID != 0 {
-                    continue;
-                }
-                let mut name_buf = [0u8; 64];
-                let n = copy_8_3_name(&entry[..11], &mut name_buf);
-                if &name_buf[..n as usize] == name {
-                    let cluster_lo = u16::from_le_bytes([entry[26], entry[27]]) as u32;
-                    let cluster_hi = u16::from_le_bytes([entry[20], entry[21]]) as u32;
-                    let cluster = (cluster_hi << 16) | cluster_lo;
-                    let size = u32::from_le_bytes([
-                        entry[28], entry[29], entry[30], entry[31],
-                    ]) as u64;
-                    let kind = if entry[11] & ATTR_DIRECTORY != 0 {
-                        InodeKind::Directory
-                    } else {
-                        InodeKind::File
-                    };
-                    return Ok(Inode {
-                        mount: self.mount,
-                        num: InodeNum(cluster as u64),
-                        kind,
-                        size_bytes: size,
-                    });
+        loop {
+            let first_sector = self.bpb.cluster_to_sector(cluster);
+            for s in 0..self.bpb.sectors_per_cluster {
+                self.read_sector(first_sector + s, &mut sector)?;
+                let entries = sector.len() / FAT_DIR_ENTRY_SIZE;
+                for e in 0..entries {
+                    let off = e * FAT_DIR_ENTRY_SIZE;
+                    let entry = &sector[off..off + FAT_DIR_ENTRY_SIZE];
+                    if entry[0] == 0x00 {
+                        return Err(VfsError::NotFound);
+                    }
+                    if entry[0] == 0xE5
+                        || entry[11] == ATTR_LFN
+                        || entry[11] & ATTR_VOLUME_ID != 0
+                    {
+                        continue;
+                    }
+                    let mut name_buf = [0u8; 64];
+                    let n = copy_8_3_name(&entry[..11], &mut name_buf);
+                    if &name_buf[..n as usize] == name {
+                        return Ok(Self::entry_to_inode(self.mount, entry));
+                    }
                 }
             }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => return Err(VfsError::NotFound),
+            }
         }
-        Err(VfsError::NotFound)
     }
 
     fn read(&self, inode: Inode, offset: u64, out: &mut [u8]) -> Result<usize, VfsError> {
@@ -269,29 +288,52 @@ impl FileSystem for Fat32 {
         if offset >= inode.size_bytes {
             return Ok(0);
         }
-        let cluster = inode.num.0 as u32;
-        let first_sector = self.bpb.cluster_to_sector(cluster);
+        // Phase F.3.2: walk the FAT chain.  We compute "skip N
+        // clusters from the start" before reading begins, then keep
+        // following the chain until either the request is satisfied,
+        // file size is reached, or the chain ends prematurely (which
+        // is corruption — surfaces as a short read).
         let cluster_bytes = self.bpb.cluster_size_bytes() as u64;
-        // F.3.1 limitation: single cluster only.  F.3.2 extends to FAT
-        // chain walking.
-        let max = inode.size_bytes.min(cluster_bytes) as usize;
-        if offset as usize >= max {
+        let want = (inode.size_bytes - offset).min(out.len() as u64) as usize;
+        if want == 0 {
             return Ok(0);
         }
-        let want = out.len().min(max - offset as usize);
-        let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
+        let skip_clusters = offset / cluster_bytes;
+        let mut cluster = inode.num.0 as u32;
+        for _ in 0..skip_clusters {
+            cluster = match self.next_cluster(cluster)? {
+                Some(next) => next,
+                None => return Ok(0), // offset past chain end
+            };
+        }
+
         let mut written = 0usize;
-        let mut cur_off = offset as usize;
+        let mut cur_off = (offset % cluster_bytes) as usize;
+        let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
         while written < want {
-            let sector_idx = cur_off / BLOCK_SECTOR_SIZE_DEFAULT as usize;
-            let in_sector_off = cur_off % BLOCK_SECTOR_SIZE_DEFAULT as usize;
-            self.read_sector(first_sector + sector_idx as u32, &mut sector)?;
-            let chunk = (BLOCK_SECTOR_SIZE_DEFAULT as usize - in_sector_off)
-                .min(want - written);
-            out[written..written + chunk]
-                .copy_from_slice(&sector[in_sector_off..in_sector_off + chunk]);
-            written += chunk;
-            cur_off += chunk;
+            let first_sector = self.bpb.cluster_to_sector(cluster);
+            // Read inside the current cluster up to its boundary or
+            // up to `want`, whichever comes first.
+            while cur_off < cluster_bytes as usize && written < want {
+                let sector_idx = cur_off / BLOCK_SECTOR_SIZE_DEFAULT as usize;
+                let in_sector = cur_off % BLOCK_SECTOR_SIZE_DEFAULT as usize;
+                self.read_sector(first_sector + sector_idx as u32, &mut sector)?;
+                let chunk = (BLOCK_SECTOR_SIZE_DEFAULT as usize - in_sector)
+                    .min(want - written);
+                out[written..written + chunk]
+                    .copy_from_slice(&sector[in_sector..in_sector + chunk]);
+                written += chunk;
+                cur_off += chunk;
+            }
+            if written >= want {
+                break;
+            }
+            // Hop to next cluster.
+            cluster = match self.next_cluster(cluster)? {
+                Some(next) => next,
+                None => break, // chain ended early
+            };
+            cur_off = 0;
         }
         Ok(written)
     }
@@ -305,52 +347,89 @@ impl FileSystem for Fat32 {
         if dir.kind != InodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
-        let cluster = dir.num.0 as u32;
-        let first_sector = self.bpb.cluster_to_sector(cluster);
+        // Cursor encoding (Phase F.3.2):
+        //   0  -> "begin at first cluster of the directory, idx 0"
+        //   else: high 32 bits = current cluster, low 32 bits = entry
+        //         index within that cluster.  FAT32 cluster numbers
+        //         are >= 2 so the encoding is unambiguous.
         let cluster_entries =
             (self.bpb.cluster_size_bytes() as usize) / FAT_DIR_ENTRY_SIZE;
+        let entries_per_sector =
+            BLOCK_SECTOR_SIZE_DEFAULT as usize / FAT_DIR_ENTRY_SIZE;
+
+        let (mut cluster, mut idx) = if cursor == 0 {
+            (dir.num.0 as u32, 0usize)
+        } else {
+            ((cursor >> 32) as u32, (cursor & 0xFFFF_FFFF) as usize)
+        };
+
         let mut written = 0usize;
         let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
-        let mut idx = cursor as usize;
-        while idx < cluster_entries && written < entries.len() {
-            let sector_idx = idx / (BLOCK_SECTOR_SIZE_DEFAULT as usize / FAT_DIR_ENTRY_SIZE);
-            let in_sector =
-                idx % (BLOCK_SECTOR_SIZE_DEFAULT as usize / FAT_DIR_ENTRY_SIZE);
-            self.read_sector(first_sector + sector_idx as u32, &mut sector)?;
-            let off = in_sector * FAT_DIR_ENTRY_SIZE;
-            let entry = &sector[off..off + FAT_DIR_ENTRY_SIZE];
-            if entry[0] == 0x00 {
-                return Ok((written, u64::MAX));
+        loop {
+            while idx < cluster_entries && written < entries.len() {
+                let sector_idx = idx / entries_per_sector;
+                let in_sector = idx % entries_per_sector;
+                let first_sector = self.bpb.cluster_to_sector(cluster);
+                self.read_sector(first_sector + sector_idx as u32, &mut sector)?;
+                let off = in_sector * FAT_DIR_ENTRY_SIZE;
+                let entry = &sector[off..off + FAT_DIR_ENTRY_SIZE];
+                if entry[0] == 0x00 {
+                    return Ok((written, u64::MAX));
+                }
+                idx += 1;
+                if entry[0] == 0xE5
+                    || entry[11] == ATTR_LFN
+                    || entry[11] & ATTR_VOLUME_ID != 0
+                {
+                    continue;
+                }
+                let mut de = DirEntry::empty();
+                let n = copy_8_3_name(&entry[..11], &mut de.name);
+                de.name_len = n;
+                de.inode = Self::entry_to_inode(self.mount, entry);
+                entries[written] = de;
+                written += 1;
             }
-            idx += 1;
-            if entry[0] == 0xE5 || entry[11] == ATTR_LFN || entry[11] & ATTR_VOLUME_ID != 0 {
-                continue;
-            }
-            let mut de = DirEntry::empty();
-            let n = copy_8_3_name(&entry[..11], &mut de.name);
-            de.name_len = n;
-            let cluster_lo = u16::from_le_bytes([entry[26], entry[27]]) as u32;
-            let cluster_hi = u16::from_le_bytes([entry[20], entry[21]]) as u32;
-            let inode_cluster = (cluster_hi << 16) | cluster_lo;
-            let size = u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]) as u64;
-            de.inode = Inode {
-                mount: self.mount,
-                num: InodeNum(inode_cluster as u64),
-                kind: if entry[11] & ATTR_DIRECTORY != 0 {
-                    InodeKind::Directory
+            if written >= entries.len() {
+                let next = if idx >= cluster_entries {
+                    match self.next_cluster(cluster)? {
+                        Some(c) => (c as u64) << 32,
+                        None => u64::MAX,
+                    }
                 } else {
-                    InodeKind::File
-                },
-                size_bytes: size,
-            };
-            entries[written] = de;
-            written += 1;
+                    ((cluster as u64) << 32) | (idx as u64)
+                };
+                return Ok((written, next));
+            }
+            // Cluster exhausted but caller still has buffer space —
+            // chain to the next cluster.
+            match self.next_cluster(cluster)? {
+                Some(next) => {
+                    cluster = next;
+                    idx = 0;
+                }
+                None => return Ok((written, u64::MAX)),
+            }
         }
-        let next = if idx >= cluster_entries {
-            u64::MAX
+    }
+}
+
+impl Fat32 {
+    fn entry_to_inode(mount: MountId, entry: &[u8]) -> Inode {
+        let cluster_lo = u16::from_le_bytes([entry[26], entry[27]]) as u32;
+        let cluster_hi = u16::from_le_bytes([entry[20], entry[21]]) as u32;
+        let cluster = (cluster_hi << 16) | cluster_lo;
+        let size = u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]) as u64;
+        let kind = if entry[11] & ATTR_DIRECTORY != 0 {
+            InodeKind::Directory
         } else {
-            idx as u64
+            InodeKind::File
         };
-        Ok((written, next))
+        Inode {
+            mount,
+            num: InodeNum(cluster as u64),
+            kind,
+            size_bytes: size,
+        }
     }
 }
