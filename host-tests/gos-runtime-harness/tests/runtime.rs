@@ -679,6 +679,143 @@ fn vfs_trait_drives_a_synthetic_in_memory_filesystem() {
     let _src = MountSource::from_block(vtable);
 }
 
+// Phase B.4.6.3 — full .gosmod load pipeline.  Build an ET_DYN with a
+// PT_LOAD covering symtab/strtab/.rela.dyn, run load_etdyn, and assert:
+//   * relocations applied
+//   * module_init / module_event / module_stop offsets resolved
+//   * image buffer carries the relocated 8-byte target
+#[test]
+fn gosmod_load_etdyn_pipelines_relocs_and_symbols() {
+    use gos_loader::elf::{
+        DT_NULL, DT_RELA, DT_RELAENT, DT_RELASZ, DT_STRSZ, DT_STRTAB, DT_SYMENT,
+        DT_SYMTAB, ELF64_RELA_SIZE, ELF64_SYM_SIZE, PT_DYNAMIC, PT_LOAD,
+    };
+    use gos_loader::gosmod::{load_etdyn, LoadError};
+
+    // Layout (everything inside one PT_LOAD so vaddr == file offset):
+    //   0x000  ELF header
+    //   0x040  PHDRs (2 * 56)
+    //   0x0B0  PT_DYNAMIC payload (7 * 16 = 112 bytes)
+    //   0x120  symtab (3 * 24 = 72)
+    //   0x168  strtab (NUL + 3 names + sentinel)
+    //   0x1C0  .rela.dyn (1 * 24)
+    //   0x1D8  reloc target (8 bytes)
+    //   ...
+    let mut elf = vec![0u8; 0x300];
+    let phoff: u64 = 0x40;
+    let dyn_off: u64 = 0xB0;
+    let symtab_off: u64 = 0x120;
+    let strtab_off: u64 = 0x168;
+    let rela_off: u64 = 0x1C0;
+    let target_off: u64 = 0x1D8;
+
+    let strtab = b"\0module_init\0module_event\0module_stop\0";
+    let strsz = strtab.len() as u64;
+
+    // ELF header
+    elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[7] = 0;
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    elf[24..32].copy_from_slice(&0u64.to_le_bytes());
+    elf[32..40].copy_from_slice(&phoff.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&2u16.to_le_bytes());
+
+    // PT_LOAD covers entire file.
+    let p0 = phoff as usize;
+    elf[p0..p0 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+    elf[p0 + 4..p0 + 8].copy_from_slice(&5u32.to_le_bytes());
+    elf[p0 + 8..p0 + 16].copy_from_slice(&0u64.to_le_bytes()); // offset
+    elf[p0 + 16..p0 + 24].copy_from_slice(&0u64.to_le_bytes()); // vaddr
+    elf[p0 + 24..p0 + 32].copy_from_slice(&0u64.to_le_bytes()); // paddr
+    elf[p0 + 32..p0 + 40].copy_from_slice(&0x300u64.to_le_bytes()); // filesz
+    elf[p0 + 40..p0 + 48].copy_from_slice(&0x300u64.to_le_bytes()); // memsz
+
+    // PT_DYNAMIC
+    let p1 = p0 + 56;
+    elf[p1..p1 + 4].copy_from_slice(&PT_DYNAMIC.to_le_bytes());
+    elf[p1 + 4..p1 + 8].copy_from_slice(&6u32.to_le_bytes());
+    elf[p1 + 8..p1 + 16].copy_from_slice(&dyn_off.to_le_bytes());
+    elf[p1 + 16..p1 + 24].copy_from_slice(&dyn_off.to_le_bytes());
+    elf[p1 + 24..p1 + 32].copy_from_slice(&0u64.to_le_bytes());
+    elf[p1 + 32..p1 + 40].copy_from_slice(&112u64.to_le_bytes());
+    elf[p1 + 40..p1 + 48].copy_from_slice(&112u64.to_le_bytes());
+
+    // Dynamic payload
+    let dyn_o = dyn_off as usize;
+    let mut put = |i: usize, tag: u64, val: u64| {
+        let b = dyn_o + i * 16;
+        elf[b..b + 8].copy_from_slice(&tag.to_le_bytes());
+        elf[b + 8..b + 16].copy_from_slice(&val.to_le_bytes());
+    };
+    put(0, DT_SYMTAB, symtab_off);
+    put(1, DT_SYMENT, ELF64_SYM_SIZE as u64);
+    put(2, DT_STRTAB, strtab_off);
+    put(3, DT_STRSZ, strsz);
+    put(4, DT_RELA, rela_off);
+    put(5, DT_RELASZ, ELF64_RELA_SIZE as u64);
+    put(6, DT_RELAENT, ELF64_RELA_SIZE as u64);
+    // (DT_NULL would be put(7, ...) — but we sized the dynamic
+    // payload at 7 entries; the parse loop terminates either on
+    // DT_NULL or when out of bytes.  Pad with NULL just in case.)
+    let _ = DT_NULL;
+
+    // Symbol table — STN_UNDEF + 3 named entries
+    let st_o = symtab_off as usize;
+    let mut put_sym = |i: usize, name_off: u32, value: u64| {
+        let b = st_o + i * ELF64_SYM_SIZE;
+        elf[b..b + 4].copy_from_slice(&name_off.to_le_bytes());
+        elf[b + 4] = 0;
+        elf[b + 5] = 0;
+        elf[b + 6..b + 8].copy_from_slice(&0u16.to_le_bytes());
+        elf[b + 8..b + 16].copy_from_slice(&value.to_le_bytes());
+        elf[b + 16..b + 24].copy_from_slice(&0u64.to_le_bytes());
+    };
+    put_sym(0, 0, 0);
+    put_sym(1, 1, 0x100); // module_init -> offset 0x100
+    put_sym(2, 13, 0x200); // module_event -> 0x200
+    // We deliberately skip module_stop here to test the None case.
+
+    let stt = strtab_off as usize;
+    elf[stt..stt + strtab.len()].copy_from_slice(strtab);
+
+    // RELA: one R_X86_64_RELATIVE @ target_off, addend = 0x42
+    let rel = rela_off as usize;
+    elf[rel..rel + 8].copy_from_slice(&target_off.to_le_bytes());
+    elf[rel + 8..rel + 16].copy_from_slice(&8u64.to_le_bytes()); // type 8
+    elf[rel + 16..rel + 24].copy_from_slice(&0x42u64.to_le_bytes());
+
+    // Run the pipeline.
+    let mut image = vec![0u8; 0x300];
+    let image_base: u64 = 0xFFFF_8000_FACE_0000;
+    let loaded = load_etdyn(&elf, &mut image, image_base).expect("load OK");
+
+    assert_eq!(loaded.relocations_applied, 1);
+    assert_eq!(loaded.module_init_offset, Some(0x100));
+    assert_eq!(loaded.module_event_offset, Some(0x200));
+    assert_eq!(loaded.module_stop_offset, None);
+    assert!(loaded.image_size > 0);
+    assert!(loaded.segment_count >= 1);
+
+    // Reloc target now reads back as image_base + addend.
+    let observed =
+        u64::from_le_bytes(image[target_off as usize..target_off as usize + 8].try_into().unwrap());
+    assert_eq!(observed, image_base + 0x42);
+
+    // Mismatch: too-small image buffer surfaces as ImageBufferTooSmall.
+    let mut tiny = vec![0u8; 16];
+    match load_etdyn(&elf, &mut tiny, image_base) {
+        Err(LoadError::ImageBufferTooSmall { required }) => {
+            assert!(required > 16);
+        }
+        other => panic!("expected ImageBufferTooSmall, got {:?}", other),
+    }
+}
+
 // Phase B.4.6.2 — dynamic symbol resolution.
 //
 // Hand-craft an ET_DYN with PT_LOAD covering the symtab + strtab and

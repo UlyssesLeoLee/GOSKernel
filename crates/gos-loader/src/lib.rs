@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod elf;
+pub mod gosmod;
 
 use gos_protocol::{
     derive_edge_id, derive_node_id, BootContext, CapabilitySpec, EdgeSpec, EntryPolicy, ExecutorId,
