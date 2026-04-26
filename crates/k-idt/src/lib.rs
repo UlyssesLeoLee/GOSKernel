@@ -77,6 +77,26 @@ fn rdtsc() -> u64 {
 }
 
 // ── Trap Normalizer ───────────────────────────────────────────────────────────
+//
+// Three regimes:
+//   1. Hardware IRQs (vector >= 32): enqueue a Signal::Interrupt and EOI.
+//   2. CPU faults that may fire inside a native dispatch (#PF, #GP, #SS,
+//      #DF) — Phase B.4.3 routes these to gos_runtime::dispatch_fault,
+//      which calls into the supervisor's ModuleFaultPolicy if a current
+//      dispatching instance can be resolved.  Runs on a dedicated IST
+//      stack so the handler doesn't trip over the interrupted code's
+//      stack state.
+//   3. Other exceptions (#BP etc): fall through to enqueue.
+const FAULT_PAGE_FAULT: u64 = 14;
+const FAULT_GP: u64 = 13;
+const FAULT_DOUBLE: u64 = 8;
+const FAULT_STACK_SEGMENT: u64 = 12;
+
+#[inline]
+fn is_cpu_fault(vector: u64) -> bool {
+    matches!(vector, FAULT_PAGE_FAULT | FAULT_GP | FAULT_DOUBLE | FAULT_STACK_SEGMENT)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn gos_trap_normalizer(frame: *mut TrapFrame) {
     let frame = &mut *frame;
@@ -101,8 +121,23 @@ pub unsafe extern "C" fn gos_trap_normalizer(frame: *mut TrapFrame) {
     let buf_token: u64 = slot as u64;
     let event = HardwareEvent::from_trap(frame, buf_token, rdtsc());
 
-    let signal = Signal::Interrupt { irq: event.vector };
-    gos_runtime::post_irq_signal(event.vector, signal);
+    if is_cpu_fault(frame.vector) {
+        // Phase B.4.3: attribute the fault to the currently-dispatching
+        // instance and let the supervisor's fault policy decide what to
+        // do (restart / degrade / panic).  If no dispatch is active the
+        // fault was kernel-internal and the dispatch hook is a no-op.
+        if let Some(instance_id) = gos_runtime::dispatching_instance() {
+            gos_runtime::dispatch_fault(instance_id);
+        }
+        // We still post a signal so observers (shell, control-plane)
+        // see the trap; the supervisor's degrade path will have torn
+        // the offending instance down by the time pump() picks it up.
+        let signal = Signal::Interrupt { irq: event.vector };
+        gos_runtime::post_irq_signal(event.vector, signal);
+    } else {
+        let signal = Signal::Interrupt { irq: event.vector };
+        gos_runtime::post_irq_signal(event.vector, signal);
+    }
 
     if frame.trap_vector().is_irq() {
         let mut master = x86_64::instructions::port::Port::<u8>::new(0x20);
@@ -227,6 +262,7 @@ exc_handler_noerr!(handle_breakpoint, 3);
 exc_handler_err!(handle_page_fault, 14);
 exc_handler_err!(handle_general_protection, 13);
 exc_handler_err!(handle_double_fault, 8); // Double fault pushes error code 0
+exc_handler_err!(handle_stack_segment, 12); // Stack-segment fault
 
 irq_handler!(handle_irq_timer,    32);
 irq_handler!(handle_irq_keyboard, 33);
@@ -250,8 +286,19 @@ unsafe extern "C" fn idt_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     let mut idt = InterruptDescriptorTable::new();
 
     idt.breakpoint.set_handler_fn(core::mem::transmute(handle_breakpoint as *const () as usize));
-    idt.page_fault.set_handler_fn(core::mem::transmute(handle_page_fault as *const () as usize));
-    idt.general_protection_fault.set_handler_fn(core::mem::transmute(handle_general_protection as *const () as usize));
+    // Phase B.4.3: route the fault classes that may fire inside a native
+    // dispatch onto dedicated IST stacks (allocated in k-gdt) so the
+    // handler executes on a known-good stack regardless of the
+    // interrupted code's stack state.
+    idt.page_fault
+        .set_handler_fn(core::mem::transmute(handle_page_fault as *const () as usize))
+        .set_stack_index(k_gdt::PAGE_FAULT_IST_INDEX);
+    idt.general_protection_fault
+        .set_handler_fn(core::mem::transmute(handle_general_protection as *const () as usize))
+        .set_stack_index(k_gdt::GENERAL_PROTECTION_IST_INDEX);
+    idt.stack_segment_fault
+        .set_handler_fn(core::mem::transmute(handle_stack_segment as *const () as usize))
+        .set_stack_index(k_gdt::STACK_SEGMENT_IST_INDEX);
     idt.double_fault
         .set_handler_fn(core::mem::transmute(handle_double_fault as *const () as usize))
         .set_stack_index(k_gdt::DOUBLE_FAULT_IST_INDEX);

@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "gos-supervisor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
@@ -41,6 +41,7 @@ name = "gos-supervisor-harness"
 version = "0.1.0"
 dependencies = [
  "gos-protocol",
+ "gos-runtime",
  "gos-supervisor",
 ]
 

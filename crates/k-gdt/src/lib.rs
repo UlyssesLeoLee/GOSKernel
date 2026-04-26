@@ -20,6 +20,14 @@ use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+// Phase B.4.3: dedicated IST stacks for the fault classes that may fire
+// inside a native plugin dispatch.  Using separate stacks (instead of
+// reusing the kernel stack) ensures the handler can run even if the
+// interrupted code corrupted its own stack — and lets the fault path
+// safely call into the supervisor without a risk of recursion.
+pub const PAGE_FAULT_IST_INDEX: u16 = 1;
+pub const GENERAL_PROTECTION_IST_INDEX: u16 = 2;
+pub const STACK_SEGMENT_IST_INDEX: u16 = 3;
 pub const NODE_VEC: VectorAddress = VectorAddress::new(1, 3, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.gdt");
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
@@ -87,8 +95,30 @@ unsafe fn init_hal_state() {
     );
 
     let state = unsafe { &mut *state_ptr };
+    // ── IST stack 0: double fault (#DF) ───────────────────────────────────
     state.tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
         const STACK_SIZE: usize = 4096 * 5;
+        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+        let stack_start = VirtAddr::from_ptr(core::ptr::addr_of!(STACK) as *const ());
+        stack_start + STACK_SIZE
+    };
+    // ── IST stack 1: page fault (#PF) — Phase B.4.3 ───────────────────────
+    state.tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = {
+        const STACK_SIZE: usize = 4096 * 4;
+        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+        let stack_start = VirtAddr::from_ptr(core::ptr::addr_of!(STACK) as *const ());
+        stack_start + STACK_SIZE
+    };
+    // ── IST stack 2: general protection (#GP) — Phase B.4.3 ───────────────
+    state.tss.interrupt_stack_table[GENERAL_PROTECTION_IST_INDEX as usize] = {
+        const STACK_SIZE: usize = 4096 * 4;
+        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+        let stack_start = VirtAddr::from_ptr(core::ptr::addr_of!(STACK) as *const ());
+        stack_start + STACK_SIZE
+    };
+    // ── IST stack 3: stack-segment fault (#SS) — Phase B.4.3 ──────────────
+    state.tss.interrupt_stack_table[STACK_SEGMENT_IST_INDEX as usize] = {
+        const STACK_SIZE: usize = 4096 * 4;
         static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
         let stack_start = VirtAddr::from_ptr(core::ptr::addr_of!(STACK) as *const ());
         stack_start + STACK_SIZE

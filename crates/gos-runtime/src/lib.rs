@@ -1142,6 +1142,42 @@ fn current_dispatch_instance() -> Option<NodeInstanceId> {
     RUNTIME.lock().instance_id_for_vec(vector)
 }
 
+/// Public reader for the currently-dispatching instance.  Used by the
+/// fault path in k-idt to attribute CPU exceptions to whichever module
+/// was on the stack when the exception fired.  Returns None if the CPU
+/// is not inside a native dispatch (boot init, idle, etc).
+pub fn dispatching_instance() -> Option<NodeInstanceId> {
+    current_dispatch_instance()
+}
+
+// ── Fault dispatch hook (Phase B.4.3) ────────────────────────────────────────
+//
+// When a CPU exception fires inside a native plugin dispatch, the trap
+// normalizer needs to notify the supervisor so its ModuleFaultPolicy can
+// run.  To avoid a runtime->supervisor dependency cycle, the supervisor
+// installs a fault-dispatch hook here at bootstrap, and k-idt calls
+// `dispatch_fault(instance_id)` from the trap path.
+#[derive(Clone, Copy)]
+pub struct FaultDispatch {
+    pub fault: unsafe extern "C" fn(instance_id: NodeInstanceId),
+}
+
+static FAULT_DISPATCH: Mutex<Option<FaultDispatch>> = Mutex::new(None);
+
+pub fn install_fault_dispatch(hook: FaultDispatch) {
+    *FAULT_DISPATCH.lock() = Some(hook);
+}
+
+/// Notify the supervisor that the given instance has faulted at the CPU
+/// level (page fault, GP fault, etc).  No-op if no supervisor hook is
+/// installed (boot-time / unit tests).
+pub fn dispatch_fault(instance_id: NodeInstanceId) {
+    let hook = *FAULT_DISPATCH.lock();
+    if let Some(hook) = hook {
+        unsafe { (hook.fault)(instance_id) };
+    }
+}
+
 unsafe extern "C" fn kernel_alloc_pages(page_count: usize) -> *mut u8 {
     if page_count == 0 {
         return core::ptr::null_mut();

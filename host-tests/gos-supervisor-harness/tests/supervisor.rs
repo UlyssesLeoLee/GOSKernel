@@ -356,6 +356,49 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     assert_eq!(snap.heap_pages_used, 0);
 }
 
+// ── Phase B.4.3 regression: CPU fault dispatch hook ──────────────────────────
+//
+// gos_supervisor::bootstrap installs a fault-dispatch hook into
+// gos_runtime so the trap normalizer can route CPU exceptions
+// (#PF / #GP / #SS / #DF) to ModuleFaultPolicy.  The bridge is:
+//
+//   k-idt trap path
+//     -> gos_runtime::dispatch_fault(instance_id)
+//       -> [supervisor-installed hook]
+//         -> resolve instance -> module
+//         -> SUPERVISOR.fault_module(handle)
+//
+// This test exercises the hook end-to-end by calling
+// gos_runtime::dispatch_fault directly, then asserts the supervisor
+// reacted: PROVIDER has fault_policy = RestartAlways, so a single
+// dispatch_fault should bump restart_generation by 1.
+#[test]
+fn fault_dispatch_hook_attributes_cpu_fault_to_module_policy() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let instance_before = current_instance(provider).expect("primary instance");
+    let gen_before =
+        instance_restart_generation(instance_before).expect("gen pre-fault");
+    assert_eq!(gen_before, 0);
+
+    // Drive the same path k-idt's trap normalizer would.
+    gos_runtime::dispatch_fault(instance_before);
+
+    // The post-fault primary instance has been recycled by the restart;
+    // restart_generation on the new instance must be one higher.
+    let instance_after = current_instance(provider).expect("post-fault instance");
+    let gen_after =
+        instance_restart_generation(instance_after).expect("gen post-fault");
+    assert_eq!(
+        gen_after, 1,
+        "fault dispatch must trigger ModuleFaultPolicy::RestartAlways"
+    );
+}
+
 // ── Phase B.4.1 regression: per-module domain root ───────────────────────────
 //
 // After realize_boot_modules, every running module must have a non-zero

@@ -2121,6 +2121,12 @@ pub fn bootstrap(boot_payload: u64) {
         charge: heap_accounting_charge,
         credit: heap_accounting_credit,
     });
+    // Phase B.4.3: install the CPU-fault dispatch hook so k-idt's trap
+    // normalizer can attribute hardware exceptions (PF/GP/SS) to the
+    // running instance and apply ModuleFaultPolicy.
+    gos_runtime::install_fault_dispatch(gos_runtime::FaultDispatch {
+        fault: fault_dispatch,
+    });
 }
 
 unsafe extern "C" fn heap_accounting_charge(
@@ -2138,6 +2144,24 @@ unsafe extern "C" fn heap_accounting_credit(
     page_count: u32,
 ) {
     SUPERVISOR.lock().credit_heap(instance_id, page_count);
+}
+
+/// Hook invoked by the trap normalizer when a CPU exception fires
+/// inside a native dispatch.  Resolves instance -> module and applies
+/// the module's ModuleFaultPolicy via fault_module — same path as a
+/// runtime-level ExecStatus::Fault.
+unsafe extern "C" fn fault_dispatch(instance_id: NodeInstanceId) {
+    if instance_id == NodeInstanceId::ZERO {
+        return;
+    }
+    let handle = {
+        let guard = SUPERVISOR.lock();
+        let Ok(slot) = guard.find_instance_slot(instance_id) else {
+            return;
+        };
+        guard.instances[slot].module
+    };
+    let _ = SUPERVISOR.lock().fault_module(handle);
 }
 
 pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {
