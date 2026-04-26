@@ -43,6 +43,7 @@ version = "0.2.0"
 dependencies = [
  "bootloader",
  "gos-hal",
+ "gos-log",
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
@@ -77,6 +78,14 @@ version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+]
+
+[[package]]
+name = "gos-log"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
 ]
 
 [[package]]

@@ -103,6 +103,74 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase D.4: gos-log routes a formatted log call to both installed
+// backends, respects min-level filtering, and truncates oversize
+// payloads with the `truncated` flag set on the structured record.
+#[test]
+fn gos_log_routes_to_serial_and_structured_backends_with_filtering() {
+    use gos_log::{
+        install_serial_backend, install_structured_backend, set_min_level, LogLevel,
+        LogRecord, SerialBackend, StructuredBackend, LOG_PAYLOAD_BYTES,
+    };
+    use std::sync::atomic::{AtomicU32, Ordering as AOrd};
+    use std::sync::Mutex as StdMutex;
+
+    static SERIAL_HITS: AtomicU32 = AtomicU32::new(0);
+    static STRUCTURED_HITS: AtomicU32 = AtomicU32::new(0);
+    static LAST_LEVEL: AtomicU32 = AtomicU32::new(0);
+    static LAST_PAYLOAD: StdMutex<Vec<u8>> = StdMutex::new(Vec::new());
+    static LAST_TRUNCATED: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn ser(level: u8, _src: *const u8, msg: *const u8, len: u32) {
+        SERIAL_HITS.fetch_add(1, AOrd::SeqCst);
+        LAST_LEVEL.store(level as u32, AOrd::SeqCst);
+        let bytes = unsafe { core::slice::from_raw_parts(msg, len as usize) };
+        let mut p = LAST_PAYLOAD.lock().unwrap();
+        p.clear();
+        p.extend_from_slice(bytes);
+    }
+    unsafe extern "C" fn structured(record: *const LogRecord) {
+        STRUCTURED_HITS.fetch_add(1, AOrd::SeqCst);
+        let r = unsafe { &*record };
+        LAST_TRUNCATED.store(r.truncated as u32, AOrd::SeqCst);
+    }
+
+    SERIAL_HITS.store(0, AOrd::SeqCst);
+    STRUCTURED_HITS.store(0, AOrd::SeqCst);
+    LAST_TRUNCATED.store(0, AOrd::SeqCst);
+
+    install_serial_backend(SerialBackend { write: ser });
+    install_structured_backend(StructuredBackend { publish: structured });
+
+    let src = *b"GOS_LOG_TEST\0\0\0\0";
+
+    // 1. Default min-level is Info — Trace/Debug filtered, Info passes.
+    set_min_level(LogLevel::Info);
+    gos_log::log!(LogLevel::Trace, src, "filtered");
+    gos_log::log!(LogLevel::Debug, src, "also filtered");
+    assert_eq!(SERIAL_HITS.load(AOrd::SeqCst), 0);
+    assert_eq!(STRUCTURED_HITS.load(AOrd::SeqCst), 0);
+
+    gos_log::log!(LogLevel::Info, src, "hello {}", 42u32);
+    assert_eq!(SERIAL_HITS.load(AOrd::SeqCst), 1);
+    assert_eq!(STRUCTURED_HITS.load(AOrd::SeqCst), 1);
+    assert_eq!(LAST_LEVEL.load(AOrd::SeqCst), LogLevel::Info as u32);
+    {
+        let p = LAST_PAYLOAD.lock().unwrap();
+        assert_eq!(p.as_slice(), b"hello 42");
+    }
+
+    // 2. Lowering min-level lets Trace through.
+    set_min_level(LogLevel::Trace);
+    gos_log::log!(LogLevel::Trace, src, "now visible");
+    assert_eq!(SERIAL_HITS.load(AOrd::SeqCst), 2);
+
+    // 3. Oversize payload sets truncated.
+    let big_str = "x".repeat(LOG_PAYLOAD_BYTES + 10);
+    gos_log::log!(LogLevel::Info, src, "{}", big_str);
+    assert_eq!(LAST_TRUNCATED.load(AOrd::SeqCst), 1);
+}
+
 // Phase F.1 / F.2: BlockDevice ABI + VFS trait surface compile cleanly
 // and round-trip through a synthetic ramdisk implementation.  Locks in
 // the contract so the FAT32 implementation slated for F.3 can build
