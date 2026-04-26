@@ -210,6 +210,88 @@ fn abi_components_round_trip() {
     }
 }
 
+// Phase E.1: soft preemption — when the supervisor flags the active
+// instance during a dispatch, the runtime must re-enqueue it and
+// surface the dispatch as Yield even if the executor returned Done.
+#[test]
+fn preempt_flag_re_enqueues_instance_and_reports_yield() {
+    use gos_protocol::{CellResult, NodeInstanceId};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AOrd};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+
+    gos_runtime::reset();
+    gos_runtime::discover_plugin(TEST_MANIFEST).expect("discover");
+    gos_runtime::mark_plugin_loaded(TEST_PLUGIN_ID).expect("loaded");
+    gos_runtime::register_node(TEST_PLUGIN_ID, TEST_VECTOR, TEST_NODE_SPECS[0])
+        .expect("register node");
+
+    unsafe extern "C" fn done_on_event(
+        _ctx: *mut gos_protocol::ExecutorContext,
+        _event: *const gos_protocol::NodeEvent,
+    ) -> gos_protocol::ExecStatus {
+        gos_protocol::ExecStatus::Done
+    }
+    let done_vtable = gos_protocol::NodeExecutorVTable {
+        executor_id: TEST_EXECUTOR,
+        on_init: None,
+        on_event: Some(done_on_event),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    gos_runtime::bind_native_executor(TEST_VECTOR, done_vtable).expect("bind");
+
+    let inst = NodeInstanceId::new(99);
+    gos_runtime::bind_plugin_instance(TEST_PLUGIN_ID, inst);
+
+    static SHOULD_PREEMPT: AtomicBool = AtomicBool::new(false);
+    static CLEAR_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn no_tick() {}
+    unsafe extern "C" fn check(_id: NodeInstanceId) -> bool {
+        SHOULD_PREEMPT.load(AOrd::SeqCst)
+    }
+    unsafe extern "C" fn clear(_id: NodeInstanceId) {
+        SHOULD_PREEMPT.store(false, AOrd::SeqCst);
+        CLEAR_COUNT.fetch_add(1, AOrd::SeqCst);
+    }
+
+    SHOULD_PREEMPT.store(false, AOrd::SeqCst);
+    CLEAR_COUNT.store(0, AOrd::SeqCst);
+
+    gos_runtime::install_scheduler(gos_runtime::Scheduler {
+        on_tick: no_tick,
+        should_preempt: check,
+        clear_preempt: clear,
+    });
+
+    let baseline = gos_runtime::preempt_count();
+
+    // First call: no preemption requested -> Done passes through.
+    let r = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 })
+        .expect("route");
+    assert!(matches!(r, CellResult::Done));
+    assert_eq!(gos_runtime::preempt_count(), baseline);
+    assert_eq!(CLEAR_COUNT.load(AOrd::SeqCst), 0);
+
+    // Second call: preempt flag set -> Yield + clear_preempt called.
+    SHOULD_PREEMPT.store(true, AOrd::SeqCst);
+    let r = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 })
+        .expect("route");
+    assert!(
+        matches!(r, CellResult::Yield),
+        "preempted dispatch must surface as Yield"
+    );
+    assert_eq!(gos_runtime::preempt_count(), baseline + 1);
+    assert_eq!(CLEAR_COUNT.load(AOrd::SeqCst), 1);
+    assert!(
+        !SHOULD_PREEMPT.load(AOrd::SeqCst),
+        "clear hook must un-set the flag"
+    );
+}
+
 // Phase B.4.4 / B.4.5: native dispatch is bracketed by a CR3 trampoline
 // (DomainSwitch hook).  This test installs a counting hook and proves
 // every native callback under route_signal increments enter+leave.

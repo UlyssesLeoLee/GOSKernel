@@ -1178,6 +1178,68 @@ pub fn dispatch_fault(instance_id: NodeInstanceId) {
     }
 }
 
+// ── Scheduler hooks (Phase E.1) ──────────────────────────────────────────────
+//
+// PIT tick fires -> Scheduler::on_tick decrements the active instance's
+// time-slice budget.  When budget reaches zero, the supervisor sets
+// `preempt_requested` on the instance.  The runtime checks the flag
+// after every native callback returns; if set, the instance is
+// re-enqueued at the ready-queue tail and the flag cleared — soft
+// preemption that catches both event-loop hogs and instances that take
+// many short callbacks but never voluntarily yield.
+//
+// True hard preemption (interrupt long-running plugin code mid-callback)
+// is Phase E.4 territory and depends on per-domain CR3 + IST stacks
+// (B.4.3/.4 are already in).
+#[derive(Clone, Copy)]
+pub struct Scheduler {
+    /// PIT tick — supervisor decrements current instance's budget.
+    pub on_tick: unsafe extern "C" fn(),
+    /// Did this instance exhaust its time slice since last check?
+    pub should_preempt: unsafe extern "C" fn(instance_id: NodeInstanceId) -> bool,
+    /// Acknowledge: clear the preempt flag and reset the budget.
+    pub clear_preempt: unsafe extern "C" fn(instance_id: NodeInstanceId),
+}
+
+static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
+static PREEMPT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn install_scheduler(hook: Scheduler) {
+    *SCHEDULER.lock() = Some(hook);
+}
+
+pub fn preempt_count() -> u64 {
+    PREEMPT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Called from the PIT tick path (k-pit post stage).  No-op when no
+/// supervisor hook is installed (boot-time / unit tests that don't
+/// need preemption).
+pub fn tick_pulse() {
+    let hook = *SCHEDULER.lock();
+    if let Some(hook) = hook {
+        unsafe { (hook.on_tick)() };
+    }
+}
+
+fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {
+    if instance_id == NodeInstanceId::ZERO {
+        return false;
+    }
+    let hook = *SCHEDULER.lock();
+    match hook {
+        Some(hook) => unsafe { (hook.should_preempt)(instance_id) },
+        None => false,
+    }
+}
+
+fn scheduler_clear_preempt(instance_id: NodeInstanceId) {
+    let hook = *SCHEDULER.lock();
+    if let Some(hook) = hook {
+        unsafe { (hook.clear_preempt)(instance_id) };
+    }
+}
+
 // ── Domain CR3 trampoline (Phase B.4.4) ──────────────────────────────────────
 //
 // Per the B.4 design doc, every native dispatch is bracketed with a CR3
@@ -1654,10 +1716,25 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 runtime.finish_native_invocation(dispatch.slot, status, initialized, terminated);
             }
 
-            Ok(match status {
-                ExecStatus::Done | ExecStatus::Route => CellResult::Done,
-                ExecStatus::Yield => CellResult::Yield,
-                ExecStatus::Fault => CellResult::Fault("native executor fault"),
+            // Phase E.1: soft preemption.  If the supervisor flagged the
+            // instance during this dispatch, re-enqueue it at the ready
+            // queue tail so other instances get a turn before it runs
+            // again.  Status is reported as Yield even if the callback
+            // returned Done, so callers see "still has work to do".
+            let preempted = !terminated
+                && status != ExecStatus::Fault
+                && scheduler_should_preempt(dispatch.instance_id);
+            if preempted {
+                scheduler_clear_preempt(dispatch.instance_id);
+                let _ = RUNTIME.lock().enqueue_ready(dispatch.node_id);
+                PREEMPT_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+
+            Ok(match (status, preempted) {
+                (_, true) => CellResult::Yield,
+                (ExecStatus::Done, _) | (ExecStatus::Route, _) => CellResult::Done,
+                (ExecStatus::Yield, _) => CellResult::Yield,
+                (ExecStatus::Fault, _) => CellResult::Fault("native executor fault"),
             })
         }
         NodeBinding::Unbound => Err(RuntimeError::NativeExecutorMissing),
@@ -1732,10 +1809,20 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
                 runtime.finish_native_invocation(dispatch.slot, status, initialized, false);
             }
 
-            Ok(match status {
-                ExecStatus::Done | ExecStatus::Route => CellResult::Done,
-                ExecStatus::Yield => CellResult::Yield,
-                ExecStatus::Fault => CellResult::Fault("native executor fault"),
+            // Phase E.1: soft preemption mirror of the route_signal path.
+            let preempted = status != ExecStatus::Fault
+                && scheduler_should_preempt(dispatch.instance_id);
+            if preempted {
+                scheduler_clear_preempt(dispatch.instance_id);
+                let _ = RUNTIME.lock().enqueue_ready(dispatch.node_id);
+                PREEMPT_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+
+            Ok(match (status, preempted) {
+                (_, true) => CellResult::Yield,
+                (ExecStatus::Done, _) | (ExecStatus::Route, _) => CellResult::Done,
+                (ExecStatus::Yield, _) => CellResult::Yield,
+                (ExecStatus::Fault, _) => CellResult::Fault("native executor fault"),
             })
         }
         NodeBinding::Unbound => Err(RuntimeError::NativeExecutorMissing),

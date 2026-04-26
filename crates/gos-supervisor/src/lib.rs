@@ -379,7 +379,22 @@ struct InstanceRecord {
     heap_quota: HeapQuota,
     heap_pages_used: u32,
     heap_cursor_pages: u32,
+    /// Phase E.1 — remaining ticks before this instance is asked to
+    /// yield.  Decremented by `on_tick` while this instance is the
+    /// currently-dispatching one; reset to `TIME_SLICE_DEFAULT_TICKS`
+    /// when the runtime acknowledges a preempt (clear_preempt).
+    time_slice_remaining: u32,
+    /// Phase E.1 — set by on_tick when the budget hits zero, consumed
+    /// by the runtime's post-dispatch check, cleared on acknowledge.
+    preempt_requested: bool,
 }
+
+/// Default time slice budget in PIT ticks (PIT runs at 120 Hz, so 12
+/// ticks = ~100 ms).  A plugin that produces many short events can
+/// still hold the CPU for ~100 ms before the supervisor asks it to
+/// yield — comfortable for interactive shell, intolerable for runaway
+/// loops.
+pub const TIME_SLICE_DEFAULT_TICKS: u32 = 12;
 
 impl InstanceRecord {
     const EMPTY: Self = Self {
@@ -393,6 +408,8 @@ impl InstanceRecord {
         heap_quota: HeapQuota::EMPTY,
         heap_pages_used: 0,
         heap_cursor_pages: 0,
+        time_slice_remaining: TIME_SLICE_DEFAULT_TICKS,
+        preempt_requested: false,
     };
 }
 
@@ -1417,6 +1434,8 @@ impl Supervisor {
             heap_quota: template.heap_quota,
             heap_pages_used: 0,
             heap_cursor_pages: 0,
+            time_slice_remaining: TIME_SLICE_DEFAULT_TICKS,
+            preempt_requested: false,
         };
         Ok(instance_id)
     }
@@ -1632,6 +1651,46 @@ impl Supervisor {
             self.instances[slot].heap_pages_used = self.instances[slot]
                 .heap_pages_used
                 .saturating_sub(page_count);
+        }
+    }
+
+    /// Phase E.1: tick handler.  Decrements the active instance's
+    /// time-slice budget; when it hits zero, set `preempt_requested`
+    /// so the runtime re-enqueues the instance after its current
+    /// callback returns.
+    fn on_tick(&mut self) {
+        let Some(instance_id) = gos_runtime::dispatching_instance() else {
+            return;
+        };
+        if instance_id == NodeInstanceId::ZERO {
+            return;
+        }
+        let Ok(slot) = self.find_instance_slot(instance_id) else {
+            return;
+        };
+        if self.instances[slot].preempt_requested {
+            // Already flagged; nothing to do until runtime acks.
+            return;
+        }
+        let remaining = self.instances[slot].time_slice_remaining;
+        if remaining <= 1 {
+            self.instances[slot].time_slice_remaining = 0;
+            self.instances[slot].preempt_requested = true;
+        } else {
+            self.instances[slot].time_slice_remaining = remaining - 1;
+        }
+    }
+
+    fn should_preempt(&self, instance_id: NodeInstanceId) -> bool {
+        self.find_instance_slot(instance_id)
+            .map(|slot| self.instances[slot].preempt_requested)
+            .unwrap_or(false)
+    }
+
+    fn clear_preempt(&mut self, instance_id: NodeInstanceId) {
+        if let Ok(slot) = self.find_instance_slot(instance_id) {
+            self.instances[slot].preempt_requested = false;
+            self.instances[slot].time_slice_remaining = TIME_SLICE_DEFAULT_TICKS;
         }
     }
 
@@ -2136,6 +2195,25 @@ pub fn bootstrap(boot_payload: u64) {
         enter: trampoline_enter,
         leave: trampoline_leave,
     });
+    // Phase E.1: install the preemption scheduler so the PIT tick path
+    // can ask the supervisor "should this instance yield now?".
+    gos_runtime::install_scheduler(gos_runtime::Scheduler {
+        on_tick: scheduler_on_tick,
+        should_preempt: scheduler_should_preempt,
+        clear_preempt: scheduler_clear_preempt,
+    });
+}
+
+unsafe extern "C" fn scheduler_on_tick() {
+    SUPERVISOR.lock().on_tick();
+}
+
+unsafe extern "C" fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {
+    SUPERVISOR.lock().should_preempt(instance_id)
+}
+
+unsafe extern "C" fn scheduler_clear_preempt(instance_id: NodeInstanceId) {
+    SUPERVISOR.lock().clear_preempt(instance_id);
 }
 
 unsafe extern "C" fn heap_accounting_charge(
