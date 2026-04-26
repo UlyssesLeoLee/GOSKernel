@@ -3,11 +3,20 @@
 version = 4
 
 [[package]]
+name = "gos-journal"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-loader"
 version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+ "gos-vfs",
 ]
 
 [[package]]
@@ -34,6 +43,7 @@ dependencies = [
 name = "gos-runtime-harness"
 version = "0.1.0"
 dependencies = [
+ "gos-journal",
  "gos-loader",
  "gos-log",
  "gos-protocol",

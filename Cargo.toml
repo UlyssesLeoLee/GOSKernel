@@ -6,6 +6,7 @@ members = [
     "crates/gos-runtime",
     "crates/gos-loader",
     "crates/gos-hal",
+    "crates/gos-journal",
     "crates/gos-log",
     "crates/gos-supervisor",
     "crates/gos-vfs",

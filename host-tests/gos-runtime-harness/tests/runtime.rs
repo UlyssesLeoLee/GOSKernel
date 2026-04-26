@@ -103,6 +103,108 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase F.4: graph state journal — serialize a few envelopes through
+// JournalRing, flush to a blob, replay, assert round-trip equality.
+#[test]
+fn journal_round_trips_envelopes_through_blob() {
+    use gos_journal::{
+        deserialize_envelope, replay, serialize_envelope, JournalError, JournalHeader,
+        JournalRing, ENVELOPE_RECORD_BYTES, HEADER_BYTES,
+    };
+    use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind};
+
+    // ── 1. Single-record encode/decode round-trip. ──────────────────
+    let env = ControlPlaneEnvelope {
+        version: 1,
+        kind: ControlPlaneMessageKind::NodeUpsert,
+        subject: *b"K_SHELL\0\0\0\0\0\0\0\0\0",
+        arg0: 0xDEAD_BEEF_CAFE_BABE,
+        arg1: 42,
+    };
+    let mut record = [0u8; ENVELOPE_RECORD_BYTES];
+    serialize_envelope(&env, &mut record);
+    let decoded = deserialize_envelope(&record).expect("decode");
+    assert_eq!(decoded.version, env.version);
+    assert_eq!(decoded.kind, env.kind);
+    assert_eq!(decoded.subject, env.subject);
+    assert_eq!(decoded.arg0, env.arg0);
+    assert_eq!(decoded.arg1, env.arg1);
+
+    // ── 2. JournalRing append + flush + replay. ─────────────────────
+    let mut ring: JournalRing<8> = JournalRing::new();
+    let envelopes = [
+        env,
+        ControlPlaneEnvelope {
+            version: 1,
+            kind: ControlPlaneMessageKind::EdgeUpsert,
+            subject: *b"K_NIM\0\0\0\0\0\0\0\0\0\0\0",
+            arg0: 0x1111,
+            arg1: 0x2222,
+        },
+        ControlPlaneEnvelope {
+            version: 1,
+            kind: ControlPlaneMessageKind::Fault,
+            subject: *b"MOD.PROVIDER\0\0\0\0",
+            arg0: 3,
+            arg1: 5,
+        },
+    ];
+    for env in &envelopes {
+        ring.append(env).expect("append");
+    }
+    assert_eq!(ring.len(), 3);
+    assert!(!ring.is_full());
+
+    let mut blob = vec![0u8; HEADER_BYTES + 3 * ENVELOPE_RECORD_BYTES];
+    let written = ring.flush_into(&mut blob).expect("flush");
+    assert_eq!(written, blob.len());
+
+    // Header parses cleanly.
+    let header = JournalHeader::parse(&blob).expect("header");
+    assert_eq!(header.version, 1);
+    assert_eq!(header.record_size as usize, ENVELOPE_RECORD_BYTES);
+
+    // Replay yields envelopes in order.
+    let mut replayed = Vec::new();
+    let n = replay(&blob, |env| replayed.push(env)).expect("replay");
+    assert_eq!(n, 3);
+    assert_eq!(replayed.len(), 3);
+    for (a, b) in replayed.iter().zip(envelopes.iter()) {
+        assert_eq!(a.version, b.version);
+        assert_eq!(a.kind, b.kind);
+        assert_eq!(a.subject, b.subject);
+        assert_eq!(a.arg0, b.arg0);
+        assert_eq!(a.arg1, b.arg1);
+    }
+
+    // ── 3. Bad header rejected. ──────────────────────────────────────
+    let mut tampered = blob.clone();
+    tampered[0] = b'X';
+    match JournalHeader::parse(&tampered) {
+        Err(JournalError::BadHeader) => {}
+        other => panic!("expected BadHeader, got {:?}", other.map(|h| h.version)),
+    }
+
+    // Wrong version.
+    let mut wrong_ver = blob.clone();
+    wrong_ver[4..6].copy_from_slice(&99u16.to_le_bytes());
+    match JournalHeader::parse(&wrong_ver) {
+        Err(JournalError::UnsupportedVersion(99)) => {}
+        other => panic!(
+            "expected UnsupportedVersion(99), got {:?}",
+            other.map(|h| h.version)
+        ),
+    }
+
+    // Trailing garbage byte at the end.
+    let mut trailing = blob.clone();
+    trailing.push(0x55);
+    match replay(&trailing, |_| {}) {
+        Err(JournalError::TrailingBytes) => {}
+        other => panic!("expected TrailingBytes, got {:?}", other),
+    }
+}
+
 // Phase D.4: gos-log routes a formatted log call to both installed
 // backends, respects min-level filtering, and truncates oversize
 // payloads with the `truncated` flag set on the structured record.
