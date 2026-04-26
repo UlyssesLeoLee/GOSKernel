@@ -189,7 +189,13 @@ fn abi_cache_store(val: Option<*const KernelAbi>) {
     unsafe { *ABI_CACHE.0.get() = val; }
 }
 
+/// Read the cached `KernelAbi` pointer.  Paired with `abi_cache_store`;
+/// retained even when no current consumer reads from it because removing
+/// half of a paired API breaks future call sites that need to recover
+/// the cached ABI in IRQ-context (where `ctx.abi` isn't readily
+/// available).
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) fn abi_cache_load() -> Option<*const KernelAbi> {
     unsafe { *ABI_CACHE.0.get() }
 }

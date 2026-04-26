@@ -4,6 +4,10 @@
 
 pub struct Output {
     pub signal_kind: u8,
+    /// Reserved for future telemetry envelopes (would be `true` if we
+    /// somehow returned from the halt loop).  Kept to preserve the
+    /// shape consumers expect once telemetry is wired through.
+    #[allow(dead_code)]
     pub did_halt: bool,
 }
 

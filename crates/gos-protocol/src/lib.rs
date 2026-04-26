@@ -376,6 +376,11 @@ pub struct CellDeclaration {
 /// The universal protocol every legacy GOS node must implement.
 pub trait NodeCell: core::marker::Send {
     fn declare(&self) -> CellDeclaration;
+    /// # Safety
+    ///
+    /// Caller must guarantee the cell is registered and its runtime
+    /// page is reachable; `init` may touch hardware (ports / MSRs) and
+    /// is undefined behaviour outside of post-registration boot context.
     unsafe fn init(&mut self);
     fn on_activate(&mut self) -> CellResult;
     fn on_signal(&mut self, signal: Signal) -> CellResult;
@@ -1368,6 +1373,11 @@ impl NodeTelemetry {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+// `NodeTelemetry` carries `&'static str` keys.  In a heterogeneous-language
+// FFI this would be unsound, but the GOS ABI is Rust-only — every plugin
+// is a Rust crate, the telemetry payload never crosses an ABI boundary
+// to a non-Rust caller.  Allow the lint at the type level.
+#[allow(improper_ctypes_definitions)]
 pub struct NodeExecutorVTable {
     pub executor_id: ExecutorId,
     pub on_init: Option<unsafe extern "C" fn(ctx: *mut ExecutorContext) -> ExecStatus>,

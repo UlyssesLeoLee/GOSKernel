@@ -8,6 +8,13 @@ pub trait CellBehavior: core::marker::Send {
     fn declare(&self) -> CellDeclaration;
     
     /// 触发硬件层面的生命开始 (Spawn 第一次到达时调用)
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee the cell has been registered with a valid
+    /// runtime page before invocation; this method may touch hardware
+    /// state (port writes, MSR writes) that is unsafe outside that
+    /// context.
     unsafe fn init(&mut self) {}
     
     /// 接收特定的外界信号

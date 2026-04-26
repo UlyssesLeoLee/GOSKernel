@@ -6,6 +6,10 @@ use core::fmt::Write;
 /// Confirmation that the byte was successfully written (carries the byte for
 /// telemetry use in the post stage).
 pub struct Output {
+    /// Reserved for future telemetry envelopes; currently the post stage
+    /// only forwards `signal_kind`.  Kept on the struct to avoid an ABI
+    /// break the moment we wire telemetry through.
+    #[allow(dead_code)]
     pub byte: u8,
     pub signal_kind: u8,
 }
