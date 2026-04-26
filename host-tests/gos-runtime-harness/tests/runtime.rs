@@ -332,6 +332,112 @@ fn vfs_trait_drives_a_synthetic_in_memory_filesystem() {
     let _src = MountSource::from_block(vtable);
 }
 
+// Phase B.4.6.1 — R_X86_64_RELATIVE relocation walker.  Hand-craft an
+// ET_DYN ELF with one PT_LOAD + one PT_DYNAMIC pointing at a one-entry
+// .rela.dyn table; apply against a loaded-image buffer; verify the
+// 8-byte target now contains image_base + addend.
+#[test]
+fn elf_apply_relative_relocations_patches_image_correctly() {
+    use gos_loader::elf::{
+        parse, ElfError, DT_NULL, DT_RELA, DT_RELAENT, DT_RELASZ, ELF64_RELA_SIZE,
+        PT_DYNAMIC, PT_LOAD,
+    };
+
+    // Layout (file offsets):
+    //   0x000  ELF header (64 bytes)
+    //   0x040  program headers — 2 entries (each 56 bytes) = 112 bytes
+    //   0x0B0  PT_DYNAMIC payload — 4 dyn entries * 16 = 64 bytes
+    //   0x0F0  RELA table — 1 entry * 24 = 24 bytes
+    //   total file = 0x108 (264 bytes)
+    let mut elf = vec![0u8; 0x108];
+    let phoff: u64 = 0x40;
+    let dyn_offset: u64 = 0xB0;
+    let dyn_size: u64 = 64;
+    let rela_offset: u64 = 0xF0;
+    let rela_size: u64 = ELF64_RELA_SIZE as u64;
+
+    // ── e_ident + header ─────────────────────────────────────────────
+    elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    elf[4] = 2; // ELFCLASS64
+    elf[5] = 1; // ELFDATA2LSB
+    elf[6] = 1;
+    elf[7] = 0;
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+    elf[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+    elf[24..32].copy_from_slice(&0u64.to_le_bytes()); // e_entry
+    elf[32..40].copy_from_slice(&phoff.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+
+    // ── program header 0: PT_LOAD, vaddr 0, memsz 64, file 0..40 ─────
+    let ph0 = phoff as usize;
+    elf[ph0..ph0 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+    elf[ph0 + 4..ph0 + 8].copy_from_slice(&5u32.to_le_bytes()); // R+X
+    elf[ph0 + 8..ph0 + 16].copy_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf[ph0 + 16..ph0 + 24].copy_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf[ph0 + 24..ph0 + 32].copy_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf[ph0 + 32..ph0 + 40].copy_from_slice(&40u64.to_le_bytes()); // p_filesz
+    elf[ph0 + 40..ph0 + 48].copy_from_slice(&64u64.to_le_bytes()); // p_memsz
+
+    // ── program header 1: PT_DYNAMIC ─────────────────────────────────
+    let ph1 = ph0 + 56;
+    elf[ph1..ph1 + 4].copy_from_slice(&PT_DYNAMIC.to_le_bytes());
+    elf[ph1 + 4..ph1 + 8].copy_from_slice(&6u32.to_le_bytes()); // R+W
+    elf[ph1 + 8..ph1 + 16].copy_from_slice(&dyn_offset.to_le_bytes());
+    elf[ph1 + 16..ph1 + 24].copy_from_slice(&0u64.to_le_bytes());
+    elf[ph1 + 24..ph1 + 32].copy_from_slice(&0u64.to_le_bytes());
+    elf[ph1 + 32..ph1 + 40].copy_from_slice(&dyn_size.to_le_bytes());
+    elf[ph1 + 40..ph1 + 48].copy_from_slice(&dyn_size.to_le_bytes());
+
+    // ── PT_DYNAMIC payload: DT_RELA, DT_RELASZ, DT_RELAENT, DT_NULL ──
+    let dyn_off = dyn_offset as usize;
+    let mut put_dyn = |i: usize, tag: u64, val: u64| {
+        let base = dyn_off + i * 16;
+        elf[base..base + 8].copy_from_slice(&tag.to_le_bytes());
+        elf[base + 8..base + 16].copy_from_slice(&val.to_le_bytes());
+    };
+    put_dyn(0, DT_RELA, rela_offset);
+    put_dyn(1, DT_RELASZ, rela_size);
+    put_dyn(2, DT_RELAENT, ELF64_RELA_SIZE as u64);
+    put_dyn(3, DT_NULL, 0);
+
+    // ── RELA table: one R_X86_64_RELATIVE @ image[0x10], addend=0x1234
+    let rel = rela_offset as usize;
+    elf[rel..rel + 8].copy_from_slice(&0x10u64.to_le_bytes()); // r_offset
+    elf[rel + 8..rel + 16].copy_from_slice(&8u64.to_le_bytes()); // r_info: type 8 = RELATIVE
+    elf[rel + 16..rel + 24].copy_from_slice(&0x1234u64.to_le_bytes()); // r_addend
+
+    // Parse + apply.
+    let parsed = parse(&elf).expect("valid ELF");
+    let dyn_table = parsed.parse_dynamic().expect("dynamic table");
+    assert_eq!(dyn_table.rela_offset, Some(rela_offset));
+    assert_eq!(dyn_table.rela_size, rela_size);
+
+    // Pretend the loader has copied PT_LOAD into a 64-byte image at
+    // image_base = 0xFFFF_8000_DEAD_0000.
+    let mut image = vec![0u8; 64];
+    let image_base: u64 = 0xFFFF_8000_DEAD_0000;
+    let count = parsed
+        .apply_relative_relocations(&mut image, image_base)
+        .expect("apply RELA");
+    assert_eq!(count, 1);
+
+    // image[0x10..0x18] == image_base + 0x1234 (little-endian).
+    let expected = image_base + 0x1234;
+    let observed = u64::from_le_bytes(image[0x10..0x18].try_into().unwrap());
+    assert_eq!(observed, expected);
+
+    // ── Tampering: rewrite the relocation to an unsupported type. ───
+    let mut bad = elf.clone();
+    bad[rel + 8..rel + 16].copy_from_slice(&1u64.to_le_bytes()); // R_X86_64_64
+    let parsed_bad = parse(&bad).expect("still valid header");
+    let mut image2 = vec![0u8; 64];
+    match parsed_bad.apply_relative_relocations(&mut image2, image_base) {
+        Err(ElfError::UnsupportedRelocation(1)) => {}
+        other => panic!("expected UnsupportedRelocation(1), got {:?}", other),
+    }
+}
+
 // Phase B.4.6: minimal ET_DYN ELF parser — locks in format detection so
 // malformed payloads are rejected before they reach the supervisor.
 #[test]

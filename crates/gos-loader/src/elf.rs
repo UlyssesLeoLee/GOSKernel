@@ -28,6 +28,15 @@ pub enum ElfError {
     NotX86_64,
     BadProgramHeader,
     UnsupportedAbi,
+    /// PT_DYNAMIC table malformed or out-of-bounds.
+    BadDynamic,
+    /// A relocation entry referenced an unsupported relocation type.
+    /// B.4.6.1 only supports R_X86_64_RELATIVE; everything else
+    /// surfaces here so the loader can refuse the module instead of
+    /// silently leaving relocations unprocessed.
+    UnsupportedRelocation(u32),
+    /// Relocation entry pointed outside the loaded image base/size.
+    RelocationOutOfBounds,
 }
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -189,5 +198,158 @@ impl<'a> ParsedElf<'a> {
             }
         });
         high
+    }
+
+    /// Locate the PT_DYNAMIC segment if present, returning its
+    /// (file_offset, file_len).  None when the image has no dynamic
+    /// section (statically-linked ET_DYN or hand-crafted test fixture).
+    pub fn dynamic_segment(&self) -> Option<(u64, u64)> {
+        let phoff = read_u64(self.data, 32)? as usize;
+        let phentsize = 56usize;
+        for idx in 0..self.program_headers as usize {
+            let off = phoff + idx * phentsize;
+            let p_type = read_u32(self.data, off)?;
+            if p_type == PT_DYNAMIC {
+                let p_offset = read_u64(self.data, off + 8)?;
+                let p_filesz = read_u64(self.data, off + 32)?;
+                return Some((p_offset, p_filesz));
+            }
+        }
+        None
+    }
+}
+
+// ── Phase B.4.6.1 — R_X86_64_RELATIVE relocation ────────────────────────────
+//
+// PT_DYNAMIC carries `Elf64_Dyn` entries (16 bytes each: u64 d_tag,
+// u64 d_val_or_ptr).  We care about three tags:
+//
+//   DT_RELA       (7)   = file offset of the .rela.dyn table
+//   DT_RELASZ     (8)   = total bytes of the table
+//   DT_RELAENT    (9)   = bytes per entry (must be 24)
+//
+// Each Elf64_Rela entry is `{ u64 r_offset; u64 r_info; i64 r_addend }`.
+// Type is encoded in the low 32 bits of `r_info`.  R_X86_64_RELATIVE
+// (type 8) does:  *(image_base + r_offset) = image_base + r_addend
+//
+// This is the only relocation type emitted by a position-independent
+// ET_DYN compiled with `-fPIE -fno-plt -fno-pic` and no external
+// symbol references — exactly what GOS plugins are constrained to.
+
+pub const DT_NULL: u64 = 0;
+pub const DT_RELA: u64 = 7;
+pub const DT_RELASZ: u64 = 8;
+pub const DT_RELAENT: u64 = 9;
+
+pub const R_X86_64_RELATIVE: u32 = 8;
+
+pub const ELF64_RELA_SIZE: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicTable {
+    pub rela_offset: Option<u64>,
+    pub rela_size: u64,
+    pub rela_entry_size: u64,
+}
+
+impl DynamicTable {
+    pub const fn empty() -> Self {
+        Self {
+            rela_offset: None,
+            rela_size: 0,
+            rela_entry_size: ELF64_RELA_SIZE as u64,
+        }
+    }
+}
+
+impl<'a> ParsedElf<'a> {
+    /// Walk PT_DYNAMIC and collect the RELA-table descriptors.
+    /// Returns `Ok(DynamicTable::empty())` for images without a
+    /// dynamic segment (no relocations needed).
+    pub fn parse_dynamic(&self) -> Result<DynamicTable, ElfError> {
+        let mut table = DynamicTable::empty();
+        let Some((dyn_off, dyn_len)) = self.dynamic_segment() else {
+            return Ok(table);
+        };
+        let dyn_off = dyn_off as usize;
+        let dyn_len = dyn_len as usize;
+        if dyn_off
+            .checked_add(dyn_len)
+            .ok_or(ElfError::BadDynamic)?
+            > self.data.len()
+        {
+            return Err(ElfError::BadDynamic);
+        }
+        let mut cur = 0usize;
+        while cur + 16 <= dyn_len {
+            let tag = read_u64(self.data, dyn_off + cur).ok_or(ElfError::BadDynamic)?;
+            let val = read_u64(self.data, dyn_off + cur + 8).ok_or(ElfError::BadDynamic)?;
+            match tag {
+                DT_NULL => break,
+                DT_RELA => table.rela_offset = Some(val),
+                DT_RELASZ => table.rela_size = val,
+                DT_RELAENT => table.rela_entry_size = val,
+                _ => {} // ignored — we handle only RELATIVE for now
+            }
+            cur += 16;
+        }
+        if let Some(_) = table.rela_offset {
+            if table.rela_entry_size as usize != ELF64_RELA_SIZE {
+                return Err(ElfError::BadDynamic);
+            }
+        }
+        Ok(table)
+    }
+
+    /// Apply R_X86_64_RELATIVE relocations against an in-memory image.
+    ///
+    /// `image` is the *loaded* image — typically a slice into the
+    /// domain's mapped image window after PT_LOAD segments have been
+    /// copied.  `image_base` is the virtual address that slice's
+    /// byte 0 corresponds to (so relocations targeting absolute VAs
+    /// resolve correctly when image_base is non-zero).
+    ///
+    /// Returns the number of relocations applied.  Errors out on the
+    /// first non-R_X86_64_RELATIVE entry — by design, plugins must be
+    /// built with no relocations our loader doesn't understand.
+    pub fn apply_relative_relocations(
+        &self,
+        image: &mut [u8],
+        image_base: u64,
+    ) -> Result<usize, ElfError> {
+        let table = self.parse_dynamic()?;
+        let Some(rela_offset) = table.rela_offset else {
+            return Ok(0);
+        };
+        let rela_offset = rela_offset as usize;
+        let rela_end = rela_offset
+            .checked_add(table.rela_size as usize)
+            .ok_or(ElfError::BadDynamic)?;
+        if rela_end > self.data.len() {
+            return Err(ElfError::BadDynamic);
+        }
+        let mut applied = 0usize;
+        let mut cur = rela_offset;
+        while cur + ELF64_RELA_SIZE <= rela_end {
+            let r_offset = read_u64(self.data, cur).ok_or(ElfError::BadDynamic)?;
+            let r_info = read_u64(self.data, cur + 8).ok_or(ElfError::BadDynamic)?;
+            let r_addend = read_u64(self.data, cur + 16).ok_or(ElfError::BadDynamic)? as i64;
+            let r_type = (r_info & 0xFFFF_FFFF) as u32;
+            cur += ELF64_RELA_SIZE;
+
+            if r_type != R_X86_64_RELATIVE {
+                return Err(ElfError::UnsupportedRelocation(r_type));
+            }
+
+            // Target offset in image (relative to image_base).
+            let target = r_offset as usize;
+            if target.checked_add(8).map(|end| end > image.len()).unwrap_or(true) {
+                return Err(ElfError::RelocationOutOfBounds);
+            }
+            let resolved = image_base.wrapping_add(r_addend as u64);
+            image[target..target + 8].copy_from_slice(&resolved.to_le_bytes());
+            applied += 1;
+        }
+        Ok(applied)
     }
 }
