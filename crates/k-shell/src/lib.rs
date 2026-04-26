@@ -397,6 +397,29 @@ impl<const N: usize> LineBuf<N> {
         }
     }
 
+    fn push_hex(&mut self, mut value: u64) {
+        let mut buf = [0u8; 16];
+        let mut len = 0usize;
+        if value == 0 {
+            self.push_byte(b'0');
+            return;
+        }
+        while value > 0 {
+            let nibble = (value & 0xF) as u8;
+            buf[len] = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + (nibble - 10)
+            };
+            value >>= 4;
+            len += 1;
+        }
+        while len > 0 {
+            len -= 1;
+            self.push_byte(buf[len]);
+        }
+    }
+
     fn push_fixed_ascii(&mut self, bytes: &[u8; 16]) {
         let mut len = 0usize;
         while len < bytes.len() && bytes[len] != 0 {
@@ -2629,6 +2652,32 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     audit.push_str("audit: boot-fallback allocs ");
     audit.push_dec(gos_runtime::boot_fallback_alloc_count());
     draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 4, 4, 15, 0, &audit);
+
+    // Phase B.4.1: domain PML4 root.  Non-zero confirms map_module ->
+    // build_domain -> k_vmm::create_isolated_address_space ran for this
+    // instance's owning module.
+    if let Some(vector) = state.selected_node {
+        if let Some(instance_id) = gos_runtime::instance_id_for_vec(vector) {
+            if instance_id.0 != 0 {
+                if let Some(root) = gos_supervisor::instance_domain_root(instance_id) {
+                    let mut domain_line = LineBuf::<72>::new();
+                    domain_line.push_str("domain root_phys=0x");
+                    domain_line.push_hex(root);
+                    if root == 0 {
+                        domain_line.push_str("  (UNMAPPED)");
+                    }
+                    draw_linebuf(
+                        sink,
+                        GRAPH_VIEW_FIRST_ITEM_ROW + 5,
+                        4,
+                        15,
+                        0,
+                        &domain_line,
+                    );
+                }
+            }
+        }
+    }
 
     render_graph_footer(sink, state, "where  select clear");
 }

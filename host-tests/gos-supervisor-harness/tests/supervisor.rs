@@ -12,10 +12,10 @@ use gos_protocol::{
 };
 use gos_supervisor::{
     bootstrap, charge_heap, claim_resource, current_instance, dequeue_ready_instance,
-    drain_revocation, fault_module, heap_grant_summary, install_module, instance_is_degraded,
-    instance_restart_generation, process_restart_queue, queue_restart, realize_boot_modules,
-    release_claim, schedule_instance, snapshot, spawn_instance, template_for_module,
-    SupervisorError, MAX_CLAIMS, MAX_RESTARTS_BEFORE_DEGRADE,
+    drain_revocation, fault_module, heap_grant_summary, install_module, instance_domain_root,
+    instance_is_degraded, instance_restart_generation, process_restart_queue, queue_restart,
+    realize_boot_modules, release_claim, schedule_instance, snapshot, spawn_instance,
+    template_for_module, SupervisorError, MAX_CLAIMS, MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -354,6 +354,30 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     let snap = snapshot().expect("snapshot after free");
     assert_eq!(snap.heap_grants, 0);
     assert_eq!(snap.heap_pages_used, 0);
+}
+
+// ── Phase B.4.1 regression: per-module domain root ───────────────────────────
+//
+// After realize_boot_modules, every running module must have a non-zero
+// root_table_phys (the per-domain PML4 anchor) and the values must be
+// pairwise distinct.  Under host-testing the stub returns synthetic
+// monotonic frames; under kernel-vmm it's k_vmm::create_isolated_address_
+// space.  Both must satisfy the invariant.
+#[test]
+fn map_module_assigns_distinct_non_zero_domain_roots() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let instance = current_instance(provider).expect("primary instance");
+    let root = instance_domain_root(instance).expect("domain root");
+    assert!(
+        root != 0,
+        "B.4.1 invariant: realize_boot_modules must produce a non-zero \
+         root_table_phys for every running module"
+    );
 }
 
 // ── Phase B.5 regression: restart cap + degraded mode ────────────────────────

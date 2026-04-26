@@ -2262,6 +2262,19 @@ pub fn instance_is_degraded(instance_id: NodeInstanceId) -> bool {
     guard.is_module_faulted(module)
 }
 
+/// Phase B.4.1 observability: report the physical address of the owning
+/// module's per-domain PML4 root.  After `realize_boot_modules` every
+/// module's `root_table_phys` should be non-zero and pairwise distinct;
+/// surfaced in shell `where` so a contributor can verify the invariant
+/// from the running kernel without needing serial logs.
+pub fn instance_domain_root(instance_id: NodeInstanceId) -> Option<u64> {
+    let guard = SUPERVISOR.lock();
+    let inst_slot = guard.find_instance_slot(instance_id).ok()?;
+    let module = guard.instances[inst_slot].module;
+    let mod_slot = guard.find_module_slot(module).ok()?;
+    Some(guard.modules[mod_slot].domain.root_table_phys)
+}
+
 pub fn service_system_cycle() {
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
