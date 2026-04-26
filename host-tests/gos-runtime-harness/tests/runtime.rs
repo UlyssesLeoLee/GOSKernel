@@ -103,6 +103,49 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase D.5: ABI semver compatibility rules.  Major must match exactly;
+// the host's minor must be >= the plugin's minor; patch is observational.
+#[test]
+fn abi_compatible_enforces_major_strict_minor_subset() {
+    use gos_protocol::{abi_compatible, encode_abi, GOS_ABI_VERSION};
+
+    // Same encoding -> compatible.
+    assert!(abi_compatible(GOS_ABI_VERSION, GOS_ABI_VERSION));
+
+    // Plugin built against an older minor on the same major -> compatible.
+    let host = encode_abi(2, 5, 0);
+    let older_minor = encode_abi(2, 3, 0);
+    assert!(abi_compatible(older_minor, host));
+
+    // Plugin built against a newer minor than host knows -> rejected.
+    let newer_minor = encode_abi(2, 7, 0);
+    assert!(!abi_compatible(newer_minor, host));
+
+    // Different major -> rejected unconditionally.
+    let bumped_major = encode_abi(3, 0, 0);
+    assert!(!abi_compatible(bumped_major, host));
+    assert!(!abi_compatible(host, bumped_major));
+
+    // Patch is informational and never affects compatibility.
+    let host_patched = encode_abi(2, 5, 42);
+    let plugin_patched = encode_abi(2, 5, 7);
+    assert!(abi_compatible(plugin_patched, host_patched));
+}
+
+// Decoding helpers should round-trip cleanly so manifest authors and
+// loaders can read individual components without bit-twiddling.
+#[test]
+fn abi_components_round_trip() {
+    use gos_protocol::{abi_major, abi_minor, abi_patch, encode_abi};
+
+    for (maj, min, pat) in [(0, 0, 0), (2, 0, 0), (2, 7, 13), (255, 255, 65535)] {
+        let v = encode_abi(maj, min, pat);
+        assert_eq!(abi_major(v), maj);
+        assert_eq!(abi_minor(v), min);
+        assert_eq!(abi_patch(v), pat);
+    }
+}
+
 #[test]
 fn instance_binding_propagates_through_dispatch_and_clears_on_unbind() {
     use gos_protocol::NodeInstanceId;

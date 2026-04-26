@@ -14,7 +14,50 @@ pub use trap::{TrapFrame, TrapVector, TrapClass, HardwareEvent};
 pub mod vectors;
 
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
-pub const GOS_ABI_VERSION: u32 = 2;
+
+// ── ABI semver (Phase D.5) ──────────────────────────────────────────────────
+//
+// `GOS_ABI_VERSION` is a u32 that semantically packs (major, minor, patch):
+//   bits [31..24] = major  -> bumped on breaking changes
+//   bits [23..16] = minor  -> bumped on additive changes
+//   bits [15..0]  = patch  -> bumped on no-ABI changes
+//
+// The historical pre-D.5 value was `2` (raw u32).  After D.5, that becomes
+// (major=2, minor=0, patch=0) — encoded as 0x0200_0000.  Every plugin/
+// module manifest that wrote `abi_version: GOS_ABI_VERSION` automatically
+// adopts the new encoding without code change.  Manifests that hard-coded
+// the integer literal `2` would now read as (major=0, minor=0, patch=2)
+// and be rejected by `abi_compatible` — by design.
+pub const GOS_ABI_MAJOR: u8 = 2;
+pub const GOS_ABI_MINOR: u8 = 0;
+pub const GOS_ABI_PATCH: u16 = 0;
+
+pub const fn encode_abi(major: u8, minor: u8, patch: u16) -> u32 {
+    ((major as u32) << 24) | ((minor as u32) << 16) | (patch as u32)
+}
+
+pub const fn abi_major(v: u32) -> u8 {
+    (v >> 24) as u8
+}
+
+pub const fn abi_minor(v: u32) -> u8 {
+    (v >> 16) as u8
+}
+
+pub const fn abi_patch(v: u32) -> u16 {
+    (v & 0xFFFF) as u16
+}
+
+/// True when a plugin compiled against `plugin_v` can be loaded by a host
+/// that exposes `host_v`.  Rule: major must match exactly; the host's minor
+/// must be greater than or equal to the plugin's minor (host knows
+/// strictly more or the same set of additive features).  Patch is
+/// observational only.
+pub const fn abi_compatible(plugin_v: u32, host_v: u32) -> bool {
+    abi_major(plugin_v) == abi_major(host_v) && abi_minor(plugin_v) <= abi_minor(host_v)
+}
+
+pub const GOS_ABI_VERSION: u32 = encode_abi(GOS_ABI_MAJOR, GOS_ABI_MINOR, GOS_ABI_PATCH);
 pub const CONTROL_PLANE_PROTOCOL_VERSION: u16 = 1;
 
 /// A 48-bit canonical vector address decomposed into graph coordinates.
@@ -784,7 +827,13 @@ pub struct ImportSpec {
     pub required: bool,
 }
 
-pub const MODULE_ABI_VERSION: u32 = 1;
+// MODULE_ABI_VERSION uses the same packed-semver layout as GOS_ABI_VERSION.
+// Historical value: 1 -> (major=1, minor=0, patch=0).
+pub const MODULE_ABI_MAJOR: u8 = 1;
+pub const MODULE_ABI_MINOR: u8 = 0;
+pub const MODULE_ABI_PATCH: u16 = 0;
+pub const MODULE_ABI_VERSION: u32 =
+    encode_abi(MODULE_ABI_MAJOR, MODULE_ABI_MINOR, MODULE_ABI_PATCH);
 
 pub const RESOURCE_FRAME_ALLOC: ResourceId = ResourceId::from_ascii("RS.FRAME");
 pub const RESOURCE_PAGE_MAPPER: ResourceId = ResourceId::from_ascii("RS.VMM");

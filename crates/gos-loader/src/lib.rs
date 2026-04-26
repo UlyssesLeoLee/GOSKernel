@@ -174,7 +174,8 @@ fn validate_bundle(bundle: &BootBundle) -> Result<(), LoaderError> {
 }
 
 fn validate_manifest(manifest: PluginManifest) -> Result<(), LoaderError> {
-    if manifest.abi_version != GOS_ABI_VERSION {
+    // Phase D.5: semver compatibility — see `gos_protocol::abi_compatible`.
+    if !gos_protocol::abi_compatible(manifest.abi_version, GOS_ABI_VERSION) {
         return Err(LoaderError::AbiVersionMismatch);
     }
     Ok(())

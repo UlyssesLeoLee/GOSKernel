@@ -1431,7 +1431,9 @@ pub fn builtin_supervisor_modules() -> &'static [ModuleDescriptor] {
 }
 
 fn validate_manifest(manifest: PluginManifest) -> Result<(), BuiltinBootError> {
-    if manifest.abi_version != GOS_ABI_VERSION {
+    // Phase D.5: semver compatibility — major must match, plugin's minor
+    // must not exceed host's minor.  Patch is observational only.
+    if !gos_protocol::abi_compatible(manifest.abi_version, GOS_ABI_VERSION) {
         return Err(BuiltinBootError::AbiVersionMismatch(manifest.plugin_id));
     }
     Ok(())
