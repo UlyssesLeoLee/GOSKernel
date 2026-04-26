@@ -13,8 +13,9 @@ use gos_protocol::{
     ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleLifecycle,
     ModuleMessage, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
     PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease, SpawnPolicy,
-    RESOURCE_DISPLAY_CONSOLE, RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL,
-    RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, MODULE_ABI_VERSION,
+    RESOURCE_BLOCK_DEVICE, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FILE_HANDLE,
+    RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_HEAP_SOURCE,
+    RESOURCE_PAGE_MAPPER, MODULE_ABI_VERSION,
 };
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
 use k_vmm;
@@ -772,6 +773,11 @@ impl Supervisor {
         let _ = self.register_resource(RESOURCE_DISPLAY_CONSOLE);
         let _ = self.register_resource(RESOURCE_HEAP_SOURCE);
         let _ = self.register_resource(RESOURCE_GPU_ACCEL);
+        // Phase F: persistence resources.  Claims succeed only after a
+        // real BlockDevice / FileSystem provider is registered (F.1.x
+        // / F.3.x); the supervisor simply tracks the claim slot today.
+        let _ = self.register_resource(RESOURCE_BLOCK_DEVICE);
+        let _ = self.register_resource(RESOURCE_FILE_HANDLE);
     }
 
     fn register_resource(&mut self, resource_id: ResourceId) -> Result<(), SupervisorError> {

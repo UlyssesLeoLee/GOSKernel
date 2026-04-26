@@ -9,3 +9,4 @@ edition = "2021"
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
 gos-loader = { path = "../../crates/gos-loader" }
+gos-vfs = { path = "../../crates/gos-vfs" }

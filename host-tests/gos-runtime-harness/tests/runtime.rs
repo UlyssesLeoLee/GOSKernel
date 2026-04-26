@@ -103,6 +103,167 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase F.1 / F.2: BlockDevice ABI + VFS trait surface compile cleanly
+// and round-trip through a synthetic ramdisk implementation.  Locks in
+// the contract so the FAT32 implementation slated for F.3 can build
+// against this trait without re-shaping the API.
+#[test]
+fn vfs_trait_drives_a_synthetic_in_memory_filesystem() {
+    use gos_protocol::block::{
+        BlockDeviceVTable, BlockGeometry, BlockIoStatus, BLOCK_SECTOR_SIZE_DEFAULT,
+    };
+    use gos_vfs::{
+        DirEntry, FileSystem, Inode, InodeKind, InodeNum, MountId, MountSource, VfsError,
+    };
+
+    // ── 1. BlockDevice round-trip: the ramdisk vtable can read back
+    //    sectors written via its write callback. ──────────────────────
+    use std::sync::Mutex as StdMutex;
+    static DISK: StdMutex<[u8; 1024]> = StdMutex::new([0u8; 1024]);
+
+    unsafe extern "C" fn read(_h: u64, lba: u64, buf: *mut u8, len: u32) -> i32 {
+        if len != BLOCK_SECTOR_SIZE_DEFAULT {
+            return BlockIoStatus::BadBuffer as i32;
+        }
+        let off = (lba as usize) * 512;
+        let disk = DISK.lock().unwrap();
+        if off + 512 > disk.len() {
+            return BlockIoStatus::OutOfBounds as i32;
+        }
+        let dst = unsafe { core::slice::from_raw_parts_mut(buf, 512) };
+        dst.copy_from_slice(&disk[off..off + 512]);
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn write(_h: u64, lba: u64, buf: *const u8, len: u32) -> i32 {
+        if len != BLOCK_SECTOR_SIZE_DEFAULT {
+            return BlockIoStatus::BadBuffer as i32;
+        }
+        let off = (lba as usize) * 512;
+        let mut disk = DISK.lock().unwrap();
+        if off + 512 > disk.len() {
+            return BlockIoStatus::OutOfBounds as i32;
+        }
+        let src = unsafe { core::slice::from_raw_parts(buf, 512) };
+        disk[off..off + 512].copy_from_slice(src);
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn flush(_h: u64) -> i32 {
+        BlockIoStatus::Ok as i32
+    }
+    unsafe extern "C" fn geometry(_h: u64) -> BlockGeometry {
+        BlockGeometry {
+            sector_count: 2,
+            sector_size: BLOCK_SECTOR_SIZE_DEFAULT,
+            flags: 0,
+        }
+    }
+    let vtable = BlockDeviceVTable {
+        handle: 1,
+        read_sector: read,
+        write_sector: write,
+        flush,
+        geometry,
+    };
+    let geo = unsafe { (vtable.geometry)(vtable.handle) };
+    assert_eq!(geo.sector_count, 2);
+    assert_eq!(geo.sector_size, 512);
+
+    let pattern = [0xABu8; 512];
+    let status = unsafe { (vtable.write_sector)(vtable.handle, 0, pattern.as_ptr(), 512) };
+    assert_eq!(BlockIoStatus::from_i32(status), BlockIoStatus::Ok);
+
+    let mut readback = [0u8; 512];
+    let status =
+        unsafe { (vtable.read_sector)(vtable.handle, 0, readback.as_mut_ptr(), 512) };
+    assert_eq!(BlockIoStatus::from_i32(status), BlockIoStatus::Ok);
+    assert_eq!(readback, pattern);
+
+    // Out-of-bounds read returns the right error class.
+    let status =
+        unsafe { (vtable.read_sector)(vtable.handle, 99, readback.as_mut_ptr(), 512) };
+    assert_eq!(BlockIoStatus::from_i32(status), BlockIoStatus::OutOfBounds);
+
+    // ── 2. FileSystem trait drives a synthetic in-memory FS. ───────
+    struct TinyFs;
+    impl FileSystem for TinyFs {
+        fn mount_id(&self) -> MountId {
+            MountId(1)
+        }
+        fn root(&self) -> Inode {
+            Inode {
+                mount: MountId(1),
+                num: InodeNum(1),
+                kind: InodeKind::Directory,
+                size_bytes: 0,
+            }
+        }
+        fn lookup(&self, parent: Inode, name: &[u8]) -> Result<Inode, VfsError> {
+            if parent.num != InodeNum(1) {
+                return Err(VfsError::NotFound);
+            }
+            if name == b"hello" {
+                Ok(Inode {
+                    mount: MountId(1),
+                    num: InodeNum(2),
+                    kind: InodeKind::File,
+                    size_bytes: 5,
+                })
+            } else {
+                Err(VfsError::NotFound)
+            }
+        }
+        fn read(&self, inode: Inode, offset: u64, out: &mut [u8]) -> Result<usize, VfsError> {
+            if inode.num != InodeNum(2) {
+                return Err(VfsError::NotAFile);
+            }
+            let data = b"hello";
+            let off = offset as usize;
+            if off >= data.len() {
+                return Ok(0);
+            }
+            let n = (data.len() - off).min(out.len());
+            out[..n].copy_from_slice(&data[off..off + n]);
+            Ok(n)
+        }
+        fn read_dir(
+            &self,
+            dir: Inode,
+            cursor: u64,
+            entries: &mut [DirEntry],
+        ) -> Result<(usize, u64), VfsError> {
+            if dir.kind != InodeKind::Directory {
+                return Err(VfsError::NotADirectory);
+            }
+            if cursor > 0 {
+                return Ok((0, u64::MAX));
+            }
+            let mut e = DirEntry::empty();
+            e.inode = self.lookup(dir, b"hello").unwrap();
+            e.name[..5].copy_from_slice(b"hello");
+            e.name_len = 5;
+            entries[0] = e;
+            Ok((1, u64::MAX))
+        }
+    }
+
+    let fs = TinyFs;
+    let root = fs.root();
+    let hello = fs.lookup(root, b"hello").expect("hello lookup");
+    let mut buf = [0u8; 16];
+    let n = fs.read(hello, 0, &mut buf).expect("read hello");
+    assert_eq!(&buf[..n], b"hello");
+
+    let mut entries = [DirEntry::empty(); 4];
+    let (n, next) = fs.read_dir(root, 0, &mut entries).expect("readdir");
+    assert_eq!(n, 1);
+    assert_eq!(next, u64::MAX);
+    assert_eq!(entries[0].name(), b"hello");
+
+    // The `MountSource::from_block(...)` path compiles and the block
+    // vtable round-trips through it.
+    let _src = MountSource::from_block(vtable);
+}
+
 // Phase B.4.6: minimal ET_DYN ELF parser — locks in format detection so
 // malformed payloads are rejected before they reach the supervisor.
 #[test]

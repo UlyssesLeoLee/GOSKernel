@@ -162,7 +162,8 @@ fn boot_realize_builds_instance_claim_and_heap_grant() {
     assert_eq!(snap.registered_templates, 1);
     assert_eq!(snap.live_instances, 1);
     assert_eq!(snap.ready_instances, 1);
-    assert_eq!(snap.registered_resources, 5);
+    // 5 legacy + 2 persistence (RS.BLOCK, RS.FILE) introduced in Phase F.
+    assert_eq!(snap.registered_resources, 7);
     assert_eq!(snap.active_claims, 1);
     assert_eq!(snap.heap_grants, 1);
     assert_eq!(snap.heap_pages_used, 2);
@@ -354,6 +355,49 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     let snap = snapshot().expect("snapshot after free");
     assert_eq!(snap.heap_grants, 0);
     assert_eq!(snap.heap_pages_used, 0);
+}
+
+// ── Phase F regression: persistence resources are registered ─────────────────
+//
+// RESOURCE_BLOCK_DEVICE and RESOURCE_FILE_HANDLE must be registered at
+// bootstrap so plugin manifests can declare claims against them, even
+// before a real driver/FS is installed.  Once a claim against either
+// resource succeeds (no provider registered yet -> Shared lease since
+// no exclusive holder), we know the supervisor knows about them.
+#[test]
+fn persistence_resources_are_registered_at_bootstrap() {
+    use gos_protocol::{RESOURCE_BLOCK_DEVICE, RESOURCE_FILE_HANDLE};
+
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+    let instance = current_instance(provider).expect("primary instance");
+
+    // Both new resources must be claimable as Shared (no exclusive
+    // holder since the provider isn't installed yet, but the resource
+    // slot exists).
+    let block_lease = claim_resource(
+        instance,
+        RESOURCE_BLOCK_DEVICE,
+        ClaimPolicy::Shared,
+        PreemptPolicy::Never,
+    )
+    .expect("RS.BLOCK must be registered after bootstrap");
+    assert_eq!(block_lease.resource_id, RESOURCE_BLOCK_DEVICE);
+
+    let file_lease = claim_resource(
+        instance,
+        RESOURCE_FILE_HANDLE,
+        ClaimPolicy::Shared,
+        PreemptPolicy::Never,
+    )
+    .expect("RS.FILE must be registered after bootstrap");
+    assert_eq!(file_lease.resource_id, RESOURCE_FILE_HANDLE);
+
+    let _ = release_claim(block_lease.claim_id);
+    let _ = release_claim(file_lease.claim_id);
 }
 
 // ── Phase E.3 regression: User-level modules are rejected at start ───────────

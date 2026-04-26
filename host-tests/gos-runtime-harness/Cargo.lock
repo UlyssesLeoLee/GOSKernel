@@ -29,6 +29,14 @@ dependencies = [
  "gos-loader",
  "gos-protocol",
  "gos-runtime",
+ "gos-vfs",
+]
+
+[[package]]
+name = "gos-vfs"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@
 //! This crate defines the cross-plugin ABI, graph descriptors, and the
 //! legacy compatibility layer used during the v0.2 runtime migration.
 
+pub mod block;
 pub mod stem;
 pub use stem::*;
 
@@ -840,6 +841,12 @@ pub const RESOURCE_PAGE_MAPPER: ResourceId = ResourceId::from_ascii("RS.VMM");
 pub const RESOURCE_DISPLAY_CONSOLE: ResourceId = ResourceId::from_ascii("RS.CONSOLE");
 pub const RESOURCE_HEAP_SOURCE: ResourceId = ResourceId::from_ascii("RS.HEAP");
 pub const RESOURCE_GPU_ACCEL: ResourceId = ResourceId::from_ascii("RS.GPU");
+// Phase F: persistence resources.  A claim against either of these is
+// honored once a real driver/FS is installed (follow-up slices F.1.x
+// and F.3.x); structurally registered now so plugins can declare the
+// dependency and the supervisor's quota machinery accounts for them.
+pub const RESOURCE_BLOCK_DEVICE: ResourceId = ResourceId::from_ascii("RS.BLOCK");
+pub const RESOURCE_FILE_HANDLE: ResourceId = ResourceId::from_ascii("RS.FILE");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

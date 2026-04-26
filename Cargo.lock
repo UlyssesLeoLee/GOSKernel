@@ -46,6 +46,7 @@ dependencies = [
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
+ "gos-vfs",
  "k-ai",
  "k-chat",
  "k-cpuid",
@@ -99,6 +100,13 @@ dependencies = [
  "k-vmm",
  "spin",
  "x86_64",
+]
+
+[[package]]
+name = "gos-vfs"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
 ]
 
 [[package]]
@@ -166,6 +174,7 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
+ "gos-runtime",
  "k-pmm",
  "k-vmm",
  "linked_list_allocator",
@@ -247,9 +256,9 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
+ "gos-runtime",
  "k-pic",
  "k-shell",
- "spin",
  "x86_64",
 ]
 
@@ -298,6 +307,7 @@ dependencies = [
  "gos-hal",
  "gos-protocol",
  "gos-runtime",
+ "gos-supervisor",
  "spin",
 ]
 
