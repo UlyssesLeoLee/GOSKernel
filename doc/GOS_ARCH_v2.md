@@ -239,17 +239,20 @@ GOS 当前的推荐架构已经不是“loader 先行、运行时补图”的原
 - `BuiltinModule` 仅剩 `Native` 变体，allowlist 为零
 - 文档已更新，legacy 仅作为历史记录存在
 
-### Phase B：补齐原子化底座
+### Phase B：补齐原子化底座 ✅ 已完成（2026-04-26）
 
-重点固定为：
-
-1. 真实 module image / domain page table / CR3 切换执行
-2. `NodeTemplate -> NodeInstance` 调度模型
-3. `claim / lease / revoke / epoch fencing`
-4. 每实例私有 heap 与 supervisor 授页
-5. fault attribution / restart / degraded mode
-
-这一阶段完成前，不插入新的高层 feature phase。
+| 子阶段 | 内容 | 状态 |
+|---|---|---|
+| B.1 | Fault attribution bridge: runtime ExecStatus::Fault → supervisor fault_module | ✅ |
+| B.2 | NodeTemplate → NodeInstance binding；supervisor lane-class 调度 → runtime pump | ✅ |
+| B.3 | Per-instance HeapQuota + k-heap backend + 不变式扫描 | ✅ |
+| B.4.1 | Domain PML4 构造 + 可观察性 | ✅ |
+| B.4.2 | Domain-aware page mapping | ✅ |
+| B.4.3 | IST stacks + CPU-fault dispatch hook | ✅ |
+| B.4.4 | CR3 trampoline + native dispatch RAII 包装 | ✅ |
+| B.4.5 | Cross-domain capability invocation | ✅（结构已具备，端到端验证待 B.4.6.x） |
+| B.4.6 | ELF loader 最小切片（解析） | ✅（relocation / symbol / loading 后续独立切片） |
+| B.5 | Degraded mode + restart cap + fault telemetry envelope | ✅ |
 
 ### Phase B.5：Degraded mode + fault telemetry ✅ 已完成（2026-04-25）
 

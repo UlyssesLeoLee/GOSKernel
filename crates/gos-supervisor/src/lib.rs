@@ -2127,6 +2127,15 @@ pub fn bootstrap(boot_payload: u64) {
     gos_runtime::install_fault_dispatch(gos_runtime::FaultDispatch {
         fault: fault_dispatch,
     });
+    // Phase B.4.4: install the CR3 trampoline so every native dispatch
+    // is bracketed by a domain switch.  Currently short-circuits when
+    // the target root_table_phys equals the live CR3 (every builtin
+    // until ELF loader ships); the API surface + counter are in place
+    // so B.4.6 / external modules will start switching automatically.
+    gos_runtime::install_domain_switch(gos_runtime::DomainSwitch {
+        enter: trampoline_enter,
+        leave: trampoline_leave,
+    });
 }
 
 unsafe extern "C" fn heap_accounting_charge(
@@ -2162,6 +2171,82 @@ unsafe extern "C" fn fault_dispatch(instance_id: NodeInstanceId) {
         guard.instances[slot].module
     };
     let _ = SUPERVISOR.lock().fault_module(handle);
+}
+
+/// Phase B.4.4: switch CR3 into the domain owning `instance_id`.
+///
+/// Returns the saved CR3 (encoded as u64) so a paired `trampoline_leave`
+/// can restore it.  Short-circuits when the target's root_table_phys is
+/// zero or already equals the live CR3 — every builtin module today
+/// has a non-zero root (B.4.1) but shares the kernel CR3 because no
+/// ELF loader has rebased their image, so the no-op branch dominates.
+unsafe extern "C" fn trampoline_enter(instance_id: NodeInstanceId) -> u64 {
+    if instance_id == NodeInstanceId::ZERO {
+        return 0;
+    }
+    let target_root = {
+        let guard = SUPERVISOR.lock();
+        let Ok(inst_slot) = guard.find_instance_slot(instance_id) else {
+            return 0;
+        };
+        let module = guard.instances[inst_slot].module;
+        let Ok(mod_slot) = guard.find_module_slot(module) else {
+            return 0;
+        };
+        guard.modules[mod_slot].domain.root_table_phys
+    };
+    cr3_switch_into(target_root)
+}
+
+unsafe extern "C" fn trampoline_leave(token: u64) {
+    cr3_restore(token);
+}
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+unsafe fn cr3_switch_into(target_root: u64) -> u64 {
+    use x86_64::registers::control::{Cr3, Cr3Flags};
+    use x86_64::structures::paging::PhysFrame;
+    use x86_64::PhysAddr;
+    if target_root == 0 {
+        return 0;
+    }
+    let (current_frame, current_flags) = Cr3::read();
+    let current = current_frame.start_address().as_u64();
+    if current == target_root {
+        // No-op: caller already running in the target domain.
+        return 0;
+    }
+    let target_frame = PhysFrame::containing_address(PhysAddr::new(target_root));
+    Cr3::write(target_frame, Cr3Flags::empty());
+    // Encode the saved CR3 as a u64 so the leave path can restore it.
+    // Bit 63 marks "valid token" so a 0 token can mean "no switch".
+    (current & !(1u64 << 63)) | (1u64 << 63) | ((current_flags.bits() as u64) << 56)
+}
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+unsafe fn cr3_restore(token: u64) {
+    use x86_64::registers::control::{Cr3, Cr3Flags};
+    use x86_64::structures::paging::PhysFrame;
+    use x86_64::PhysAddr;
+    if token == 0 || (token & (1u64 << 63)) == 0 {
+        return;
+    }
+    let saved_flags = Cr3Flags::from_bits_truncate(((token >> 56) & 0x7F) as u64);
+    let saved = token & 0x00FF_FFFF_FFFF_FFFFu64;
+    let frame = PhysFrame::containing_address(PhysAddr::new(saved));
+    Cr3::write(frame, saved_flags);
+}
+
+#[cfg(any(test, feature = "host-testing"))]
+unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
+    // Host harness: no MMU; record nothing, return a sentinel so the
+    // round-trip-counter test can observe enter/leave balance.
+    0
+}
+
+#[cfg(any(test, feature = "host-testing"))]
+unsafe fn cr3_restore(_token: u64) {
+    // Host harness counterpart to cr3_switch_into.  Intentional no-op.
 }
 
 pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {

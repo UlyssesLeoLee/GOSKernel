@@ -1178,6 +1178,85 @@ pub fn dispatch_fault(instance_id: NodeInstanceId) {
     }
 }
 
+// ── Domain CR3 trampoline (Phase B.4.4) ──────────────────────────────────────
+//
+// Per the B.4 design doc, every native dispatch is bracketed with a CR3
+// switch into the target instance's domain.  The supervisor installs the
+// actual switch implementation at bootstrap (`enter` returns a saved
+// token, `leave` restores from it).  Without an installed hook the
+// trampoline is a no-op — covers host-testing and pre-bootstrap boot.
+//
+// The hook is permitted (and expected today) to short-circuit when the
+// target's root_table_phys equals the live CR3 — that's the case for
+// every builtin until ELF-loaded modules ship in B.4.6.  Until then,
+// this gives us the API surface, RAII guard, and a measurable
+// transition counter without changing on-CPU semantics.
+#[derive(Clone, Copy)]
+pub struct DomainSwitch {
+    /// Switch CR3 to the domain owning `instance_id`; return an opaque
+    /// token the supervisor can later use in `leave` to restore.
+    pub enter: unsafe extern "C" fn(instance_id: NodeInstanceId) -> u64,
+    /// Restore CR3 from a token previously returned by `enter`.
+    pub leave: unsafe extern "C" fn(token: u64),
+}
+
+static DOMAIN_SWITCH: Mutex<Option<DomainSwitch>> = Mutex::new(None);
+static DOMAIN_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn install_domain_switch(hook: DomainSwitch) {
+    *DOMAIN_SWITCH.lock() = Some(hook);
+}
+
+pub fn domain_switch_count() -> u64 {
+    DOMAIN_SWITCH_COUNT.load(Ordering::Relaxed)
+}
+
+/// Begin a domain dispatch.  Returns an opaque token the caller must
+/// pass to `end_domain_dispatch` (or `DomainGuard::drop` does it).
+fn begin_domain_dispatch(instance_id: NodeInstanceId) -> u64 {
+    let hook = *DOMAIN_SWITCH.lock();
+    let Some(hook) = hook else { return 0 };
+    if instance_id == NodeInstanceId::ZERO {
+        return 0;
+    }
+    DOMAIN_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    unsafe { (hook.enter)(instance_id) }
+}
+
+fn end_domain_dispatch(token: u64) {
+    let hook = *DOMAIN_SWITCH.lock();
+    if let Some(hook) = hook {
+        unsafe { (hook.leave)(token) };
+    }
+}
+
+/// RAII guard ensuring `leave` runs on drop.  Used inside route_signal
+/// and activate to bracket every native callback.
+struct DomainGuard {
+    token: u64,
+    active: bool,
+}
+
+impl DomainGuard {
+    fn enter(instance_id: NodeInstanceId) -> Self {
+        let active = DOMAIN_SWITCH.lock().is_some() && instance_id != NodeInstanceId::ZERO;
+        let token = if active {
+            begin_domain_dispatch(instance_id)
+        } else {
+            0
+        };
+        Self { token, active }
+    }
+}
+
+impl Drop for DomainGuard {
+    fn drop(&mut self) {
+        if self.active {
+            end_domain_dispatch(self.token);
+        }
+    }
+}
+
 unsafe extern "C" fn kernel_alloc_pages(page_count: usize) -> *mut u8 {
     if page_count == 0 {
         return core::ptr::null_mut();
@@ -1504,6 +1583,11 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             let terminated = matches!(signal, Signal::Terminate);
 
             set_current_dispatch(dispatch.vector);
+            // Phase B.4.4: bracket the native callback in a CR3
+            // trampoline.  Currently a no-op when target root == live
+            // CR3 (every builtin until ELF loader ships), but the
+            // wiring + transition counter is in place.
+            let _domain_guard = DomainGuard::enter(dispatch.instance_id);
 
             if !binding.initialized {
                 if let Some(on_init) = binding.vtable.on_init {
@@ -1533,6 +1617,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 };
             }
 
+            drop(_domain_guard);
             clear_current_dispatch();
 
             // ── Conditional routing (LangGraph-style) ────────────────────────
@@ -1620,6 +1705,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             let mut status = ExecStatus::Done;
 
             set_current_dispatch(dispatch.vector);
+            let _domain_guard = DomainGuard::enter(dispatch.instance_id);
 
             if !binding.initialized {
                 if let Some(on_init) = binding.vtable.on_init {
@@ -1638,6 +1724,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
                 };
             }
 
+            drop(_domain_guard);
             clear_current_dispatch();
 
             {

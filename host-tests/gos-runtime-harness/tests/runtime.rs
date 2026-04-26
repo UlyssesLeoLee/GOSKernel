@@ -103,6 +103,70 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase B.4.6: minimal ET_DYN ELF parser — locks in format detection so
+// malformed payloads are rejected before they reach the supervisor.
+#[test]
+fn elf_parser_rejects_bad_inputs_and_walks_synthetic_etdyn() {
+    use gos_loader::elf::{parse, ElfError, PF_R, PF_X, PT_LOAD};
+
+    // Reject empty / short / wrong magic / wrong class.
+    assert_eq!(parse(&[]).unwrap_err(), ElfError::TooSmall);
+    assert_eq!(parse(&[0u8; 32]).unwrap_err(), ElfError::TooSmall);
+    let mut bad_magic = [0u8; 64];
+    bad_magic[..4].copy_from_slice(&[0x7F, b'X', b'L', b'F']);
+    assert_eq!(parse(&bad_magic).unwrap_err(), ElfError::BadMagic);
+
+    // Build a minimal valid ET_DYN ELF64-LE x86_64 header + 1 PT_LOAD.
+    let mut elf = vec![0u8; 64 + 56];
+    elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    elf[4] = 2; // ELFCLASS64
+    elf[5] = 1; // ELFDATA2LSB
+    elf[6] = 1; // EI_VERSION
+    elf[7] = 0; // EI_OSABI = SYSV
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+    elf[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+    elf[24..32].copy_from_slice(&0x1234u64.to_le_bytes()); // e_entry
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+    // PT_LOAD at offset 64
+    elf[64..68].copy_from_slice(&PT_LOAD.to_le_bytes());
+    elf[68..72].copy_from_slice(&(PF_R | PF_X).to_le_bytes());
+    elf[72..80].copy_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf[80..88].copy_from_slice(&0x4000u64.to_le_bytes()); // p_vaddr
+    elf[88..96].copy_from_slice(&0x4000u64.to_le_bytes()); // p_paddr
+    elf[96..104].copy_from_slice(&0x100u64.to_le_bytes()); // p_filesz
+    elf[104..112].copy_from_slice(&0x200u64.to_le_bytes()); // p_memsz
+
+    let parsed = parse(&elf).expect("valid ET_DYN");
+    assert_eq!(parsed.entry_offset, 0x1234);
+    assert_eq!(parsed.program_headers, 1);
+
+    let mut count = 0usize;
+    let mut last_flags = 0u32;
+    parsed.for_each_load_segment(|seg| {
+        count += 1;
+        assert_eq!(seg.virt_addr, 0x4000);
+        assert_eq!(seg.mem_len, 0x200);
+        assert_eq!(seg.file_offset, 0);
+        assert_eq!(seg.file_len, 0x100);
+        last_flags = seg.flags;
+    });
+    assert_eq!(count, 1);
+    assert_eq!(last_flags, PF_R | PF_X);
+    assert_eq!(parsed.highest_virt_end(), 0x4200);
+
+    // Reject non-ET_DYN.
+    let mut elf_exec = elf.clone();
+    elf_exec[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    assert_eq!(parse(&elf_exec).unwrap_err(), ElfError::NotEtDyn);
+
+    // Reject non-x86_64.
+    let mut elf_arm = elf.clone();
+    elf_arm[18..20].copy_from_slice(&183u16.to_le_bytes()); // EM_AARCH64
+    assert_eq!(parse(&elf_arm).unwrap_err(), ElfError::NotX86_64);
+}
+
 // Phase D.5: ABI semver compatibility rules.  Major must match exactly;
 // the host's minor must be >= the plugin's minor; patch is observational.
 #[test]
@@ -144,6 +208,60 @@ fn abi_components_round_trip() {
         assert_eq!(abi_minor(v), min);
         assert_eq!(abi_patch(v), pat);
     }
+}
+
+// Phase B.4.4 / B.4.5: native dispatch is bracketed by a CR3 trampoline
+// (DomainSwitch hook).  This test installs a counting hook and proves
+// every native callback under route_signal increments enter+leave.
+//
+// Verifying actual CR3 transitions is impossible from host; the
+// bookkeeping balance is what matters here — once an ELF-loaded plugin
+// has its own root, the same hook does the real switch.
+#[test]
+fn domain_switch_hook_brackets_every_native_dispatch() {
+    use gos_protocol::NodeInstanceId;
+    use std::sync::atomic::{AtomicU32, Ordering as AOrd};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    install_test_node();
+
+    static ENTER_COUNT: AtomicU32 = AtomicU32::new(0);
+    static LEAVE_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn count_enter(_id: NodeInstanceId) -> u64 {
+        ENTER_COUNT.fetch_add(1, AOrd::SeqCst);
+        0xC0FFEE
+    }
+    unsafe extern "C" fn count_leave(token: u64) {
+        assert_eq!(token, 0xC0FFEE, "leave must receive enter's token");
+        LEAVE_COUNT.fetch_add(1, AOrd::SeqCst);
+    }
+
+    ENTER_COUNT.store(0, AOrd::SeqCst);
+    LEAVE_COUNT.store(0, AOrd::SeqCst);
+
+    gos_runtime::install_domain_switch(gos_runtime::DomainSwitch {
+        enter: count_enter,
+        leave: count_leave,
+    });
+
+    // Bind the test plugin to a real instance (non-ZERO) so the
+    // trampoline guard activates.
+    let _ = gos_runtime::bind_plugin_instance(TEST_PLUGIN_ID, NodeInstanceId::new(7));
+
+    let _ = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 });
+
+    assert_eq!(ENTER_COUNT.load(AOrd::SeqCst), 1, "trampoline enter on dispatch");
+    assert_eq!(
+        LEAVE_COUNT.load(AOrd::SeqCst),
+        1,
+        "trampoline leave must balance enter"
+    );
+    assert_eq!(
+        gos_runtime::domain_switch_count(),
+        1,
+        "runtime-level transition counter"
+    );
 }
 
 #[test]

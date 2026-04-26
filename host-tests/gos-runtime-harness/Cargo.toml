@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
+gos-loader = { path = "../../crates/gos-loader" }
