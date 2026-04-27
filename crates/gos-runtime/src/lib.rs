@@ -1834,6 +1834,15 @@ pub fn route_edge(edge_id: EdgeId, signal: Signal) -> Result<(), RuntimeError> {
 }
 
 pub fn pump() {
+    // Hard cap: a tight signal-loop between two nodes can otherwise
+    // pin the kernel inside this pump call.  4096 work items per
+    // pump pass is generous (the steady-state queue depth is
+    // typically <100) but bounds the worst case.  service_system_
+    // cycle calls pump repeatedly, so this cap doesn't drop work —
+    // it just gives the supervisor a chance to drain faults / apply
+    // restart policy between batches.
+    const MAX_WORK_ITEMS_PER_PUMP: u32 = 4096;
+    let mut processed: u32 = 0;
     loop {
         let work = {
             let mut runtime = RUNTIME.lock();
@@ -1857,6 +1866,10 @@ pub fn pump() {
             WorkItem::Signal(signal) => {
                 let _ = route_signal(signal.target, signal.signal);
             }
+        }
+        processed = processed.wrapping_add(1);
+        if processed >= MAX_WORK_ITEMS_PER_PUMP {
+            break;
         }
 
         let mut runtime = RUNTIME.lock();

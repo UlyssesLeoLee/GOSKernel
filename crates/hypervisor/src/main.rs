@@ -77,17 +77,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         snapshot.signal_queue_len
     );
 
-    raw_serial_println(format_args!("boot: supervisor owns system cycle"));
-    gos_supervisor::service_system_cycle();
-
-    // Phase E.2: program the syscall MSRs after the GDT has been loaded
-    // (k-gdt's Spawn dispatch ran during the system cycle above).  Until
-    // an ELF-loaded plugin runs in Ring 3 (B.4.6.x + E.3) no `syscall`
-    // is issued; we wire it now so the moment a user-mode .gosmod
-    // dispatches its first call lands on a working trampoline.
+    // Phase E.2: program the syscall MSRs after the GDT has been
+    // loaded by realize_boot_modules' call_entry path.
+    raw_serial_println(format_args!("boot: arming ring3 syscall surface"));
     unsafe { ring3::init(); }
     raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
+    raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
     loop {

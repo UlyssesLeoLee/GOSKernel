@@ -2585,6 +2585,13 @@ pub fn instance_domain_root(instance_id: NodeInstanceId) -> Option<u64> {
 }
 
 pub fn service_system_cycle() {
+    // Hard cap: any individual cycle that can't drain in this many
+    // iterations is in a fault-restart loop or similar pathology.
+    // Bail rather than hang the kernel.  Phase B.5's restart cap
+    // catches single-module loops; this cap catches multi-module
+    // round-robins that B.5 alone can't see.
+    const MAX_CYCLE_ITERATIONS: u32 = 2048;
+    let mut iter: u32 = 0;
     loop {
         let restarted = process_restart_queue().ok().flatten().is_some();
         // Drain supervisor lane-class ready queues into the runtime ready
@@ -2601,6 +2608,12 @@ pub fn service_system_cycle() {
             }
         }
         if !restarted && dispatched == 0 {
+            break;
+        }
+        iter = iter.wrapping_add(1);
+        if iter >= MAX_CYCLE_ITERATIONS {
+            // Diagnostic break — leaves the runtime in whatever state
+            // it reached.  Steady-state shell pump will pick back up.
             break;
         }
     }
