@@ -23,7 +23,10 @@
       "Bash(cargo build *)",
       "Bash(cargo run *)",
       "Bash(git check-ignore *)",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(\"/c/Program Files/qemu/qemu-system-x86_64.exe\" --version)",
+      "Bash(cargo bootimage *)",
+      "PowerShell(Stop-Process -Name qemu-system-x86_64 -Force -ErrorAction SilentlyContinue)"
     ]
   }
 }
