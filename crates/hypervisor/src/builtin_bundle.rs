@@ -1028,6 +1028,46 @@ const fn module_descriptor(
     imports: &'static [ImportSpec],
     fault_policy: ModuleFaultPolicy,
 ) -> ModuleDescriptor {
+    module_descriptor_with_flags(
+        plugin_id, name, dependencies, permissions, exports, imports, fault_policy, 0,
+    )
+}
+
+/// Phase G.1 — App-tier descriptor.  Sets `MODULE_FLAG_APP` so the
+/// supervisor + builtin_bundle can tell at-a-glance which modules
+/// run lazily (signal-driven post-interrupts) vs. synchronously
+/// during boot init.
+const fn module_descriptor_app(
+    plugin_id: PluginId,
+    name: &'static str,
+    dependencies: &'static [ModuleDependencySpec],
+    permissions: &'static [PermissionSpec],
+    exports: &'static [CapabilitySpec],
+    imports: &'static [ImportSpec],
+    fault_policy: ModuleFaultPolicy,
+) -> ModuleDescriptor {
+    module_descriptor_with_flags(
+        plugin_id,
+        name,
+        dependencies,
+        permissions,
+        exports,
+        imports,
+        fault_policy,
+        gos_protocol::MODULE_FLAG_APP,
+    )
+}
+
+const fn module_descriptor_with_flags(
+    plugin_id: PluginId,
+    name: &'static str,
+    dependencies: &'static [ModuleDependencySpec],
+    permissions: &'static [PermissionSpec],
+    exports: &'static [CapabilitySpec],
+    imports: &'static [ImportSpec],
+    fault_policy: ModuleFaultPolicy,
+    flags: u64,
+) -> ModuleDescriptor {
     ModuleDescriptor {
         abi_version: MODULE_ABI_VERSION,
         module_id: module_id(plugin_id),
@@ -1042,7 +1082,7 @@ const fn module_descriptor(
         segments: &[],
         entry: ModuleEntry::NONE,
         signature: None,
-        flags: 0,
+        flags,
     }
 }
 
@@ -1336,7 +1376,10 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         MOUSE_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    // Phase G.1 — App-tier modules: lazy on_init via the runtime pump
+    // once the system is interactive.  Marked with MODULE_FLAG_APP so
+    // any future "list apps" UI can distinguish them from drivers.
+    module_descriptor_app(
         K_CYPHER_ID,
         "K_CYPHER",
         MOD_DEP_CYPHER,
@@ -1345,7 +1388,7 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         CYPHER_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    module_descriptor_app(
         K_CUDA_ID,
         "K_CUDA",
         MOD_DEP_CUDA,
@@ -1354,7 +1397,7 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         CUDA_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    module_descriptor_app(
         K_SHELL_ID,
         "K_SHELL",
         MOD_DEP_SHELL,
@@ -1363,7 +1406,7 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         SHELL_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    module_descriptor_app(
         K_AI_ID,
         "K_AI",
         MOD_DEP_AI,
@@ -1372,7 +1415,7 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         AI_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    module_descriptor_app(
         K_CHAT_ID,
         "K_CHAT",
         MOD_DEP_CHAT,
@@ -1381,7 +1424,7 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         CHAT_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
-    module_descriptor(
+    module_descriptor_app(
         K_NIM_ID,
         "K_NIM",
         MOD_DEP_NIM,
@@ -1679,4 +1722,38 @@ fn idt_load_hook(_ctx: &mut BootContext) {
         k_pic::InterruptIndex::Mouse.as_u8(),
         k_mouse::NODE_VEC,
     );
+}
+
+/// Phase G.1 — synchronous kernel-tier init pass.
+///
+/// Hardware drivers must finish their CPU-state setup (GDT/IDT
+/// installed, PIC unmasked) BEFORE the kernel enables interrupts.
+/// The runtime's pump-driven dispatch path is signal-driven and
+/// doesn't run until interrupts are on, so anything that needs to
+/// fire pre-interrupts must be invoked by direct Rust calls here.
+///
+/// App-tier modules (shell, cypher, ai, chat, ...) skip this pass —
+/// they activate via the steady-state pump in `service_system_cycle`
+/// once the system is interactive.
+///
+/// Order matters:
+///   1. GDT before IDT (TSS selector lives in GDT; IDT IST entries
+///      reference TSS slots).
+///   2. IDT before PIC unmask (an IRQ arriving before IDT loaded
+///      would jump into an unmapped vector and triple-fault).
+///   3. PIC unmask must be the LAST step before main.rs enables
+///      interrupts — once unmasked + sti, IRQs start flowing.
+pub fn init_kernel_tier_drivers() {
+    // 1. GDT — write the GdtState into HAL_MATRIX, then lgdt + reload
+    //    CS + load_tss.  `boot_init_gdt` combines what `gdt_on_init`
+    //    and `init_gdt` would do separately under the runtime-pump
+    //    path that doesn't run pre-interrupts.
+    k_gdt::boot_init_gdt();
+    // 2. IDT — k-idt::init_idt is already self-contained (writes the
+    //    IDT into HAL_MATRIX and lidts it in one call).
+    unsafe { k_idt::init_idt(); }
+    // 3. PIC — initialises the 8259 chain, unmasks Timer / Keyboard /
+    //    Cascade / Mouse.  PIT was already programmed via
+    //    pit_register_hook (120 Hz) during register_hooks pass.
+    k_pic::init_pic();
 }

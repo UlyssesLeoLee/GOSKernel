@@ -77,8 +77,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         snapshot.signal_queue_len
     );
 
-    // Phase E.2: program the syscall MSRs after the GDT has been
-    // loaded by realize_boot_modules' call_entry path.
+    // Phase G.1: synchronously initialize kernel-tier drivers (GDT,
+    // IDT, PIC) before interrupts come up.  Builtin modules' on_init
+    // never ran via runtime pump because their ModuleEntry was None;
+    // hardware setup must happen on the direct path here.
+    raw_serial_println(format_args!("boot: kernel-tier drivers init"));
+    builtin_bundle::init_kernel_tier_drivers();
+    raw_serial_println(format_args!("boot: kernel-tier drivers ready (GDT/IDT/PIC)"));
+
+    // Phase E.2: program the syscall MSRs once the GDT is live.
     raw_serial_println(format_args!("boot: arming ring3 syscall surface"));
     unsafe { ring3::init(); }
     raw_serial_println(format_args!("boot: ring3 syscall surface armed"));

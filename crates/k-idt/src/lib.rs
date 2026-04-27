@@ -279,7 +279,12 @@ pub fn idt() -> &'static InterruptDescriptorTable {
     }
 }
 
-unsafe extern "C" fn idt_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
+/// Phase G.1 — synchronous IDT setup, callable directly from the
+/// kernel-tier boot init pass (before interrupts).  `idt_on_init`
+/// below is a thin wrapper for the runtime-dispatch path; both end
+/// up calling this.  Idempotent: re-running with the same IDT layout
+/// is harmless because `lidt` just reloads.
+pub unsafe fn init_idt() {
     let p = node_ptr();
     meta::burn_node_metadata(p, "HAL", "IDT");
 
@@ -312,7 +317,10 @@ unsafe extern "C" fn idt_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     core::ptr::write(state_ptr, idt);
 
     crate::idt().load();
+}
 
+unsafe extern "C" fn idt_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
+    unsafe { init_idt(); }
     ExecStatus::Done
 }
 

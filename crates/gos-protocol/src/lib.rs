@@ -1179,6 +1179,27 @@ pub enum Privilege {
 }
 
 pub const MODULE_FLAG_USER: u64 = 1 << 0;
+/// Phase G.1 — PluginTier flag.  Bit 0 was Privilege::User.  Bit 1 is
+/// PluginTier::App: when set, the module's `on_init` runs lazily via
+/// the runtime pump (signal-driven), NOT during the synchronous boot
+/// init pass.  Default (bit clear) = PluginTier::Kernel — `on_init`
+/// runs synchronously during `boot_builtin_graph`'s kernel-tier init
+/// pass, BEFORE interrupts are enabled.
+///
+/// The split exists because hardware drivers (PIC, GDT, IDT, PIT,
+/// PS/2) must finish their setup before the first IRQ fires, while
+/// graph clients (shell, cypher, ai, chat) only need to be alive
+/// once the system is interactive.  Mixing them through one
+/// pump-driven path (the previous design) means an App that blocks
+/// on init takes the kernel down with it.
+pub const MODULE_FLAG_APP: u64 = 1 << 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PluginTier {
+    Kernel = 0,
+    App = 1,
+}
 
 impl ModuleDescriptor {
     pub const fn privilege(&self) -> Privilege {
@@ -1186,6 +1207,14 @@ impl ModuleDescriptor {
             Privilege::User
         } else {
             Privilege::Kernel
+        }
+    }
+
+    pub const fn tier(&self) -> PluginTier {
+        if self.flags & MODULE_FLAG_APP != 0 {
+            PluginTier::App
+        } else {
+            PluginTier::Kernel
         }
     }
 }
