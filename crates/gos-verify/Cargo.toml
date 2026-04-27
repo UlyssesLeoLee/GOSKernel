@@ -1,0 +1,14 @@
+[package]
+name = "gos-verify"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# When the `kani` feature is on, the proof harnesses below compile
+# under Kani's bounded-model checker.  Without it they degrade into
+# ordinary unit tests so the same invariants are exercised in cargo
+# test.
+kani = []
+
+[dependencies]

@@ -8,8 +8,12 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
+gos-ai-bridge = { path = "../../crates/gos-ai-bridge" }
+gos-cluster = { path = "../../crates/gos-cluster" }
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
 gos-journal = { path = "../../crates/gos-journal" }
 gos-loader = { path = "../../crates/gos-loader" }
 gos-log = { path = "../../crates/gos-log" }
+gos-verify = { path = "../../crates/gos-verify" }
 gos-vfs = { path = "../../crates/gos-vfs" }
 k-fat32 = { path = "../../crates/k-fat32" }

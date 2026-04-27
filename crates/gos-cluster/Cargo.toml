@@ -1,0 +1,8 @@
+[package]
+name = "gos-cluster"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+spin = "0.9"

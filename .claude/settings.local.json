@@ -3,7 +3,27 @@
     "allow": [
       "Bash(wc -l /e/GOSKernel/crates/*/src/lib.rs /e/GOSKernel/crates/hypervisor/src/*.rs)",
       "Bash(cargo check:*)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(python3 -)",
+      "Bash(python3 -c ' *)",
+      "Bash(cargo fix *)",
+      "Bash(grep \"crates\\\\\\\\\")",
+      "Bash(find \"E:\\\\GOSKernel/crates\" -type f -name \"Cargo.toml\" -exec grep -l \"path\\\\|version\" {} \\\\;)",
+      "Bash(xargs wc *)",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"E:\\\\GOSKernel\\\\tools\\\\verify-graph-architecture.ps1\")",
+      "Bash(xargs grep *)",
+      "Bash(powershell -File verify-graph-architecture.ps1)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File verify-graph-architecture.ps1)",
+      "Bash(dir verify-graph*.ps1)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"E:/GOSKernel/tools/verify-graph-architecture.ps1\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File tools/verify-graph-architecture.ps1)",
+      "Bash(git commit -m ' *)",
+      "Bash(rm E:/GOSKernel/.git/index.lock)",
+      "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(cargo run *)",
+      "Bash(git check-ignore *)",
+      "Bash(tasklist)"
     ]
   }
 }
