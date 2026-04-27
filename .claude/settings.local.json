@@ -26,7 +26,9 @@
       "Bash(tasklist)",
       "Bash(\"/c/Program Files/qemu/qemu-system-x86_64.exe\" --version)",
       "Bash(cargo bootimage *)",
-      "PowerShell(Stop-Process -Name qemu-system-x86_64 -Force -ErrorAction SilentlyContinue)"
+      "PowerShell(Stop-Process -Name qemu-system-x86_64 -Force -ErrorAction SilentlyContinue)",
+      "Bash(\"/c/Program Files/qemu/qemu-system-x86_64.exe\" -drive format=raw,file=E:/DevCache/cargo/target/x86_64-gos-kernel/debug/bootimage-gos-kernel.bin -serial file:E:/GOSKernel/qemu-serial.log -no-reboot -m 256M -netdev user,id=gosnet0 -device e1000,netdev=gosnet0,mac=52:54:00:12:34:56 -vga std)",
+      "PowerShell(Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue | Select-Object Name, Id, StartTime, @{Name='RunTime';Expression={\\(Get-Date\\) - $_.StartTime}})"
     ]
   }
 }
