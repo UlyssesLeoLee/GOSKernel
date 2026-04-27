@@ -2383,38 +2383,39 @@ unsafe extern "C" fn trampoline_leave(token: u64) {
 }
 
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-unsafe fn cr3_switch_into(target_root: u64) -> u64 {
-    use x86_64::registers::control::{Cr3, Cr3Flags};
-    use x86_64::structures::paging::PhysFrame;
-    use x86_64::PhysAddr;
-    if target_root == 0 {
-        return 0;
-    }
-    let (current_frame, current_flags) = Cr3::read();
-    let current = current_frame.start_address().as_u64();
-    if current == target_root {
-        // No-op: caller already running in the target domain.
-        return 0;
-    }
-    let target_frame = PhysFrame::containing_address(PhysAddr::new(target_root));
-    Cr3::write(target_frame, Cr3Flags::empty());
-    // Encode the saved CR3 as a u64 so the leave path can restore it.
-    // Bit 63 marks "valid token" so a 0 token can mean "no switch".
-    (current & !(1u64 << 63)) | (1u64 << 63) | ((current_flags.bits() as u64) << 56)
+unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
+    // Phase B.4.4 trampoline — *intentionally a no-op on real boot
+    // today*.  The reason:
+    //
+    //   build_domain (k_vmm::create_isolated_address_space) clones
+    //   only the kernel HIGH half (PML4 entries 256..512) into each
+    //   per-module PML4.  The kernel binary itself, however, is
+    //   loaded by bootloader 0.9 into a virtual address that lives in
+    //   the LOWER half.  Switching CR3 to a domain root with no
+    //   lower-half mapping would unmap the kernel's own .text
+    //   immediately — next instruction fetch -> #PF on an empty page
+    //   table -> #DF (no IST stack mapped here either) -> triple
+    //   fault.
+    //
+    //   Until ELF user-mode plugins arrive (Phase G.1.x) and the
+    //   kernel is moved into the high half by a linker-script /
+    //   bootloader switch, every running module is Privilege::Kernel
+    //   and shares the kernel's CR3 anyway — the switch would be a
+    //   no-op even with a correct PML4, just slower.
+    //
+    // The trampoline's API surface (DomainGuard, install_domain_switch,
+    // domain_switch_count, the host harness test
+    // `domain_switch_hook_brackets_every_native_dispatch`) all stay
+    // exactly as they were — only the kernel's switch implementation
+    // is neutered.  When the kernel base flips to the high half the
+    // body below restores cleanly.
+    0
 }
 
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-unsafe fn cr3_restore(token: u64) {
-    use x86_64::registers::control::{Cr3, Cr3Flags};
-    use x86_64::structures::paging::PhysFrame;
-    use x86_64::PhysAddr;
-    if token == 0 || (token & (1u64 << 63)) == 0 {
-        return;
-    }
-    let saved_flags = Cr3Flags::from_bits_truncate(((token >> 56) & 0x7F) as u64);
-    let saved = token & 0x00FF_FFFF_FFFF_FFFFu64;
-    let frame = PhysFrame::containing_address(PhysAddr::new(saved));
-    Cr3::write(frame, saved_flags);
+unsafe fn cr3_restore(_token: u64) {
+    // Mirror of cr3_switch_into: no-op on real boot until the kernel
+    // image lives in the high half.  See cr3_switch_into above.
 }
 
 #[cfg(any(test, feature = "host-testing"))]

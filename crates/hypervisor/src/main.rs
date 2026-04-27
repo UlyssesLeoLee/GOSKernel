@@ -131,6 +131,6 @@ fn raw_serial_print(args: fmt::Arguments) {
     let _ = RawSerial.write_fmt(args);
 }
 
-fn raw_serial_println(args: fmt::Arguments) {
+pub(crate) fn raw_serial_println(args: fmt::Arguments) {
     raw_serial_print(format_args!("{}\n", args));
 }
