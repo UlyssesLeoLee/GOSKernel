@@ -14,8 +14,8 @@ use gos_protocol::{
     ModuleMessage, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
     PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease, SpawnPolicy,
     RESOURCE_BLOCK_DEVICE, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FILE_HANDLE,
-    RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_HEAP_SOURCE,
-    RESOURCE_PAGE_MAPPER, MODULE_ABI_VERSION,
+    RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_GPU_MEMORY,
+    RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, RESOURCE_SOCKET, MODULE_ABI_VERSION,
 };
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
 use k_vmm;
@@ -399,6 +399,14 @@ struct InstanceRecord {
     /// Phase E.1 — set by on_tick when the budget hits zero, consumed
     /// by the runtime's post-dispatch check, cleared on acknowledge.
     preempt_requested: bool,
+    /// Phase G.4 — bytes of GPU device memory currently charged to
+    /// this instance.  Parallels `heap_pages_used` but in bytes
+    /// because GPU buffer sizes are usually rounded to texel boundaries
+    /// rather than 4 KiB pages.
+    gpu_bytes_used: u64,
+    /// Phase G.4 — quota cap; 0 means "no GPU access permitted".
+    /// `template.gpu_bytes_quota` seeds this on instantiation.
+    gpu_bytes_quota: u64,
 }
 
 /// Default time slice budget in PIT ticks (PIT runs at 120 Hz, so 12
@@ -422,6 +430,8 @@ impl InstanceRecord {
         heap_cursor_pages: 0,
         time_slice_remaining: TIME_SLICE_DEFAULT_TICKS,
         preempt_requested: false,
+        gpu_bytes_used: 0,
+        gpu_bytes_quota: 0,
     };
 }
 
@@ -778,6 +788,12 @@ impl Supervisor {
         // / F.3.x); the supervisor simply tracks the claim slot today.
         let _ = self.register_resource(RESOURCE_BLOCK_DEVICE);
         let _ = self.register_resource(RESOURCE_FILE_HANDLE);
+        // Phase G.3 / G.4: networking + GPU memory.  Same pattern —
+        // capability slot exists today; real backend (smoltcp wrapper,
+        // CUDA host bridge with GPU mem accounting) registers a
+        // device vtable later.
+        let _ = self.register_resource(RESOURCE_SOCKET);
+        let _ = self.register_resource(RESOURCE_GPU_MEMORY);
     }
 
     fn register_resource(&mut self, resource_id: ResourceId) -> Result<(), SupervisorError> {
@@ -1468,6 +1484,11 @@ impl Supervisor {
             heap_cursor_pages: 0,
             time_slice_remaining: TIME_SLICE_DEFAULT_TICKS,
             preempt_requested: false,
+            gpu_bytes_used: 0,
+            // G.4 first slice: GPU quota stays 0 until the kernel boot
+            // path opts an instance in via `set_gpu_quota`.  Plugins
+            // that don't claim RESOURCE_GPU_MEMORY never notice.
+            gpu_bytes_quota: 0,
         };
         Ok(instance_id)
     }
@@ -1684,6 +1705,55 @@ impl Supervisor {
                 .heap_pages_used
                 .saturating_sub(page_count);
         }
+    }
+
+    /// Phase G.4 — opt an instance into GPU memory accounting.  Until
+    /// this is called, `charge_gpu_bytes` rejects any non-zero
+    /// allocation (gpu_bytes_quota == 0 means "no GPU permitted").
+    fn set_gpu_quota(
+        &mut self,
+        instance_id: NodeInstanceId,
+        bytes: u64,
+    ) -> Result<(), SupervisorError> {
+        let slot = self.find_instance_slot(instance_id)?;
+        self.instances[slot].gpu_bytes_quota = bytes;
+        Ok(())
+    }
+
+    /// Phase G.4 — charge `bytes` of GPU memory against an instance's
+    /// quota.  Same shape as `charge_heap` but in bytes; degraded
+    /// modules and unbound instances are refused.
+    fn charge_gpu_bytes(
+        &mut self,
+        instance_id: NodeInstanceId,
+        bytes: u64,
+    ) -> Result<(), SupervisorError> {
+        let slot = self.find_instance_slot(instance_id)?;
+        let module = self.instances[slot].module;
+        if self.is_module_faulted(module) {
+            return Err(SupervisorError::ModuleRejected);
+        }
+        let projected = self.instances[slot].gpu_bytes_used.saturating_add(bytes);
+        if projected > self.instances[slot].gpu_bytes_quota {
+            return Err(SupervisorError::HeapQuotaExceeded);
+        }
+        self.instances[slot].gpu_bytes_used = projected;
+        Ok(())
+    }
+
+    fn credit_gpu_bytes(&mut self, instance_id: NodeInstanceId, bytes: u64) {
+        if let Ok(slot) = self.find_instance_slot(instance_id) {
+            self.instances[slot].gpu_bytes_used =
+                self.instances[slot].gpu_bytes_used.saturating_sub(bytes);
+        }
+    }
+
+    fn instance_gpu_usage(&self, instance_id: NodeInstanceId) -> Option<(u64, u64)> {
+        let slot = self.find_instance_slot(instance_id).ok()?;
+        Some((
+            self.instances[slot].gpu_bytes_used,
+            self.instances[slot].gpu_bytes_quota,
+        ))
     }
 
     /// Phase E.1: tick handler.  Decrements the active instance's
@@ -2445,6 +2515,25 @@ pub fn charge_heap(
 
 pub fn credit_heap(instance_id: NodeInstanceId, page_count: u32) {
     SUPERVISOR.lock().credit_heap(instance_id, page_count)
+}
+
+pub fn set_gpu_quota(instance_id: NodeInstanceId, bytes: u64) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().set_gpu_quota(instance_id, bytes)
+}
+
+pub fn charge_gpu_bytes(
+    instance_id: NodeInstanceId,
+    bytes: u64,
+) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().charge_gpu_bytes(instance_id, bytes)
+}
+
+pub fn credit_gpu_bytes(instance_id: NodeInstanceId, bytes: u64) {
+    SUPERVISOR.lock().credit_gpu_bytes(instance_id, bytes)
+}
+
+pub fn instance_gpu_usage(instance_id: NodeInstanceId) -> Option<(u64, u64)> {
+    SUPERVISOR.lock().instance_gpu_usage(instance_id)
 }
 
 /// Report (used_pages, max_pages) for the given instance, or None if

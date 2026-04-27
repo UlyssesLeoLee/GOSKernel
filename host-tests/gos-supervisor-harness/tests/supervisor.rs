@@ -162,8 +162,9 @@ fn boot_realize_builds_instance_claim_and_heap_grant() {
     assert_eq!(snap.registered_templates, 1);
     assert_eq!(snap.live_instances, 1);
     assert_eq!(snap.ready_instances, 1);
-    // 5 legacy + 2 persistence (RS.BLOCK, RS.FILE) introduced in Phase F.
-    assert_eq!(snap.registered_resources, 7);
+    // 5 legacy + 2 persistence (RS.BLOCK, RS.FILE) [F.1/F.2]
+    // + 2 networking/GPU (RS.SOCKET, RS.GPUMEM)         [G.3/G.4]
+    assert_eq!(snap.registered_resources, 9);
     assert_eq!(snap.active_claims, 1);
     assert_eq!(snap.heap_grants, 1);
     assert_eq!(snap.heap_pages_used, 2);
@@ -355,6 +356,67 @@ fn heap_quota_is_enforced_and_grants_can_be_freed() {
     let snap = snapshot().expect("snapshot after free");
     assert_eq!(snap.heap_grants, 0);
     assert_eq!(snap.heap_pages_used, 0);
+}
+
+// ── Phase G.3 + G.4 regression: socket + GPU memory resources ────────────────
+#[test]
+fn g3_g4_resources_registered_and_gpu_quota_enforced() {
+    use gos_protocol::{RESOURCE_GPU_MEMORY, RESOURCE_SOCKET};
+    use gos_supervisor::{
+        charge_gpu_bytes, credit_gpu_bytes, instance_gpu_usage, set_gpu_quota,
+    };
+
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+    let instance = current_instance(provider).expect("primary instance");
+
+    // ── G.3: RESOURCE_SOCKET claimable ──────────────────────────────
+    let socket_lease = claim_resource(
+        instance,
+        RESOURCE_SOCKET,
+        ClaimPolicy::Shared,
+        PreemptPolicy::Never,
+    )
+    .expect("RS.SOCKET must be registered");
+    assert_eq!(socket_lease.resource_id, RESOURCE_SOCKET);
+    let _ = release_claim(socket_lease.claim_id);
+
+    // ── G.4: RESOURCE_GPU_MEMORY claim succeeds; quota enforced ─────
+    let gpu_lease = claim_resource(
+        instance,
+        RESOURCE_GPU_MEMORY,
+        ClaimPolicy::Shared,
+        PreemptPolicy::Never,
+    )
+    .expect("RS.GPUMEM must be registered");
+    assert_eq!(gpu_lease.resource_id, RESOURCE_GPU_MEMORY);
+
+    // No quota set yet -> any non-zero charge refused.
+    assert!(charge_gpu_bytes(instance, 1).is_err());
+    assert_eq!(instance_gpu_usage(instance), Some((0, 0)));
+
+    // Open a 1 MiB quota.
+    set_gpu_quota(instance, 1 << 20).expect("quota set");
+    assert_eq!(instance_gpu_usage(instance), Some((0, 1 << 20)));
+
+    // 512 KiB allocation succeeds.
+    charge_gpu_bytes(instance, 512 * 1024).expect("first charge");
+    assert_eq!(instance_gpu_usage(instance), Some((512 * 1024, 1 << 20)));
+
+    // Another 600 KiB exceeds the cap -> rejected.
+    assert_eq!(
+        charge_gpu_bytes(instance, 600 * 1024),
+        Err(SupervisorError::HeapQuotaExceeded)
+    );
+
+    // Credit half back, then succeed.
+    credit_gpu_bytes(instance, 256 * 1024);
+    charge_gpu_bytes(instance, 600 * 1024).expect("retry after credit");
+
+    let _ = release_claim(gpu_lease.claim_id);
 }
 
 // ── Phase G.2 regression: install-time signature gate ────────────────────────

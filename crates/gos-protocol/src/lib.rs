@@ -6,6 +6,7 @@
 //! legacy compatibility layer used during the v0.2 runtime migration.
 
 pub mod block;
+pub mod socket;
 pub mod stem;
 pub use stem::*;
 
@@ -847,6 +848,13 @@ pub const RESOURCE_GPU_ACCEL: ResourceId = ResourceId::from_ascii("RS.GPU");
 // dependency and the supervisor's quota machinery accounts for them.
 pub const RESOURCE_BLOCK_DEVICE: ResourceId = ResourceId::from_ascii("RS.BLOCK");
 pub const RESOURCE_FILE_HANDLE: ResourceId = ResourceId::from_ascii("RS.FILE");
+// Phase G.3: networking.  Plugins claim RESOURCE_SOCKET to signal
+// they want TCP/UDP endpoints; the smoltcp-backed driver (G.3.1)
+// publishes a SocketDeviceVTable through `gos_protocol::socket`.
+pub const RESOURCE_SOCKET: ResourceId = ResourceId::from_ascii("RS.SOCKET");
+// Phase G.4: GPU memory accounting.  RESOURCE_GPU_ACCEL stays for
+// "want GPU compute"; this new slot is byte-quota-tracked memory.
+pub const RESOURCE_GPU_MEMORY: ResourceId = ResourceId::from_ascii("RS.GPUMEM");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

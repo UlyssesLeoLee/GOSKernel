@@ -103,6 +103,126 @@ fn route_signal_to_faulting_executor_pushes_vector_into_fault_queue() {
     );
 }
 
+// Phase G.3: socket ABI shape — install a stub vtable, drive an
+// open->send->recv->close cycle, assert each callback receives the
+// expected arguments and the SocketStatus decoder round-trips.
+#[test]
+fn socket_vtable_round_trips_open_send_recv_close() {
+    use gos_protocol::socket::{
+        SocketAddress, SocketDeviceVTable, SocketKind, SocketOptions, SocketStatus,
+    };
+    use std::sync::atomic::{AtomicU32, Ordering as AOrd};
+    use std::sync::Mutex as StdMutex;
+
+    static OPEN_HITS: AtomicU32 = AtomicU32::new(0);
+    static SEND_HITS: AtomicU32 = AtomicU32::new(0);
+    static RECV_HITS: AtomicU32 = AtomicU32::new(0);
+    static CLOSE_HITS: AtomicU32 = AtomicU32::new(0);
+    static LAST_ADDR: StdMutex<[u8; 16]> = StdMutex::new([0u8; 16]);
+
+    unsafe extern "C" fn open(
+        _h: u64,
+        _kind: SocketKind,
+        addr: *const SocketAddress,
+        _opts: *const SocketOptions,
+        out_socket: *mut u64,
+    ) -> i32 {
+        OPEN_HITS.fetch_add(1, AOrd::SeqCst);
+        let a = unsafe { &*addr };
+        *LAST_ADDR.lock().unwrap() = a.addr;
+        unsafe { *out_socket = 7 };
+        SocketStatus::Ok as i32
+    }
+    unsafe extern "C" fn send(
+        _h: u64,
+        socket: u64,
+        _buf: *const u8,
+        len: u32,
+        out: *mut u32,
+    ) -> i32 {
+        SEND_HITS.fetch_add(1, AOrd::SeqCst);
+        assert_eq!(socket, 7);
+        unsafe { *out = len };
+        SocketStatus::Ok as i32
+    }
+    unsafe extern "C" fn recv(
+        _h: u64,
+        _socket: u64,
+        buf: *mut u8,
+        len: u32,
+        out: *mut u32,
+    ) -> i32 {
+        RECV_HITS.fetch_add(1, AOrd::SeqCst);
+        let n = (len as usize).min(5);
+        let dst = unsafe { core::slice::from_raw_parts_mut(buf, n) };
+        dst.copy_from_slice(&b"hello"[..n]);
+        unsafe { *out = n as u32 };
+        SocketStatus::Ok as i32
+    }
+    unsafe extern "C" fn close(_h: u64, _socket: u64) -> i32 {
+        CLOSE_HITS.fetch_add(1, AOrd::SeqCst);
+        SocketStatus::Ok as i32
+    }
+    let vtable = SocketDeviceVTable {
+        handle: 0xCAFE,
+        open,
+        send,
+        recv,
+        close,
+    };
+
+    OPEN_HITS.store(0, AOrd::SeqCst);
+    SEND_HITS.store(0, AOrd::SeqCst);
+    RECV_HITS.store(0, AOrd::SeqCst);
+    CLOSE_HITS.store(0, AOrd::SeqCst);
+
+    let addr = SocketAddress::ipv4(10, 0, 2, 2, 80);
+    let opts = SocketOptions::default_blocking();
+    let mut sock: u64 = 0;
+    let rc = unsafe { (vtable.open)(vtable.handle, SocketKind::Tcp, &addr, &opts, &mut sock) };
+    assert_eq!(SocketStatus::from_i32(rc), SocketStatus::Ok);
+    assert_eq!(sock, 7);
+    let last = *LAST_ADDR.lock().unwrap();
+    assert_eq!(&last[..4], &[10, 0, 2, 2]);
+
+    let payload = b"GET /";
+    let mut sent = 0u32;
+    let rc =
+        unsafe { (vtable.send)(vtable.handle, sock, payload.as_ptr(), payload.len() as u32, &mut sent) };
+    assert_eq!(SocketStatus::from_i32(rc), SocketStatus::Ok);
+    assert_eq!(sent, payload.len() as u32);
+
+    let mut buf = [0u8; 16];
+    let mut got = 0u32;
+    let rc = unsafe {
+        (vtable.recv)(vtable.handle, sock, buf.as_mut_ptr(), buf.len() as u32, &mut got)
+    };
+    assert_eq!(SocketStatus::from_i32(rc), SocketStatus::Ok);
+    assert_eq!(got, 5);
+    assert_eq!(&buf[..5], b"hello");
+
+    let rc = unsafe { (vtable.close)(vtable.handle, sock) };
+    assert_eq!(SocketStatus::from_i32(rc), SocketStatus::Ok);
+
+    assert_eq!(OPEN_HITS.load(AOrd::SeqCst), 1);
+    assert_eq!(SEND_HITS.load(AOrd::SeqCst), 1);
+    assert_eq!(RECV_HITS.load(AOrd::SeqCst), 1);
+    assert_eq!(CLOSE_HITS.load(AOrd::SeqCst), 1);
+
+    // SocketStatus error-class decoder round-trips for every variant.
+    for s in [
+        SocketStatus::Ok,
+        SocketStatus::NotConnected,
+        SocketStatus::TransportError,
+        SocketStatus::BadBuffer,
+        SocketStatus::Unbound,
+        SocketStatus::OutOfHandles,
+        SocketStatus::WouldBlock,
+    ] {
+        assert_eq!(SocketStatus::from_i32(s as i32), s);
+    }
+}
+
 // Phase F.4: graph state journal — serialize a few envelopes through
 // JournalRing, flush to a blob, replay, assert round-trip equality.
 #[test]
