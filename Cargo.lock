@@ -27,6 +27,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f6a8a495d2f93fe3d6eb3a224f9aa749a63cfd746ed03eb5ddcbd00ade7d8f"
 
 [[package]]
+name = "gos-ai-bridge"
+version = "0.1.0"
+dependencies = [
+ "gos-cypher-mut",
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-cluster"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-cypher-mut"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-hal"
 version = "0.2.0"
 dependencies = [
@@ -50,6 +75,9 @@ name = "gos-kernel"
 version = "0.2.0"
 dependencies = [
  "bootloader",
+ "gos-ai-bridge",
+ "gos-cluster",
+ "gos-cypher-mut",
  "gos-hal",
  "gos-journal",
  "gos-log",
@@ -131,6 +159,10 @@ dependencies = [
  "spin",
  "x86_64",
 ]
+
+[[package]]
+name = "gos-verify"
+version = "0.1.0"
 
 [[package]]
 name = "gos-vfs"

@@ -3,6 +3,31 @@
 version = 4
 
 [[package]]
+name = "gos-ai-bridge"
+version = "0.1.0"
+dependencies = [
+ "gos-cypher-mut",
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-cluster"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-cypher-mut"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-journal"
 version = "0.1.0"
 dependencies = [
@@ -43,14 +68,22 @@ dependencies = [
 name = "gos-runtime-harness"
 version = "0.1.0"
 dependencies = [
+ "gos-ai-bridge",
+ "gos-cluster",
+ "gos-cypher-mut",
  "gos-journal",
  "gos-loader",
  "gos-log",
  "gos-protocol",
  "gos-runtime",
+ "gos-verify",
  "gos-vfs",
  "k-fat32",
 ]
+
+[[package]]
+name = "gos-verify"
+version = "0.1.0"
 
 [[package]]
 name = "gos-vfs"

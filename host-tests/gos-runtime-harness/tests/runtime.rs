@@ -209,7 +209,8 @@ fn ai_bridge_validates_suggestions_and_gates_acceptance() {
     use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
     use gos_protocol::NodeId;
 
-    static EXPECT_INVALID: spin::Mutex<bool> = spin::Mutex::new(false);
+    use std::sync::Mutex as StdMutex2;
+    static EXPECT_INVALID: StdMutex2<bool> = StdMutex2::new(false);
 
     unsafe extern "C" fn backend(
         _prompt: *const u8,
@@ -227,7 +228,7 @@ fn ai_bridge_validates_suggestions_and_gates_acceptance() {
             to: NodeId([2u8; 16]),
             edge_kind: ReceptiveEdgeKind::Mount,
         });
-        if *EXPECT_INVALID.lock() {
+        if *EXPECT_INVALID.lock().unwrap() {
             // Receptive subset enforces edge_kind ∈ {Mount, Use}.
             // We can't construct an invalid kind directly (the enum
             // forbids it), so simulate by injecting an unconstructed
@@ -276,7 +277,7 @@ fn ai_bridge_validates_suggestions_and_gates_acceptance() {
     assert_eq!(gate.len(), 0);
 
     // Two suggestions stage cleanly when both are receptive.
-    *EXPECT_INVALID.lock() = true;
+    *EXPECT_INVALID.lock().unwrap() = true;
     let resp = ask(&req).expect("two-mutation response");
     assert_eq!(resp.pending_mutations().count(), 2);
 
@@ -307,8 +308,9 @@ fn cluster_remote_vector_routes_via_registered_transport() {
 
     static SEND_HITS: AtomicU32 = AtomicU32::new(0);
     static LAST_TARGET: AtomicU32 = AtomicU32::new(0);
-    static LAST_LO: spin::Mutex<u64> = spin::Mutex::new(0);
-    static LAST_HI: spin::Mutex<u64> = spin::Mutex::new(0);
+    use std::sync::Mutex as StdMutex3;
+    static LAST_LO: StdMutex3<u64> = StdMutex3::new(0);
+    static LAST_HI: StdMutex3<u64> = StdMutex3::new(0);
 
     unsafe extern "C" fn xport(
         _h: u64,
@@ -318,8 +320,8 @@ fn cluster_remote_vector_routes_via_registered_transport() {
     ) -> i32 {
         SEND_HITS.fetch_add(1, AOrd::SeqCst);
         LAST_TARGET.store(target as u32, AOrd::SeqCst);
-        *LAST_LO.lock() = signal_lo;
-        *LAST_HI.lock() = signal_hi;
+        *LAST_LO.lock().unwrap() = signal_lo;
+        *LAST_HI.lock().unwrap() = signal_hi;
         0
     }
 
@@ -341,8 +343,8 @@ fn cluster_remote_vector_routes_via_registered_transport() {
     let target = RemoteVector::remote(h, VectorAddress::new(6, 1, 4, 0));
     route_remote_signal(target, 0xDEAD, 0xBEEF).expect("route");
     assert_eq!(SEND_HITS.load(AOrd::SeqCst), 1);
-    assert_eq!(*LAST_LO.lock(), 0xDEAD);
-    assert_eq!(*LAST_HI.lock(), 0xBEEF);
+    assert_eq!(*LAST_LO.lock().unwrap(), 0xDEAD);
+    assert_eq!(*LAST_HI.lock().unwrap(), 0xBEEF);
 
     // Local target is rejected.
     match route_remote_signal(
