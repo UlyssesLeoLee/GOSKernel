@@ -1,0 +1,3 @@
+# Raw PPM screen dumps from QEMU monitor — large (~844 KB each) and
+# the PNG conversions next to them are the actual checked-in evidence.
+*.ppm

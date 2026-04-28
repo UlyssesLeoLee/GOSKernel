@@ -1756,4 +1756,40 @@ pub fn init_kernel_tier_drivers() {
     //    Cascade / Mouse.  PIT was already programmed via
     //    pit_register_hook (120 Hz) during register_hooks pass.
     k_pic::init_pic();
+    // 4. Activate every Kernel-tier node through the runtime so its
+    //    on_init / on_resume run synchronously.  Without this, plugins
+    //    like k-ps2 never enter their Keyboard parse state and a
+    //    keyboard IRQ would queue but on_event would dereference an
+    //    uninitialized Ps2State.  We use gos_runtime::activate()
+    //    directly per-vector so order is deterministic and we can
+    //    skip App-tier nodes (which init lazily via interrupts).
+    activate_kernel_tier_nodes();
+}
+
+/// Phase G.1 — synchronous on_init pass for Kernel-tier nodes.
+/// Called from `init_kernel_tier_drivers` after GDT/IDT/PIC are up.
+/// Each `gos_runtime::activate(vec)` runs the node's on_init (first
+/// time) then on_resume.  Order matches BUILTIN_MODULES topological
+/// order so dependencies (k-pmm before k-vmm before k-heap, etc) are
+/// satisfied.
+fn activate_kernel_tier_nodes() {
+    let order: &[gos_protocol::VectorAddress] = &[
+        // Foundation drivers — touch hardware state, must come first.
+        k_serial::NODE_VEC, // UART up so subsequent on_init can log
+        k_panic::NODE_VEC,
+        k_cpuid::NODE_VEC,
+        // Memory subsystem — strict ordering.
+        k_pmm::NODE_VEC,
+        k_vmm::NODE_VEC,
+        k_heap::NODE_VEC,
+        // Display + input device controllers.
+        k_vga::NODE_VEC,
+        k_pit::NODE_VEC, // already programmed via register_hook; on_init seeds atomic counter
+        k_ps2::NODE_VEC, // initialises Ps2State, the Keyboard parse machine
+        k_mouse::NODE_VEC,
+        k_net::NODE_VEC,
+    ];
+    for vec in order {
+        let _ = gos_runtime::activate(*vec);
+    }
 }
