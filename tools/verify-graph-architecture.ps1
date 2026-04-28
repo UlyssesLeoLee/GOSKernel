@@ -90,6 +90,17 @@ foreach ($match in $legacyBundleMatches) {
     Assert-Rule ($legacyBundleCrateAllowlist -contains $crateIdent) "Legacy bundle module $crateIdent is outside the approved migration island"
 }
 
+# A `k-*` crate is one of two shapes:
+#
+#   1. **Plugin crate** — exposes a graph node via PLUGIN_DESCRIPTOR.
+#      MUST define NODE_VEC + EXECUTOR_ID + EXECUTOR_VTABLE.
+#
+#   2. **Library crate** — pure types / algorithms used by plugins
+#      (e.g. `k-fat32` implements gos_vfs::FileSystem for FAT32; any
+#      future `k-fs-mount` plugin embeds it).  No node, no descriptor.
+#
+# We tell them apart by looking for `BuiltinPluginDescriptor` in the
+# crate's lib.rs.  Plugin crates declare one; library crates don't.
 $crateDirs = Get-ChildItem -Path (Join-Path $RepoRoot "crates") -Directory | Where-Object { $_.Name -like "k-*" }
 foreach ($crate in $crateDirs) {
     $libPath = Join-Path $crate.FullName "src\lib.rs"
@@ -101,8 +112,17 @@ foreach ($crate in $crateDirs) {
     $isLegacy = $legacyAllowlist -contains $crate.Name
     $hasLegacyTrait = $content -match "impl\s+NodeCell" -or $content -match "impl\s+PluginEntry" -or $content -match "try_mount_cell\s*\("
     $hasNativeExecutor = $content -match "EXECUTOR_ID" -and $content -match "EXECUTOR_VTABLE"
+    $isPlugin = $content -match "BuiltinPluginDescriptor"
 
     if ($isLegacy) {
+        continue
+    }
+
+    # Library crates: only forbid legacy-trait usage; no node-shape
+    # requirements.  This is the lane k-fat32 (FAT32 reader) lives in
+    # alongside any future no-node algorithm crate.
+    if (-not $isPlugin) {
+        Assert-Rule (-not $hasLegacyTrait) "$($crate.Name) (library) must not use NodeCell/PluginEntry/try_mount_cell"
         continue
     }
 
