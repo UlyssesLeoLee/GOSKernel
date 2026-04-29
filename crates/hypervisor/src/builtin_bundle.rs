@@ -1756,7 +1756,17 @@ pub fn init_kernel_tier_drivers() {
     //    Cascade / Mouse.  PIT was already programmed via
     //    pit_register_hook (120 Hz) during register_hooks pass.
     k_pic::init_pic();
-    // 4. Activate every Kernel-tier node through the runtime so its
+    // 4. Drain the PS/2 controller's output buffer.  BIOS / QEMU
+    //    initialization leaves a stale byte in port 0x60 (we observed
+    //    IRQ 1 = 1 right after boot).  As long as that byte sits
+    //    there, the i8042 controller will NOT raise another IRQ 1 —
+    //    its buffer is full from the controller's perspective, so
+    //    user keystrokes get queued in the keyboard cable but never
+    //    delivered to the CPU.  A defensive drain (read until status
+    //    bit 0 clears) lets the controller raise IRQ 1 on the next
+    //    real keypress.  Also drain the mouse channel for symmetry.
+    drain_ps2_buffer();
+    // 5. Activate every Kernel-tier node through the runtime so its
     //    on_init / on_resume run synchronously.  Without this, plugins
     //    like k-ps2 never enter their Keyboard parse state and a
     //    keyboard IRQ would queue but on_event would dereference an
@@ -1764,6 +1774,25 @@ pub fn init_kernel_tier_drivers() {
     //    directly per-vector so order is deterministic and we can
     //    skip App-tier nodes (which init lazily via interrupts).
     activate_kernel_tier_nodes();
+}
+
+/// Drain any byte sitting in the i8042 PS/2 controller's output
+/// buffer.  Reads port 0x64 (status) — if bit 0 (output buffer full)
+/// is set, port 0x60 has a byte for us; reading it clears the buffer
+/// so the controller can raise IRQ 1 / IRQ 12 again.  Bounded loop
+/// (max 64 iterations) so a misbehaving controller can't hang us.
+fn drain_ps2_buffer() {
+    use x86_64::instructions::port::Port;
+    let mut status: Port<u8> = Port::new(0x64);
+    let mut data: Port<u8> = Port::new(0x60);
+    for _ in 0..64u8 {
+        let s = unsafe { status.read() };
+        if s & 0x01 == 0 {
+            // Output buffer empty; controller is ready.
+            break;
+        }
+        let _ = unsafe { data.read() };
+    }
 }
 
 /// Phase G.1 — synchronous on_init pass for Kernel-tier nodes.
