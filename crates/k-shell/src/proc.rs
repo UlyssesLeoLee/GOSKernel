@@ -546,6 +546,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
         super::print_str(sink, "  ctrl+l  toggle input language en/zh-py\n");
         super::print_str(sink, "  mem     physical memory + supervisor domain stats\n");
+        super::print_str(sink, "  ps      list loaded modules and lifecycle state\n");
+        super::print_str(sink, "  caps    list published capabilities\n");
+        super::print_str(sink, "  instances  list spawned node instances\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -986,6 +989,151 @@ fn dispatch_text_command(
             super::print_str(sink, "  revocations-pending: ");
             super::print_num_inline(sink, sv.pending_revocations);
             super::print_str(sink, "\n");
+        }
+    } else if cmd == "ps" || cmd == "modules" {
+        use gos_protocol::ModuleLifecycle;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " modules\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::ModuleInfo {
+            handle: gos_protocol::ModuleHandle(0),
+            name: "",
+            state: ModuleLifecycle::Stopped,
+            isolated: false,
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::module_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_num_inline(sink, info.handle.0 as usize);
+                super::print_str(sink, "  ");
+                super::print_str(sink, info.name);
+                super::print_str(sink, "  ");
+                super::print_str(sink, match info.state {
+                    ModuleLifecycle::Installed    => "installed",
+                    ModuleLifecycle::Validated    => "validated",
+                    ModuleLifecycle::Mapped       => "mapped",
+                    ModuleLifecycle::Instantiated => "instantiated",
+                    ModuleLifecycle::Running      => "running",
+                    ModuleLifecycle::Quiescing    => "quiescing",
+                    ModuleLifecycle::Stopped      => "stopped",
+                    ModuleLifecycle::Faulted      => "faulted",
+                });
+                if info.isolated {
+                    super::print_str(sink, "  [isolated]");
+                }
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no modules installed)\n");
+        }
+    } else if cmd == "caps" || cmd == "capabilities" {
+        use gos_protocol::CapabilityToken;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " capabilities\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::CapabilityInfo {
+            token: CapabilityToken::ZERO,
+            provider: gos_protocol::ModuleHandle(0),
+            namespace: "",
+            name: "",
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::capability_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_str(sink, info.namespace);
+                super::print_str(sink, "::");
+                super::print_str(sink, info.name);
+                super::print_str(sink, "  provider=");
+                super::print_num_inline(sink, info.provider.0 as usize);
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no capabilities published)\n");
+        }
+    } else if cmd == "instances" {
+        use gos_protocol::{NodeInstanceLifecycle, ExecutionLaneClass};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " instances\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::NodeInstanceSummary {
+            instance_id: gos_protocol::NodeInstanceId(0),
+            template_id: gos_protocol::NodeTemplateId([0u8; 16]),
+            module: gos_protocol::ModuleHandle(0),
+            lane: ExecutionLaneClass::Background,
+            lifecycle: NodeInstanceLifecycle::Stopped,
+            ready_queued: false,
+            heap_quota: gos_protocol::HeapQuota::EMPTY,
+            heap_pages_used: 0,
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::instance_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_num_inline(sink, info.instance_id.0 as usize);
+                super::print_str(sink, "  mod=");
+                super::print_num_inline(sink, info.module.0 as usize);
+                super::print_str(sink, "  lane=");
+                super::print_str(sink, match info.lane {
+                    ExecutionLaneClass::Control    => "ctrl",
+                    ExecutionLaneClass::Io         => "io",
+                    ExecutionLaneClass::Compute    => "compute",
+                    ExecutionLaneClass::Background => "bg",
+                });
+                super::print_str(sink, "  ");
+                super::print_str(sink, match info.lifecycle {
+                    NodeInstanceLifecycle::Allocated    => "allocated",
+                    NodeInstanceLifecycle::Ready        => "ready",
+                    NodeInstanceLifecycle::Running      => "running",
+                    NodeInstanceLifecycle::WaitingClaim => "waiting-claim",
+                    NodeInstanceLifecycle::Suspended    => "suspended",
+                    NodeInstanceLifecycle::Stopped      => "stopped",
+                    NodeInstanceLifecycle::Faulted      => "faulted",
+                });
+                super::print_str(sink, "  heap=");
+                super::print_num_inline(sink, info.heap_pages_used as usize);
+                super::print_str(sink, "p");
+                if info.ready_queued {
+                    super::print_str(sink, "  [queued]");
+                }
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no instances)\n");
         }
     } else if cmd == "clear" {
         state.len = 0;
