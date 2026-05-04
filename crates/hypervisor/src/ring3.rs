@@ -65,27 +65,17 @@ pub unsafe fn init() {
     //   * user_data    == user_code - 8        (sysret layout)
     //   * kernel_data  == kernel_code + 8      (syscall layout)
     //
-    // Today k-gdt does NOT install a separate kernel data segment
-    // between the kernel code and the user descriptors — the kernel
-    // currently runs entirely with CS=kernel_code and SS=0 (no data
-    // segment loads).  Once a Ring 3 plugin actually issues `syscall`
-    // we need a real kernel data descriptor (E.2.1 follow-up) for
-    // syscall to reload SS correctly.  Until then we skip the MSR
-    // program if the layout doesn't satisfy the invariant — boot
-    // continues, the syscall surface stays disarmed, and the failure
-    // path surfaces on the serial console for diagnosis.
+    // Phase E.2.1: k-gdt now installs a kernel data segment immediately
+    // after the kernel code segment so this invariant is satisfied.
+    // `selectors.data_selector` carries that descriptor.
     if let Err(reason) = Star::write(
         selectors.user_code_selector,
         selectors.user_data_selector,
         selectors.code_selector,
-        selectors.code_selector,
+        selectors.data_selector,
     ) {
-        // Print to serial via the hypervisor's raw helper.  The
-        // syscall trampoline never gets enabled — any future user
-        // plugin issuing `syscall` will #UD, which is a recoverable
-        // CPU fault routed through B.4.3's IST stack.
         crate::raw_serial_println(format_args!(
-            "ring3: skipping IA32_STAR program — {} (kernel data segment not yet in GDT, see E.2.1)",
+            "ring3: IA32_STAR program failed — {}",
             reason
         ));
         return;
@@ -172,22 +162,37 @@ pub extern "C" fn rust_syscall_handler(
         x if x == SyscallNo::AllocPages as u64 => {
             // alloc_pages goes through the same gos-runtime ABI shim
             // the kernel-side path uses today; quota accounting and
-            // backend forwarding both happen there.
-            // The signature is `unsafe extern "C" fn(usize) -> *mut u8`.
-            // We rely on KernelAbi being installed before any user
-            // plugin runs — gos_runtime exposes the live ABI via
-            // KERNEL_ABI; we call through the public alloc helper if
-            // present, else return null.
-            // For this stub, we route through gos-runtime's installed
-            // backend by re-creating an ExecutorContext-less call.
-            // Implementation lands when E.3 (per-instance privilege
-            // gating) lands; until then, return null.
-            let _ = (rdi, rsi, rdx, rcx, r8);
+            // Phase E.3: delegate to gos-runtime's quota-aware allocator.
+            // dispatching_instance() tracks the instance on the current
+            // executor dispatch; when a Ring 3 plugin issues `syscall` the
+            // instance context is preserved via the kernel stack.
+            let _ = (rsi, rdx, rcx, r8);
+            unsafe { gos_runtime::syscall_alloc_pages(rdi as usize) as u64 }
+        }
+        x if x == SyscallNo::FreePages as u64 => {
+            // free_pages(ptr, page_count): rdi = ptr, rsi = page_count.
+            let _ = (rdx, rcx, r8);
+            unsafe { gos_runtime::syscall_free_pages(rdi as *mut u8, rsi as usize) };
             0
         }
-        x if x == SyscallNo::FreePages as u64 => 0,
-        x if x == SyscallNo::EmitSignal as u64 => 0,
-        x if x == SyscallNo::ResolveCapability as u64 => 0,
+        x if x == SyscallNo::EmitSignal as u64 => {
+            // emit_signal(target_vec, packet_lo, packet_hi): rdi, rsi, rdx.
+            // packet_lo[63:56] = signal kind tag; packet_lo[55:0] = arg0.
+            let _ = (rcx, r8);
+            unsafe { gos_runtime::syscall_emit_signal(rdi, rsi, rdx) as u64 }
+        }
+        x if x == SyscallNo::ResolveCapability as u64 => {
+            // resolve_capability(ns_ptr, ns_len, name_ptr, name_len).
+            let _ = r8;
+            unsafe {
+                gos_runtime::syscall_resolve_capability(
+                    rdi as *const u8,
+                    rsi as usize,
+                    rdx as *const u8,
+                    rcx as usize,
+                )
+            }
+        }
         _ => u64::MAX, // ENOSYS
     }
 }

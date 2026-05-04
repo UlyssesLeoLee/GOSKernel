@@ -1473,6 +1473,42 @@ static KERNEL_ABI: KernelAbi = KernelAbi {
 
 static RUNTIME: Mutex<GraphRuntime> = Mutex::new(GraphRuntime::new());
 
+// ── Phase E.3: syscall surface wrappers ─────────────────────────────────────
+//
+// These thin public wrappers expose the same kernel-ABI functions that
+// native plugins call through ExecutorContext::abi, but without requiring
+// a context pointer.  The Ring 3 syscall trampoline (hypervisor::ring3)
+// calls them after decoding syscall arguments from registers.
+//
+// Packet encoding for EmitSignal:
+//   packet_lo bits [63:56] = KernelSignalKind tag
+//   packet_lo bits [55: 0] = arg0 (VectorAddress / payload; 56-bit cap)
+//   packet_hi               = arg1
+
+pub unsafe fn syscall_alloc_pages(page_count: usize) -> *mut u8 {
+    kernel_alloc_pages(page_count)
+}
+
+pub unsafe fn syscall_free_pages(ptr: *mut u8, page_count: usize) {
+    kernel_free_pages(ptr, page_count)
+}
+
+pub unsafe fn syscall_emit_signal(target: u64, packet_lo: u64, packet_hi: u64) -> i32 {
+    let tag = (packet_lo >> 56) as u8;
+    let arg0 = packet_lo & 0x00FF_FFFF_FFFF_FFFF;
+    let packet = KernelSignalPacket { tag, arg0, arg1: packet_hi, arg2: 0 };
+    kernel_emit_signal(target, packet)
+}
+
+pub unsafe fn syscall_resolve_capability(
+    ns: *const u8,
+    ns_len: usize,
+    name: *const u8,
+    name_len: usize,
+) -> u64 {
+    kernel_resolve_capability(ns, ns_len, name, name_len)
+}
+
 pub fn reset() {
     RUNTIME.lock().reset();
 }
