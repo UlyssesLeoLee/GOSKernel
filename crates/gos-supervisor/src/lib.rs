@@ -307,6 +307,18 @@ fn create_domain_root(
     Ok(NEXT_ROOT.fetch_add(0x1000, Ordering::SeqCst))
 }
 
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+fn create_domain_root(
+    _image_base: u64,
+    _image_len: u64,
+    _stack_base: u64,
+    _stack_len: u64,
+    _ipc_base: u64,
+    _ipc_len: u64,
+) -> Result<u64, SupervisorError> {
+    Err(SupervisorError::DomainCreateFailed)
+}
+
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
 fn map_domain_heap_pages(
     root_table_phys: u64,
@@ -326,6 +338,16 @@ fn map_domain_heap_pages(
 }
 
 #[cfg(any(test, feature = "host-testing"))]
+fn map_domain_heap_pages(
+    _root_table_phys: u64,
+    _base: u64,
+    _page_count: usize,
+    _writable: bool,
+) -> Result<(), SupervisorError> {
+    Ok(())
+}
+
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
 fn map_domain_heap_pages(
     _root_table_phys: u64,
     _base: u64,
@@ -2429,6 +2451,14 @@ unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
 unsafe fn cr3_restore(_token: u64) {
     // Host harness counterpart to cr3_switch_into.  Intentional no-op.
 }
+
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
+    0
+}
+
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+unsafe fn cr3_restore(_token: u64) {}
 
 pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {
     SUPERVISOR.lock().install_descriptor(descriptor)

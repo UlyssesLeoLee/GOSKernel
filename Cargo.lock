@@ -177,6 +177,7 @@ version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+ "k-net",
  "k-shell",
 ]
 
@@ -378,6 +379,7 @@ dependencies = [
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
+ "k-pmm",
  "spin",
 ]
 

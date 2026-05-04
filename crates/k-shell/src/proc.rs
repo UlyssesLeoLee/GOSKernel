@@ -545,6 +545,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  ask     send prompt into ai chat lane\n");
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
         super::print_str(sink, "  ctrl+l  toggle input language en/zh-py\n");
+        super::print_str(sink, "  mem     physical memory + supervisor domain stats\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -946,6 +947,46 @@ fn dispatch_text_command(
             );
         }
         super::redraw_ai_panel(sink, state, true);
+    } else if cmd == "mem" || cmd == "memory" {
+        // Phase C: developer-facing memory + supervisor domain stats.
+        let pmm = k_pmm::allocator().lock();
+        let total_kb = (pmm.total_frames() * 4096) / 1024;
+        let used_kb  = (pmm.used_frames()  * 4096) / 1024;
+        let free_kb  = (pmm.free_frames()  * 4096) / 1024;
+        drop(pmm);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " physical memory\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total_kb);
+        super::print_str(sink, " KiB  used: ");
+        super::print_num_inline(sink, used_kb);
+        super::print_str(sink, " KiB  free: ");
+        super::print_num_inline(sink, free_kb);
+        super::print_str(sink, " KiB\n");
+        let fallback = gos_runtime::boot_fallback_alloc_count();
+        let switches = gos_runtime::domain_switch_count();
+        super::print_str(sink, "  boot-fallback-allocs: ");
+        super::print_num_inline(sink, fallback as usize);
+        super::print_str(sink, "  domain-switches: ");
+        super::print_num_inline(sink, switches as usize);
+        super::print_str(sink, "\n");
+        if let Ok(sv) = gos_supervisor::snapshot() {
+            super::set_color(sink, 10, 0);
+            super::print_str(sink, " supervisor\n");
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "  modules: ");
+            super::print_num_inline(sink, sv.installed_modules);
+            super::print_str(sink, "  running: ");
+            super::print_num_inline(sink, sv.running_modules);
+            super::print_str(sink, "  domains: ");
+            super::print_num_inline(sink, sv.isolated_domains);
+            super::print_str(sink, "  caps: ");
+            super::print_num_inline(sink, sv.published_capabilities);
+            super::print_str(sink, "  revocations-pending: ");
+            super::print_num_inline(sink, sv.pending_revocations);
+            super::print_str(sink, "\n");
+        }
     } else if cmd == "clear" {
         state.len = 0;
         super::redraw_console(sink, state);
