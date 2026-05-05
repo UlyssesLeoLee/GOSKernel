@@ -572,6 +572,8 @@ fn dispatch_text_command(
         super::print_num_inline(sink, snapshot.ready_queue_len);
         super::print_str(sink, "  signals: ");
         super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, "  ctrl: ");
+        super::print_num_inline(sink, snapshot.control_queue_len);
         super::print_str(sink, "  stable: ");
         super::print_str(sink, if gos_runtime::is_stable() { "yes" } else { "no" });
         super::print_str(sink, "  tick: ");
@@ -1331,6 +1333,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  pump-tick: ");
         super::print_num_inline(sink, snapshot.tick as usize);
         super::print_str(sink, "  (work items processed)\n");
+        super::print_str(sink, "  ctrl-q:   ");
+        super::print_num_inline(sink, snapshot.control_queue_len);
+        super::print_str(sink, "  (high-priority: Control/Spawn/Terminate)\n");
         super::print_str(sink, "  signals:  ");
         super::print_num_inline(sink, snapshot.signal_queue_len);
         super::print_str(sink, "  ready: ");

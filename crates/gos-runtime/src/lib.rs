@@ -25,6 +25,10 @@ pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
 pub const MAX_CONTROL_PLANE_MESSAGES: usize = 256;
+/// Dedicated queue for high-priority signals (Control / Spawn / Terminate).
+/// Drained before `signal_queue` in `next_work_item` so lifecycle signals
+/// are never starved behind a flood of Data traffic.
+pub const MAX_CONTROL_SIGNAL_QUEUE: usize = 64;
 pub const NODE_ARENA_PAGES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +278,9 @@ pub struct GraphRuntime {
     nodes: [Option<NodeRecord>; MAX_NODES],
     edges: [Option<EdgeRecord>; MAX_EDGES],
     ready_queue: RingQueue<NodeId, MAX_READY_QUEUE>,
+    /// High-priority lane: Control / Spawn / Terminate signals.
+    /// Always drained before `signal_queue`.
+    control_signal_queue: RingQueue<RuntimeSignal, MAX_CONTROL_SIGNAL_QUEUE>,
     signal_queue: RingQueue<RuntimeSignal, MAX_SIGNAL_QUEUE>,
     fault_queue: RingQueue<VectorAddress, MAX_FAULT_QUEUE>,
     call_frames: [Option<CallFrame>; MAX_CALL_FRAMES],
@@ -297,6 +304,7 @@ impl GraphRuntime {
             nodes: [None; MAX_NODES],
             edges: [None; MAX_EDGES],
             ready_queue: RingQueue::new(),
+            control_signal_queue: RingQueue::new(),
             signal_queue: RingQueue::new(),
             fault_queue: RingQueue::new(),
             call_frames: [None; MAX_CALL_FRAMES],
@@ -761,7 +769,20 @@ impl GraphRuntime {
     }
 
     pub fn post_signal(&mut self, target: VectorAddress, signal: Signal) -> Result<(), RuntimeError> {
-        self.signal_queue.push_signal(RuntimeSignal { target, signal })
+        let rs = RuntimeSignal { target, signal };
+        // Control-plane lifecycle signals get their own high-priority queue so
+        // they are never starved behind a flood of Data signals.  If that queue
+        // is full we fall back to the normal queue rather than dropping.
+        match signal {
+            Signal::Control { .. } | Signal::Spawn { .. } | Signal::Terminate => {
+                if self.control_signal_queue.push_signal(rs).is_err() {
+                    self.signal_queue.push_signal(rs)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => self.signal_queue.push_signal(rs),
+        }
     }
 
     fn prepare_activation(&mut self, vector: VectorAddress) -> Result<PreparedDispatch, RuntimeError> {
@@ -1006,11 +1027,13 @@ impl GraphRuntime {
         if let Some(node_id) = self.ready_queue.pop() {
             return Some(WorkItem::Ready(node_id));
         }
-
+        // High-priority lane: Control / Spawn / Terminate signals before Data.
+        if let Some(signal) = self.control_signal_queue.pop() {
+            return Some(WorkItem::Signal(signal));
+        }
         if let Some(signal) = self.signal_queue.pop() {
             return Some(WorkItem::Signal(signal));
         }
-
         None
     }
 
@@ -1025,12 +1048,14 @@ impl GraphRuntime {
             edge_count: self.edge_count,
             ready_queue_len: self.ready_queue.len(),
             signal_queue_len: self.signal_queue.len(),
+            control_queue_len: self.control_signal_queue.len(),
             tick: self.tick,
         }
     }
 
     pub fn is_stable(&self) -> bool {
         self.ready_queue.is_empty()
+            && self.control_signal_queue.is_empty()
             && self.signal_queue.is_empty()
             && self.call_frames.iter().all(|slot| slot.is_none())
             && self.wait_sets.iter().all(|slot| slot.is_none())

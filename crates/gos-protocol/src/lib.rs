@@ -1556,6 +1556,9 @@ pub struct GraphSnapshot {
     pub edge_count: usize,
     pub ready_queue_len: usize,
     pub signal_queue_len: usize,
+    /// High-priority queue depth: Control / Spawn / Terminate signals waiting
+    /// ahead of the normal `signal_queue`.
+    pub control_queue_len: usize,
     pub tick: u64,
 }
 

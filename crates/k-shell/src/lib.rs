@@ -1529,7 +1529,7 @@ fn draw_command_deck_panel(
         6,
         27,
         11,
-        (snapshot.signal_queue_len * 2).min(11),
+        ((snapshot.signal_queue_len + snapshot.control_queue_len) * 2).min(11),
         WABI_TEA,
         WABI_INK,
     );
@@ -1624,6 +1624,10 @@ fn draw_operator_band(
     route.push_dec(snapshot.ready_queue_len as u64);
     route.push_str(" / sg ");
     route.push_dec(snapshot.signal_queue_len as u64);
+    if snapshot.control_queue_len > 0 {
+        route.push_str("+");
+        route.push_dec(snapshot.control_queue_len as u64);
+    }
     draw_linebuf(sink, 13, 11, WABI_PAPER, WABI_INK, &route);
 }
 
@@ -1698,7 +1702,7 @@ fn draw_ai_panel(sink: &ConsoleSink, state: &ShellState) {
         AI_PANEL_TOP + 4,
         AI_PANEL_LEFT + 16,
         6,
-        (snapshot.signal_queue_len * 2).min(6),
+        ((snapshot.signal_queue_len + snapshot.control_queue_len) * 2).min(6),
         WABI_TEA,
         WABI_INK,
     );
@@ -2019,7 +2023,7 @@ fn draw_telemetry_panel(sink: &ConsoleSink, stage: usize, pulse: usize, snapshot
     draw_metric_line(sink, 4, "nod", snapshot.node_count, snapshot.node_count, stage, pulse, 15);
     draw_metric_line(sink, 5, "edg", snapshot.edge_count, snapshot.edge_count, stage, pulse, 14);
     draw_metric_line(sink, 6, "rq ", snapshot.ready_queue_len, snapshot.ready_queue_len.max(1), stage, pulse, 10);
-    draw_metric_line(sink, 7, "sig", snapshot.signal_queue_len, snapshot.signal_queue_len.max(1), stage, pulse, 12);
+    draw_metric_line(sink, 7, "sig", snapshot.signal_queue_len + snapshot.control_queue_len, (snapshot.signal_queue_len + snapshot.control_queue_len).max(1), stage, pulse, 12);
     draw_text(sink, 8, 58, 7, 0, "mesh");
     draw_text(
         sink,
