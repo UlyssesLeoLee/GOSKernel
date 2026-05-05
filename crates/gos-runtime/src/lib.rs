@@ -283,6 +283,11 @@ pub struct GraphRuntime {
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
     tick: u64,
+    /// Incremental counters — updated on insert/remove to avoid O(n)
+    /// scans in the hot `snapshot()` path.
+    plugin_count: usize,
+    node_count: usize,
+    edge_count: usize,
 }
 
 impl GraphRuntime {
@@ -301,6 +306,9 @@ impl GraphRuntime {
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             tick: 0,
+            plugin_count: 0,
+            node_count: 0,
+            edge_count: 0,
         }
     }
 
@@ -423,6 +431,7 @@ impl GraphRuntime {
                     manifest,
                     state: PluginLoadState::Discovered,
                 });
+                self.plugin_count += 1;
                 self.emit_control_plane(ControlPlaneMessageKind::PluginDiscovered, manifest.plugin_id.0, manifest.version as u64, 0);
                 Ok(())
             }
@@ -471,6 +480,7 @@ impl GraphRuntime {
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
         });
+        self.node_count += 1;
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
         self.state_delta(spec.node_id, NodeLifecycle::Registered);
@@ -489,6 +499,7 @@ impl GraphRuntime {
             edge_vector: derive_edge_vector(spec.edge_id),
             spec,
         });
+        self.edge_count += 1;
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         Ok(spec.edge_id)
     }
@@ -518,6 +529,7 @@ impl GraphRuntime {
     pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
         self.edges[slot] = None;
+        self.edge_count = self.edge_count.saturating_sub(1);
         self.adjacency_arena.release(edge_id);
         Ok(())
     }
@@ -1007,9 +1019,9 @@ impl GraphRuntime {
 
     pub fn snapshot(&self) -> GraphSnapshot {
         GraphSnapshot {
-            plugin_count: self.plugins.iter().filter(|slot| slot.is_some()).count(),
-            node_count: self.nodes.iter().filter(|slot| slot.is_some()).count(),
-            edge_count: self.edges.iter().filter(|slot| slot.is_some()).count(),
+            plugin_count: self.plugin_count,
+            node_count: self.node_count,
+            edge_count: self.edge_count,
             ready_queue_len: self.ready_queue.len(),
             signal_queue_len: self.signal_queue.len(),
             tick: self.tick,
@@ -1203,6 +1215,9 @@ pub struct Scheduler {
 
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 static PREEMPT_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Incremented once per PIT interrupt (120 Hz) by `tick_pulse()`.
+/// Use for wall-clock elapsed time: `pit_tick_count() / 120` = seconds.
+static PIT_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn install_scheduler(hook: Scheduler) {
     *SCHEDULER.lock() = Some(hook);
@@ -1216,10 +1231,17 @@ pub fn preempt_count() -> u64 {
 /// supervisor hook is installed (boot-time / unit tests that don't
 /// need preemption).
 pub fn tick_pulse() {
+    PIT_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     let hook = *SCHEDULER.lock();
     if let Some(hook) = hook {
         unsafe { (hook.on_tick)() };
     }
+}
+
+/// Returns the number of PIT interrupts since boot (120 Hz).
+/// Divide by 120 for wall-clock seconds.
+pub fn pit_tick_count() -> u64 {
+    PIT_TICK_COUNT.load(Ordering::Relaxed)
 }
 
 fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {

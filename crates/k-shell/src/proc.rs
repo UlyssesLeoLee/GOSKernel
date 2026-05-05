@@ -1208,20 +1208,23 @@ fn dispatch_text_command(
         super::print_str(sink, "\n");
     } else if cmd == "tick" || cmd == "uptime" {
         let snapshot = gos_runtime::snapshot();
+        let pit_ticks = gos_runtime::pit_tick_count();
         super::set_color(sink, 10, 0);
-        super::print_str(sink, " scheduler tick\n");
+        super::print_str(sink, " uptime\n");
         super::set_color(sink, 7, 0);
-        super::print_str(sink, "  tick:     ");
-        super::print_num_inline(sink, snapshot.tick as usize);
-        super::print_str(sink, "\n  freq:     120 Hz (PIT)\n");
-        // Convert ticks to seconds: tick / 120
-        let secs = snapshot.tick / 120;
-        let frac = (snapshot.tick % 120) * 10 / 120;
+        // PIT runs at 120 Hz; convert to wall-clock time.
+        let secs = pit_ticks / 120;
+        let frac = (pit_ticks % 120) * 10 / 120;
         super::print_str(sink, "  uptime:   ");
         super::print_num_inline(sink, secs as usize);
         super::print_str(sink, ".");
         super::print_num_inline(sink, frac as usize);
-        super::print_str(sink, " s\n");
+        super::print_str(sink, " s  (PIT 120 Hz, ");
+        super::print_num_inline(sink, pit_ticks as usize);
+        super::print_str(sink, " ticks)\n");
+        super::print_str(sink, "  pump-tick: ");
+        super::print_num_inline(sink, snapshot.tick as usize);
+        super::print_str(sink, "  (work items processed)\n");
         super::print_str(sink, "  signals:  ");
         super::print_num_inline(sink, snapshot.signal_queue_len);
         super::print_str(sink, "  ready: ");
