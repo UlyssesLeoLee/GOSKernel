@@ -549,6 +549,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  ps      list loaded modules and lifecycle state\n");
         super::print_str(sink, "  caps    list published capabilities\n");
         super::print_str(sink, "  instances  list spawned node instances\n");
+        super::print_str(sink, "  log        show recent kernel log entries\n");
+        super::print_str(sink, "  log clear  clear the log ring buffer\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -1135,6 +1137,58 @@ fn dispatch_text_command(
         if total == 0 {
             super::print_str(sink, "  (no instances)\n");
         }
+    } else if cmd == "log" || cmd == "logs" || cmd == "dmesg" {
+        use gos_log::LogLevel;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " kernel log\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_log::LogRecord::empty(); 32];
+        let n = gos_log::recent_logs(&mut buf);
+        if n == 0 {
+            super::print_str(sink, "  (empty)\n");
+        } else {
+            for rec in buf[..n].iter() {
+                let (color, prefix) = match rec.level {
+                    LogLevel::Trace => (8u8,  "T"),
+                    LogLevel::Debug => (7u8,  "D"),
+                    LogLevel::Info  => (10u8, "I"),
+                    LogLevel::Warn  => (14u8, "W"),
+                    LogLevel::Error => (12u8, "E"),
+                };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, prefix);
+                super::print_str(sink, " [");
+                // Print up to 8 bytes of the source tag as ASCII.
+                let src_end = rec.source.iter().position(|&b| b == 0).unwrap_or(16).min(16);
+                for &b in &rec.source[..src_end] {
+                    if b >= 0x20 && b < 0x7F {
+                        super::print_byte(sink, b);
+                    } else {
+                        super::print_byte(sink, b'?');
+                    }
+                }
+                super::print_str(sink, "] ");
+                super::set_color(sink, 7, 0);
+                for &b in rec.payload_str() {
+                    if b == b'\n' {
+                        super::print_str(sink, "\n    ");
+                    } else {
+                        super::print_byte(sink, b);
+                    }
+                }
+                if rec.truncated {
+                    super::set_color(sink, 14, 0);
+                    super::print_str(sink, "…");
+                    super::set_color(sink, 7, 0);
+                }
+                super::print_str(sink, "\n");
+            }
+        }
+    } else if cmd == "log clear" || cmd == "logs clear" || cmd == "dmesg clear" {
+        gos_log::clear_log_ring();
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " log ring cleared\n");
+        super::set_color(sink, 7, 0);
     } else if cmd == "clear" {
         state.len = 0;
         super::redraw_console(sink, state);

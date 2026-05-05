@@ -8,11 +8,36 @@ mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
+use gos_log::{LogLevel, log};
 
 entry_point!(kernel_main);
 
+/// `extern "C"` serial write backend for gos-log — writes the message
+/// bytes directly to COM1 followed by a newline.
+unsafe extern "C" fn log_serial_write(
+    _level: u8,
+    _source: *const u8,
+    msg: *const u8,
+    len: u32,
+) {
+    let mut port = x86_64::instructions::port::Port::<u8>::new(0x3F8);
+    let msg_bytes = unsafe { core::slice::from_raw_parts(msg, len as usize) };
+    for &b in msg_bytes {
+        unsafe { port.write(b); }
+    }
+    unsafe { port.write(b'\n'); }
+}
+
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    raw_serial_println(format_args!("boot: kernel_main entered"));
+    // Install gos-log serial backend so log!() calls populate both the
+    // COM1 serial stream and the in-kernel ring buffer (for the shell's
+    // `log` command).
+    gos_log::install_serial_backend(gos_log::SerialBackend {
+        write: log_serial_write,
+    });
+    gos_log::set_min_level(gos_log::LogLevel::Info);
+
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "kernel_main entered");
 
     unsafe {
         use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
@@ -26,71 +51,49 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         cr4.insert(Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE);
         Cr4::write(cr4);
     }
-    raw_serial_println(format_args!("boot: cpu features enabled"));
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "cpu features enabled (FPU/SSE)");
 
     // Minimal bootstrap only owns compatibility addressing and metadata schemas.
     gos_hal::vaddr::init();
     gos_hal::meta::init();
     // Store the physical memory offset for DMA address translation in k-net and other drivers.
     gos_hal::phys::set_phys_offset(boot_info.physical_memory_offset);
-    raw_serial_println(format_args!("boot: vaddr/meta initialized, phys_offset={:#x}", boot_info.physical_memory_offset));
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "vaddr/meta/phys initialized");
 
-    raw_serial_println(format_args!("boot: staging supervisor domains"));
     gos_supervisor::bootstrap(boot_info as *const _ as u64);
     for descriptor in builtin_bundle::builtin_supervisor_modules() {
         gos_supervisor::install_module(*descriptor)
             .expect("supervisor failed to install module descriptor");
     }
-    raw_serial_println(format_args!("boot: supervisor registered module descriptors"));
+    log!(LogLevel::Info, *b"SUPERVISOR\0\0\0\0\0\0", "module descriptors registered");
 
-    raw_serial_println(format_args!("boot: bootstrapping builtin graph"));
     let report = builtin_bundle::boot_builtin_graph(boot_info as *const _ as u64)
         .expect("builtin graph boot failed");
-    raw_serial_println(format_args!("boot: builtin graph booted"));
+    log!(LogLevel::Info, *b"RUNTIME\0\0\0\0\0\0\0\0\0", "builtin graph booted: plugins={} loaded={} stable={}",
+        report.discovered_plugins, report.loaded_plugins, report.stable_after_load);
 
     let supervisor_report = gos_supervisor::realize_boot_modules()
         .expect("supervisor failed to realize isolated domains");
-    raw_serial_println(format_args!("boot: supervisor staged isolated domains"));
-
-    k_serial::serial_println!(
-        "supervisor modules={} running={} domains={} caps={}",
-        supervisor_report.discovered_modules,
-        supervisor_report.running_modules,
-        supervisor_report.isolated_domains,
-        supervisor_report.published_capabilities
-    );
-
-    k_serial::serial_println!("\n=== GOS v0.2 BUNDLE LOAD ===");
-    k_serial::serial_println!(
-        "plugins discovered={} loaded={} stable={}",
-        report.discovered_plugins,
-        report.loaded_plugins,
-        report.stable_after_load
-    );
+    log!(LogLevel::Info, *b"SUPERVISOR\0\0\0\0\0\0", "boot realized: modules={} running={} domains={} caps={}",
+        supervisor_report.discovered_modules, supervisor_report.running_modules,
+        supervisor_report.isolated_domains, supervisor_report.published_capabilities);
 
     let snapshot = gos_runtime::snapshot();
-    k_serial::serial_println!(
-        "runtime nodes={} edges={} ready={} signals={}",
-        snapshot.node_count,
-        snapshot.edge_count,
-        snapshot.ready_queue_len,
-        snapshot.signal_queue_len
-    );
+    log!(LogLevel::Info, *b"RUNTIME\0\0\0\0\0\0\0\0\0", "graph ready: nodes={} edges={} ready={} signals={}",
+        snapshot.node_count, snapshot.edge_count, snapshot.ready_queue_len, snapshot.signal_queue_len);
 
     // Phase G.1: synchronously initialize kernel-tier drivers (GDT,
     // IDT, PIC) before interrupts come up.  Builtin modules' on_init
     // never ran via runtime pump because their ModuleEntry was None;
     // hardware setup must happen on the direct path here.
-    raw_serial_println(format_args!("boot: kernel-tier drivers init"));
     builtin_bundle::init_kernel_tier_drivers();
-    raw_serial_println(format_args!("boot: kernel-tier drivers ready (GDT/IDT/PIC)"));
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "kernel-tier drivers ready (GDT/IDT/PIC)");
 
     // Phase E.2: program the syscall MSRs once the GDT is live.
-    raw_serial_println(format_args!("boot: arming ring3 syscall surface"));
     unsafe { ring3::init(); }
-    raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "ring3 syscall surface armed (STAR/LSTAR)");
 
-    raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "interrupts enabled — steady-state loop");
     x86_64::instructions::interrupts::enable();
 
     loop {
