@@ -1941,6 +1941,11 @@ pub fn route_edge(edge_id: EdgeId, signal: Signal) -> Result<(), RuntimeError> {
 }
 
 pub fn pump() {
+    // Drain hardware IRQ pending bitmap before processing work items.
+    // This is lock-free for the IRQ side and ensures every coalesced
+    // interrupt gets one signal dispatch per pump pass.
+    drain_irq_pending();
+
     // Hard cap: a tight signal-loop between two nodes can otherwise
     // pin the kernel inside this pump call.  4096 work items per
     // pump pass is generous (the steady-state queue depth is
@@ -2036,75 +2041,110 @@ pub fn bootstrap_context(payload: u64) -> BootContext {
     BootContext::new(payload)
 }
 
-// ── Hardware IRQ → Graph routing table ───────────────────────────────────────
+// ── Hardware IRQ → Graph routing table (lock-free) ───────────────────────────
 //
 // Every IRQ vector (0–255) maps to a target VectorAddress in the graph.
-// Plugins register their target with `subscribe_irq(vector, node_vec)` at boot.
+// Plugins register their target with `subscribe_irq(vector, node_vec)` at boot
+// (before interrupts are enabled).
 //
-// Design invariants (enforced here):
-//   - At most ONE subscriber per IRQ vector (ownership, no fan-out in interrupt
-//     context; fan-out is the Router Node's job if needed).
-//   - Subscription table is populated before interrupts are enabled.
-//   - `post_irq_signal` is safe to call from `extern "C"` interrupt context:
-//     it takes the Spinlock briefly to enqueue a RuntimeSignal, then returns.
-//     The actual node dispatch happens on the next `pump()` tick.
+// Design invariants:
+//   - At most ONE subscriber per IRQ vector.
+//   - Subscriptions are write-once at boot; reads are lock-free.
+//   - `post_irq_signal` for Interrupt signals touches zero spinlocks:
+//       1. AtomicU64 load of IRQ_TARGETS[vector]  (single cache-line read)
+//       2. AtomicU64 fetch_or into IRQ_PENDING     (single RMW op)
+//     The bitmap is drained by drain_irq_pending() at the top of every pump().
+//   - Non-Interrupt signals fall back to the runtime lock (currently unused
+//     in hardware paths but kept for future extensibility).
 
 /// Maximum number of distinct IRQ vectors that may be subscribed.
 pub const MAX_IRQ_VECTORS: usize = 256;
 
-#[derive(Clone, Copy)]
-struct IrqSubscription {
-    /// Target node vector in the graph.
-    target: VectorAddress,
-    /// True when this slot is valid.
-    active: bool,
-}
+// Packed target table.  Stores `target.as_u64()` or 0 (inactive).
+// Valid targets always have KERNEL_BASE (0xFFFF_8000_0000_0000) set,
+// so 0 is a safe "no subscriber" sentinel.
+static IRQ_TARGETS: [AtomicU64; MAX_IRQ_VECTORS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_IRQ_VECTORS]
+};
 
-struct IrqTable {
-    entries: [IrqSubscription; MAX_IRQ_VECTORS],
-}
+// 256-bit pending bitmap: bit N = IRQ vector N is pending dispatch.
+// 4 × 64-bit words covers all 256 hardware vectors.
+static IRQ_PENDING: [AtomicU64; 4] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 4]
+};
 
-impl IrqTable {
-    const fn new() -> Self {
-        Self {
-            entries: [IrqSubscription {
-                target: VectorAddress::new(0, 0, 0, 0),
-                active: false,
-            }; MAX_IRQ_VECTORS],
-        }
-    }
-}
+/// Total IRQs coalesced (set a bit that was already set = backlog under load).
+static IRQ_COALESCED_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static IRQ_TABLE: Mutex<IrqTable> = Mutex::new(IrqTable::new());
+pub fn irq_coalesced_count() -> u64 {
+    IRQ_COALESCED_COUNT.load(Ordering::Relaxed)
+}
 
 /// Register a node vector as the handler for a particular IRQ number.
 ///
 /// Must be called before `x86_64::instructions::interrupts::enable()`.
 /// Overwrites any existing subscription for that vector (last write wins).
 pub fn subscribe_irq(vector: u8, target: VectorAddress) {
-    let mut table = IRQ_TABLE.lock();
-    table.entries[vector as usize] = IrqSubscription { target, active: true };
+    IRQ_TARGETS[vector as usize].store(target.as_u64(), Ordering::Release);
 }
 
 /// Post a hardware IRQ signal into the graph signal queue.
 ///
 /// Called by `gos_trap_normalizer` (in `k-idt`) on every hardware interrupt.
-/// This function must be **extremely fast** — it only enqueues; dispatching
-/// happens on the next supervisor `pump()` / `service_system_cycle()` tick.
+/// For `Signal::Interrupt` (the common case) this is entirely lock-free:
+/// one atomic load + one atomic fetch_or.  Dispatch happens in the next
+/// `pump()` call via `drain_irq_pending()`.
 ///
 /// If no subscriber is registered for the vector, the signal is silently
 /// dropped (the IRQ has been acknowledged at the hardware level already).
 pub fn post_irq_signal(vector: u8, signal: Signal) {
-    // Look up the subscriber without holding RUNTIME lock simultaneously.
-    let maybe_target = {
-        let table = IRQ_TABLE.lock();
-        let entry = &table.entries[vector as usize];
-        if entry.active { Some(entry.target) } else { None }
-    };
+    let raw = IRQ_TARGETS[vector as usize].load(Ordering::Acquire);
+    if raw == 0 {
+        return; // no subscriber
+    }
 
-    if let Some(target) = maybe_target {
-        // Enqueue signal — if the queue is full we drop (backpressure ok in
-        // interrupt context; the supervisor loop will drain it promptly).
-        let _ = RUNTIME.lock().post_signal(target, signal);
+    match signal {
+        Signal::Interrupt { .. } => {
+            // Lock-free fast path: set the pending bit.
+            let word = (vector / 64) as usize;
+            let bit = 1u64 << (vector % 64);
+            let prev = IRQ_PENDING[word].fetch_or(bit, Ordering::Release);
+            if prev & bit != 0 {
+                // Bit was already set — another IRQ arrived before drain.
+                IRQ_COALESCED_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        _ => {
+            // Slow path for non-Interrupt signals (rare / future use).
+            let target = VectorAddress::from_u64(raw);
+            let _ = RUNTIME.lock().post_signal(target, signal);
+        }
+    }
+}
+
+/// Drain all pending IRQ bits and inject them into the runtime signal queue.
+///
+/// Called at the top of `pump()` so each IRQ gets exactly one dispatch per
+/// pump pass, regardless of how many times the hardware fired while the
+/// previous pump was running.
+fn drain_irq_pending() {
+    for word_idx in 0..4usize {
+        let word = IRQ_PENDING[word_idx].swap(0, Ordering::AcqRel);
+        if word == 0 {
+            continue;
+        }
+        let mut bits = word;
+        while bits != 0 {
+            let bit_pos = bits.trailing_zeros() as u8;
+            bits &= bits.wrapping_sub(1); // clear lowest set bit
+            let vector = word_idx as u8 * 64 + bit_pos;
+            let raw = IRQ_TARGETS[vector as usize].load(Ordering::Acquire);
+            if raw != 0 {
+                let target = VectorAddress::from_u64(raw);
+                let _ = RUNTIME.lock().post_signal(target, Signal::Interrupt { irq: vector });
+            }
+        }
     }
 }

@@ -1248,7 +1248,9 @@ fn dispatch_text_command(
         super::print_num_inline(sink, gos_runtime::domain_switch_count() as usize);
         super::print_str(sink, "\n  boot-fallback-allocs: ");
         super::print_num_inline(sink, gos_runtime::boot_fallback_alloc_count() as usize);
-        super::print_str(sink, "\n");
+        super::print_str(sink, "\n  irq-coalesced:      ");
+        super::print_num_inline(sink, gos_runtime::irq_coalesced_count() as usize);
+        super::print_str(sink, "  (bitmap hits while prev pending)\n");
     } else if cmd == "cpu" || cmd == "cpuid" {
         // Query CPUID directly for brand string, feature flags, and topology.
         super::set_color(sink, 10, 0);
