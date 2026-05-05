@@ -89,6 +89,8 @@ pub struct ModuleInfo {
     pub name: &'static str,
     pub state: ModuleLifecycle,
     pub isolated: bool,
+    pub restart_generation: u32,
+    pub queued_restart: bool,
 }
 
 /// One row in the `capability_page` / `caps` listing.
@@ -2094,6 +2096,8 @@ impl Supervisor {
                 name,
                 state: record.state,
                 isolated: record.domain.isolated,
+                restart_generation: record.restart_generation,
+                queued_restart: record.queued_restart,
             };
             written += 1;
             seen += 1;

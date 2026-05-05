@@ -554,6 +554,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
+        super::print_str(sink, "  health     show module health, faults, and restart counts\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -1017,6 +1018,8 @@ fn dispatch_text_command(
             name: "",
             state: ModuleLifecycle::Stopped,
             isolated: false,
+            restart_generation: 0,
+            queued_restart: false,
         }; 16];
         let mut offset = 0usize;
         let mut total = 0usize;
@@ -1043,6 +1046,13 @@ fn dispatch_text_command(
                 });
                 if info.isolated {
                     super::print_str(sink, "  [isolated]");
+                }
+                if info.queued_restart {
+                    super::print_str(sink, "  [restart-queued]");
+                }
+                if info.restart_generation > 0 {
+                    super::print_str(sink, "  restarts=");
+                    super::print_num_inline(sink, info.restart_generation as usize);
                 }
                 super::print_str(sink, "\n");
                 total += 1;
@@ -1151,6 +1161,72 @@ fn dispatch_text_command(
         }
         if total == 0 {
             super::print_str(sink, "  (no instances)\n");
+        }
+    } else if cmd == "health" {
+        use gos_protocol::ModuleLifecycle;
+        let mut buf = [gos_supervisor::ModuleInfo {
+            handle: gos_protocol::ModuleHandle(0),
+            name: "",
+            state: ModuleLifecycle::Stopped,
+            isolated: false,
+            restart_generation: 0,
+            queued_restart: false,
+        }; 32];
+        let mut total_modules = 0usize;
+        let mut running = 0usize;
+        let mut faulted = 0usize;
+        let mut restarting = 0usize;
+        let mut offset = 0usize;
+        loop {
+            let n = gos_supervisor::module_page(offset, &mut buf);
+            if n == 0 { break; }
+            for info in buf[..n].iter() {
+                total_modules += 1;
+                if info.state == ModuleLifecycle::Running { running += 1; }
+                if info.state == ModuleLifecycle::Faulted { faulted += 1; }
+                if info.queued_restart { restarting += 1; }
+            }
+            offset += n;
+            if n < buf.len() { break; }
+        }
+        let ok = faulted == 0 && restarting == 0;
+        super::set_color(sink, if ok { 10 } else { 12 }, 0);
+        super::print_str(sink, if ok { " health: OK\n" } else { " health: DEGRADED\n" });
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  modules: ");
+        super::print_num_inline(sink, total_modules);
+        super::print_str(sink, "  running: ");
+        super::print_num_inline(sink, running);
+        super::print_str(sink, "  faulted: ");
+        if faulted > 0 { super::set_color(sink, 12, 0); }
+        super::print_num_inline(sink, faulted);
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  restarting: ");
+        if restarting > 0 { super::set_color(sink, 14, 0); }
+        super::print_num_inline(sink, restarting);
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "\n");
+        // Show faulted modules by name.
+        if faulted > 0 {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " faulted modules:\n");
+            super::set_color(sink, 7, 0);
+            let mut offset2 = 0usize;
+            loop {
+                let n = gos_supervisor::module_page(offset2, &mut buf);
+                if n == 0 { break; }
+                for info in buf[..n].iter() {
+                    if info.state == ModuleLifecycle::Faulted {
+                        super::print_str(sink, "  ");
+                        super::print_str(sink, info.name);
+                        super::print_str(sink, "  restarts=");
+                        super::print_num_inline(sink, info.restart_generation as usize);
+                        super::print_str(sink, "\n");
+                    }
+                }
+                offset2 += n;
+                if n < buf.len() { break; }
+            }
         }
     } else if cmd == "events" || cmd == "stats" {
         super::set_color(sink, 10, 0);
