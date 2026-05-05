@@ -551,6 +551,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  instances  list spawned node instances\n");
         super::print_str(sink, "  log        show recent kernel log entries\n");
         super::print_str(sink, "  log clear  clear the log ring buffer\n");
+        super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
+        super::print_str(sink, "  tick       show current scheduler tick counter\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -1137,6 +1139,94 @@ fn dispatch_text_command(
         if total == 0 {
             super::print_str(sink, "  (no instances)\n");
         }
+    } else if cmd == "cpu" || cmd == "cpuid" {
+        // Query CPUID directly for brand string, feature flags, and topology.
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " cpu\n");
+        super::set_color(sink, 7, 0);
+        // Brand string: leaves 0x8000_0002..0x8000_0004, 12 dwords = 48 bytes.
+        let mut brand = [0u8; 48];
+        for (i, leaf) in (0x8000_0002u32..=0x8000_0004u32).enumerate() {
+            let result = unsafe { core::arch::x86_64::__cpuid(leaf) };
+            let off = i * 16;
+            brand[off..off + 4].copy_from_slice(&result.eax.to_le_bytes());
+            brand[off + 4..off + 8].copy_from_slice(&result.ebx.to_le_bytes());
+            brand[off + 8..off + 12].copy_from_slice(&result.ecx.to_le_bytes());
+            brand[off + 12..off + 16].copy_from_slice(&result.edx.to_le_bytes());
+        }
+        super::print_str(sink, "  model:    ");
+        let brand_end = brand.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        for &b in brand[..brand_end].iter() {
+            if b >= 0x20 && b < 0x7F {
+                super::print_byte(sink, b);
+            }
+        }
+        super::print_str(sink, "\n");
+        // Feature flags: leaf 1 ECX and EDX.
+        let feat = unsafe { core::arch::x86_64::__cpuid(1) };
+        let ecx = feat.ecx;
+        let edx = feat.edx;
+        super::print_str(sink, "  features:");
+        if edx & (1 << 25) != 0 { super::print_str(sink, " SSE"); }
+        if edx & (1 << 26) != 0 { super::print_str(sink, " SSE2"); }
+        if ecx & (1 << 0)  != 0 { super::print_str(sink, " SSE3"); }
+        if ecx & (1 << 9)  != 0 { super::print_str(sink, " SSSE3"); }
+        if ecx & (1 << 19) != 0 { super::print_str(sink, " SSE4.1"); }
+        if ecx & (1 << 20) != 0 { super::print_str(sink, " SSE4.2"); }
+        if ecx & (1 << 28) != 0 { super::print_str(sink, " AVX"); }
+        if ecx & (1 << 12) != 0 { super::print_str(sink, " FMA"); }
+        if ecx & (1 << 30) != 0 { super::print_str(sink, " RDRAND"); }
+        if ecx & (1 << 5)  != 0 { super::print_str(sink, " VMX"); }
+        if ecx & (1 << 26) != 0 { super::print_str(sink, " XSAVE"); }
+        if edx & (1 << 4)  != 0 { super::print_str(sink, " TSC"); }
+        if edx & (1 << 5)  != 0 { super::print_str(sink, " MSR"); }
+        if edx & (1 << 9)  != 0 { super::print_str(sink, " APIC"); }
+        super::print_str(sink, "\n");
+        // Physical/logical core count from leaf 4.
+        let topo = unsafe { core::arch::x86_64::__cpuid_count(4, 0) }; // leaf 4 sub-leaf 0
+        let phys_cores = ((topo.eax >> 26) & 0x3F) + 1;
+        let leaf1_ebx = feat.ebx;
+        let logical_per_package = (leaf1_ebx >> 16) & 0xFF;
+        super::print_str(sink, "  phys-cores: ");
+        super::print_num_inline(sink, phys_cores as usize);
+        super::print_str(sink, "  logical/pkg: ");
+        super::print_num_inline(sink, logical_per_package as usize);
+        super::print_str(sink, "\n");
+        // Max CPUID leaf.
+        let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }; // max basic leaf
+        super::print_str(sink, "  max-leaf: ");
+        super::print_num_inline(sink, max_leaf.eax as usize);
+        let max_ext = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }; // max ext leaf
+        super::print_str(sink, "  max-ext-leaf: ");
+        // Print hex for extended leaf
+        let v = max_ext.eax;
+        super::print_str(sink, "0x");
+        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
+            let nibble = (v >> shift) & 0xF;
+            super::print_byte(sink, if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble as u8 - 10) });
+        }
+        super::print_str(sink, "\n");
+    } else if cmd == "tick" || cmd == "uptime" {
+        let snapshot = gos_runtime::snapshot();
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " scheduler tick\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  tick:     ");
+        super::print_num_inline(sink, snapshot.tick as usize);
+        super::print_str(sink, "\n  freq:     120 Hz (PIT)\n");
+        // Convert ticks to seconds: tick / 120
+        let secs = snapshot.tick / 120;
+        let frac = (snapshot.tick % 120) * 10 / 120;
+        super::print_str(sink, "  uptime:   ");
+        super::print_num_inline(sink, secs as usize);
+        super::print_str(sink, ".");
+        super::print_num_inline(sink, frac as usize);
+        super::print_str(sink, " s\n");
+        super::print_str(sink, "  signals:  ");
+        super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, "  ready: ");
+        super::print_num_inline(sink, snapshot.ready_queue_len);
+        super::print_str(sink, "\n");
     } else if cmd == "log" || cmd == "logs" || cmd == "dmesg" {
         use gos_log::LogLevel;
         super::set_color(sink, 10, 0);

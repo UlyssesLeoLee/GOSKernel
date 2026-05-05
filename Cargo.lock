@@ -382,6 +382,7 @@ dependencies = [
  "gos-supervisor",
  "k-pmm",
  "spin",
+ "x86_64",
 ]
 
 [[package]]

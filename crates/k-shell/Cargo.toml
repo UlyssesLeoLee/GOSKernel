@@ -11,3 +11,4 @@ gos-supervisor = { path = "../gos-supervisor", default-features = false }
 gos-log = { path = "../gos-log" }
 k-pmm = { path = "../k-pmm" }
 spin = "0.9"
+x86_64 = "0.14"
