@@ -988,6 +988,7 @@ impl GraphRuntime {
 
             if status == ExecStatus::Fault {
                 let _ = self.fault_queue.push(record.vector);
+                FAULT_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1218,6 +1219,12 @@ static PREEMPT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Incremented once per PIT interrupt (120 Hz) by `tick_pulse()`.
 /// Use for wall-clock elapsed time: `pit_tick_count() / 120` = seconds.
 static PIT_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total signals routed since boot (both legacy and native).
+static SIGNAL_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total native-executor activations (Spawn + subsequent events).
+static ACTIVATION_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total faults dispatched to the fault queue.
+static FAULT_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn install_scheduler(hook: Scheduler) {
     *SCHEDULER.lock() = Some(hook);
@@ -1242,6 +1249,21 @@ pub fn tick_pulse() {
 /// Divide by 120 for wall-clock seconds.
 pub fn pit_tick_count() -> u64 {
     PIT_TICK_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total signals routed since boot via `route_signal`.
+pub fn signal_dispatch_count() -> u64 {
+    SIGNAL_DISPATCH_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total node activations since boot via `activate`.
+pub fn activation_count() -> u64 {
+    ACTIVATION_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total fault dispatches pushed to the fault queue since boot.
+pub fn fault_dispatch_count() -> u64 {
+    FAULT_DISPATCH_COUNT.load(Ordering::Relaxed)
 }
 
 fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {
@@ -1654,6 +1676,7 @@ pub fn post_signal(target: VectorAddress, signal: Signal) -> Result<(), RuntimeE
 }
 
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {
+    SIGNAL_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
     let dispatch = {
         let mut runtime = RUNTIME.lock();
         runtime.prepare_signal_dispatch(target)?
@@ -1800,6 +1823,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
 }
 
 pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
+    ACTIVATION_COUNT.fetch_add(1, Ordering::Relaxed);
     let dispatch = {
         let mut runtime = RUNTIME.lock();
         runtime.prepare_activation(target)?

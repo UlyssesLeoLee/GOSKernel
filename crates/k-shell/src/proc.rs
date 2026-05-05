@@ -552,7 +552,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  log        show recent kernel log entries\n");
         super::print_str(sink, "  log clear  clear the log ring buffer\n");
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
-        super::print_str(sink, "  tick       show current scheduler tick counter\n");
+        super::print_str(sink, "  tick       show uptime and scheduler counters\n");
+        super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -971,6 +972,18 @@ fn dispatch_text_command(
         super::print_str(sink, " KiB  free: ");
         super::print_num_inline(sink, free_kb);
         super::print_str(sink, " KiB\n");
+        // Heap stats from linked_list_allocator.
+        let (heap_used, heap_free, heap_total) = k_heap::heap_stats();
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " kernel heap\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, heap_total / 1024);
+        super::print_str(sink, " KiB  used: ");
+        super::print_num_inline(sink, heap_used / 1024);
+        super::print_str(sink, " KiB  free: ");
+        super::print_num_inline(sink, heap_free / 1024);
+        super::print_str(sink, " KiB\n");
         let fallback = gos_runtime::boot_fallback_alloc_count();
         let switches = gos_runtime::domain_switch_count();
         super::print_str(sink, "  boot-fallback-allocs: ");
@@ -1139,6 +1152,23 @@ fn dispatch_text_command(
         if total == 0 {
             super::print_str(sink, "  (no instances)\n");
         }
+    } else if cmd == "events" || cmd == "stats" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " event counters\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  signals-dispatched: ");
+        super::print_num_inline(sink, gos_runtime::signal_dispatch_count() as usize);
+        super::print_str(sink, "\n  activations:       ");
+        super::print_num_inline(sink, gos_runtime::activation_count() as usize);
+        super::print_str(sink, "\n  faults:            ");
+        super::print_num_inline(sink, gos_runtime::fault_dispatch_count() as usize);
+        super::print_str(sink, "\n  preemptions:       ");
+        super::print_num_inline(sink, gos_runtime::preempt_count() as usize);
+        super::print_str(sink, "\n  domain-switches:   ");
+        super::print_num_inline(sink, gos_runtime::domain_switch_count() as usize);
+        super::print_str(sink, "\n  boot-fallback-allocs: ");
+        super::print_num_inline(sink, gos_runtime::boot_fallback_alloc_count() as usize);
+        super::print_str(sink, "\n");
     } else if cmd == "cpu" || cmd == "cpuid" {
         // Query CPUID directly for brand string, feature flags, and topology.
         super::set_color(sink, 10, 0);

@@ -10,5 +10,6 @@ gos-runtime = { path = "../gos-runtime" }
 gos-supervisor = { path = "../gos-supervisor", default-features = false }
 gos-log = { path = "../gos-log" }
 k-pmm = { path = "../k-pmm" }
+k-heap = { path = "../k-heap" }
 spin = "0.9"
 x86_64 = "0.14"

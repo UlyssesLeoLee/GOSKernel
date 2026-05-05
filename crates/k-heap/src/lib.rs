@@ -52,6 +52,16 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 
 pub fn node_ptr() -> *mut u8 { vaddr::resolve_hal_node(NODE_VEC) }
 
+/// Returns `(used_bytes, free_bytes, total_bytes)` for the kernel heap.
+/// Zero before the heap is initialized.
+pub fn heap_stats() -> (usize, usize, usize) {
+    let guard = ALLOCATOR.lock();
+    let used = guard.used();
+    let free = guard.free();
+    let total = guard.size();
+    (used, free, total)
+}
+
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 

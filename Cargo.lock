@@ -380,6 +380,7 @@ dependencies = [
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
+ "k-heap",
  "k-pmm",
  "spin",
  "x86_64",
