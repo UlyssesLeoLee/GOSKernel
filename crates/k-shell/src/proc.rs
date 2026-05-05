@@ -555,6 +555,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
+        super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
+        super::print_str(sink, "  edges      list all registered graph edges with type\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -1393,6 +1395,141 @@ fn dispatch_text_command(
         super::set_color(sink, 11, 0);
         super::print_str(sink, " log ring cleared\n");
         super::set_color(sink, 7, 0);
+    } else if cmd == "nodes" || cmd == "node-list" || cmd == "nl" {
+        use gos_protocol::{GraphNodeSummary, NodeLifecycle, RuntimeNodeType};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph nodes\n");
+        super::set_color(sink, 7, 0);
+        let mut page = [GraphNodeSummary::EMPTY; 16];
+        let (total, n) = gos_runtime::node_page(0, &mut page);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "\n");
+        for node in &page[..n] {
+            // lifecycle color
+            let lc_color: u8 = match node.lifecycle {
+                NodeLifecycle::Ready    => 10,
+                NodeLifecycle::Running  => 14,
+                NodeLifecycle::Faulted  => 12,
+                NodeLifecycle::Terminated => 8,
+                NodeLifecycle::Suspended  => 11,
+                _                       => 7,
+            };
+            let lc_label = match node.lifecycle {
+                NodeLifecycle::Discovered  => "disc",
+                NodeLifecycle::Loaded      => "load",
+                NodeLifecycle::Registered  => "reg ",
+                NodeLifecycle::Allocated   => "allc",
+                NodeLifecycle::Ready       => "rdy ",
+                NodeLifecycle::Running     => "run ",
+                NodeLifecycle::Waiting     => "wait",
+                NodeLifecycle::Suspended   => "susp",
+                NodeLifecycle::Terminated  => "term",
+                NodeLifecycle::Faulted     => "FALT",
+            };
+            let nt_label = match node.node_type {
+                RuntimeNodeType::Hardware    => "hw  ",
+                RuntimeNodeType::Driver      => "drv ",
+                RuntimeNodeType::Service     => "svc ",
+                RuntimeNodeType::PluginEntry => "plug",
+                RuntimeNodeType::Compute     => "comp",
+                RuntimeNodeType::Router      => "rout",
+                RuntimeNodeType::Aggregator  => "aggr",
+                RuntimeNodeType::Vector      => "vec ",
+            };
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  [");
+            super::print_num_inline(sink, node.vector.l4 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.l3 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.l2 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.offset as usize);
+            super::print_str(sink, "] ");
+            super::set_color(sink, lc_color, 0);
+            super::print_str(sink, lc_label);
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, " ");
+            super::print_str(sink, nt_label);
+            super::print_str(sink, "  ");
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, node.local_node_key);
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, node.plugin_name);
+            if node.export_count > 0 {
+                super::set_color(sink, 11, 0);
+                super::print_str(sink, "  exports:");
+                super::print_num_inline(sink, node.export_count);
+            }
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+        }
+        if total > n {
+            super::print_str(sink, "  … ");
+            super::print_num_inline(sink, total - n);
+            super::print_str(sink, " more (pagination not yet implemented)\n");
+        }
+    } else if cmd == "edges" || cmd == "edge-list" || cmd == "el" {
+        use gos_protocol::{GraphEdgeSummary, RuntimeEdgeType};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph edges\n");
+        super::set_color(sink, 7, 0);
+        let mut page = [GraphEdgeSummary::EMPTY; 16];
+        let (total, n) = gos_runtime::edge_page(0, &mut page);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "\n");
+        for edge in &page[..n] {
+            let et_color: u8 = match edge.edge_type {
+                RuntimeEdgeType::Call   => 14,
+                RuntimeEdgeType::Spawn  => 13,
+                RuntimeEdgeType::Signal => 10,
+                RuntimeEdgeType::Stream => 11,
+                RuntimeEdgeType::Return => 8,
+                RuntimeEdgeType::Mount  => 12,
+                _                       => 7,
+            };
+            let et_label = match edge.edge_type {
+                RuntimeEdgeType::Call   => "call  ",
+                RuntimeEdgeType::Spawn  => "spawn ",
+                RuntimeEdgeType::Depend => "dep   ",
+                RuntimeEdgeType::Signal => "sig   ",
+                RuntimeEdgeType::Return => "ret   ",
+                RuntimeEdgeType::Mount  => "mount ",
+                RuntimeEdgeType::Sync   => "sync  ",
+                RuntimeEdgeType::Stream => "stream",
+                RuntimeEdgeType::Use    => "use   ",
+            };
+            super::set_color(sink, et_color, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, et_label);
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, edge.from_key);
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, " -> ");
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, edge.to_key);
+            let cap_ns = edge.capability_namespace.unwrap_or("");
+            let cap_bind = edge.capability_binding.unwrap_or("");
+            if !cap_ns.is_empty() || !cap_bind.is_empty() {
+                super::set_color(sink, 11, 0);
+                super::print_str(sink, "  [");
+                super::print_str(sink, cap_ns);
+                super::print_str(sink, "::");
+                super::print_str(sink, cap_bind);
+                super::print_str(sink, "]");
+            }
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+        }
+        if total > n {
+            super::print_str(sink, "  … ");
+            super::print_num_inline(sink, total - n);
+            super::print_str(sink, " more\n");
+        }
     } else if cmd == "clear" {
         state.len = 0;
         super::redraw_console(sink, state);
