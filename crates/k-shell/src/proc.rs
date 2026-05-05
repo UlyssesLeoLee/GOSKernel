@@ -557,6 +557,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
         super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
         super::print_str(sink, "  edges      list all registered graph edges with type\n");
+        super::print_str(sink, "  signal <vec> <type> [args]  inject signal into a node\n");
+        super::print_str(sink, "    types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
+        super::print_str(sink, "           data <from> <byte>  interrupt <irq>  call <from>\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -1397,6 +1400,111 @@ fn dispatch_text_command(
         super::set_color(sink, 11, 0);
         super::print_str(sink, " log ring cleared\n");
         super::set_color(sink, 7, 0);
+    } else if let Some(sig_args) = cmd.strip_prefix("signal ").or_else(|| cmd.strip_prefix("sig ")) {
+        // signal <vector> <type> [args...]
+        // Examples:
+        //   signal 2.3.0.0 spawn
+        //   signal 2.3.0.0 spawn 42
+        //   signal 2.3.0.0 ctrl 0xA0 0x01
+        //   signal 2.3.0.0 data 0 0x48
+        //   signal 2.3.0.0 interrupt 33
+        //   signal 2.3.0.0 terminate
+        use gos_protocol::{Signal, VectorAddress};
+        let mut parts = sig_args.splitn(4, ' ');
+        let vec_str = parts.next().unwrap_or("");
+        let kind_str = parts.next().unwrap_or("");
+        let arg0_str = parts.next().unwrap_or("");
+        let arg1_str = parts.next().unwrap_or("");
+
+        let maybe_vec = VectorAddress::parse(vec_str);
+
+        fn parse_u64_arg(s: &str) -> Option<u64> {
+            let s = s.trim();
+            if s.is_empty() { return None; }
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        }
+
+        let maybe_signal: Option<Signal> = match kind_str.trim() {
+            "spawn"     => Some(Signal::Spawn { payload: parse_u64_arg(arg0_str).unwrap_or(0) }),
+            "terminate" => Some(Signal::Terminate),
+            "ctrl" | "control" => {
+                let cmd_byte = parse_u64_arg(arg0_str).unwrap_or(0) as u8;
+                let val_byte = parse_u64_arg(arg1_str).unwrap_or(0) as u8;
+                Some(Signal::Control { cmd: cmd_byte, val: val_byte })
+            }
+            "data" => {
+                let from = parse_u64_arg(arg0_str).unwrap_or(0);
+                let byte = parse_u64_arg(arg1_str).unwrap_or(0) as u8;
+                Some(Signal::Data { from, byte })
+            }
+            "interrupt" | "irq" => {
+                let irq = parse_u64_arg(arg0_str).unwrap_or(0) as u8;
+                Some(Signal::Interrupt { irq })
+            }
+            "call" => {
+                let from = parse_u64_arg(arg0_str).unwrap_or(0);
+                Some(Signal::Call { from })
+            }
+            _ => None,
+        };
+
+        match (maybe_vec, maybe_signal) {
+            (None, _) => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, vec_str);
+                super::print_str(sink, "  expected L4.L3.L2.offset\n");
+                super::set_color(sink, 7, 0);
+            }
+            (_, None) => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " unknown signal type: ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, kind_str);
+                super::print_str(sink, "\n");
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
+                super::print_str(sink, "         data <from> <byte>  interrupt <irq>  call <from>\n");
+                super::set_color(sink, 7, 0);
+            }
+            (Some(target), Some(signal)) => {
+                match gos_runtime::post_signal(target, signal) {
+                    Ok(()) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " queued ");
+                        super::print_str(sink, kind_str);
+                        super::print_str(sink, " -> ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, target.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.offset as usize);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Err(e) => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " post_signal failed: ");
+                        let emsg = match e {
+                            gos_runtime::RuntimeError::SignalQueueFull => "signal queue full",
+                            gos_runtime::RuntimeError::NodeNotFound    => "node not found",
+                            _ => "error",
+                        };
+                        super::print_str(sink, emsg);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                }
+            }
+        }
     } else if cmd == "nodes" || cmd == "node-list" || cmd == "nl" {
         use gos_protocol::{GraphNodeSummary, NodeLifecycle, RuntimeNodeType};
         super::set_color(sink, 10, 0);
