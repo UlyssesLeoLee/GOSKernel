@@ -551,6 +551,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  instances  list spawned node instances\n");
         super::print_str(sink, "  log        show recent kernel log entries\n");
         super::print_str(sink, "  log clear  clear the log ring buffer\n");
+        super::print_str(sink, "  journal    show last 32 control-plane events (node/edge/fault)\n");
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
@@ -1401,6 +1402,61 @@ fn dispatch_text_command(
         super::set_color(sink, 11, 0);
         super::print_str(sink, " log ring cleared\n");
         super::set_color(sink, 7, 0);
+    } else if cmd == "journal" || cmd == "cpj" {
+        use gos_protocol::ControlPlaneMessageKind;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " control-plane journal\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_protocol::ControlPlaneEnvelope {
+            version: 0,
+            kind: ControlPlaneMessageKind::Hello,
+            subject: [0; 16],
+            arg0: 0,
+            arg1: 0,
+        }; 32];
+        let n = gos_runtime::cp_journal_recent(&mut buf);
+        if n == 0 {
+            super::print_str(sink, "  (empty)\n");
+        } else {
+            for env in &buf[..n] {
+                let (color, label) = match env.kind {
+                    ControlPlaneMessageKind::Hello           => (8u8,  "hello   "),
+                    ControlPlaneMessageKind::PluginDiscovered => (11u8, "plug+   "),
+                    ControlPlaneMessageKind::NodeUpsert      => (10u8, "node+   "),
+                    ControlPlaneMessageKind::EdgeUpsert      => (14u8, "edge+   "),
+                    ControlPlaneMessageKind::StateDelta      => (7u8,  "state   "),
+                    ControlPlaneMessageKind::SnapshotChunk   => (8u8,  "snap    "),
+                    ControlPlaneMessageKind::Fault           => (12u8, "FAULT   "),
+                    ControlPlaneMessageKind::Metric          => (8u8,  "metric  "),
+                };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, "  ");
+                super::print_str(sink, label);
+                super::set_color(sink, 7, 0);
+                // Print up to 8 bytes of subject as ASCII
+                let src_end = env.subject.iter().position(|&b| b == 0).unwrap_or(16).min(8);
+                super::print_str(sink, "[");
+                for &b in &env.subject[..src_end] {
+                    if b >= 0x20 && b < 0x7F {
+                        super::print_byte(sink, b);
+                    } else {
+                        super::print_byte(sink, b'.');
+                    }
+                }
+                super::print_str(sink, "]");
+                if env.arg0 != 0 || env.arg1 != 0 {
+                    super::set_color(sink, 8, 0);
+                    super::print_str(sink, "  a0:");
+                    super::print_num_inline(sink, env.arg0 as usize);
+                    if env.arg1 != 0 {
+                        super::print_str(sink, " a1:");
+                        super::print_num_inline(sink, env.arg1 as usize);
+                    }
+                }
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+        }
     } else if let Some(sig_args) = cmd.strip_prefix("signal ").or_else(|| cmd.strip_prefix("sig ")) {
         // signal <vector> <type> [args...]
         // Examples:

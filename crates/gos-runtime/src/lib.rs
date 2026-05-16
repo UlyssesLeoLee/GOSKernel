@@ -329,13 +329,16 @@ impl GraphRuntime {
         arg0: u64,
         arg1: u64,
     ) {
-        let _ = self.control_plane.push_control_plane(ControlPlaneEnvelope {
+        let env = ControlPlaneEnvelope {
             version: CONTROL_PLANE_PROTOCOL_VERSION,
             kind,
             subject,
             arg0,
             arg1,
-        });
+        };
+        let _ = self.control_plane.push_control_plane(env);
+        // Mirror into the persistent journal (not drained by consumers).
+        CP_JOURNAL.lock().push(env);
     }
 
     fn plugin_slot(&self, plugin_id: PluginId) -> Option<usize> {
@@ -1533,6 +1536,68 @@ unsafe extern "C" fn kernel_emit_control_plane(
     with_runtime(|runtime| {
         runtime.emit_control_plane(control_plane_kind_from_u8(kind), subject_buf, arg0, arg1);
     });
+}
+
+// ── Control-plane event journal ───────────────────────────────────────────────
+//
+// A persistent ring buffer that mirrors every emit_control_plane call.
+// Unlike the 256-slot `GraphRuntime::control_plane` queue (which is drained
+// by consumers and then gone), this journal keeps the last
+// CP_JOURNAL_CAPACITY events for shell inspection via `journal`.
+
+pub const CP_JOURNAL_CAPACITY: usize = 64;
+
+struct CpJournal {
+    entries: [ControlPlaneEnvelope; CP_JOURNAL_CAPACITY],
+    head: usize,  // next write slot
+    count: usize, // total written, capped at CP_JOURNAL_CAPACITY
+}
+
+impl CpJournal {
+    const fn new() -> Self {
+        Self {
+            entries: [ControlPlaneEnvelope {
+                version: 0,
+                kind: ControlPlaneMessageKind::Hello,
+                subject: [0; 16],
+                arg0: 0,
+                arg1: 0,
+            }; CP_JOURNAL_CAPACITY],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, env: ControlPlaneEnvelope) {
+        self.entries[self.head] = env;
+        self.head = (self.head + 1) % CP_JOURNAL_CAPACITY;
+        if self.count < CP_JOURNAL_CAPACITY {
+            self.count += 1;
+        }
+    }
+
+    fn read_recent(&self, out: &mut [ControlPlaneEnvelope]) -> usize {
+        let n = out.len().min(self.count);
+        if n == 0 {
+            return 0;
+        }
+        // Oldest-first: start from (head - count) wrapping.
+        let start = (self.head + CP_JOURNAL_CAPACITY - self.count) % CP_JOURNAL_CAPACITY;
+        // Skip entries to show only the last `n`.
+        let skip = self.count - n;
+        for i in 0..n {
+            out[i] = self.entries[(start + skip + i) % CP_JOURNAL_CAPACITY];
+        }
+        n
+    }
+}
+
+static CP_JOURNAL: Mutex<CpJournal> = Mutex::new(CpJournal::new());
+
+/// Read up to `out.len()` recent control-plane events, oldest first.
+/// Returns the number of entries written into `out`.
+pub fn cp_journal_recent(out: &mut [ControlPlaneEnvelope]) -> usize {
+    CP_JOURNAL.lock().read_recent(out)
 }
 
 static KERNEL_ABI: KernelAbi = KernelAbi {
