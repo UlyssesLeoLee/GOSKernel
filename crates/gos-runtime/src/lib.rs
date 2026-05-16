@@ -157,6 +157,8 @@ struct NodeRecord {
     /// builtin nodes operate in this mode until the supervisor calls
     /// `bind_instance`.
     instance_id: NodeInstanceId,
+    /// Cumulative signals dispatched to this node (wraps at u64::MAX).
+    signal_count: u64,
     /// Conditional-route table (LangGraph-style edge fan-out).
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
@@ -389,6 +391,7 @@ impl GraphRuntime {
             entry_policy: record.spec.entry_policy,
             executor_id: record.spec.executor_id,
             export_count: record.spec.exports.len(),
+            signal_count: record.signal_count,
         })
     }
 
@@ -485,6 +488,7 @@ impl GraphRuntime {
             runtime_page,
             binding: NodeBinding::Unbound,
             instance_id: NodeInstanceId::ZERO,
+            signal_count: 0,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
         });
@@ -808,6 +812,7 @@ impl GraphRuntime {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
         let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
         record.lifecycle = NodeLifecycle::Running;
+        record.signal_count = record.signal_count.wrapping_add(1);
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Running);
         Ok(PreparedDispatch {

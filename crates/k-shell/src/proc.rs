@@ -1573,6 +1573,11 @@ fn dispatch_text_command(
                 super::print_str(sink, "  exports:");
                 super::print_num_inline(sink, node.export_count);
             }
+            if node.signal_count > 0 {
+                super::set_color(sink, 14, 0);
+                super::print_str(sink, "  sigs:");
+                super::print_num_inline(sink, node.signal_count as usize);
+            }
             super::set_color(sink, 7, 0);
             super::print_str(sink, "\n");
         }
