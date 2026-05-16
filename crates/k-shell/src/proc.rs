@@ -581,9 +581,11 @@ fn dispatch_text_command(
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
+        super::print_str(sink, "  fault <vec>  inject fault into the plugin owning a node\n");
         super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
         super::print_str(sink, "  node <vec> show detail + edges for one node\n");
         super::print_str(sink, "  edges      list all registered graph edges with type\n");
+        super::print_str(sink, "  edge <vec> show detail for one edge\n");
         super::print_str(sink, "  signal <vec> <type> [args]  inject signal into a node\n");
         super::print_str(sink, "    types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
         super::print_str(sink, "           data <from> <byte>  interrupt <irq>  call <from>\n");
@@ -1422,6 +1424,55 @@ fn dispatch_text_command(
                 super::print_str(sink, "\n");
             }
         }
+    } else if let Some(vec_str) = cmd.strip_prefix("fault ") {
+        // fault <L4.L3.L2.offset>  — inject a fault into a node's plugin
+        // Useful for testing supervisor fault-recovery / restart policy.
+        use gos_protocol::VectorAddress;
+        match VectorAddress::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(vec) => {
+                match gos_runtime::plugin_id_for_vec(vec) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " no plugin bound to that vector\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(plugin_id) => {
+                        gos_runtime::mark_plugin_fault(plugin_id);
+                        // Also push a Fault envelope into the control-plane so
+                        // the journal records it.
+                        gos_runtime::with_runtime(|rt| {
+                            rt.emit_control_plane(
+                                gos_protocol::ControlPlaneMessageKind::Fault,
+                                plugin_id.0,
+                                0,
+                                0,
+                            );
+                        });
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " fault injected into plugin at ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, vec.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.offset as usize);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 8, 0);
+                        super::print_str(sink, "  use 'health' to see fault state\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                }
+            }
+        }
     } else if cmd == "log clear" || cmd == "logs clear" || cmd == "dmesg clear" {
         gos_log::clear_log_ring();
         super::set_color(sink, 11, 0);
@@ -1814,6 +1865,95 @@ fn dispatch_text_command(
             super::print_str(sink, "  … ");
             super::print_num_inline(sink, total - n);
             super::print_str(sink, " more (pagination not yet implemented)\n");
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("edge ").or_else(|| cmd.strip_prefix("e ")) {
+        // edge <L4.L3.L2.offset>  — show detail for one edge
+        use gos_protocol::{EdgeVector, RuntimeEdgeType, RoutePolicy};
+        match EdgeVector::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad edge vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(ev) => {
+                match gos_runtime::edge_summary(ev) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " edge not found\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(edge) => {
+                        let et_label = match edge.edge_type {
+                            RuntimeEdgeType::Call   => "Call",
+                            RuntimeEdgeType::Spawn  => "Spawn",
+                            RuntimeEdgeType::Depend => "Depend",
+                            RuntimeEdgeType::Signal => "Signal",
+                            RuntimeEdgeType::Return => "Return",
+                            RuntimeEdgeType::Mount  => "Mount",
+                            RuntimeEdgeType::Sync   => "Sync",
+                            RuntimeEdgeType::Stream => "Stream",
+                            RuntimeEdgeType::Use    => "Use",
+                        };
+                        let rp_label = match edge.route_policy {
+                            RoutePolicy::Direct    => "Direct",
+                            RoutePolicy::Weighted  => "Weighted",
+                            RoutePolicy::Broadcast => "Broadcast",
+                            RoutePolicy::FailFast  => "FailFast",
+                        };
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " edge: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, edge.from_key);
+                        super::print_str(sink, " -> ");
+                        super::print_str(sink, edge.to_key);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "  type:   ");
+                        super::print_str(sink, et_label);
+                        super::print_str(sink, "\n  policy: ");
+                        super::print_str(sink, rp_label);
+                        super::print_str(sink, "\n  from:   ");
+                        super::print_num_inline(sink, edge.from_vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.offset as usize);
+                        super::print_str(sink, "\n  to:     ");
+                        super::print_num_inline(sink, edge.to_vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.offset as usize);
+                        super::print_str(sink, "\n");
+                        if let Some(ns) = edge.capability_namespace {
+                            if !ns.is_empty() {
+                                super::set_color(sink, 11, 0);
+                                super::print_str(sink, "  cap:    ");
+                                super::print_str(sink, ns);
+                                if let Some(bind) = edge.capability_binding {
+                                    super::print_str(sink, "::");
+                                    super::print_str(sink, bind);
+                                }
+                                super::set_color(sink, 7, 0);
+                                super::print_str(sink, "\n");
+                            }
+                        }
+                        if edge.weight != 0.0 {
+                            super::set_color(sink, 8, 0);
+                            super::print_str(sink, "  acl:    0x");
+                            super::print_num_inline(sink, edge.acl_mask as usize);
+                            super::set_color(sink, 7, 0);
+                            super::print_str(sink, "\n");
+                        }
+                    }
+                }
+            }
         }
     } else if cmd == "edges" || cmd == "edge-list" || cmd == "el" {
         use gos_protocol::{GraphEdgeSummary, RuntimeEdgeType};
