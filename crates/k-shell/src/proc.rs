@@ -556,6 +556,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
         super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
+        super::print_str(sink, "  node <vec> show detail + edges for one node\n");
         super::print_str(sink, "  edges      list all registered graph edges with type\n");
         super::print_str(sink, "  signal <vec> <type> [args]  inject signal into a node\n");
         super::print_str(sink, "    types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
@@ -1501,6 +1502,134 @@ fn dispatch_text_command(
                         super::print_str(sink, emsg);
                         super::print_str(sink, "\n");
                         super::set_color(sink, 7, 0);
+                    }
+                }
+            }
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("node ").or_else(|| cmd.strip_prefix("n ")) {
+        // node <L4.L3.L2.offset>  — show full detail for one node
+        use gos_protocol::{GraphEdgeSummary, NodeLifecycle, RuntimeEdgeType, VectorAddress};
+        match VectorAddress::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "  expected L4.L3.L2.offset\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(vec) => {
+                match gos_runtime::node_summary(vec) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " node not found\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(node) => {
+                        let lc_color: u8 = match node.lifecycle {
+                            NodeLifecycle::Ready     => 10,
+                            NodeLifecycle::Running   => 14,
+                            NodeLifecycle::Faulted   => 12,
+                            NodeLifecycle::Terminated | NodeLifecycle::Suspended => 8,
+                            _ => 7,
+                        };
+                        let lc_label = match node.lifecycle {
+                            NodeLifecycle::Discovered  => "Discovered",
+                            NodeLifecycle::Loaded      => "Loaded",
+                            NodeLifecycle::Registered  => "Registered",
+                            NodeLifecycle::Allocated   => "Allocated",
+                            NodeLifecycle::Ready       => "Ready",
+                            NodeLifecycle::Running     => "Running",
+                            NodeLifecycle::Waiting     => "Waiting",
+                            NodeLifecycle::Suspended   => "Suspended",
+                            NodeLifecycle::Terminated  => "Terminated",
+                            NodeLifecycle::Faulted     => "FAULTED",
+                        };
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " node: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, node.local_node_key);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "  vector:   ");
+                        super::print_num_inline(sink, node.vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.offset as usize);
+                        super::print_str(sink, "\n  plugin:   ");
+                        super::print_str(sink, node.plugin_name);
+                        super::print_str(sink, "\n  lifecycle: ");
+                        super::set_color(sink, lc_color, 0);
+                        super::print_str(sink, lc_label);
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "\n  signals:  ");
+                        super::print_num_inline(sink, node.signal_count as usize);
+                        super::print_str(sink, "\n  exports:  ");
+                        super::print_num_inline(sink, node.export_count);
+                        super::print_str(sink, "\n");
+
+                        // List edges for this node
+                        let mut edges = [GraphEdgeSummary::EMPTY; 16];
+                        match gos_runtime::edge_page_for_node(vec, 0, &mut edges) {
+                            Err(_) => {
+                                super::set_color(sink, 8, 0);
+                                super::print_str(sink, "  edges: (node lookup failed)\n");
+                                super::set_color(sink, 7, 0);
+                            }
+                            Ok((total, n)) => {
+                                super::print_str(sink, "  edges: ");
+                                super::print_num_inline(sink, total);
+                                super::print_str(sink, "\n");
+                                for edge in &edges[..n] {
+                                    let et_label = match edge.edge_type {
+                                        RuntimeEdgeType::Call   => "call",
+                                        RuntimeEdgeType::Spawn  => "spawn",
+                                        RuntimeEdgeType::Depend => "dep",
+                                        RuntimeEdgeType::Signal => "sig",
+                                        RuntimeEdgeType::Return => "ret",
+                                        RuntimeEdgeType::Mount  => "mount",
+                                        RuntimeEdgeType::Sync   => "sync",
+                                        RuntimeEdgeType::Stream => "stream",
+                                        RuntimeEdgeType::Use    => "use",
+                                    };
+                                    use gos_protocol::GraphEdgeDirection;
+                                    let (dir_sym, peer_key) = match edge.direction {
+                                        GraphEdgeDirection::Outbound => ("->", edge.to_key),
+                                        GraphEdgeDirection::Inbound  => ("<-", edge.from_key),
+                                    };
+                                    super::set_color(sink, 8, 0);
+                                    super::print_str(sink, "    ");
+                                    super::print_str(sink, dir_sym);
+                                    super::print_str(sink, " [");
+                                    super::print_str(sink, et_label);
+                                    super::print_str(sink, "] ");
+                                    super::set_color(sink, 15, 0);
+                                    super::print_str(sink, peer_key);
+                                    if let Some(ns) = edge.capability_namespace {
+                                        if !ns.is_empty() {
+                                            super::set_color(sink, 11, 0);
+                                            super::print_str(sink, "  ");
+                                            super::print_str(sink, ns);
+                                            if let Some(bind) = edge.capability_binding {
+                                                super::print_str(sink, "::");
+                                                super::print_str(sink, bind);
+                                            }
+                                        }
+                                    }
+                                    super::set_color(sink, 7, 0);
+                                    super::print_str(sink, "\n");
+                                }
+                                if total > n {
+                                    super::set_color(sink, 8, 0);
+                                    super::print_str(sink, "    … ");
+                                    super::print_num_inline(sink, total - n);
+                                    super::print_str(sink, " more\n");
+                                    super::set_color(sink, 7, 0);
+                                }
+                            }
+                        }
                     }
                 }
             }

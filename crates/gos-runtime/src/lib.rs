@@ -1985,12 +1985,10 @@ pub fn pump() {
             }
         }
         processed = processed.wrapping_add(1);
+        RUNTIME.lock().bump_tick();
         if processed >= MAX_WORK_ITEMS_PER_PUMP {
             break;
         }
-
-        let mut runtime = RUNTIME.lock();
-        runtime.bump_tick();
     }
 }
 
