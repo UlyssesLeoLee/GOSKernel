@@ -580,6 +580,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
+        super::print_str(sink, "  gc         graph consistency check (faults, dangling edges)\n");
         super::print_str(sink, "  rq         peek at the ready queue (non-consuming)\n");
         super::print_str(sink, "  sq         peek at the signal queue (non-consuming)\n");
         super::print_str(sink, "  reset-stats  zero all telemetry counters\n");
@@ -1268,6 +1269,94 @@ fn dispatch_text_command(
                 if n < buf.len() { break; }
             }
         }
+    } else if cmd == "gc" || cmd == "graph-check" || cmd == "lint" {
+        // Graph consistency check — find structural problems without needing a debugger.
+        use gos_protocol::{GraphNodeSummary, GraphEdgeSummary, NodeLifecycle};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph consistency check\n");
+        super::set_color(sink, 7, 0);
+
+        let mut issues: usize = 0;
+
+        // Scan all nodes
+        let mut nodes = [GraphNodeSummary::EMPTY; 128];
+        let (total_nodes, n_nodes) = gos_runtime::node_page(0, &mut nodes);
+
+        // Check for faulted nodes
+        for node in &nodes[..n_nodes] {
+            if node.lifecycle == NodeLifecycle::Faulted {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, "  FAULT  ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, node.local_node_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  (plugin: ");
+                super::print_str(sink, node.plugin_name);
+                super::print_str(sink, ")\n");
+                super::set_color(sink, 7, 0);
+                issues += 1;
+            }
+        }
+
+        // Scan edges for dangling endpoints (from/to node no longer registered)
+        let mut edges = [GraphEdgeSummary::EMPTY; 128];
+        let (total_edges, n_edges) = gos_runtime::edge_page(0, &mut edges);
+        for edge in &edges[..n_edges] {
+            // An edge is dangling if either endpoint has an empty key (EMPTY default)
+            // or can't be found as a node.
+            let from_ok = gos_runtime::node_summary(edge.from_vector).is_some();
+            let to_ok   = gos_runtime::node_summary(edge.to_vector).is_some();
+            if !from_ok || !to_ok {
+                super::set_color(sink, 14, 0);
+                super::print_str(sink, "  DANGLE ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, edge.from_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, " -> ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, edge.to_key);
+                if !from_ok { super::print_str(sink, "  [from missing]"); }
+                if !to_ok   { super::print_str(sink, "  [to missing]"); }
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+                issues += 1;
+            }
+        }
+
+        // Check for nodes with no edges at all (truly isolated)
+        for node in &nodes[..n_nodes] {
+            let mut node_edges = [GraphEdgeSummary::EMPTY; 1];
+            let edge_count = match gos_runtime::edge_page_for_node(node.vector, 0, &mut node_edges) {
+                Ok((total, _)) => total,
+                Err(_) => 0,
+            };
+            if edge_count == 0 && node.export_count == 0 {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  isolat ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, node.local_node_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  (no edges, no exports)\n");
+                super::set_color(sink, 7, 0);
+                // Not counted as an error — isolated service nodes are valid
+            }
+        }
+
+        // Summary
+        super::print_str(sink, "  nodes: ");
+        super::print_num_inline(sink, total_nodes);
+        super::print_str(sink, "  edges: ");
+        super::print_num_inline(sink, total_edges);
+        if issues == 0 {
+            super::set_color(sink, 10, 0);
+            super::print_str(sink, "  OK\n");
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, "  issues: ");
+            super::print_num_inline(sink, issues);
+            super::print_str(sink, "\n");
+        }
+        super::set_color(sink, 7, 0);
     } else if cmd == "rq" || cmd == "ready-queue" {
         super::set_color(sink, 10, 0);
         super::print_str(sink, " ready queue\n");
