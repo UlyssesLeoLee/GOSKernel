@@ -32,11 +32,194 @@ mod post;
 // ============================================================
 
 
+use core::cell::UnsafeCell;
+
 use gos_protocol::{
     signal_to_packet, ControlPlaneMessageKind, ExecStatus,
     ExecutorContext, ExecutorId, KernelAbi, NodeEvent, NodeExecutorVTable, Signal,
     VectorAddress,
 };
+
+// ── Phase F.6: direct TCP transport to a local LLM endpoint ─────────────────
+//
+// Default target: QEMU SLIRP gateway 10.0.2.2 with Ollama on port 11434.
+// Users can place any OpenAI-compatible server (Ollama, llama.cpp, vLLM)
+// on the host and reach it transparently.
+
+const OLLAMA_IP:   [u8; 4] = [10, 0, 2, 2];
+const OLLAMA_PORT: u16      = 11434;
+const DEFAULT_MODEL: &[u8]  = b"qwen2.5:7b";
+
+const AI_HTTP_REQ_BUF:  usize = 2048;
+const AI_HTTP_RESP_BUF: usize = 8192;
+
+struct ByteBuf<const N: usize>(UnsafeCell<[u8; N]>);
+unsafe impl<const N: usize> Sync for ByteBuf<N> {}
+static AI_REQ:  ByteBuf<AI_HTTP_REQ_BUF>  = ByteBuf(UnsafeCell::new([0u8; AI_HTTP_REQ_BUF]));
+static AI_RESP: ByteBuf<AI_HTTP_RESP_BUF> = ByteBuf(UnsafeCell::new([0u8; AI_HTTP_RESP_BUF]));
+
+fn ai_buf_append(buf: &mut [u8], pos: &mut usize, data: &[u8]) -> bool {
+    if *pos + data.len() > buf.len() { return false; }
+    buf[*pos..*pos + data.len()].copy_from_slice(data);
+    *pos += data.len();
+    true
+}
+
+fn ai_buf_append_u32(buf: &mut [u8], pos: &mut usize, mut val: u32) -> bool {
+    let mut tmp = [0u8; 10];
+    let mut len = 0usize;
+    if val == 0 { tmp[0] = b'0'; len = 1; }
+    else { while val > 0 { tmp[len] = b'0' + (val % 10) as u8; val /= 10; len += 1; } }
+    let mut out = [0u8; 10];
+    for i in 0..len { out[i] = tmp[len - 1 - i]; }
+    ai_buf_append(buf, pos, &out[..len])
+}
+
+fn ai_buf_append_json(buf: &mut [u8], pos: &mut usize, s: &[u8]) -> bool {
+    for &b in s {
+        let ok = match b {
+            b'"'  => ai_buf_append(buf, pos, b"\\\""),
+            b'\\' => ai_buf_append(buf, pos, b"\\\\"),
+            b'\n' => ai_buf_append(buf, pos, b"\\n"),
+            b'\r' => ai_buf_append(buf, pos, b"\\r"),
+            other => { if *pos < buf.len() { buf[*pos] = other; *pos += 1; true } else { false } }
+        };
+        if !ok { return false; }
+    }
+    true
+}
+
+fn build_ai_ollama_body(buf: &mut [u8], model: &[u8], user_msg: &[u8]) -> usize {
+    let mut p = 0usize;
+    if !ai_buf_append(buf, &mut p, b"{\"model\":\"") { return 0; }
+    if !ai_buf_append_json(buf, &mut p, model) { return 0; }
+    if !ai_buf_append(buf, &mut p, b"\",\"messages\":[{\"role\":\"system\",\"content\":\"") { return 0; }
+    if !ai_buf_append_json(buf, &mut p, b"You are a helpful AI assistant embedded in the GOS graph-native bare-metal kernel. Respond concisely in plain text, no markdown.") { return 0; }
+    if !ai_buf_append(buf, &mut p, b"\"},{\"role\":\"user\",\"content\":\"") { return 0; }
+    if !ai_buf_append_json(buf, &mut p, user_msg) { return 0; }
+    if !ai_buf_append(buf, &mut p, b"\"}],\"stream\":false}") { return 0; }
+    p
+}
+
+fn build_ai_http_request(
+    buf: &mut [u8], path: &[u8], ip: [u8; 4], port: u16,
+    auth_hdr: &[u8], body: &[u8],
+) -> usize {
+    let mut p = 0usize;
+    if !ai_buf_append(buf, &mut p, b"POST ") { return 0; }
+    if !ai_buf_append(buf, &mut p, path) { return 0; }
+    if !ai_buf_append(buf, &mut p, b" HTTP/1.0\r\nHost: ") { return 0; }
+    for (i, &o) in ip.iter().enumerate() {
+        if i > 0 { buf[p] = b'.'; p += 1; }
+        ai_buf_append_u32(buf, &mut p, o as u32);
+    }
+    buf[p] = b':'; p += 1;
+    ai_buf_append_u32(buf, &mut p, port as u32);
+    if !ai_buf_append(buf, &mut p, b"\r\nContent-Type: application/json\r\n") { return 0; }
+    if !auth_hdr.is_empty() && !ai_buf_append(buf, &mut p, auth_hdr) { return 0; }
+    if !ai_buf_append(buf, &mut p, b"Content-Length: ") { return 0; }
+    if !ai_buf_append_u32(buf, &mut p, body.len() as u32) { return 0; }
+    if !ai_buf_append(buf, &mut p, b"\r\n\r\n") { return 0; }
+    if !ai_buf_append(buf, &mut p, body) { return 0; }
+    p
+}
+
+fn ai_find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() { return Some(0); }
+    'outer: for i in 0..hay.len().saturating_sub(needle.len() - 1) {
+        for j in 0..needle.len() { if hay[i + j] != needle[j] { continue 'outer; } }
+        return Some(i);
+    }
+    None
+}
+
+fn ai_extract_json_str<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let mut pat = [0u8; 128];
+    let mut sp = 0usize;
+    pat[sp] = b'"'; sp += 1;
+    for &b in key { if sp < pat.len() { pat[sp] = b; sp += 1; } }
+    if sp + 3 > pat.len() { return None; }
+    pat[sp] = b'"'; sp += 1; pat[sp] = b':'; sp += 1; pat[sp] = b'"'; sp += 1;
+    let start = ai_find_bytes(json, &pat[..sp])? + sp;
+    let mut end = start;
+    while end < json.len() {
+        if json[end] == b'\\' { end += 2; }
+        else if json[end] == b'"' { return Some(&json[start..end]); }
+        else { end += 1; }
+    }
+    None
+}
+
+unsafe fn do_llm_request(sink: &ConsoleSink, state: &mut AiState) {
+    let req_buf  = unsafe { &mut *AI_REQ.0.get() };
+    let resp_buf = unsafe { &mut *AI_RESP.0.get() };
+
+    let user_msg = &state.prompt[..state.prompt_len];
+
+    // Build body into second half of req_buf as scratch
+    let body_start = AI_HTTP_REQ_BUF / 2;
+    let body_len = build_ai_ollama_body(&mut req_buf[body_start..], DEFAULT_MODEL, user_msg);
+    if body_len == 0 {
+        emit_shell_chat_line(sink, state, "ai> prompt too large for HTTP body");
+        return;
+    }
+    // Copy body out to avoid aliasing req_buf
+    let mut body_scratch = [0u8; 1024];
+    let body_len = body_len.min(body_scratch.len());
+    body_scratch[..body_len].copy_from_slice(&req_buf[body_start..body_start + body_len]);
+
+    // Optional Bearer auth if api_key is set
+    let mut auth_hdr = [0u8; 192];
+    let auth_len = if state.api_ready && state.api_len > 0 {
+        let mut p = 0usize;
+        let ok = ai_buf_append(&mut auth_hdr, &mut p, b"Authorization: Bearer ")
+            && ai_buf_append(&mut auth_hdr, &mut p, &state.api_key[..state.api_len])
+            && ai_buf_append(&mut auth_hdr, &mut p, b"\r\n");
+        if ok { p } else { 0 }
+    } else {
+        0
+    };
+
+    let req_len = build_ai_http_request(
+        req_buf,
+        b"/api/chat",
+        OLLAMA_IP,
+        OLLAMA_PORT,
+        &auth_hdr[..auth_len],
+        &body_scratch[..body_len],
+    );
+    if req_len == 0 {
+        emit_shell_chat_line(sink, state, "ai> HTTP request overflow");
+        return;
+    }
+
+    emit_shell_chat_str(sink, state, "ai> connecting to llm... ");
+
+    let result = unsafe {
+        k_net::net_http_post_sync(OLLAMA_IP, OLLAMA_PORT, &req_buf[..req_len], resp_buf)
+    };
+
+    match result {
+        None => {
+            emit_shell_chat_line(sink, state, "failed (network unavailable)");
+        }
+        Some(n) => {
+            let raw = &resp_buf[..n];
+            let body_off = ai_find_bytes(raw, b"\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+            let json = &raw[body_off..];
+            if let Some(content) = ai_extract_json_str(json, b"content") {
+                emit_shell_chat_byte(sink, state, b'\n');
+                emit_shell_chat_str(sink, state, "ai> ");
+                emit_shell_chat_bytes(sink, state, content, content.len().min(512));
+                emit_shell_chat_byte(sink, state, b'\n');
+            } else {
+                emit_shell_chat_str(sink, state, "ok (");
+                emit_shell_chat_num(sink, state, n.saturating_sub(body_off));
+                emit_shell_chat_str(sink, state, "b)\n");
+            }
+        }
+    }
+}
 
 pub const NODE_VEC: VectorAddress = VectorAddress::new(6, 2, 0, 0);
 const VGA_FALLBACK_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
@@ -379,10 +562,7 @@ fn commit_chat_capture(sink: &ConsoleSink, state: &mut AiState) {
     } else if prompt_contains(prompt, b"api") || prompt_contains(prompt, b"key") {
         emit_shell_chat_line(sink, state, "ai> api key is armed for this boot session only");
     } else {
-        emit_shell_chat_str(sink, state, "ai> external llm transport pending; heard: ");
-        emit_shell_chat_bytes(sink, state, prompt, 20);
-        emit_shell_chat_byte(sink, state, b'\n');
-        emit_shell_chat_line(sink, state, "ai> try ask status / ask graph / ask net");
+        unsafe { do_llm_request(sink, state); }
     }
 }
 

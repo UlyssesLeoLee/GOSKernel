@@ -82,6 +82,26 @@ pub enum SupervisorError {
     DomainCreateFailed,
 }
 
+/// One row in the `module_page` / `ps` listing.
+#[derive(Clone, Copy)]
+pub struct ModuleInfo {
+    pub handle: ModuleHandle,
+    pub name: &'static str,
+    pub state: ModuleLifecycle,
+    pub isolated: bool,
+    pub restart_generation: u32,
+    pub queued_restart: bool,
+}
+
+/// One row in the `capability_page` / `caps` listing.
+#[derive(Clone, Copy)]
+pub struct CapabilityInfo {
+    pub token: CapabilityToken,
+    pub provider: ModuleHandle,
+    pub namespace: &'static str,
+    pub name: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupervisorSnapshot {
     pub installed_modules: usize,
@@ -307,6 +327,18 @@ fn create_domain_root(
     Ok(NEXT_ROOT.fetch_add(0x1000, Ordering::SeqCst))
 }
 
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+fn create_domain_root(
+    _image_base: u64,
+    _image_len: u64,
+    _stack_base: u64,
+    _stack_len: u64,
+    _ipc_base: u64,
+    _ipc_len: u64,
+) -> Result<u64, SupervisorError> {
+    Err(SupervisorError::DomainCreateFailed)
+}
+
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
 fn map_domain_heap_pages(
     root_table_phys: u64,
@@ -326,6 +358,16 @@ fn map_domain_heap_pages(
 }
 
 #[cfg(any(test, feature = "host-testing"))]
+fn map_domain_heap_pages(
+    _root_table_phys: u64,
+    _base: u64,
+    _page_count: usize,
+    _writable: bool,
+) -> Result<(), SupervisorError> {
+    Ok(())
+}
+
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
 fn map_domain_heap_pages(
     _root_table_phys: u64,
     _base: u64,
@@ -2030,6 +2072,94 @@ impl Supervisor {
             ready_background: self.ready_background.len(),
         }
     }
+
+    fn module_page(&self, offset: usize, out: &mut [ModuleInfo]) -> usize {
+        let mut written = 0usize;
+        let mut seen = 0usize;
+        for record in self.modules.iter() {
+            if !record.occupied {
+                continue;
+            }
+            if seen < offset {
+                seen += 1;
+                continue;
+            }
+            if written >= out.len() {
+                break;
+            }
+            let name = match record.source {
+                ModuleSource::Descriptor(d) => d.name,
+                ModuleSource::Empty => "<empty>",
+            };
+            out[written] = ModuleInfo {
+                handle: record.handle,
+                name,
+                state: record.state,
+                isolated: record.domain.isolated,
+                restart_generation: record.restart_generation,
+                queued_restart: record.queued_restart,
+            };
+            written += 1;
+            seen += 1;
+        }
+        written
+    }
+
+    fn capability_page(&self, offset: usize, out: &mut [CapabilityInfo]) -> usize {
+        let mut written = 0usize;
+        let mut seen = 0usize;
+        for record in self.capabilities.iter() {
+            if !record.occupied {
+                continue;
+            }
+            if seen < offset {
+                seen += 1;
+                continue;
+            }
+            if written >= out.len() {
+                break;
+            }
+            out[written] = CapabilityInfo {
+                token: record.token,
+                provider: record.provider,
+                namespace: record.spec.namespace,
+                name: record.spec.name,
+            };
+            written += 1;
+            seen += 1;
+        }
+        written
+    }
+
+    fn instance_page(&self, offset: usize, out: &mut [NodeInstanceSummary]) -> usize {
+        let mut written = 0usize;
+        let mut seen = 0usize;
+        for record in self.instances.iter() {
+            if !record.occupied {
+                continue;
+            }
+            if seen < offset {
+                seen += 1;
+                continue;
+            }
+            if written >= out.len() {
+                break;
+            }
+            out[written] = NodeInstanceSummary {
+                instance_id: record.id,
+                template_id: record.template_id,
+                module: record.module,
+                lane: record.lane,
+                lifecycle: record.lifecycle,
+                ready_queued: record.ready_queued,
+                heap_quota: record.heap_quota,
+                heap_pages_used: record.heap_pages_used,
+            };
+            written += 1;
+            seen += 1;
+        }
+        written
+    }
 }
 
 static SUPERVISOR: Mutex<Supervisor> = Mutex::new(Supervisor::new());
@@ -2430,6 +2560,14 @@ unsafe fn cr3_restore(_token: u64) {
     // Host harness counterpart to cr3_switch_into.  Intentional no-op.
 }
 
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
+    0
+}
+
+#[cfg(not(any(feature = "kernel-vmm", test, feature = "host-testing")))]
+unsafe fn cr3_restore(_token: u64) {}
+
 pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, SupervisorError> {
     SUPERVISOR.lock().install_descriptor(descriptor)
 }
@@ -2442,6 +2580,25 @@ pub fn snapshot() -> Result<SupervisorSnapshot, SupervisorError> {
     let guard = SUPERVISOR.lock();
     guard.ensure_bootstrapped()?;
     Ok(guard.snapshot())
+}
+
+/// Fill `out` with up to `out.len()` `ModuleInfo` records starting at
+/// `offset` (zero-indexed across occupied slots).  Returns the number
+/// of records written.  Returns 0 when `offset` is past the end.
+pub fn module_page(offset: usize, out: &mut [ModuleInfo]) -> usize {
+    SUPERVISOR.lock().module_page(offset, out)
+}
+
+/// Fill `out` with up to `out.len()` `CapabilityInfo` records starting
+/// at `offset`.  Returns the number written; 0 means end of list.
+pub fn capability_page(offset: usize, out: &mut [CapabilityInfo]) -> usize {
+    SUPERVISOR.lock().capability_page(offset, out)
+}
+
+/// Fill `out` with up to `out.len()` `NodeInstanceSummary` records
+/// starting at `offset`.  Returns the number written; 0 means end.
+pub fn instance_page(offset: usize, out: &mut [NodeInstanceSummary]) -> usize {
+    SUPERVISOR.lock().instance_page(offset, out)
 }
 
 pub fn fault_module(handle: ModuleHandle) -> Result<(), SupervisorError> {

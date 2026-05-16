@@ -42,6 +42,10 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 
 pub struct Selectors {
     pub code_selector: SegmentSelector,
+    /// Phase E.2.1 — kernel data descriptor immediately after kernel code
+    /// so that `IA32_STAR` satisfies `kernel_ss == kernel_cs + 8`.
+    /// The `syscall` instruction loads SS from this selector on entry.
+    pub data_selector: SegmentSelector,
     pub tss_selector: SegmentSelector,
     /// Phase E.2 — user-mode code descriptor.  Populated alongside the
     /// kernel selectors so `IA32_STAR` can be programmed with both
@@ -95,6 +99,7 @@ unsafe fn init_hal_state() {
             gdt: GlobalDescriptorTable::new(),
             selectors: Selectors {
                 code_selector: SegmentSelector(0),
+                data_selector: SegmentSelector(0),
                 tss_selector: SegmentSelector(0),
                 user_code_selector: SegmentSelector(0),
                 user_data_selector: SegmentSelector(0),
@@ -133,15 +138,15 @@ unsafe fn init_hal_state() {
     };
 
     state.selectors.code_selector = state.gdt.add_entry(Descriptor::kernel_code_segment());
-    // Phase E.2: order is significant.  IA32_STAR encodes user CS/SS as
-    // (selector_base, selector_base + 8) for sysret, so the descriptors
-    // must be installed contiguously in this order:
-    //   N+0: user 32-bit code (placeholder, unused on x86_64)
-    //   N+1: user data
-    //   N+2: user 64-bit code
-    // x86_64 crate's user_data_segment / user_code_segment helpers
-    // produce DPL=3 entries and we register them right after the kernel
-    // descriptors so the layout is well-defined.
+    // Phase E.2.1: kernel data must be at kernel_code + 8 so that
+    // IA32_STAR can encode kernel_ss = kernel_cs + 8, satisfying the
+    // constraint enforced by x86_64::registers::model_specific::Star::write.
+    state.selectors.data_selector = state.gdt.add_entry(Descriptor::kernel_data_segment());
+    // Phase E.2: user segments follow in a contiguous run so that
+    // IA32_STAR can encode the sysret base selector.  Layout:
+    //   N+0: user 32-bit code placeholder (STAR[63:48])
+    //   N+1: user data  (sysret loads SS = STAR[63:48] + 8)
+    //   N+2: user 64-bit code (sysret loads CS = STAR[63:48] + 16)
     let _user_code_compat = state.gdt.add_entry(Descriptor::user_data_segment());
     state.selectors.user_data_selector = state.gdt.add_entry(Descriptor::user_data_segment());
     state.selectors.user_code_selector = state.gdt.add_entry(Descriptor::user_code_segment());

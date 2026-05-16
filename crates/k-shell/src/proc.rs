@@ -77,6 +77,29 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: Input) -> Option<Output>
                 super::redraw_footer(&sink, state, false);
             }
             super::restore_cursor(&sink, 0);
+
+            // Watch mode: replay the stored command at WATCH_INTERVAL_TICKS.
+            if state.watch_active != 0 {
+                state.watch_tick = state.watch_tick.wrapping_add(1);
+                if state.watch_tick >= super::WATCH_INTERVAL_TICKS {
+                    state.watch_tick = 0;
+                    let wlen = state.watch_buf_len as usize;
+                    if wlen > 0 {
+                        let mut tmp = [0u8; 64];
+                        tmp[..wlen].copy_from_slice(&state.watch_buf[..wlen]);
+                        if let Ok(wcmd) = core::str::from_utf8(&tmp[..wlen]) {
+                            super::restore_output_cursor(&sink);
+                            super::set_color(&sink, 8, 0);
+                            super::print_str(&sink, "[ watch: ");
+                            super::print_str(&sink, wcmd);
+                            super::print_str(&sink, " ]\n");
+                            super::set_color(&sink, 7, 0);
+                            dispatch_text_command(&sink, state, wcmd);
+                            super::save_output_cursor(&sink);
+                        }
+                    }
+                }
+            }
             ExecStatus::Done
         }
 
@@ -545,6 +568,32 @@ fn dispatch_text_command(
         super::print_str(sink, "  ask     send prompt into ai chat lane\n");
         super::print_str(sink, "  ^C/^X/^V copy, cut, paste active input through clipboard.mount\n");
         super::print_str(sink, "  ctrl+l  toggle input language en/zh-py\n");
+        super::print_str(sink, "  mem     physical memory + supervisor domain stats\n");
+        super::print_str(sink, "  ps      list loaded modules and lifecycle state\n");
+        super::print_str(sink, "  caps    list published capabilities\n");
+        super::print_str(sink, "  instances  list spawned node instances\n");
+        super::print_str(sink, "  log        show recent kernel log entries\n");
+        super::print_str(sink, "  log clear  clear the log ring buffer\n");
+        super::print_str(sink, "  journal    show last 32 control-plane events (node/edge/fault)\n");
+        super::print_str(sink, "  watch <cmd>  re-run a command every ~2s (heartbeat-driven)\n");
+        super::print_str(sink, "  unwatch    stop watch mode\n");
+        super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
+        super::print_str(sink, "  tick       show uptime and scheduler counters\n");
+        super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
+        super::print_str(sink, "  gc         graph consistency check (faults, dangling edges)\n");
+        super::print_str(sink, "  rq         peek at the ready queue (non-consuming)\n");
+        super::print_str(sink, "  sq         peek at the signal queue (non-consuming)\n");
+        super::print_str(sink, "  reset-stats  zero all telemetry counters\n");
+        super::print_str(sink, "  cap resolve <ns> <name>  look up capability provider node\n");
+        super::print_str(sink, "  health     show module health, faults, and restart counts\n");
+        super::print_str(sink, "  fault <vec>  inject fault into the plugin owning a node\n");
+        super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
+        super::print_str(sink, "  node <vec> show detail + edges for one node\n");
+        super::print_str(sink, "  edges      list all registered graph edges with type\n");
+        super::print_str(sink, "  edge <vec> show detail for one edge\n");
+        super::print_str(sink, "  signal <vec> <type> [args]  inject signal into a node\n");
+        super::print_str(sink, "    types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
+        super::print_str(sink, "           data <from> <byte>  interrupt <irq>  call <from>\n");
         super::print_str(sink, "  clear   redraw command deck\n");
         super::print_str(sink, "  splash  replay boot cinema\n");
     } else if cmd == "info" || cmd == "graph" {
@@ -562,6 +611,8 @@ fn dispatch_text_command(
         super::print_num_inline(sink, snapshot.ready_queue_len);
         super::print_str(sink, "  signals: ");
         super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, "  ctrl: ");
+        super::print_num_inline(sink, snapshot.control_queue_len);
         super::print_str(sink, "  stable: ");
         super::print_str(sink, if gos_runtime::is_stable() { "yes" } else { "no" });
         super::print_str(sink, "  tick: ");
@@ -946,6 +997,1265 @@ fn dispatch_text_command(
             );
         }
         super::redraw_ai_panel(sink, state, true);
+    } else if cmd == "mem" || cmd == "memory" {
+        // Phase C: developer-facing memory + supervisor domain stats.
+        let pmm = k_pmm::allocator().lock();
+        let total_kb = (pmm.total_frames() * 4096) / 1024;
+        let used_kb  = (pmm.used_frames()  * 4096) / 1024;
+        let free_kb  = (pmm.free_frames()  * 4096) / 1024;
+        drop(pmm);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " physical memory\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total_kb);
+        super::print_str(sink, " KiB  used: ");
+        super::print_num_inline(sink, used_kb);
+        super::print_str(sink, " KiB  free: ");
+        super::print_num_inline(sink, free_kb);
+        super::print_str(sink, " KiB\n");
+        // Heap stats from linked_list_allocator.
+        let (heap_used, heap_free, heap_total) = k_heap::heap_stats();
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " kernel heap\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, heap_total / 1024);
+        super::print_str(sink, " KiB  used: ");
+        super::print_num_inline(sink, heap_used / 1024);
+        super::print_str(sink, " KiB  free: ");
+        super::print_num_inline(sink, heap_free / 1024);
+        super::print_str(sink, " KiB\n");
+        let fallback = gos_runtime::boot_fallback_alloc_count();
+        let switches = gos_runtime::domain_switch_count();
+        super::print_str(sink, "  boot-fallback-allocs: ");
+        super::print_num_inline(sink, fallback as usize);
+        super::print_str(sink, "  domain-switches: ");
+        super::print_num_inline(sink, switches as usize);
+        super::print_str(sink, "\n");
+        if let Ok(sv) = gos_supervisor::snapshot() {
+            super::set_color(sink, 10, 0);
+            super::print_str(sink, " supervisor\n");
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "  modules: ");
+            super::print_num_inline(sink, sv.installed_modules);
+            super::print_str(sink, "  running: ");
+            super::print_num_inline(sink, sv.running_modules);
+            super::print_str(sink, "  domains: ");
+            super::print_num_inline(sink, sv.isolated_domains);
+            super::print_str(sink, "  caps: ");
+            super::print_num_inline(sink, sv.published_capabilities);
+            super::print_str(sink, "  revocations-pending: ");
+            super::print_num_inline(sink, sv.pending_revocations);
+            super::print_str(sink, "\n");
+        }
+    } else if cmd == "ps" || cmd == "modules" {
+        use gos_protocol::ModuleLifecycle;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " modules\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::ModuleInfo {
+            handle: gos_protocol::ModuleHandle(0),
+            name: "",
+            state: ModuleLifecycle::Stopped,
+            isolated: false,
+            restart_generation: 0,
+            queued_restart: false,
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::module_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_num_inline(sink, info.handle.0 as usize);
+                super::print_str(sink, "  ");
+                super::print_str(sink, info.name);
+                super::print_str(sink, "  ");
+                super::print_str(sink, match info.state {
+                    ModuleLifecycle::Installed    => "installed",
+                    ModuleLifecycle::Validated    => "validated",
+                    ModuleLifecycle::Mapped       => "mapped",
+                    ModuleLifecycle::Instantiated => "instantiated",
+                    ModuleLifecycle::Running      => "running",
+                    ModuleLifecycle::Quiescing    => "quiescing",
+                    ModuleLifecycle::Stopped      => "stopped",
+                    ModuleLifecycle::Faulted      => "faulted",
+                });
+                if info.isolated {
+                    super::print_str(sink, "  [isolated]");
+                }
+                if info.queued_restart {
+                    super::print_str(sink, "  [restart-queued]");
+                }
+                if info.restart_generation > 0 {
+                    super::print_str(sink, "  restarts=");
+                    super::print_num_inline(sink, info.restart_generation as usize);
+                }
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no modules installed)\n");
+        }
+    } else if cmd == "caps" || cmd == "capabilities" {
+        use gos_protocol::CapabilityToken;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " capabilities\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::CapabilityInfo {
+            token: CapabilityToken::ZERO,
+            provider: gos_protocol::ModuleHandle(0),
+            namespace: "",
+            name: "",
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::capability_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_str(sink, info.namespace);
+                super::print_str(sink, "::");
+                super::print_str(sink, info.name);
+                super::print_str(sink, "  provider=");
+                super::print_num_inline(sink, info.provider.0 as usize);
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no capabilities published)\n");
+        }
+    } else if cmd == "instances" {
+        use gos_protocol::{NodeInstanceLifecycle, ExecutionLaneClass};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " instances\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_supervisor::NodeInstanceSummary {
+            instance_id: gos_protocol::NodeInstanceId(0),
+            template_id: gos_protocol::NodeTemplateId([0u8; 16]),
+            module: gos_protocol::ModuleHandle(0),
+            lane: ExecutionLaneClass::Background,
+            lifecycle: NodeInstanceLifecycle::Stopped,
+            ready_queued: false,
+            heap_quota: gos_protocol::HeapQuota::EMPTY,
+            heap_pages_used: 0,
+        }; 16];
+        let mut offset = 0usize;
+        let mut total = 0usize;
+        loop {
+            let n = gos_supervisor::instance_page(offset, &mut buf);
+            if n == 0 {
+                break;
+            }
+            for info in buf[..n].iter() {
+                super::print_str(sink, "  ");
+                super::print_num_inline(sink, info.instance_id.0 as usize);
+                super::print_str(sink, "  mod=");
+                super::print_num_inline(sink, info.module.0 as usize);
+                super::print_str(sink, "  lane=");
+                super::print_str(sink, match info.lane {
+                    ExecutionLaneClass::Control    => "ctrl",
+                    ExecutionLaneClass::Io         => "io",
+                    ExecutionLaneClass::Compute    => "compute",
+                    ExecutionLaneClass::Background => "bg",
+                });
+                super::print_str(sink, "  ");
+                super::print_str(sink, match info.lifecycle {
+                    NodeInstanceLifecycle::Allocated    => "allocated",
+                    NodeInstanceLifecycle::Ready        => "ready",
+                    NodeInstanceLifecycle::Running      => "running",
+                    NodeInstanceLifecycle::WaitingClaim => "waiting-claim",
+                    NodeInstanceLifecycle::Suspended    => "suspended",
+                    NodeInstanceLifecycle::Stopped      => "stopped",
+                    NodeInstanceLifecycle::Faulted      => "faulted",
+                });
+                super::print_str(sink, "  heap=");
+                super::print_num_inline(sink, info.heap_pages_used as usize);
+                super::print_str(sink, "p");
+                if info.ready_queued {
+                    super::print_str(sink, "  [queued]");
+                }
+                super::print_str(sink, "\n");
+                total += 1;
+            }
+            offset += n;
+            if n < buf.len() {
+                break;
+            }
+        }
+        if total == 0 {
+            super::print_str(sink, "  (no instances)\n");
+        }
+    } else if cmd == "health" {
+        use gos_protocol::ModuleLifecycle;
+        let mut buf = [gos_supervisor::ModuleInfo {
+            handle: gos_protocol::ModuleHandle(0),
+            name: "",
+            state: ModuleLifecycle::Stopped,
+            isolated: false,
+            restart_generation: 0,
+            queued_restart: false,
+        }; 32];
+        let mut total_modules = 0usize;
+        let mut running = 0usize;
+        let mut faulted = 0usize;
+        let mut restarting = 0usize;
+        let mut offset = 0usize;
+        loop {
+            let n = gos_supervisor::module_page(offset, &mut buf);
+            if n == 0 { break; }
+            for info in buf[..n].iter() {
+                total_modules += 1;
+                if info.state == ModuleLifecycle::Running { running += 1; }
+                if info.state == ModuleLifecycle::Faulted { faulted += 1; }
+                if info.queued_restart { restarting += 1; }
+            }
+            offset += n;
+            if n < buf.len() { break; }
+        }
+        let ok = faulted == 0 && restarting == 0;
+        super::set_color(sink, if ok { 10 } else { 12 }, 0);
+        super::print_str(sink, if ok { " health: OK\n" } else { " health: DEGRADED\n" });
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  modules: ");
+        super::print_num_inline(sink, total_modules);
+        super::print_str(sink, "  running: ");
+        super::print_num_inline(sink, running);
+        super::print_str(sink, "  faulted: ");
+        if faulted > 0 { super::set_color(sink, 12, 0); }
+        super::print_num_inline(sink, faulted);
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  restarting: ");
+        if restarting > 0 { super::set_color(sink, 14, 0); }
+        super::print_num_inline(sink, restarting);
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "\n");
+        // Show faulted modules by name.
+        if faulted > 0 {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " faulted modules:\n");
+            super::set_color(sink, 7, 0);
+            let mut offset2 = 0usize;
+            loop {
+                let n = gos_supervisor::module_page(offset2, &mut buf);
+                if n == 0 { break; }
+                for info in buf[..n].iter() {
+                    if info.state == ModuleLifecycle::Faulted {
+                        super::print_str(sink, "  ");
+                        super::print_str(sink, info.name);
+                        super::print_str(sink, "  restarts=");
+                        super::print_num_inline(sink, info.restart_generation as usize);
+                        super::print_str(sink, "\n");
+                    }
+                }
+                offset2 += n;
+                if n < buf.len() { break; }
+            }
+        }
+    } else if cmd == "gc" || cmd == "graph-check" || cmd == "lint" {
+        // Graph consistency check — find structural problems without needing a debugger.
+        use gos_protocol::{GraphNodeSummary, GraphEdgeSummary, NodeLifecycle};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph consistency check\n");
+        super::set_color(sink, 7, 0);
+
+        let mut issues: usize = 0;
+
+        // Scan all nodes
+        let mut nodes = [GraphNodeSummary::EMPTY; 128];
+        let (total_nodes, n_nodes) = gos_runtime::node_page(0, &mut nodes);
+
+        // Check for faulted nodes
+        for node in &nodes[..n_nodes] {
+            if node.lifecycle == NodeLifecycle::Faulted {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, "  FAULT  ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, node.local_node_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  (plugin: ");
+                super::print_str(sink, node.plugin_name);
+                super::print_str(sink, ")\n");
+                super::set_color(sink, 7, 0);
+                issues += 1;
+            }
+        }
+
+        // Scan edges for dangling endpoints (from/to node no longer registered)
+        let mut edges = [GraphEdgeSummary::EMPTY; 128];
+        let (total_edges, n_edges) = gos_runtime::edge_page(0, &mut edges);
+        for edge in &edges[..n_edges] {
+            // An edge is dangling if either endpoint has an empty key (EMPTY default)
+            // or can't be found as a node.
+            let from_ok = gos_runtime::node_summary(edge.from_vector).is_some();
+            let to_ok   = gos_runtime::node_summary(edge.to_vector).is_some();
+            if !from_ok || !to_ok {
+                super::set_color(sink, 14, 0);
+                super::print_str(sink, "  DANGLE ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, edge.from_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, " -> ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, edge.to_key);
+                if !from_ok { super::print_str(sink, "  [from missing]"); }
+                if !to_ok   { super::print_str(sink, "  [to missing]"); }
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+                issues += 1;
+            }
+        }
+
+        // Check for nodes with no edges at all (truly isolated)
+        for node in &nodes[..n_nodes] {
+            let mut node_edges = [GraphEdgeSummary::EMPTY; 1];
+            let edge_count = match gos_runtime::edge_page_for_node(node.vector, 0, &mut node_edges) {
+                Ok((total, _)) => total,
+                Err(_) => 0,
+            };
+            if edge_count == 0 && node.export_count == 0 {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  isolat ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, node.local_node_key);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  (no edges, no exports)\n");
+                super::set_color(sink, 7, 0);
+                // Not counted as an error — isolated service nodes are valid
+            }
+        }
+
+        // Summary
+        super::print_str(sink, "  nodes: ");
+        super::print_num_inline(sink, total_nodes);
+        super::print_str(sink, "  edges: ");
+        super::print_num_inline(sink, total_edges);
+        if issues == 0 {
+            super::set_color(sink, 10, 0);
+            super::print_str(sink, "  OK\n");
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, "  issues: ");
+            super::print_num_inline(sink, issues);
+            super::print_str(sink, "\n");
+        }
+        super::set_color(sink, 7, 0);
+    } else if cmd == "rq" || cmd == "ready-queue" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " ready queue\n");
+        super::set_color(sink, 7, 0);
+        let mut entries = [gos_runtime::ReadyQueueEntry {
+            node_id: gos_protocol::NodeId::ZERO,
+            vector: gos_protocol::VectorAddress::new(0, 0, 0, 0),
+            node_key: "",
+        }; 16];
+        let n = gos_runtime::peek_ready_queue(&mut entries);
+        let snapshot = gos_runtime::snapshot();
+        super::print_str(sink, "  depth: ");
+        super::print_num_inline(sink, snapshot.ready_queue_len);
+        super::print_str(sink, "\n");
+        if n == 0 {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  (empty)\n");
+            super::set_color(sink, 7, 0);
+        } else {
+            for entry in &entries[..n] {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  [");
+                super::print_num_inline(sink, entry.vector.l4 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.l3 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.l2 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.offset as usize);
+                super::print_str(sink, "] ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, entry.node_key);
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+            if snapshot.ready_queue_len > n {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  … ");
+                super::print_num_inline(sink, snapshot.ready_queue_len - n);
+                super::print_str(sink, " more\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
+    } else if cmd == "sq" || cmd == "signal-queue" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " signal queue\n");
+        super::set_color(sink, 7, 0);
+        let mut entries = [gos_runtime::SignalQueueEntry {
+            target: gos_protocol::VectorAddress::new(0, 0, 0, 0),
+            kind: "",
+            target_key: "",
+            is_control: false,
+        }; 16];
+        let n = gos_runtime::peek_signal_queue(&mut entries);
+        let snapshot = gos_runtime::snapshot();
+        let total = snapshot.signal_queue_len + snapshot.control_queue_len;
+        super::print_str(sink, "  depth: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "  (ctrl:");
+        super::print_num_inline(sink, snapshot.control_queue_len);
+        super::print_str(sink, " norm:");
+        super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, ")\n");
+        if n == 0 {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  (empty)\n");
+            super::set_color(sink, 7, 0);
+        } else {
+            for entry in &entries[..n] {
+                let color: u8 = if entry.is_control { 13 } else { 10 };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, "  ");
+                super::print_str(sink, entry.kind);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, " -> ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, entry.target_key);
+                super::set_color(sink, 8, 0);
+                if entry.is_control { super::print_str(sink, " [ctrl]"); }
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+            if total > n {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  … ");
+                super::print_num_inline(sink, total - n);
+                super::print_str(sink, " more\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
+    } else if cmd == "events" || cmd == "stats" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " event counters\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  signals-dispatched: ");
+        super::print_num_inline(sink, gos_runtime::signal_dispatch_count() as usize);
+        super::print_str(sink, "\n  activations:       ");
+        super::print_num_inline(sink, gos_runtime::activation_count() as usize);
+        super::print_str(sink, "\n  faults:            ");
+        super::print_num_inline(sink, gos_runtime::fault_dispatch_count() as usize);
+        super::print_str(sink, "\n  preemptions:       ");
+        super::print_num_inline(sink, gos_runtime::preempt_count() as usize);
+        super::print_str(sink, "\n  domain-switches:   ");
+        super::print_num_inline(sink, gos_runtime::domain_switch_count() as usize);
+        super::print_str(sink, "\n  boot-fallback-allocs: ");
+        super::print_num_inline(sink, gos_runtime::boot_fallback_alloc_count() as usize);
+        super::print_str(sink, "\n  irq-coalesced:      ");
+        super::print_num_inline(sink, gos_runtime::irq_coalesced_count() as usize);
+        super::print_str(sink, "  (bitmap hits while prev pending)\n");
+    } else if cmd == "cpu" || cmd == "cpuid" {
+        // Query CPUID directly for brand string, feature flags, and topology.
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " cpu\n");
+        super::set_color(sink, 7, 0);
+        // Brand string: leaves 0x8000_0002..0x8000_0004, 12 dwords = 48 bytes.
+        let mut brand = [0u8; 48];
+        for (i, leaf) in (0x8000_0002u32..=0x8000_0004u32).enumerate() {
+            let result = unsafe { core::arch::x86_64::__cpuid(leaf) };
+            let off = i * 16;
+            brand[off..off + 4].copy_from_slice(&result.eax.to_le_bytes());
+            brand[off + 4..off + 8].copy_from_slice(&result.ebx.to_le_bytes());
+            brand[off + 8..off + 12].copy_from_slice(&result.ecx.to_le_bytes());
+            brand[off + 12..off + 16].copy_from_slice(&result.edx.to_le_bytes());
+        }
+        super::print_str(sink, "  model:    ");
+        let brand_end = brand.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        for &b in brand[..brand_end].iter() {
+            if b >= 0x20 && b < 0x7F {
+                super::print_byte(sink, b);
+            }
+        }
+        super::print_str(sink, "\n");
+        // Feature flags: leaf 1 ECX and EDX.
+        let feat = unsafe { core::arch::x86_64::__cpuid(1) };
+        let ecx = feat.ecx;
+        let edx = feat.edx;
+        super::print_str(sink, "  features:");
+        if edx & (1 << 25) != 0 { super::print_str(sink, " SSE"); }
+        if edx & (1 << 26) != 0 { super::print_str(sink, " SSE2"); }
+        if ecx & (1 << 0)  != 0 { super::print_str(sink, " SSE3"); }
+        if ecx & (1 << 9)  != 0 { super::print_str(sink, " SSSE3"); }
+        if ecx & (1 << 19) != 0 { super::print_str(sink, " SSE4.1"); }
+        if ecx & (1 << 20) != 0 { super::print_str(sink, " SSE4.2"); }
+        if ecx & (1 << 28) != 0 { super::print_str(sink, " AVX"); }
+        if ecx & (1 << 12) != 0 { super::print_str(sink, " FMA"); }
+        if ecx & (1 << 30) != 0 { super::print_str(sink, " RDRAND"); }
+        if ecx & (1 << 5)  != 0 { super::print_str(sink, " VMX"); }
+        if ecx & (1 << 26) != 0 { super::print_str(sink, " XSAVE"); }
+        if edx & (1 << 4)  != 0 { super::print_str(sink, " TSC"); }
+        if edx & (1 << 5)  != 0 { super::print_str(sink, " MSR"); }
+        if edx & (1 << 9)  != 0 { super::print_str(sink, " APIC"); }
+        super::print_str(sink, "\n");
+        // Physical/logical core count from leaf 4.
+        let topo = unsafe { core::arch::x86_64::__cpuid_count(4, 0) }; // leaf 4 sub-leaf 0
+        let phys_cores = ((topo.eax >> 26) & 0x3F) + 1;
+        let leaf1_ebx = feat.ebx;
+        let logical_per_package = (leaf1_ebx >> 16) & 0xFF;
+        super::print_str(sink, "  phys-cores: ");
+        super::print_num_inline(sink, phys_cores as usize);
+        super::print_str(sink, "  logical/pkg: ");
+        super::print_num_inline(sink, logical_per_package as usize);
+        super::print_str(sink, "\n");
+        // Max CPUID leaf.
+        let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }; // max basic leaf
+        super::print_str(sink, "  max-leaf: ");
+        super::print_num_inline(sink, max_leaf.eax as usize);
+        let max_ext = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }; // max ext leaf
+        super::print_str(sink, "  max-ext-leaf: ");
+        // Print hex for extended leaf
+        let v = max_ext.eax;
+        super::print_str(sink, "0x");
+        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
+            let nibble = (v >> shift) & 0xF;
+            super::print_byte(sink, if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble as u8 - 10) });
+        }
+        super::print_str(sink, "\n");
+    } else if cmd == "tick" || cmd == "uptime" {
+        let snapshot = gos_runtime::snapshot();
+        let pit_ticks = gos_runtime::pit_tick_count();
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " uptime\n");
+        super::set_color(sink, 7, 0);
+        // PIT runs at 120 Hz; convert to wall-clock time.
+        let secs = pit_ticks / 120;
+        let frac = (pit_ticks % 120) * 10 / 120;
+        super::print_str(sink, "  uptime:   ");
+        super::print_num_inline(sink, secs as usize);
+        super::print_str(sink, ".");
+        super::print_num_inline(sink, frac as usize);
+        super::print_str(sink, " s  (PIT 120 Hz, ");
+        super::print_num_inline(sink, pit_ticks as usize);
+        super::print_str(sink, " ticks)\n");
+        super::print_str(sink, "  pump-tick: ");
+        super::print_num_inline(sink, snapshot.tick as usize);
+        super::print_str(sink, "  (work items processed)\n");
+        super::print_str(sink, "  ctrl-q:   ");
+        super::print_num_inline(sink, snapshot.control_queue_len);
+        super::print_str(sink, "  (high-priority: Control/Spawn/Terminate)\n");
+        super::print_str(sink, "  signals:  ");
+        super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, "  ready: ");
+        super::print_num_inline(sink, snapshot.ready_queue_len);
+        super::print_str(sink, "\n");
+    } else if cmd == "reset-stats" || cmd == "stats reset" || cmd == "events reset" {
+        gos_runtime::reset_telemetry_counters();
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " telemetry counters reset\n");
+        super::set_color(sink, 7, 0);
+    } else if let Some(cap_args) = cmd.strip_prefix("cap ").or_else(|| cmd.strip_prefix("capability ")) {
+        // cap resolve <namespace> <name>  — look up a capability provider
+        if let Some(rest) = cap_args.strip_prefix("resolve ") {
+            let mut parts = rest.splitn(2, ' ');
+            let ns = parts.next().unwrap_or("").trim();
+            let name = parts.next().unwrap_or("").trim();
+            if ns.is_empty() || name.is_empty() {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " usage: cap resolve <namespace> <name>\n");
+                super::set_color(sink, 7, 0);
+            } else {
+                match gos_runtime::resolve_capability(ns.as_bytes(), name.as_bytes()) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " capability not found: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, ns);
+                        super::print_str(sink, "::");
+                        super::print_str(sink, name);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(vec) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " ");
+                        super::print_str(sink, ns);
+                        super::print_str(sink, "::");
+                        super::print_str(sink, name);
+                        super::print_str(sink, "  -> ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, vec.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.offset as usize);
+                        // Try to get the node key for extra context
+                        if let Some(node) = gos_runtime::node_summary(vec) {
+                            super::set_color(sink, 8, 0);
+                            super::print_str(sink, "  (");
+                            super::print_str(sink, node.local_node_key);
+                            super::print_str(sink, ")");
+                        }
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "\n");
+                    }
+                }
+            }
+        } else {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, " cap subcommands: resolve <ns> <name>\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "log" || cmd == "logs" || cmd == "dmesg" {
+        use gos_log::LogLevel;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " kernel log\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_log::LogRecord::empty(); 32];
+        let n = gos_log::recent_logs(&mut buf);
+        if n == 0 {
+            super::print_str(sink, "  (empty)\n");
+        } else {
+            for rec in buf[..n].iter() {
+                let (color, prefix) = match rec.level {
+                    LogLevel::Trace => (8u8,  "T"),
+                    LogLevel::Debug => (7u8,  "D"),
+                    LogLevel::Info  => (10u8, "I"),
+                    LogLevel::Warn  => (14u8, "W"),
+                    LogLevel::Error => (12u8, "E"),
+                };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, prefix);
+                super::print_str(sink, " [");
+                // Print up to 8 bytes of the source tag as ASCII.
+                let src_end = rec.source.iter().position(|&b| b == 0).unwrap_or(16).min(16);
+                for &b in &rec.source[..src_end] {
+                    if b >= 0x20 && b < 0x7F {
+                        super::print_byte(sink, b);
+                    } else {
+                        super::print_byte(sink, b'?');
+                    }
+                }
+                super::print_str(sink, "] ");
+                super::set_color(sink, 7, 0);
+                for &b in rec.payload_str() {
+                    if b == b'\n' {
+                        super::print_str(sink, "\n    ");
+                    } else {
+                        super::print_byte(sink, b);
+                    }
+                }
+                if rec.truncated {
+                    super::set_color(sink, 14, 0);
+                    super::print_str(sink, "…");
+                    super::set_color(sink, 7, 0);
+                }
+                super::print_str(sink, "\n");
+            }
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("fault ") {
+        // fault <L4.L3.L2.offset>  — inject a fault into a node's plugin
+        // Useful for testing supervisor fault-recovery / restart policy.
+        use gos_protocol::VectorAddress;
+        match VectorAddress::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(vec) => {
+                match gos_runtime::plugin_id_for_vec(vec) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " no plugin bound to that vector\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(plugin_id) => {
+                        gos_runtime::mark_plugin_fault(plugin_id);
+                        // Also push a Fault envelope into the control-plane so
+                        // the journal records it.
+                        gos_runtime::with_runtime(|rt| {
+                            rt.emit_control_plane(
+                                gos_protocol::ControlPlaneMessageKind::Fault,
+                                plugin_id.0,
+                                0,
+                                0,
+                            );
+                        });
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " fault injected into plugin at ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, vec.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.offset as usize);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 8, 0);
+                        super::print_str(sink, "  use 'health' to see fault state\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                }
+            }
+        }
+    } else if cmd == "log clear" || cmd == "logs clear" || cmd == "dmesg clear" {
+        gos_log::clear_log_ring();
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " log ring cleared\n");
+        super::set_color(sink, 7, 0);
+    } else if let Some(watch_cmd_str) = cmd.strip_prefix("watch ") {
+        let wlen = watch_cmd_str.len().min(64);
+        state.watch_buf[..wlen].copy_from_slice(&watch_cmd_str.as_bytes()[..wlen]);
+        state.watch_buf_len = wlen as u8;
+        state.watch_active = 1;
+        state.watch_tick = super::WATCH_INTERVAL_TICKS; // fire immediately next tick
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " watch: ");
+        super::print_str(sink, watch_cmd_str);
+        super::set_color(sink, 8, 0);
+        super::print_str(sink, "  (unwatch to stop)\n");
+        super::set_color(sink, 7, 0);
+    } else if cmd == "unwatch" || cmd == "watch stop" || cmd == "watch off" {
+        state.watch_active = 0;
+        state.watch_tick = 0;
+        state.watch_buf_len = 0;
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " watch stopped\n");
+        super::set_color(sink, 7, 0);
+    } else if cmd == "journal" || cmd == "cpj" {
+        use gos_protocol::ControlPlaneMessageKind;
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " control-plane journal\n");
+        super::set_color(sink, 7, 0);
+        let mut buf = [gos_protocol::ControlPlaneEnvelope {
+            version: 0,
+            kind: ControlPlaneMessageKind::Hello,
+            subject: [0; 16],
+            arg0: 0,
+            arg1: 0,
+        }; 32];
+        let n = gos_runtime::cp_journal_recent(&mut buf);
+        if n == 0 {
+            super::print_str(sink, "  (empty)\n");
+        } else {
+            for env in &buf[..n] {
+                let (color, label) = match env.kind {
+                    ControlPlaneMessageKind::Hello           => (8u8,  "hello   "),
+                    ControlPlaneMessageKind::PluginDiscovered => (11u8, "plug+   "),
+                    ControlPlaneMessageKind::NodeUpsert      => (10u8, "node+   "),
+                    ControlPlaneMessageKind::EdgeUpsert      => (14u8, "edge+   "),
+                    ControlPlaneMessageKind::StateDelta      => (7u8,  "state   "),
+                    ControlPlaneMessageKind::SnapshotChunk   => (8u8,  "snap    "),
+                    ControlPlaneMessageKind::Fault           => (12u8, "FAULT   "),
+                    ControlPlaneMessageKind::Metric          => (8u8,  "metric  "),
+                };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, "  ");
+                super::print_str(sink, label);
+                super::set_color(sink, 7, 0);
+                // Print up to 8 bytes of subject as ASCII
+                let src_end = env.subject.iter().position(|&b| b == 0).unwrap_or(16).min(8);
+                super::print_str(sink, "[");
+                for &b in &env.subject[..src_end] {
+                    if b >= 0x20 && b < 0x7F {
+                        super::print_byte(sink, b);
+                    } else {
+                        super::print_byte(sink, b'.');
+                    }
+                }
+                super::print_str(sink, "]");
+                if env.arg0 != 0 || env.arg1 != 0 {
+                    super::set_color(sink, 8, 0);
+                    super::print_str(sink, "  a0:");
+                    super::print_num_inline(sink, env.arg0 as usize);
+                    if env.arg1 != 0 {
+                        super::print_str(sink, " a1:");
+                        super::print_num_inline(sink, env.arg1 as usize);
+                    }
+                }
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+        }
+    } else if let Some(sig_args) = cmd.strip_prefix("signal ").or_else(|| cmd.strip_prefix("sig ")) {
+        // signal <vector> <type> [args...]
+        // Examples:
+        //   signal 2.3.0.0 spawn
+        //   signal 2.3.0.0 spawn 42
+        //   signal 2.3.0.0 ctrl 0xA0 0x01
+        //   signal 2.3.0.0 data 0 0x48
+        //   signal 2.3.0.0 interrupt 33
+        //   signal 2.3.0.0 terminate
+        use gos_protocol::{Signal, VectorAddress};
+        let mut parts = sig_args.splitn(4, ' ');
+        let vec_str = parts.next().unwrap_or("");
+        let kind_str = parts.next().unwrap_or("");
+        let arg0_str = parts.next().unwrap_or("");
+        let arg1_str = parts.next().unwrap_or("");
+
+        let maybe_vec = VectorAddress::parse(vec_str);
+
+        fn parse_u64_arg(s: &str) -> Option<u64> {
+            let s = s.trim();
+            if s.is_empty() { return None; }
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        }
+
+        let maybe_signal: Option<Signal> = match kind_str.trim() {
+            "spawn"     => Some(Signal::Spawn { payload: parse_u64_arg(arg0_str).unwrap_or(0) }),
+            "terminate" => Some(Signal::Terminate),
+            "ctrl" | "control" => {
+                let cmd_byte = parse_u64_arg(arg0_str).unwrap_or(0) as u8;
+                let val_byte = parse_u64_arg(arg1_str).unwrap_or(0) as u8;
+                Some(Signal::Control { cmd: cmd_byte, val: val_byte })
+            }
+            "data" => {
+                let from = parse_u64_arg(arg0_str).unwrap_or(0);
+                let byte = parse_u64_arg(arg1_str).unwrap_or(0) as u8;
+                Some(Signal::Data { from, byte })
+            }
+            "interrupt" | "irq" => {
+                let irq = parse_u64_arg(arg0_str).unwrap_or(0) as u8;
+                Some(Signal::Interrupt { irq })
+            }
+            "call" => {
+                let from = parse_u64_arg(arg0_str).unwrap_or(0);
+                Some(Signal::Call { from })
+            }
+            _ => None,
+        };
+
+        match (maybe_vec, maybe_signal) {
+            (None, _) => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, vec_str);
+                super::print_str(sink, "  expected L4.L3.L2.offset\n");
+                super::set_color(sink, 7, 0);
+            }
+            (_, None) => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " unknown signal type: ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, kind_str);
+                super::print_str(sink, "\n");
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  types: spawn [payload]  terminate  ctrl <cmd> <val>\n");
+                super::print_str(sink, "         data <from> <byte>  interrupt <irq>  call <from>\n");
+                super::set_color(sink, 7, 0);
+            }
+            (Some(target), Some(signal)) => {
+                match gos_runtime::post_signal(target, signal) {
+                    Ok(()) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " queued ");
+                        super::print_str(sink, kind_str);
+                        super::print_str(sink, " -> ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, target.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, target.offset as usize);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Err(e) => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " post_signal failed: ");
+                        let emsg = match e {
+                            gos_runtime::RuntimeError::SignalQueueFull => "signal queue full",
+                            gos_runtime::RuntimeError::NodeNotFound    => "node not found",
+                            _ => "error",
+                        };
+                        super::print_str(sink, emsg);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                }
+            }
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("node ").or_else(|| cmd.strip_prefix("n ")) {
+        // node <L4.L3.L2.offset>  — show full detail for one node
+        use gos_protocol::{GraphEdgeSummary, NodeLifecycle, RuntimeEdgeType, VectorAddress};
+        match VectorAddress::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "  expected L4.L3.L2.offset\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(vec) => {
+                match gos_runtime::node_summary(vec) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " node not found\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(node) => {
+                        let lc_color: u8 = match node.lifecycle {
+                            NodeLifecycle::Ready     => 10,
+                            NodeLifecycle::Running   => 14,
+                            NodeLifecycle::Faulted   => 12,
+                            NodeLifecycle::Terminated | NodeLifecycle::Suspended => 8,
+                            _ => 7,
+                        };
+                        let lc_label = match node.lifecycle {
+                            NodeLifecycle::Discovered  => "Discovered",
+                            NodeLifecycle::Loaded      => "Loaded",
+                            NodeLifecycle::Registered  => "Registered",
+                            NodeLifecycle::Allocated   => "Allocated",
+                            NodeLifecycle::Ready       => "Ready",
+                            NodeLifecycle::Running     => "Running",
+                            NodeLifecycle::Waiting     => "Waiting",
+                            NodeLifecycle::Suspended   => "Suspended",
+                            NodeLifecycle::Terminated  => "Terminated",
+                            NodeLifecycle::Faulted     => "FAULTED",
+                        };
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " node: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, node.local_node_key);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "  vector:   ");
+                        super::print_num_inline(sink, node.vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, node.vector.offset as usize);
+                        super::print_str(sink, "\n  plugin:   ");
+                        super::print_str(sink, node.plugin_name);
+                        super::print_str(sink, "\n  lifecycle: ");
+                        super::set_color(sink, lc_color, 0);
+                        super::print_str(sink, lc_label);
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "\n  signals:  ");
+                        super::print_num_inline(sink, node.signal_count as usize);
+                        super::print_str(sink, "\n  exports:  ");
+                        super::print_num_inline(sink, node.export_count);
+                        super::print_str(sink, "\n");
+
+                        // List edges for this node
+                        let mut edges = [GraphEdgeSummary::EMPTY; 16];
+                        match gos_runtime::edge_page_for_node(vec, 0, &mut edges) {
+                            Err(_) => {
+                                super::set_color(sink, 8, 0);
+                                super::print_str(sink, "  edges: (node lookup failed)\n");
+                                super::set_color(sink, 7, 0);
+                            }
+                            Ok((total, n)) => {
+                                super::print_str(sink, "  edges: ");
+                                super::print_num_inline(sink, total);
+                                super::print_str(sink, "\n");
+                                for edge in &edges[..n] {
+                                    let et_label = match edge.edge_type {
+                                        RuntimeEdgeType::Call   => "call",
+                                        RuntimeEdgeType::Spawn  => "spawn",
+                                        RuntimeEdgeType::Depend => "dep",
+                                        RuntimeEdgeType::Signal => "sig",
+                                        RuntimeEdgeType::Return => "ret",
+                                        RuntimeEdgeType::Mount  => "mount",
+                                        RuntimeEdgeType::Sync   => "sync",
+                                        RuntimeEdgeType::Stream => "stream",
+                                        RuntimeEdgeType::Use    => "use",
+                                    };
+                                    use gos_protocol::GraphEdgeDirection;
+                                    let (dir_sym, peer_key) = match edge.direction {
+                                        GraphEdgeDirection::Outbound => ("->", edge.to_key),
+                                        GraphEdgeDirection::Inbound  => ("<-", edge.from_key),
+                                    };
+                                    super::set_color(sink, 8, 0);
+                                    super::print_str(sink, "    ");
+                                    super::print_str(sink, dir_sym);
+                                    super::print_str(sink, " [");
+                                    super::print_str(sink, et_label);
+                                    super::print_str(sink, "] ");
+                                    super::set_color(sink, 15, 0);
+                                    super::print_str(sink, peer_key);
+                                    if let Some(ns) = edge.capability_namespace {
+                                        if !ns.is_empty() {
+                                            super::set_color(sink, 11, 0);
+                                            super::print_str(sink, "  ");
+                                            super::print_str(sink, ns);
+                                            if let Some(bind) = edge.capability_binding {
+                                                super::print_str(sink, "::");
+                                                super::print_str(sink, bind);
+                                            }
+                                        }
+                                    }
+                                    super::set_color(sink, 7, 0);
+                                    super::print_str(sink, "\n");
+                                }
+                                if total > n {
+                                    super::set_color(sink, 8, 0);
+                                    super::print_str(sink, "    … ");
+                                    super::print_num_inline(sink, total - n);
+                                    super::print_str(sink, " more\n");
+                                    super::set_color(sink, 7, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if cmd == "nodes" || cmd == "node-list" || cmd == "nl" {
+        use gos_protocol::{GraphNodeSummary, NodeLifecycle, RuntimeNodeType};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph nodes\n");
+        super::set_color(sink, 7, 0);
+        let mut page = [GraphNodeSummary::EMPTY; 16];
+        let (total, n) = gos_runtime::node_page(0, &mut page);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "\n");
+        for node in &page[..n] {
+            // lifecycle color
+            let lc_color: u8 = match node.lifecycle {
+                NodeLifecycle::Ready    => 10,
+                NodeLifecycle::Running  => 14,
+                NodeLifecycle::Faulted  => 12,
+                NodeLifecycle::Terminated => 8,
+                NodeLifecycle::Suspended  => 11,
+                _                       => 7,
+            };
+            let lc_label = match node.lifecycle {
+                NodeLifecycle::Discovered  => "disc",
+                NodeLifecycle::Loaded      => "load",
+                NodeLifecycle::Registered  => "reg ",
+                NodeLifecycle::Allocated   => "allc",
+                NodeLifecycle::Ready       => "rdy ",
+                NodeLifecycle::Running     => "run ",
+                NodeLifecycle::Waiting     => "wait",
+                NodeLifecycle::Suspended   => "susp",
+                NodeLifecycle::Terminated  => "term",
+                NodeLifecycle::Faulted     => "FALT",
+            };
+            let nt_label = match node.node_type {
+                RuntimeNodeType::Hardware    => "hw  ",
+                RuntimeNodeType::Driver      => "drv ",
+                RuntimeNodeType::Service     => "svc ",
+                RuntimeNodeType::PluginEntry => "plug",
+                RuntimeNodeType::Compute     => "comp",
+                RuntimeNodeType::Router      => "rout",
+                RuntimeNodeType::Aggregator  => "aggr",
+                RuntimeNodeType::Vector      => "vec ",
+            };
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  [");
+            super::print_num_inline(sink, node.vector.l4 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.l3 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.l2 as usize);
+            super::print_str(sink, ".");
+            super::print_num_inline(sink, node.vector.offset as usize);
+            super::print_str(sink, "] ");
+            super::set_color(sink, lc_color, 0);
+            super::print_str(sink, lc_label);
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, " ");
+            super::print_str(sink, nt_label);
+            super::print_str(sink, "  ");
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, node.local_node_key);
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, node.plugin_name);
+            if node.export_count > 0 {
+                super::set_color(sink, 11, 0);
+                super::print_str(sink, "  exports:");
+                super::print_num_inline(sink, node.export_count);
+            }
+            if node.signal_count > 0 {
+                super::set_color(sink, 14, 0);
+                super::print_str(sink, "  sigs:");
+                super::print_num_inline(sink, node.signal_count as usize);
+            }
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+        }
+        if total > n {
+            super::print_str(sink, "  … ");
+            super::print_num_inline(sink, total - n);
+            super::print_str(sink, " more (pagination not yet implemented)\n");
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("edge ").or_else(|| cmd.strip_prefix("e ")) {
+        // edge <L4.L3.L2.offset>  — show detail for one edge
+        use gos_protocol::{EdgeVector, RuntimeEdgeType, RoutePolicy};
+        match EdgeVector::parse(vec_str.trim()) {
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " bad edge vector: ");
+                super::print_str(sink, vec_str.trim());
+                super::print_str(sink, "\n");
+                super::set_color(sink, 7, 0);
+            }
+            Some(ev) => {
+                match gos_runtime::edge_summary(ev) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " edge not found\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(edge) => {
+                        let et_label = match edge.edge_type {
+                            RuntimeEdgeType::Call   => "Call",
+                            RuntimeEdgeType::Spawn  => "Spawn",
+                            RuntimeEdgeType::Depend => "Depend",
+                            RuntimeEdgeType::Signal => "Signal",
+                            RuntimeEdgeType::Return => "Return",
+                            RuntimeEdgeType::Mount  => "Mount",
+                            RuntimeEdgeType::Sync   => "Sync",
+                            RuntimeEdgeType::Stream => "Stream",
+                            RuntimeEdgeType::Use    => "Use",
+                        };
+                        let rp_label = match edge.route_policy {
+                            RoutePolicy::Direct    => "Direct",
+                            RoutePolicy::Weighted  => "Weighted",
+                            RoutePolicy::Broadcast => "Broadcast",
+                            RoutePolicy::FailFast  => "FailFast",
+                        };
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " edge: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, edge.from_key);
+                        super::print_str(sink, " -> ");
+                        super::print_str(sink, edge.to_key);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "  type:   ");
+                        super::print_str(sink, et_label);
+                        super::print_str(sink, "\n  policy: ");
+                        super::print_str(sink, rp_label);
+                        super::print_str(sink, "\n  from:   ");
+                        super::print_num_inline(sink, edge.from_vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.from_vector.offset as usize);
+                        super::print_str(sink, "\n  to:     ");
+                        super::print_num_inline(sink, edge.to_vector.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, edge.to_vector.offset as usize);
+                        super::print_str(sink, "\n");
+                        if let Some(ns) = edge.capability_namespace {
+                            if !ns.is_empty() {
+                                super::set_color(sink, 11, 0);
+                                super::print_str(sink, "  cap:    ");
+                                super::print_str(sink, ns);
+                                if let Some(bind) = edge.capability_binding {
+                                    super::print_str(sink, "::");
+                                    super::print_str(sink, bind);
+                                }
+                                super::set_color(sink, 7, 0);
+                                super::print_str(sink, "\n");
+                            }
+                        }
+                        if edge.weight != 0.0 {
+                            super::set_color(sink, 8, 0);
+                            super::print_str(sink, "  acl:    0x");
+                            super::print_num_inline(sink, edge.acl_mask as usize);
+                            super::set_color(sink, 7, 0);
+                            super::print_str(sink, "\n");
+                        }
+                    }
+                }
+            }
+        }
+    } else if cmd == "edges" || cmd == "edge-list" || cmd == "el" {
+        use gos_protocol::{GraphEdgeSummary, RuntimeEdgeType};
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " graph edges\n");
+        super::set_color(sink, 7, 0);
+        let mut page = [GraphEdgeSummary::EMPTY; 16];
+        let (total, n) = gos_runtime::edge_page(0, &mut page);
+        super::print_str(sink, "  total: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "\n");
+        for edge in &page[..n] {
+            let et_color: u8 = match edge.edge_type {
+                RuntimeEdgeType::Call   => 14,
+                RuntimeEdgeType::Spawn  => 13,
+                RuntimeEdgeType::Signal => 10,
+                RuntimeEdgeType::Stream => 11,
+                RuntimeEdgeType::Return => 8,
+                RuntimeEdgeType::Mount  => 12,
+                _                       => 7,
+            };
+            let et_label = match edge.edge_type {
+                RuntimeEdgeType::Call   => "call  ",
+                RuntimeEdgeType::Spawn  => "spawn ",
+                RuntimeEdgeType::Depend => "dep   ",
+                RuntimeEdgeType::Signal => "sig   ",
+                RuntimeEdgeType::Return => "ret   ",
+                RuntimeEdgeType::Mount  => "mount ",
+                RuntimeEdgeType::Sync   => "sync  ",
+                RuntimeEdgeType::Stream => "stream",
+                RuntimeEdgeType::Use    => "use   ",
+            };
+            super::set_color(sink, et_color, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, et_label);
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, "  ");
+            super::print_str(sink, edge.from_key);
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, " -> ");
+            super::set_color(sink, 15, 0);
+            super::print_str(sink, edge.to_key);
+            let cap_ns = edge.capability_namespace.unwrap_or("");
+            let cap_bind = edge.capability_binding.unwrap_or("");
+            if !cap_ns.is_empty() || !cap_bind.is_empty() {
+                super::set_color(sink, 11, 0);
+                super::print_str(sink, "  [");
+                super::print_str(sink, cap_ns);
+                super::print_str(sink, "::");
+                super::print_str(sink, cap_bind);
+                super::print_str(sink, "]");
+            }
+            super::set_color(sink, 7, 0);
+            super::print_str(sink, "\n");
+        }
+        if total > n {
+            super::print_str(sink, "  … ");
+            super::print_num_inline(sink, total - n);
+            super::print_str(sink, " more\n");
+        }
     } else if cmd == "clear" {
         state.len = 0;
         super::redraw_console(sink, state);

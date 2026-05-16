@@ -25,6 +25,10 @@ pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
 pub const MAX_CONTROL_PLANE_MESSAGES: usize = 256;
+/// Dedicated queue for high-priority signals (Control / Spawn / Terminate).
+/// Drained before `signal_queue` in `next_work_item` so lifecycle signals
+/// are never starved behind a flood of Data traffic.
+pub const MAX_CONTROL_SIGNAL_QUEUE: usize = 64;
 pub const NODE_ARENA_PAGES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +114,18 @@ impl<T: Copy, const N: usize> RingQueue<T, N> {
     fn is_empty(&self) -> bool {
         self.head == self.tail
     }
+
+    /// Copy up to `out.len()` items from tail (oldest) without consuming them.
+    /// Returns the number written into `out`.
+    fn peek(&self, out: &mut [T]) -> usize {
+        let n = out.len().min(self.len());
+        for i in 0..n {
+            if let Some(v) = self.buffer[(self.tail + i) % N] {
+                out[i] = v;
+            }
+        }
+        n
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +169,11 @@ struct NodeRecord {
     /// builtin nodes operate in this mode until the supervisor calls
     /// `bind_instance`.
     instance_id: NodeInstanceId,
+    /// Cumulative signals dispatched to this node (wraps at u64::MAX).
+    signal_count: u64,
+    /// Count of outbound Stream edges from this node.  Used to short-circuit
+    /// the O(MAX_EDGES) fan-out scan when there are no Stream subscribers.
+    stream_out_count: u8,
     /// Conditional-route table (LangGraph-style edge fan-out).
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
@@ -274,6 +295,9 @@ pub struct GraphRuntime {
     nodes: [Option<NodeRecord>; MAX_NODES],
     edges: [Option<EdgeRecord>; MAX_EDGES],
     ready_queue: RingQueue<NodeId, MAX_READY_QUEUE>,
+    /// High-priority lane: Control / Spawn / Terminate signals.
+    /// Always drained before `signal_queue`.
+    control_signal_queue: RingQueue<RuntimeSignal, MAX_CONTROL_SIGNAL_QUEUE>,
     signal_queue: RingQueue<RuntimeSignal, MAX_SIGNAL_QUEUE>,
     fault_queue: RingQueue<VectorAddress, MAX_FAULT_QUEUE>,
     call_frames: [Option<CallFrame>; MAX_CALL_FRAMES],
@@ -283,6 +307,11 @@ pub struct GraphRuntime {
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
     tick: u64,
+    /// Incremental counters — updated on insert/remove to avoid O(n)
+    /// scans in the hot `snapshot()` path.
+    plugin_count: usize,
+    node_count: usize,
+    edge_count: usize,
 }
 
 impl GraphRuntime {
@@ -292,6 +321,7 @@ impl GraphRuntime {
             nodes: [None; MAX_NODES],
             edges: [None; MAX_EDGES],
             ready_queue: RingQueue::new(),
+            control_signal_queue: RingQueue::new(),
             signal_queue: RingQueue::new(),
             fault_queue: RingQueue::new(),
             call_frames: [None; MAX_CALL_FRAMES],
@@ -301,6 +331,9 @@ impl GraphRuntime {
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             tick: 0,
+            plugin_count: 0,
+            node_count: 0,
+            edge_count: 0,
         }
     }
 
@@ -311,13 +344,16 @@ impl GraphRuntime {
         arg0: u64,
         arg1: u64,
     ) {
-        let _ = self.control_plane.push_control_plane(ControlPlaneEnvelope {
+        let env = ControlPlaneEnvelope {
             version: CONTROL_PLANE_PROTOCOL_VERSION,
             kind,
             subject,
             arg0,
             arg1,
-        });
+        };
+        let _ = self.control_plane.push_control_plane(env);
+        // Mirror into the persistent journal (not drained by consumers).
+        CP_JOURNAL.lock().push(env);
     }
 
     fn plugin_slot(&self, plugin_id: PluginId) -> Option<usize> {
@@ -373,6 +409,7 @@ impl GraphRuntime {
             entry_policy: record.spec.entry_policy,
             executor_id: record.spec.executor_id,
             export_count: record.spec.exports.len(),
+            signal_count: record.signal_count,
         })
     }
 
@@ -423,6 +460,7 @@ impl GraphRuntime {
                     manifest,
                     state: PluginLoadState::Discovered,
                 });
+                self.plugin_count += 1;
                 self.emit_control_plane(ControlPlaneMessageKind::PluginDiscovered, manifest.plugin_id.0, manifest.version as u64, 0);
                 Ok(())
             }
@@ -468,9 +506,12 @@ impl GraphRuntime {
             runtime_page,
             binding: NodeBinding::Unbound,
             instance_id: NodeInstanceId::ZERO,
+            signal_count: 0,
+            stream_out_count: 0,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
         });
+        self.node_count += 1;
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
         self.state_delta(spec.node_id, NodeLifecycle::Registered);
@@ -489,6 +530,16 @@ impl GraphRuntime {
             edge_vector: derive_edge_vector(spec.edge_id),
             spec,
         });
+        self.edge_count += 1;
+        // Maintain stream_out_count so fan-out can short-circuit.
+        if spec.edge_type == RuntimeEdgeType::Stream {
+            if let Some(from_slot) = self.node_slot_by_id(spec.from_node) {
+                if let Some(mut record) = self.nodes[from_slot] {
+                    record.stream_out_count = record.stream_out_count.saturating_add(1);
+                    self.nodes[from_slot] = Some(record);
+                }
+            }
+        }
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         Ok(spec.edge_id)
     }
@@ -517,7 +568,18 @@ impl GraphRuntime {
 
     pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
+        let edge = self.edges[slot].ok_or(RuntimeError::EdgeNotFound)?;
+        // Maintain stream_out_count before clearing the slot.
+        if edge.spec.edge_type == RuntimeEdgeType::Stream {
+            if let Some(from_slot) = self.node_slot_by_id(edge.spec.from_node) {
+                if let Some(mut record) = self.nodes[from_slot] {
+                    record.stream_out_count = record.stream_out_count.saturating_sub(1);
+                    self.nodes[from_slot] = Some(record);
+                }
+            }
+        }
         self.edges[slot] = None;
+        self.edge_count = self.edge_count.saturating_sub(1);
         self.adjacency_arena.release(edge_id);
         Ok(())
     }
@@ -749,7 +811,20 @@ impl GraphRuntime {
     }
 
     pub fn post_signal(&mut self, target: VectorAddress, signal: Signal) -> Result<(), RuntimeError> {
-        self.signal_queue.push_signal(RuntimeSignal { target, signal })
+        let rs = RuntimeSignal { target, signal };
+        // Control-plane lifecycle signals get their own high-priority queue so
+        // they are never starved behind a flood of Data signals.  If that queue
+        // is full we fall back to the normal queue rather than dropping.
+        match signal {
+            Signal::Control { .. } | Signal::Spawn { .. } | Signal::Terminate => {
+                if self.control_signal_queue.push_signal(rs).is_err() {
+                    self.signal_queue.push_signal(rs)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => self.signal_queue.push_signal(rs),
+        }
     }
 
     fn prepare_activation(&mut self, vector: VectorAddress) -> Result<PreparedDispatch, RuntimeError> {
@@ -775,6 +850,7 @@ impl GraphRuntime {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
         let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
         record.lifecycle = NodeLifecycle::Running;
+        record.signal_count = record.signal_count.wrapping_add(1);
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Running);
         Ok(PreparedDispatch {
@@ -865,23 +941,33 @@ impl GraphRuntime {
             // Mimics LangGraph's multi-target edge: one signal, N subscribers.
             RuntimeEdgeType::Stream => {
                 let source_node = edge.from_node;
-                // Collect targets first to avoid borrow issues.
-                let mut targets = [VectorAddress::new(0, 0, 0, 0); MAX_EDGES];
-                let mut target_count = 0usize;
-                for slot in 0..MAX_EDGES {
-                    let Some(e) = self.edges[slot] else { continue };
-                    if e.spec.from_node == source_node
-                        && e.spec.edge_type == RuntimeEdgeType::Stream
-                        && target_count < MAX_EDGES
-                    {
-                        if let Ok(v) = self.node_vector(e.spec.to_node) {
-                            targets[target_count] = v;
-                            target_count += 1;
+                // Short-circuit: if the source has no outbound stream edges
+                // (tracked cheaply per node) skip the O(MAX_EDGES) scan.
+                let has_subscribers = self.node_slot_by_id(source_node)
+                    .and_then(|s| self.nodes[s])
+                    .map(|r| r.stream_out_count > 0)
+                    .unwrap_or(false);
+                if !has_subscribers {
+                    // nothing to fan out
+                } else {
+                    // Collect targets first to avoid borrow issues.
+                    let mut targets = [VectorAddress::new(0, 0, 0, 0); MAX_EDGES];
+                    let mut target_count = 0usize;
+                    for slot in 0..MAX_EDGES {
+                        let Some(e) = self.edges[slot] else { continue };
+                        if e.spec.from_node == source_node
+                            && e.spec.edge_type == RuntimeEdgeType::Stream
+                            && target_count < MAX_EDGES
+                        {
+                            if let Ok(v) = self.node_vector(e.spec.to_node) {
+                                targets[target_count] = v;
+                                target_count += 1;
+                            }
                         }
                     }
-                }
-                for i in 0..target_count {
-                    let _ = self.post_signal(targets[i], signal);
+                    for i in 0..target_count {
+                        let _ = self.post_signal(targets[i], signal);
+                    }
                 }
             }
             RuntimeEdgeType::Depend => {
@@ -976,6 +1062,7 @@ impl GraphRuntime {
 
             if status == ExecStatus::Fault {
                 let _ = self.fault_queue.push(record.vector);
+                FAULT_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -993,11 +1080,13 @@ impl GraphRuntime {
         if let Some(node_id) = self.ready_queue.pop() {
             return Some(WorkItem::Ready(node_id));
         }
-
+        // High-priority lane: Control / Spawn / Terminate signals before Data.
+        if let Some(signal) = self.control_signal_queue.pop() {
+            return Some(WorkItem::Signal(signal));
+        }
         if let Some(signal) = self.signal_queue.pop() {
             return Some(WorkItem::Signal(signal));
         }
-
         None
     }
 
@@ -1007,17 +1096,19 @@ impl GraphRuntime {
 
     pub fn snapshot(&self) -> GraphSnapshot {
         GraphSnapshot {
-            plugin_count: self.plugins.iter().filter(|slot| slot.is_some()).count(),
-            node_count: self.nodes.iter().filter(|slot| slot.is_some()).count(),
-            edge_count: self.edges.iter().filter(|slot| slot.is_some()).count(),
+            plugin_count: self.plugin_count,
+            node_count: self.node_count,
+            edge_count: self.edge_count,
             ready_queue_len: self.ready_queue.len(),
             signal_queue_len: self.signal_queue.len(),
+            control_queue_len: self.control_signal_queue.len(),
             tick: self.tick,
         }
     }
 
     pub fn is_stable(&self) -> bool {
         self.ready_queue.is_empty()
+            && self.control_signal_queue.is_empty()
             && self.signal_queue.is_empty()
             && self.call_frames.iter().all(|slot| slot.is_none())
             && self.wait_sets.iter().all(|slot| slot.is_none())
@@ -1203,6 +1294,15 @@ pub struct Scheduler {
 
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 static PREEMPT_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Incremented once per PIT interrupt (120 Hz) by `tick_pulse()`.
+/// Use for wall-clock elapsed time: `pit_tick_count() / 120` = seconds.
+static PIT_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total signals routed since boot (both legacy and native).
+static SIGNAL_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total native-executor activations (Spawn + subsequent events).
+static ACTIVATION_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total faults dispatched to the fault queue.
+static FAULT_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn install_scheduler(hook: Scheduler) {
     *SCHEDULER.lock() = Some(hook);
@@ -1216,10 +1316,44 @@ pub fn preempt_count() -> u64 {
 /// supervisor hook is installed (boot-time / unit tests that don't
 /// need preemption).
 pub fn tick_pulse() {
+    PIT_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     let hook = *SCHEDULER.lock();
     if let Some(hook) = hook {
         unsafe { (hook.on_tick)() };
     }
+}
+
+/// Returns the number of PIT interrupts since boot (120 Hz).
+/// Divide by 120 for wall-clock seconds.
+pub fn pit_tick_count() -> u64 {
+    PIT_TICK_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total signals routed since boot via `route_signal`.
+pub fn signal_dispatch_count() -> u64 {
+    SIGNAL_DISPATCH_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total node activations since boot via `activate`.
+pub fn activation_count() -> u64 {
+    ACTIVATION_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total fault dispatches pushed to the fault queue since boot.
+pub fn fault_dispatch_count() -> u64 {
+    FAULT_DISPATCH_COUNT.load(Ordering::Relaxed)
+}
+
+/// Reset all edge-case telemetry counters to zero.
+/// PIT_TICK_COUNT is intentionally excluded (it is a wall-clock reference).
+pub fn reset_telemetry_counters() {
+    SIGNAL_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+    ACTIVATION_COUNT.store(0, Ordering::Relaxed);
+    FAULT_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+    PREEMPT_COUNT.store(0, Ordering::Relaxed);
+    DOMAIN_SWITCH_COUNT.store(0, Ordering::Relaxed);
+    IRQ_COALESCED_COUNT.store(0, Ordering::Relaxed);
+    BOOT_FALLBACK_ALLOC_COUNT.store(0, Ordering::Relaxed);
 }
 
 fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {
@@ -1461,6 +1595,68 @@ unsafe extern "C" fn kernel_emit_control_plane(
     });
 }
 
+// ── Control-plane event journal ───────────────────────────────────────────────
+//
+// A persistent ring buffer that mirrors every emit_control_plane call.
+// Unlike the 256-slot `GraphRuntime::control_plane` queue (which is drained
+// by consumers and then gone), this journal keeps the last
+// CP_JOURNAL_CAPACITY events for shell inspection via `journal`.
+
+pub const CP_JOURNAL_CAPACITY: usize = 64;
+
+struct CpJournal {
+    entries: [ControlPlaneEnvelope; CP_JOURNAL_CAPACITY],
+    head: usize,  // next write slot
+    count: usize, // total written, capped at CP_JOURNAL_CAPACITY
+}
+
+impl CpJournal {
+    const fn new() -> Self {
+        Self {
+            entries: [ControlPlaneEnvelope {
+                version: 0,
+                kind: ControlPlaneMessageKind::Hello,
+                subject: [0; 16],
+                arg0: 0,
+                arg1: 0,
+            }; CP_JOURNAL_CAPACITY],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, env: ControlPlaneEnvelope) {
+        self.entries[self.head] = env;
+        self.head = (self.head + 1) % CP_JOURNAL_CAPACITY;
+        if self.count < CP_JOURNAL_CAPACITY {
+            self.count += 1;
+        }
+    }
+
+    fn read_recent(&self, out: &mut [ControlPlaneEnvelope]) -> usize {
+        let n = out.len().min(self.count);
+        if n == 0 {
+            return 0;
+        }
+        // Oldest-first: start from (head - count) wrapping.
+        let start = (self.head + CP_JOURNAL_CAPACITY - self.count) % CP_JOURNAL_CAPACITY;
+        // Skip entries to show only the last `n`.
+        let skip = self.count - n;
+        for i in 0..n {
+            out[i] = self.entries[(start + skip + i) % CP_JOURNAL_CAPACITY];
+        }
+        n
+    }
+}
+
+static CP_JOURNAL: Mutex<CpJournal> = Mutex::new(CpJournal::new());
+
+/// Read up to `out.len()` recent control-plane events, oldest first.
+/// Returns the number of entries written into `out`.
+pub fn cp_journal_recent(out: &mut [ControlPlaneEnvelope]) -> usize {
+    CP_JOURNAL.lock().read_recent(out)
+}
+
 static KERNEL_ABI: KernelAbi = KernelAbi {
     abi_version: GOS_ABI_VERSION,
     log: None,
@@ -1472,6 +1668,42 @@ static KERNEL_ABI: KernelAbi = KernelAbi {
 };
 
 static RUNTIME: Mutex<GraphRuntime> = Mutex::new(GraphRuntime::new());
+
+// ── Phase E.3: syscall surface wrappers ─────────────────────────────────────
+//
+// These thin public wrappers expose the same kernel-ABI functions that
+// native plugins call through ExecutorContext::abi, but without requiring
+// a context pointer.  The Ring 3 syscall trampoline (hypervisor::ring3)
+// calls them after decoding syscall arguments from registers.
+//
+// Packet encoding for EmitSignal:
+//   packet_lo bits [63:56] = KernelSignalKind tag
+//   packet_lo bits [55: 0] = arg0 (VectorAddress / payload; 56-bit cap)
+//   packet_hi               = arg1
+
+pub unsafe fn syscall_alloc_pages(page_count: usize) -> *mut u8 {
+    kernel_alloc_pages(page_count)
+}
+
+pub unsafe fn syscall_free_pages(ptr: *mut u8, page_count: usize) {
+    kernel_free_pages(ptr, page_count)
+}
+
+pub unsafe fn syscall_emit_signal(target: u64, packet_lo: u64, packet_hi: u64) -> i32 {
+    let tag = (packet_lo >> 56) as u8;
+    let arg0 = packet_lo & 0x00FF_FFFF_FFFF_FFFF;
+    let packet = KernelSignalPacket { tag, arg0, arg1: packet_hi, arg2: 0 };
+    kernel_emit_signal(target, packet)
+}
+
+pub unsafe fn syscall_resolve_capability(
+    ns: *const u8,
+    ns_len: usize,
+    name: *const u8,
+    name_len: usize,
+) -> u64 {
+    kernel_resolve_capability(ns, ns_len, name, name_len)
+}
 
 pub fn reset() {
     RUNTIME.lock().reset();
@@ -1596,6 +1828,7 @@ pub fn post_signal(target: VectorAddress, signal: Signal) -> Result<(), RuntimeE
 }
 
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {
+    SIGNAL_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
     let dispatch = {
         let mut runtime = RUNTIME.lock();
         runtime.prepare_signal_dispatch(target)?
@@ -1742,6 +1975,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
 }
 
 pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
+    ACTIVATION_COUNT.fetch_add(1, Ordering::Relaxed);
     let dispatch = {
         let mut runtime = RUNTIME.lock();
         runtime.prepare_activation(target)?
@@ -1834,6 +2068,11 @@ pub fn route_edge(edge_id: EdgeId, signal: Signal) -> Result<(), RuntimeError> {
 }
 
 pub fn pump() {
+    // Drain hardware IRQ pending bitmap before processing work items.
+    // This is lock-free for the IRQ side and ensures every coalesced
+    // interrupt gets one signal dispatch per pump pass.
+    drain_irq_pending();
+
     // Hard cap: a tight signal-loop between two nodes can otherwise
     // pin the kernel inside this pump call.  4096 work items per
     // pump pass is generous (the steady-state queue depth is
@@ -1868,12 +2107,10 @@ pub fn pump() {
             }
         }
         processed = processed.wrapping_add(1);
+        RUNTIME.lock().bump_tick();
         if processed >= MAX_WORK_ITEMS_PER_PUMP {
             break;
         }
-
-        let mut runtime = RUNTIME.lock();
-        runtime.bump_tick();
     }
 }
 
@@ -1925,79 +2162,214 @@ pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
     f(&mut runtime)
 }
 
+/// A non-consuming peek at one ready-queue entry.
+#[derive(Clone, Copy)]
+pub struct ReadyQueueEntry {
+    pub node_id: NodeId,
+    /// Resolved vector address (zero if node not found).
+    pub vector: VectorAddress,
+    pub node_key: &'static str,
+}
+
+/// A non-consuming peek at one signal-queue entry.
+#[derive(Clone, Copy)]
+pub struct SignalQueueEntry {
+    pub target: VectorAddress,
+    /// Human-readable signal type tag.
+    pub kind: &'static str,
+    pub target_key: &'static str,
+    /// True if this entry came from the high-priority control queue.
+    pub is_control: bool,
+}
+
+/// Peek at up to `out.len()` entries from the ready queue (oldest first).
+/// Returns the number written.
+pub fn peek_ready_queue(out: &mut [ReadyQueueEntry]) -> usize {
+    let runtime = RUNTIME.lock();
+    let mut ids = [NodeId::ZERO; MAX_READY_QUEUE];
+    let n = runtime.ready_queue.peek(&mut ids[..out.len()]);
+    for i in 0..n {
+        let node_id = ids[i];
+        let (vector, key) = runtime.node_slot_by_id(node_id)
+            .and_then(|slot| runtime.nodes[slot])
+            .map(|r| (r.vector, r.spec.local_node_key))
+            .unwrap_or((VectorAddress::new(0, 0, 0, 0), "?"));
+        out[i] = ReadyQueueEntry { node_id, vector, node_key: key };
+    }
+    n
+}
+
+/// Peek at up to `out.len()` entries from the signal queues (control first, then normal).
+/// Returns the number written.
+pub fn peek_signal_queue(out: &mut [SignalQueueEntry]) -> usize {
+    let runtime = RUNTIME.lock();
+    let mut signals = [RuntimeSignal {
+        target: VectorAddress::new(0, 0, 0, 0),
+        signal: Signal::Terminate,
+    }; MAX_CONTROL_SIGNAL_QUEUE];
+
+    let mut written = 0usize;
+    // Control queue first
+    let ctrl_n = runtime.control_signal_queue.peek(&mut signals[..out.len().min(MAX_CONTROL_SIGNAL_QUEUE)]);
+    for i in 0..ctrl_n {
+        if written >= out.len() { break; }
+        let rs = signals[i];
+        let key = runtime.node_slot_by_vec(rs.target)
+            .and_then(|s| runtime.nodes[s])
+            .map(|r| r.spec.local_node_key)
+            .unwrap_or("?");
+        out[written] = SignalQueueEntry {
+            target: rs.target,
+            kind: signal_kind_str(rs.signal),
+            target_key: key,
+            is_control: true,
+        };
+        written += 1;
+    }
+    // Normal signal queue
+    let mut norm_signals = [RuntimeSignal {
+        target: VectorAddress::new(0, 0, 0, 0),
+        signal: Signal::Terminate,
+    }; MAX_SIGNAL_QUEUE];
+    let remain = out.len().saturating_sub(written);
+    let norm_n = runtime.signal_queue.peek(&mut norm_signals[..remain.min(MAX_SIGNAL_QUEUE)]);
+    for i in 0..norm_n {
+        if written >= out.len() { break; }
+        let rs = norm_signals[i];
+        let key = runtime.node_slot_by_vec(rs.target)
+            .and_then(|s| runtime.nodes[s])
+            .map(|r| r.spec.local_node_key)
+            .unwrap_or("?");
+        out[written] = SignalQueueEntry {
+            target: rs.target,
+            kind: signal_kind_str(rs.signal),
+            target_key: key,
+            is_control: false,
+        };
+        written += 1;
+    }
+    written
+}
+
+fn signal_kind_str(s: Signal) -> &'static str {
+    match s {
+        Signal::Call { .. }      => "Call",
+        Signal::Spawn { .. }     => "Spawn",
+        Signal::Interrupt { .. } => "Interrupt",
+        Signal::Data { .. }      => "Data",
+        Signal::Control { .. }   => "Control",
+        Signal::Terminate        => "Terminate",
+    }
+}
+
 pub fn bootstrap_context(payload: u64) -> BootContext {
     BootContext::new(payload)
 }
 
-// ── Hardware IRQ → Graph routing table ───────────────────────────────────────
+// ── Hardware IRQ → Graph routing table (lock-free) ───────────────────────────
 //
 // Every IRQ vector (0–255) maps to a target VectorAddress in the graph.
-// Plugins register their target with `subscribe_irq(vector, node_vec)` at boot.
+// Plugins register their target with `subscribe_irq(vector, node_vec)` at boot
+// (before interrupts are enabled).
 //
-// Design invariants (enforced here):
-//   - At most ONE subscriber per IRQ vector (ownership, no fan-out in interrupt
-//     context; fan-out is the Router Node's job if needed).
-//   - Subscription table is populated before interrupts are enabled.
-//   - `post_irq_signal` is safe to call from `extern "C"` interrupt context:
-//     it takes the Spinlock briefly to enqueue a RuntimeSignal, then returns.
-//     The actual node dispatch happens on the next `pump()` tick.
+// Design invariants:
+//   - At most ONE subscriber per IRQ vector.
+//   - Subscriptions are write-once at boot; reads are lock-free.
+//   - `post_irq_signal` for Interrupt signals touches zero spinlocks:
+//       1. AtomicU64 load of IRQ_TARGETS[vector]  (single cache-line read)
+//       2. AtomicU64 fetch_or into IRQ_PENDING     (single RMW op)
+//     The bitmap is drained by drain_irq_pending() at the top of every pump().
+//   - Non-Interrupt signals fall back to the runtime lock (currently unused
+//     in hardware paths but kept for future extensibility).
 
 /// Maximum number of distinct IRQ vectors that may be subscribed.
 pub const MAX_IRQ_VECTORS: usize = 256;
 
-#[derive(Clone, Copy)]
-struct IrqSubscription {
-    /// Target node vector in the graph.
-    target: VectorAddress,
-    /// True when this slot is valid.
-    active: bool,
-}
+// Packed target table.  Stores `target.as_u64()` or 0 (inactive).
+// Valid targets always have KERNEL_BASE (0xFFFF_8000_0000_0000) set,
+// so 0 is a safe "no subscriber" sentinel.
+static IRQ_TARGETS: [AtomicU64; MAX_IRQ_VECTORS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_IRQ_VECTORS]
+};
 
-struct IrqTable {
-    entries: [IrqSubscription; MAX_IRQ_VECTORS],
-}
+// 256-bit pending bitmap: bit N = IRQ vector N is pending dispatch.
+// 4 × 64-bit words covers all 256 hardware vectors.
+static IRQ_PENDING: [AtomicU64; 4] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 4]
+};
 
-impl IrqTable {
-    const fn new() -> Self {
-        Self {
-            entries: [IrqSubscription {
-                target: VectorAddress::new(0, 0, 0, 0),
-                active: false,
-            }; MAX_IRQ_VECTORS],
-        }
-    }
-}
+/// Total IRQs coalesced (set a bit that was already set = backlog under load).
+static IRQ_COALESCED_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static IRQ_TABLE: Mutex<IrqTable> = Mutex::new(IrqTable::new());
+pub fn irq_coalesced_count() -> u64 {
+    IRQ_COALESCED_COUNT.load(Ordering::Relaxed)
+}
 
 /// Register a node vector as the handler for a particular IRQ number.
 ///
 /// Must be called before `x86_64::instructions::interrupts::enable()`.
 /// Overwrites any existing subscription for that vector (last write wins).
 pub fn subscribe_irq(vector: u8, target: VectorAddress) {
-    let mut table = IRQ_TABLE.lock();
-    table.entries[vector as usize] = IrqSubscription { target, active: true };
+    IRQ_TARGETS[vector as usize].store(target.as_u64(), Ordering::Release);
 }
 
 /// Post a hardware IRQ signal into the graph signal queue.
 ///
 /// Called by `gos_trap_normalizer` (in `k-idt`) on every hardware interrupt.
-/// This function must be **extremely fast** — it only enqueues; dispatching
-/// happens on the next supervisor `pump()` / `service_system_cycle()` tick.
+/// For `Signal::Interrupt` (the common case) this is entirely lock-free:
+/// one atomic load + one atomic fetch_or.  Dispatch happens in the next
+/// `pump()` call via `drain_irq_pending()`.
 ///
 /// If no subscriber is registered for the vector, the signal is silently
 /// dropped (the IRQ has been acknowledged at the hardware level already).
 pub fn post_irq_signal(vector: u8, signal: Signal) {
-    // Look up the subscriber without holding RUNTIME lock simultaneously.
-    let maybe_target = {
-        let table = IRQ_TABLE.lock();
-        let entry = &table.entries[vector as usize];
-        if entry.active { Some(entry.target) } else { None }
-    };
+    let raw = IRQ_TARGETS[vector as usize].load(Ordering::Acquire);
+    if raw == 0 {
+        return; // no subscriber
+    }
 
-    if let Some(target) = maybe_target {
-        // Enqueue signal — if the queue is full we drop (backpressure ok in
-        // interrupt context; the supervisor loop will drain it promptly).
-        let _ = RUNTIME.lock().post_signal(target, signal);
+    match signal {
+        Signal::Interrupt { .. } => {
+            // Lock-free fast path: set the pending bit.
+            let word = (vector / 64) as usize;
+            let bit = 1u64 << (vector % 64);
+            let prev = IRQ_PENDING[word].fetch_or(bit, Ordering::Release);
+            if prev & bit != 0 {
+                // Bit was already set — another IRQ arrived before drain.
+                IRQ_COALESCED_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        _ => {
+            // Slow path for non-Interrupt signals (rare / future use).
+            let target = VectorAddress::from_u64(raw);
+            let _ = RUNTIME.lock().post_signal(target, signal);
+        }
+    }
+}
+
+/// Drain all pending IRQ bits and inject them into the runtime signal queue.
+///
+/// Called at the top of `pump()` so each IRQ gets exactly one dispatch per
+/// pump pass, regardless of how many times the hardware fired while the
+/// previous pump was running.
+fn drain_irq_pending() {
+    for word_idx in 0..4usize {
+        let word = IRQ_PENDING[word_idx].swap(0, Ordering::AcqRel);
+        if word == 0 {
+            continue;
+        }
+        let mut bits = word;
+        while bits != 0 {
+            let bit_pos = bits.trailing_zeros() as u8;
+            bits &= bits.wrapping_sub(1); // clear lowest set bit
+            let vector = word_idx as u8 * 64 + bit_pos;
+            let raw = IRQ_TARGETS[vector as usize].load(Ordering::Acquire);
+            if raw != 0 {
+                let target = VectorAddress::from_u64(raw);
+                let _ = RUNTIME.lock().post_signal(target, Signal::Interrupt { irq: vector });
+            }
+        }
     }
 }

@@ -777,14 +777,12 @@ unsafe extern "C" fn chat_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     // Initialise COM2 UART
     com2_init();
 
-    // Probe the bridge
-    let com2_ready = if com2_probe() { 1u8 } else { 0u8 };
-
-    // Populate state
+    // Populate state; com2_ready starts false and is detected lazily on
+    // first chat message to avoid a multi-second blocking probe during boot.
     let state = unsafe { &mut *CHAT_STATE.0.get() };
     state.console_target = console_target;
     state.net_target     = net_target;
-    state.com2_ready     = com2_ready;
+    state.com2_ready     = 0u8;
 
     ExecStatus::Done
 }

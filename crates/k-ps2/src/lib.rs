@@ -96,14 +96,6 @@ unsafe extern "C" fn ps2_on_event(
     ctx: *mut ExecutorContext,
     event: *const NodeEvent,
 ) -> ExecStatus {
-    // ── Diagnostic: confirm the IRQ-driven dispatch path actually ─────────────
-    // reaches us.  Writes a single byte to COM1 so the serial log shows
-    // each invocation as a 'K'.  Cheap and non-blocking.
-    {
-        use x86_64::instructions::port::Port;
-        let mut com1: Port<u8> = Port::new(0x3F8);
-        unsafe { com1.write(b'K'); }
-    }
     // ── Pre-processing: validate IRQ and read scancode ────────────────────────
     let Some(input) = (unsafe { pre::prepare(event) }) else {
         return ExecStatus::Done;

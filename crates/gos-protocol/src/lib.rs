@@ -1556,6 +1556,9 @@ pub struct GraphSnapshot {
     pub edge_count: usize,
     pub ready_queue_len: usize,
     pub signal_queue_len: usize,
+    /// High-priority queue depth: Control / Spawn / Terminate signals waiting
+    /// ahead of the normal `signal_queue`.
+    pub control_queue_len: usize,
     pub tick: u64,
 }
 
@@ -1571,6 +1574,8 @@ pub struct GraphNodeSummary {
     pub entry_policy: EntryPolicy,
     pub executor_id: ExecutorId,
     pub export_count: usize,
+    /// Cumulative signals dispatched to this node since registration.
+    pub signal_count: u64,
 }
 
 impl GraphNodeSummary {
@@ -1585,6 +1590,7 @@ impl GraphNodeSummary {
         entry_policy: EntryPolicy::Manual,
         executor_id: ExecutorId::ZERO,
         export_count: 0,
+        signal_count: 0,
     };
 }
 

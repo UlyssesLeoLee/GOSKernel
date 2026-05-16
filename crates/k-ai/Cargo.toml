@@ -7,3 +7,4 @@ edition = "2021"
 gos-protocol = { path = "../gos-protocol" }
 gos-runtime = { path = "../gos-runtime" }
 k-shell = { path = "../k-shell" }
+k-net = { path = "../k-net" }
