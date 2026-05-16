@@ -159,6 +159,9 @@ struct NodeRecord {
     instance_id: NodeInstanceId,
     /// Cumulative signals dispatched to this node (wraps at u64::MAX).
     signal_count: u64,
+    /// Count of outbound Stream edges from this node.  Used to short-circuit
+    /// the O(MAX_EDGES) fan-out scan when there are no Stream subscribers.
+    stream_out_count: u8,
     /// Conditional-route table (LangGraph-style edge fan-out).
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
@@ -492,6 +495,7 @@ impl GraphRuntime {
             binding: NodeBinding::Unbound,
             instance_id: NodeInstanceId::ZERO,
             signal_count: 0,
+            stream_out_count: 0,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
         });
@@ -515,6 +519,15 @@ impl GraphRuntime {
             spec,
         });
         self.edge_count += 1;
+        // Maintain stream_out_count so fan-out can short-circuit.
+        if spec.edge_type == RuntimeEdgeType::Stream {
+            if let Some(from_slot) = self.node_slot_by_id(spec.from_node) {
+                if let Some(mut record) = self.nodes[from_slot] {
+                    record.stream_out_count = record.stream_out_count.saturating_add(1);
+                    self.nodes[from_slot] = Some(record);
+                }
+            }
+        }
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         Ok(spec.edge_id)
     }
@@ -543,6 +556,16 @@ impl GraphRuntime {
 
     pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
+        let edge = self.edges[slot].ok_or(RuntimeError::EdgeNotFound)?;
+        // Maintain stream_out_count before clearing the slot.
+        if edge.spec.edge_type == RuntimeEdgeType::Stream {
+            if let Some(from_slot) = self.node_slot_by_id(edge.spec.from_node) {
+                if let Some(mut record) = self.nodes[from_slot] {
+                    record.stream_out_count = record.stream_out_count.saturating_sub(1);
+                    self.nodes[from_slot] = Some(record);
+                }
+            }
+        }
         self.edges[slot] = None;
         self.edge_count = self.edge_count.saturating_sub(1);
         self.adjacency_arena.release(edge_id);
@@ -906,23 +929,33 @@ impl GraphRuntime {
             // Mimics LangGraph's multi-target edge: one signal, N subscribers.
             RuntimeEdgeType::Stream => {
                 let source_node = edge.from_node;
-                // Collect targets first to avoid borrow issues.
-                let mut targets = [VectorAddress::new(0, 0, 0, 0); MAX_EDGES];
-                let mut target_count = 0usize;
-                for slot in 0..MAX_EDGES {
-                    let Some(e) = self.edges[slot] else { continue };
-                    if e.spec.from_node == source_node
-                        && e.spec.edge_type == RuntimeEdgeType::Stream
-                        && target_count < MAX_EDGES
-                    {
-                        if let Ok(v) = self.node_vector(e.spec.to_node) {
-                            targets[target_count] = v;
-                            target_count += 1;
+                // Short-circuit: if the source has no outbound stream edges
+                // (tracked cheaply per node) skip the O(MAX_EDGES) scan.
+                let has_subscribers = self.node_slot_by_id(source_node)
+                    .and_then(|s| self.nodes[s])
+                    .map(|r| r.stream_out_count > 0)
+                    .unwrap_or(false);
+                if !has_subscribers {
+                    // nothing to fan out
+                } else {
+                    // Collect targets first to avoid borrow issues.
+                    let mut targets = [VectorAddress::new(0, 0, 0, 0); MAX_EDGES];
+                    let mut target_count = 0usize;
+                    for slot in 0..MAX_EDGES {
+                        let Some(e) = self.edges[slot] else { continue };
+                        if e.spec.from_node == source_node
+                            && e.spec.edge_type == RuntimeEdgeType::Stream
+                            && target_count < MAX_EDGES
+                        {
+                            if let Ok(v) = self.node_vector(e.spec.to_node) {
+                                targets[target_count] = v;
+                                target_count += 1;
+                            }
                         }
                     }
-                }
-                for i in 0..target_count {
-                    let _ = self.post_signal(targets[i], signal);
+                    for i in 0..target_count {
+                        let _ = self.post_signal(targets[i], signal);
+                    }
                 }
             }
             RuntimeEdgeType::Depend => {
