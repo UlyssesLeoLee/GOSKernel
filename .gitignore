@@ -1,5 +1,6 @@
 /target
 /dist
+/.claude/worktrees/
 *.log
 *.txt
 # Specific patterns found in current directory
