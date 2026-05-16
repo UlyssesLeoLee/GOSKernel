@@ -77,6 +77,29 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: Input) -> Option<Output>
                 super::redraw_footer(&sink, state, false);
             }
             super::restore_cursor(&sink, 0);
+
+            // Watch mode: replay the stored command at WATCH_INTERVAL_TICKS.
+            if state.watch_active != 0 {
+                state.watch_tick = state.watch_tick.wrapping_add(1);
+                if state.watch_tick >= super::WATCH_INTERVAL_TICKS {
+                    state.watch_tick = 0;
+                    let wlen = state.watch_buf_len as usize;
+                    if wlen > 0 {
+                        let mut tmp = [0u8; 64];
+                        tmp[..wlen].copy_from_slice(&state.watch_buf[..wlen]);
+                        if let Ok(wcmd) = core::str::from_utf8(&tmp[..wlen]) {
+                            super::restore_output_cursor(&sink);
+                            super::set_color(&sink, 8, 0);
+                            super::print_str(&sink, "[ watch: ");
+                            super::print_str(&sink, wcmd);
+                            super::print_str(&sink, " ]\n");
+                            super::set_color(&sink, 7, 0);
+                            dispatch_text_command(&sink, state, wcmd);
+                            super::save_output_cursor(&sink);
+                        }
+                    }
+                }
+            }
             ExecStatus::Done
         }
 
@@ -552,6 +575,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  log        show recent kernel log entries\n");
         super::print_str(sink, "  log clear  clear the log ring buffer\n");
         super::print_str(sink, "  journal    show last 32 control-plane events (node/edge/fault)\n");
+        super::print_str(sink, "  watch <cmd>  re-run a command every ~2s (heartbeat-driven)\n");
+        super::print_str(sink, "  unwatch    stop watch mode\n");
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
@@ -1401,6 +1426,25 @@ fn dispatch_text_command(
         gos_log::clear_log_ring();
         super::set_color(sink, 11, 0);
         super::print_str(sink, " log ring cleared\n");
+        super::set_color(sink, 7, 0);
+    } else if let Some(watch_cmd_str) = cmd.strip_prefix("watch ") {
+        let wlen = watch_cmd_str.len().min(64);
+        state.watch_buf[..wlen].copy_from_slice(&watch_cmd_str.as_bytes()[..wlen]);
+        state.watch_buf_len = wlen as u8;
+        state.watch_active = 1;
+        state.watch_tick = super::WATCH_INTERVAL_TICKS; // fire immediately next tick
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " watch: ");
+        super::print_str(sink, watch_cmd_str);
+        super::set_color(sink, 8, 0);
+        super::print_str(sink, "  (unwatch to stop)\n");
+        super::set_color(sink, 7, 0);
+    } else if cmd == "unwatch" || cmd == "watch stop" || cmd == "watch off" {
+        state.watch_active = 0;
+        state.watch_tick = 0;
+        state.watch_buf_len = 0;
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " watch stopped\n");
         super::set_color(sink, 7, 0);
     } else if cmd == "journal" || cmd == "cpj" {
         use gos_protocol::ControlPlaneMessageKind;

@@ -111,6 +111,8 @@ const PULSE_COUNT: usize = 3;
 const FRAME_COUNT: usize = STAGE_COUNT * PULSE_COUNT;
 const EVENT_LINES: usize = 4;
 const LIVE_SIGIL_FRAMES: usize = 12;
+/// Heartbeat ticks (120 Hz) between watch command replays ≈ 2 seconds.
+pub const WATCH_INTERVAL_TICKS: u8 = 240;
 const COMMAND_DECK_TOP: usize = 2;
 const COMMAND_DECK_LEFT: usize = 2;
 const COMMAND_DECK_WIDTH: usize = 47;
@@ -319,6 +321,14 @@ struct ShellState {
     menu_mode: u8,
     input_lang: u8,
     api_configured: u8,
+    /// Non-zero when `watch` mode is active.
+    watch_active: u8,
+    /// Heartbeat ticks since last watch re-run (resets at WATCH_INTERVAL_TICKS).
+    watch_tick: u8,
+    /// Length of the command stored in watch_buf.
+    watch_buf_len: u8,
+    /// The command to re-run in watch mode (NUL-padded).
+    watch_buf: [u8; 64],
 }
 
 #[repr(C)]
@@ -3937,6 +3947,10 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 menu_mode: MENU_MODE_COMMAND,
                 input_lang: IME_MODE_ASCII,
                 api_configured: 0,
+                watch_active: 0,
+                watch_tick: 0,
+                watch_buf_len: 0,
+                watch_buf: [0; 64],
             },
         );
     }
