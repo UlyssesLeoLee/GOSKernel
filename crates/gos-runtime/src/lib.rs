@@ -114,6 +114,18 @@ impl<T: Copy, const N: usize> RingQueue<T, N> {
     fn is_empty(&self) -> bool {
         self.head == self.tail
     }
+
+    /// Copy up to `out.len()` items from tail (oldest) without consuming them.
+    /// Returns the number written into `out`.
+    fn peek(&self, out: &mut [T]) -> usize {
+        let n = out.len().min(self.len());
+        for i in 0..n {
+            if let Some(v) = self.buffer[(self.tail + i) % N] {
+                out[i] = v;
+            }
+        }
+        n
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2148,6 +2160,106 @@ pub fn enqueue_ready_for_plugin(plugin_id: PluginId) -> usize {
 pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
     let mut runtime = RUNTIME.lock();
     f(&mut runtime)
+}
+
+/// A non-consuming peek at one ready-queue entry.
+#[derive(Clone, Copy)]
+pub struct ReadyQueueEntry {
+    pub node_id: NodeId,
+    /// Resolved vector address (zero if node not found).
+    pub vector: VectorAddress,
+    pub node_key: &'static str,
+}
+
+/// A non-consuming peek at one signal-queue entry.
+#[derive(Clone, Copy)]
+pub struct SignalQueueEntry {
+    pub target: VectorAddress,
+    /// Human-readable signal type tag.
+    pub kind: &'static str,
+    pub target_key: &'static str,
+    /// True if this entry came from the high-priority control queue.
+    pub is_control: bool,
+}
+
+/// Peek at up to `out.len()` entries from the ready queue (oldest first).
+/// Returns the number written.
+pub fn peek_ready_queue(out: &mut [ReadyQueueEntry]) -> usize {
+    let runtime = RUNTIME.lock();
+    let mut ids = [NodeId::ZERO; MAX_READY_QUEUE];
+    let n = runtime.ready_queue.peek(&mut ids[..out.len()]);
+    for i in 0..n {
+        let node_id = ids[i];
+        let (vector, key) = runtime.node_slot_by_id(node_id)
+            .and_then(|slot| runtime.nodes[slot])
+            .map(|r| (r.vector, r.spec.local_node_key))
+            .unwrap_or((VectorAddress::new(0, 0, 0, 0), "?"));
+        out[i] = ReadyQueueEntry { node_id, vector, node_key: key };
+    }
+    n
+}
+
+/// Peek at up to `out.len()` entries from the signal queues (control first, then normal).
+/// Returns the number written.
+pub fn peek_signal_queue(out: &mut [SignalQueueEntry]) -> usize {
+    let runtime = RUNTIME.lock();
+    let mut signals = [RuntimeSignal {
+        target: VectorAddress::new(0, 0, 0, 0),
+        signal: Signal::Terminate,
+    }; MAX_CONTROL_SIGNAL_QUEUE];
+
+    let mut written = 0usize;
+    // Control queue first
+    let ctrl_n = runtime.control_signal_queue.peek(&mut signals[..out.len().min(MAX_CONTROL_SIGNAL_QUEUE)]);
+    for i in 0..ctrl_n {
+        if written >= out.len() { break; }
+        let rs = signals[i];
+        let key = runtime.node_slot_by_vec(rs.target)
+            .and_then(|s| runtime.nodes[s])
+            .map(|r| r.spec.local_node_key)
+            .unwrap_or("?");
+        out[written] = SignalQueueEntry {
+            target: rs.target,
+            kind: signal_kind_str(rs.signal),
+            target_key: key,
+            is_control: true,
+        };
+        written += 1;
+    }
+    // Normal signal queue
+    let mut norm_signals = [RuntimeSignal {
+        target: VectorAddress::new(0, 0, 0, 0),
+        signal: Signal::Terminate,
+    }; MAX_SIGNAL_QUEUE];
+    let remain = out.len().saturating_sub(written);
+    let norm_n = runtime.signal_queue.peek(&mut norm_signals[..remain.min(MAX_SIGNAL_QUEUE)]);
+    for i in 0..norm_n {
+        if written >= out.len() { break; }
+        let rs = norm_signals[i];
+        let key = runtime.node_slot_by_vec(rs.target)
+            .and_then(|s| runtime.nodes[s])
+            .map(|r| r.spec.local_node_key)
+            .unwrap_or("?");
+        out[written] = SignalQueueEntry {
+            target: rs.target,
+            kind: signal_kind_str(rs.signal),
+            target_key: key,
+            is_control: false,
+        };
+        written += 1;
+    }
+    written
+}
+
+fn signal_kind_str(s: Signal) -> &'static str {
+    match s {
+        Signal::Call { .. }      => "Call",
+        Signal::Spawn { .. }     => "Spawn",
+        Signal::Interrupt { .. } => "Interrupt",
+        Signal::Data { .. }      => "Data",
+        Signal::Control { .. }   => "Control",
+        Signal::Terminate        => "Terminate",
+    }
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {

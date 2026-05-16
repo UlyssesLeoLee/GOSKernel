@@ -580,6 +580,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
+        super::print_str(sink, "  rq         peek at the ready queue (non-consuming)\n");
+        super::print_str(sink, "  sq         peek at the signal queue (non-consuming)\n");
         super::print_str(sink, "  reset-stats  zero all telemetry counters\n");
         super::print_str(sink, "  cap resolve <ns> <name>  look up capability provider node\n");
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
@@ -1264,6 +1266,96 @@ fn dispatch_text_command(
                 }
                 offset2 += n;
                 if n < buf.len() { break; }
+            }
+        }
+    } else if cmd == "rq" || cmd == "ready-queue" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " ready queue\n");
+        super::set_color(sink, 7, 0);
+        let mut entries = [gos_runtime::ReadyQueueEntry {
+            node_id: gos_protocol::NodeId::ZERO,
+            vector: gos_protocol::VectorAddress::new(0, 0, 0, 0),
+            node_key: "",
+        }; 16];
+        let n = gos_runtime::peek_ready_queue(&mut entries);
+        let snapshot = gos_runtime::snapshot();
+        super::print_str(sink, "  depth: ");
+        super::print_num_inline(sink, snapshot.ready_queue_len);
+        super::print_str(sink, "\n");
+        if n == 0 {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  (empty)\n");
+            super::set_color(sink, 7, 0);
+        } else {
+            for entry in &entries[..n] {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  [");
+                super::print_num_inline(sink, entry.vector.l4 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.l3 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.l2 as usize);
+                super::print_str(sink, ".");
+                super::print_num_inline(sink, entry.vector.offset as usize);
+                super::print_str(sink, "] ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, entry.node_key);
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+            if snapshot.ready_queue_len > n {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  … ");
+                super::print_num_inline(sink, snapshot.ready_queue_len - n);
+                super::print_str(sink, " more\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
+    } else if cmd == "sq" || cmd == "signal-queue" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " signal queue\n");
+        super::set_color(sink, 7, 0);
+        let mut entries = [gos_runtime::SignalQueueEntry {
+            target: gos_protocol::VectorAddress::new(0, 0, 0, 0),
+            kind: "",
+            target_key: "",
+            is_control: false,
+        }; 16];
+        let n = gos_runtime::peek_signal_queue(&mut entries);
+        let snapshot = gos_runtime::snapshot();
+        let total = snapshot.signal_queue_len + snapshot.control_queue_len;
+        super::print_str(sink, "  depth: ");
+        super::print_num_inline(sink, total);
+        super::print_str(sink, "  (ctrl:");
+        super::print_num_inline(sink, snapshot.control_queue_len);
+        super::print_str(sink, " norm:");
+        super::print_num_inline(sink, snapshot.signal_queue_len);
+        super::print_str(sink, ")\n");
+        if n == 0 {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, "  (empty)\n");
+            super::set_color(sink, 7, 0);
+        } else {
+            for entry in &entries[..n] {
+                let color: u8 = if entry.is_control { 13 } else { 10 };
+                super::set_color(sink, color, 0);
+                super::print_str(sink, "  ");
+                super::print_str(sink, entry.kind);
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, " -> ");
+                super::set_color(sink, 15, 0);
+                super::print_str(sink, entry.target_key);
+                super::set_color(sink, 8, 0);
+                if entry.is_control { super::print_str(sink, " [ctrl]"); }
+                super::set_color(sink, 7, 0);
+                super::print_str(sink, "\n");
+            }
+            if total > n {
+                super::set_color(sink, 8, 0);
+                super::print_str(sink, "  … ");
+                super::print_num_inline(sink, total - n);
+                super::print_str(sink, " more\n");
+                super::set_color(sink, 7, 0);
             }
         }
     } else if cmd == "events" || cmd == "stats" {
