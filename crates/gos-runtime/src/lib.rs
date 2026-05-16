@@ -1299,6 +1299,18 @@ pub fn fault_dispatch_count() -> u64 {
     FAULT_DISPATCH_COUNT.load(Ordering::Relaxed)
 }
 
+/// Reset all edge-case telemetry counters to zero.
+/// PIT_TICK_COUNT is intentionally excluded (it is a wall-clock reference).
+pub fn reset_telemetry_counters() {
+    SIGNAL_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+    ACTIVATION_COUNT.store(0, Ordering::Relaxed);
+    FAULT_DISPATCH_COUNT.store(0, Ordering::Relaxed);
+    PREEMPT_COUNT.store(0, Ordering::Relaxed);
+    DOMAIN_SWITCH_COUNT.store(0, Ordering::Relaxed);
+    IRQ_COALESCED_COUNT.store(0, Ordering::Relaxed);
+    BOOT_FALLBACK_ALLOC_COUNT.store(0, Ordering::Relaxed);
+}
+
 fn scheduler_should_preempt(instance_id: NodeInstanceId) -> bool {
     if instance_id == NodeInstanceId::ZERO {
         return false;

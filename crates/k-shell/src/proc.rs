@@ -580,6 +580,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  cpu        show CPU brand, features, and topology\n");
         super::print_str(sink, "  tick       show uptime and scheduler counters\n");
         super::print_str(sink, "  events     show signal dispatch and fault event counters\n");
+        super::print_str(sink, "  reset-stats  zero all telemetry counters\n");
+        super::print_str(sink, "  cap resolve <ns> <name>  look up capability provider node\n");
         super::print_str(sink, "  health     show module health, faults, and restart counts\n");
         super::print_str(sink, "  fault <vec>  inject fault into the plugin owning a node\n");
         super::print_str(sink, "  nodes      list all registered graph nodes with lifecycle\n");
@@ -1377,6 +1379,65 @@ fn dispatch_text_command(
         super::print_str(sink, "  ready: ");
         super::print_num_inline(sink, snapshot.ready_queue_len);
         super::print_str(sink, "\n");
+    } else if cmd == "reset-stats" || cmd == "stats reset" || cmd == "events reset" {
+        gos_runtime::reset_telemetry_counters();
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " telemetry counters reset\n");
+        super::set_color(sink, 7, 0);
+    } else if let Some(cap_args) = cmd.strip_prefix("cap ").or_else(|| cmd.strip_prefix("capability ")) {
+        // cap resolve <namespace> <name>  — look up a capability provider
+        if let Some(rest) = cap_args.strip_prefix("resolve ") {
+            let mut parts = rest.splitn(2, ' ');
+            let ns = parts.next().unwrap_or("").trim();
+            let name = parts.next().unwrap_or("").trim();
+            if ns.is_empty() || name.is_empty() {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " usage: cap resolve <namespace> <name>\n");
+                super::set_color(sink, 7, 0);
+            } else {
+                match gos_runtime::resolve_capability(ns.as_bytes(), name.as_bytes()) {
+                    None => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " capability not found: ");
+                        super::set_color(sink, 15, 0);
+                        super::print_str(sink, ns);
+                        super::print_str(sink, "::");
+                        super::print_str(sink, name);
+                        super::print_str(sink, "\n");
+                        super::set_color(sink, 7, 0);
+                    }
+                    Some(vec) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " ");
+                        super::print_str(sink, ns);
+                        super::print_str(sink, "::");
+                        super::print_str(sink, name);
+                        super::print_str(sink, "  -> ");
+                        super::set_color(sink, 15, 0);
+                        super::print_num_inline(sink, vec.l4 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l3 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.l2 as usize);
+                        super::print_str(sink, ".");
+                        super::print_num_inline(sink, vec.offset as usize);
+                        // Try to get the node key for extra context
+                        if let Some(node) = gos_runtime::node_summary(vec) {
+                            super::set_color(sink, 8, 0);
+                            super::print_str(sink, "  (");
+                            super::print_str(sink, node.local_node_key);
+                            super::print_str(sink, ")");
+                        }
+                        super::set_color(sink, 7, 0);
+                        super::print_str(sink, "\n");
+                    }
+                }
+            }
+        } else {
+            super::set_color(sink, 8, 0);
+            super::print_str(sink, " cap subcommands: resolve <ns> <name>\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "log" || cmd == "logs" || cmd == "dmesg" {
         use gos_log::LogLevel;
         super::set_color(sink, 10, 0);
