@@ -124,10 +124,12 @@ dependencies = [
  "k-pit",
  "k-pmm",
  "k-ps2",
+ "k-rast",
  "k-serial",
  "k-shell",
  "k-vga",
  "k-vmm",
+ "libm",
  "x86_64",
 ]
 
@@ -394,6 +396,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "k-rast"
+version = "0.2.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "k-scene"
 version = "0.2.0"
 dependencies = [
@@ -442,6 +451,12 @@ dependencies = [
  "spin",
  "x86_64",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linked_list_allocator"

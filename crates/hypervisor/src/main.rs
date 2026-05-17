@@ -8,7 +8,8 @@ mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
-use gos_protocol::{GraphNodeSummary, RuntimeNodeType};
+use gos_protocol::{GraphEdgeSummary, GraphNodeSummary, RuntimeNodeType, VectorAddress};
+use k_rast::{project_to_screen, sort_by_depth_desc, Mat4, Vec3};
 
 entry_point!(kernel_main);
 
@@ -105,132 +106,327 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     unsafe { ring3::init(); }
     raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
-    // Phase I.3.2 — paint the kernel-node UI before going interactive.
-    // Static one-shot for now; the I.3.x refresh hook will repaint on
-    // graph-generation ticks once `gos_runtime::graph_generation()` is
-    // wired into the boot loop.
-    paint_boot_ui();
-    raw_serial_println(format_args!("boot: framebuffer UI painted"));
+    // Phase I.3.8 — first 3D paint before going interactive.  Idle
+    // loop below repaints continuously to keep the camera rotation
+    // smooth.
+    paint_3d_view(0);
+    raw_serial_println(format_args!("boot: framebuffer 3D scene painted"));
 
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
-    // I.3.5 — live repaint loop.  `gos_runtime::graph_generation()`
-    // bumps on every Cypher mutation (H.1.x) and every internal edge
-    // mutation; the framebuffer UI tracks it and re-paints only when
-    // the graph actually changes.  Cheap atomic compare; idle ticks
-    // pay nothing.
+    // I.3.5 + I.3.8 — paint loop.  Every PIT-driven idle iteration
+    // bumps `frame_counter` and advances the camera's yaw; graph
+    // mutations (Cypher LINK et al) bump `graph_generation` which
+    // schedules an immediate full repaint.  In between, we still
+    // repaint every `REPAINT_TICKS` iterations to keep the cube
+    // rotation smooth.
+    const REPAINT_TICKS: u64 = 2;
     let mut last_painted_gen = gos_runtime::graph_generation();
+    let mut frame_counter: u64 = 0;
     loop {
         x86_64::instructions::interrupts::without_interrupts(|| {
             gos_supervisor::service_system_cycle();
         });
+        frame_counter = frame_counter.wrapping_add(1);
         let gen_now = gos_runtime::graph_generation();
-        if gen_now != last_painted_gen {
-            paint_boot_ui();
+        let graph_dirty = gen_now != last_painted_gen;
+        if graph_dirty || frame_counter % REPAINT_TICKS == 0 {
+            paint_3d_view(frame_counter);
             last_painted_gen = gen_now;
         }
         x86_64::instructions::hlt();
     }
 }
 
-// ─── Phase I.3.2 — boot UI painter ──────────────────────────────────
+// ─── Phase I.3.8 — software 3D scene painter ────────────────────────
 //
-// Draws the kernel-node tile grid into the mode-13h framebuffer.  No
-// text yet (font glyphs are I.3.x); each node is a colour-coded tile
-// classified by `RuntimeNodeType`, framed with a thin DimWhite outline
-// so identical-classified tiles still read as discrete entities.  A
-// bottom progress bar shows live-vs-discovered ratio.
+// Renders the kernel graph as a rotating 3D scene in mode 13h:
+// nodes are coloured cubes laid out in a 3D grid, edges are
+// straight lines between cube centres.  Camera auto-orbits the
+// origin; `frame_counter` advances the yaw so the view animates
+// without any input plumbing.
 //
-// Layout (320×200, top-left origin):
-//   y  0..18   header bar     (HeaderBar, painted earlier)
-//   y 18..19   underline      (DimWhite)
-//   y 22..180  tile grid      (8 cols × N rows, 36×16 tiles, 4px pad)
-//   y 184..185 footer divider (DimWhite)
-//   y 185..189 progress bar   (Highlight, width = returned/total)
-//   y 192..199 status row     (reserved for I.3.x text)
+// Pipeline per frame:
+//   1. Clear framebuffer to Background, paint header bar + status text.
+//   2. Compute view_proj from the current camera yaw.
+//   3. For each visible node: project its centre + 8 cube corners.
+//      Front-face-cull each of the 12 triangles via screen-space
+//      signed area sign.  Submit surviving tris to fill_triangle.
+//      Sort cubes by view-space depth so painter's algorithm
+//      produces a correct image without a per-pixel z-buffer.
+//   4. For each edge: project the two endpoint centres, draw a
+//      Bresenham line in the edge-type's colour.
+//
+// 320×200×256 leaves a tight pixel budget; ~30 nodes × 12 tris ≈ 360
+// triangles is comfortably within one PIT tick.
 
-const UI_GRID_TOP: usize = 22;
-const UI_TILE_COLS: usize = 8;
-const UI_TILE_W: usize = 36;
-const UI_TILE_H: usize = 16;
-const UI_TILE_PAD: usize = 4;
-const UI_GRID_LEFT: usize = 8;
-const UI_FOOTER_Y: usize = 184;
-const UI_PROGRESS_Y: usize = 185;
-const UI_PROGRESS_H: usize = 4;
+const SCENE_WIDTH: i32 = k_fb::WIDTH as i32;
+const SCENE_HEIGHT: i32 = k_fb::HEIGHT as i32;
+const HEADER_H: i32 = 14;
+const FOOTER_Y: i32 = 192;
+const MAX_NODES: usize = 64;
+const MAX_EDGES: usize = 128;
 
-fn paint_boot_ui() {
+/// Auto-rotation rate.  At ~100 Hz PIT and REPAINT_TICKS = 2 we get
+/// ~50 fps; 0.04 rad/frame ≈ 115°/sec — fast enough to read as
+/// motion without being dizzying.
+const YAW_PER_FRAME: f32 = 0.04;
+
+fn paint_3d_view(frame: u64) {
     if !k_fb::ready() {
         return;
     }
 
     let snapshot = gos_runtime::snapshot();
-    let mut nodes = [GraphNodeSummary::EMPTY; 64];
-    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
+    let mut nodes = [GraphNodeSummary::EMPTY; MAX_NODES];
+    let (_total_n, returned_n) = gos_runtime::node_page(0, &mut nodes);
+    let mut edges = [GraphEdgeSummary::EMPTY; MAX_EDGES];
+    let (_total_e, returned_e) = gos_runtime::edge_page(0, &mut edges);
 
-    // Header: solid teal band + "GOS · N MOD · M NODES · K EDGES"
-    // The leading dot-glyph is ASCII '.', not unicode middle dot —
-    // BASIC_LEGACY only covers 7-bit ASCII.
-    k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
+    // Camera: orbit around origin at fixed radius + pitch.
+    let yaw = (frame as f32) * YAW_PER_FRAME;
+    let pitch: f32 = 0.45;
+    let radius: f32 = 3.5;
+    let eye = Vec3::new(
+        radius * libm::cosf(pitch) * libm::sinf(yaw),
+        radius * libm::sinf(pitch),
+        radius * libm::cosf(pitch) * libm::cosf(yaw),
+    );
+    let view = Mat4::look_at(eye, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    let aspect = SCENE_WIDTH as f32 / SCENE_HEIGHT as f32;
+    let proj = Mat4::perspective(60.0_f32.to_radians(), aspect, 0.1, 100.0);
+    let view_proj = proj.mul(view);
+
+    // Background + header band + footer band so the body region paints
+    // fresh every frame (no leftover ghosts from the previous tick).
+    k_fb::clear(k_fb::Color::Background);
+    k_fb::fill_rect(0, 0, k_fb::WIDTH, HEADER_H as usize, k_fb::Color::HeaderBar);
+
+    // Project node centres + classify colour.  We need both screen
+    // coordinates (for edges) and view-space depth (for painter's
+    // sort).
+    let mut node_centre_screen = [(0i32, 0i32, false); MAX_NODES];
+    let mut depths: [(usize, f32); MAX_NODES] = [(0, 0.0); MAX_NODES];
+    let mut depth_count = 0usize;
+    for i in 0..returned_n {
+        let centre = node_world_position(i, returned_n);
+        let clip = view_proj.transform_point(centre);
+        if let Some((sx, sy, _z)) = project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32)
+        {
+            node_centre_screen[i] = (sx, sy, true);
+            // depth: distance² from camera.  Larger = farther.
+            let to_cam = centre.sub(eye);
+            depths[depth_count] = (i, to_cam.dot(to_cam));
+            depth_count += 1;
+        }
+    }
+    sort_by_depth_desc(&mut depths[..depth_count]);
+
+    // Cubes (painter's order: far first, near last).
+    for slot in 0..depth_count {
+        let i = depths[slot].0;
+        let centre = node_world_position(i, returned_n);
+        let color = classify_node(&nodes[i]);
+        draw_cube(centre, color, &view_proj);
+    }
+
+    // Edges: lines between projected centres.  Drawn AFTER cubes so
+    // they always read as overlay.  Lines are short enough that we
+    // don't bother with depth-aware drawing.
+    for i in 0..returned_e {
+        let from_idx = find_node_index(&nodes[..returned_n], edges[i].from_vector);
+        let to_idx = find_node_index(&nodes[..returned_n], edges[i].to_vector);
+        let (Some(fi), Some(ti)) = (from_idx, to_idx) else { continue };
+        let (fx, fy, fok) = node_centre_screen[fi];
+        let (tx, ty, tok) = node_centre_screen[ti];
+        if !(fok && tok) {
+            continue;
+        }
+        let color = classify_edge(edges[i].edge_type);
+        k_rast::draw_line(
+            |x, y| {
+                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                    k_fb::put_pixel(x as usize, y as usize, color);
+                }
+            },
+            fx,
+            fy,
+            tx,
+            ty,
+        );
+    }
+
+    // Header text: "GOS  N NOD  M EDG  G<gen>"
     let mut hdr = TextBuf::<40>::new();
     hdr.push_str("GOS  ");
-    hdr.push_dec(returned as u64);
+    hdr.push_dec(returned_n as u64);
     hdr.push_str(" NOD  ");
     hdr.push_dec(snapshot.edge_count as u64);
     hdr.push_str(" EDG  G");
     hdr.push_dec(gos_runtime::graph_generation());
-    k_fb::draw_text(4, 5, hdr.as_str(), k_fb::Color::Foreground);
+    k_fb::draw_text(4, 3, hdr.as_str(), k_fb::Color::Foreground);
 
-    // Reset body region (everything below header) so a previous repaint
-    // doesn't leave ghost text behind.
-    k_fb::fill_rect(
-        0,
-        18,
-        k_fb::WIDTH,
-        k_fb::HEIGHT - 18,
-        k_fb::Color::Background,
-    );
-    k_fb::hline(0, 18, k_fb::WIDTH, k_fb::Color::DimWhite);
-
-    let max_visible = UI_TILE_COLS * ((k_fb::HEIGHT - UI_GRID_TOP - 20) / (UI_TILE_H + UI_TILE_PAD));
-    let shown = returned.min(max_visible);
-    for i in 0..shown {
-        let col = i % UI_TILE_COLS;
-        let row = i / UI_TILE_COLS;
-        let x = UI_GRID_LEFT + col * (UI_TILE_W + UI_TILE_PAD);
-        let y = UI_GRID_TOP + row * (UI_TILE_H + UI_TILE_PAD);
-        let color = classify_node(&nodes[i]);
-        k_fb::fill_rect(x, y, UI_TILE_W, UI_TILE_H, color);
-        k_fb::stroke_rect(x, y, UI_TILE_W, UI_TILE_H, k_fb::Color::DimWhite);
-        // First 4 chars of plugin_name (4 × 8 = 32 px fits inside the
-        // 36-px tile with a 2 px inset both sides).  Drawn over the
-        // tile body in Foreground; the per-tile classify_node fill
-        // colour stays the dominant visual cue when reading at a
-        // glance.
-        let label = first_n_chars(nodes[i].plugin_name, 4);
-        k_fb::draw_text(x + 2, y + 4, label, k_fb::Color::Foreground);
-    }
-
-    // Footer: divider + progress bar + status text.
-    k_fb::hline(0, UI_FOOTER_Y, k_fb::WIDTH, k_fb::Color::DimWhite);
-    let progress_w = if total == 0 {
-        0
-    } else {
-        returned.saturating_mul(k_fb::WIDTH) / total
-    };
-    k_fb::fill_rect(0, UI_PROGRESS_Y, k_fb::WIDTH, UI_PROGRESS_H, k_fb::Color::BarEmpty);
-    if progress_w > 0 {
-        k_fb::fill_rect(0, UI_PROGRESS_Y, progress_w, UI_PROGRESS_H, k_fb::Color::Highlight);
-    }
+    // Footer status.
+    k_fb::hline(0, FOOTER_Y as usize, k_fb::WIDTH, k_fb::Color::DimWhite);
     let mut footer = TextBuf::<40>::new();
-    footer.push_str("READY  RDY=");
+    footer.push_str("3D  RDY=");
     footer.push_dec(snapshot.ready_queue_len as u64);
     footer.push_str(" SIG=");
     footer.push_dec(snapshot.signal_queue_len as u64);
+    footer.push_str("  F");
+    footer.push_dec(frame);
     k_fb::draw_text(4, 192, footer.as_str(), k_fb::Color::Foreground);
 
     k_fb::present();
+}
+
+/// World-space centre for the i-th node.  Lays nodes out on a 3D
+/// grid centred at the origin.  Spread tuned so the scene fits the
+/// frustum at the camera radius used above.
+fn node_world_position(i: usize, total: usize) -> Vec3 {
+    // Use isqrt to pick a square grid in the XZ plane; Y is the
+    // index `mod 3` so we get some vertical separation that reads
+    // as 3D when the camera orbits.
+    let cols = isqrt_ceil(total).max(1);
+    let row = (i / cols) as i32;
+    let col = (i % cols) as i32;
+    let layer = (i % 3) as i32 - 1; // -1, 0, +1
+    let cols_i = cols as i32;
+    let span_x = (col - cols_i / 2) as f32 * 0.45;
+    let span_z = (row - cols_i / 2) as f32 * 0.45;
+    let span_y = layer as f32 * 0.18;
+    Vec3::new(span_x, span_y, span_z)
+}
+
+fn isqrt_ceil(n: usize) -> usize {
+    let mut s: usize = 1;
+    while s * s < n {
+        s += 1;
+    }
+    s
+}
+
+const CUBE_HALF: f32 = 0.10;
+
+/// 8 corners of a unit cube centred at the origin (the per-node
+/// world transform just translates).  Order matches `CUBE_FACES`
+/// below.
+const CUBE_CORNERS_LOCAL: [(f32, f32, f32); 8] = [
+    (-1.0, -1.0, -1.0),
+    (1.0, -1.0, -1.0),
+    (1.0, 1.0, -1.0),
+    (-1.0, 1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+    (1.0, -1.0, 1.0),
+    (1.0, 1.0, 1.0),
+    (-1.0, 1.0, 1.0),
+];
+
+/// 12 triangles, 2 per face, CCW winding when viewed from outside.
+const CUBE_TRIS: [[usize; 3]; 12] = [
+    // -z face
+    [0, 1, 2], [0, 2, 3],
+    // +z face
+    [4, 6, 5], [4, 7, 6],
+    // -y face
+    [0, 4, 5], [0, 5, 1],
+    // +y face
+    [3, 2, 6], [3, 6, 7],
+    // -x face
+    [0, 3, 7], [0, 7, 4],
+    // +x face
+    [1, 5, 6], [1, 6, 2],
+];
+
+fn draw_cube(centre: Vec3, color: k_fb::Color, view_proj: &Mat4) {
+    // Project all 8 corners.
+    let mut screen = [(0i32, 0i32, true); 8];
+    for j in 0..8 {
+        let l = CUBE_CORNERS_LOCAL[j];
+        let world = Vec3::new(
+            centre.x + l.0 * CUBE_HALF,
+            centre.y + l.1 * CUBE_HALF,
+            centre.z + l.2 * CUBE_HALF,
+        );
+        let clip = view_proj.transform_point(world);
+        match project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32) {
+            Some((sx, sy, _)) => screen[j] = (sx, sy, true),
+            None => screen[j] = (0, 0, false),
+        }
+    }
+
+    for tri in &CUBE_TRIS {
+        let (x0, y0, ok0) = screen[tri[0]];
+        let (x1, y1, ok1) = screen[tri[1]];
+        let (x2, y2, ok2) = screen[tri[2]];
+        if !(ok0 && ok1 && ok2) {
+            continue;
+        }
+        // Screen-space back-face cull: positive signed area means the
+        // triangle faces away from the camera (CCW-world -> CW-screen
+        // after Y flip).  Skip those — they're occluded by the front
+        // faces of the same cube.
+        let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+        if area2 <= 0 {
+            continue;
+        }
+        k_rast::fill_triangle(
+            |x, y| {
+                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                    k_fb::put_pixel(x as usize, y as usize, color);
+                }
+            },
+            SCENE_WIDTH,
+            SCENE_HEIGHT,
+            (x0, y0),
+            (x1, y1),
+            (x2, y2),
+        );
+    }
+
+    // Outline the cube silhouette with the dim white frame line so
+    // adjacent same-colour cubes still read as separate.
+    for tri in &CUBE_TRIS {
+        let (x0, y0, ok0) = screen[tri[0]];
+        let (x1, y1, ok1) = screen[tri[1]];
+        let (x2, y2, ok2) = screen[tri[2]];
+        if !(ok0 && ok1 && ok2) {
+            continue;
+        }
+        let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+        if area2 <= 0 {
+            continue;
+        }
+        let put = |x: i32, y: i32| {
+            if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                k_fb::put_pixel(x as usize, y as usize, k_fb::Color::DimWhite);
+            }
+        };
+        k_rast::draw_line(put, x0, y0, x1, y1);
+        k_rast::draw_line(put, x1, y1, x2, y2);
+        k_rast::draw_line(put, x2, y2, x0, y0);
+    }
+}
+
+fn find_node_index(
+    nodes: &[GraphNodeSummary],
+    vector: VectorAddress,
+) -> Option<usize> {
+    nodes.iter().position(|n| n.vector == vector)
+}
+
+fn classify_edge(kind: gos_protocol::RuntimeEdgeType) -> k_fb::Color {
+    use gos_protocol::RuntimeEdgeType;
+    match kind {
+        RuntimeEdgeType::Mount => k_fb::Color::NodeDriver,
+        RuntimeEdgeType::Use => k_fb::Color::NodeService,
+        RuntimeEdgeType::Link => k_fb::Color::Highlight,
+        RuntimeEdgeType::Call | RuntimeEdgeType::Spawn | RuntimeEdgeType::Signal => {
+            k_fb::Color::NodeApp
+        }
+        _ => k_fb::Color::DimWhite,
+    }
 }
 
 /// Tiny no_std string builder used by the framebuffer UI to format
@@ -283,17 +479,6 @@ impl<const N: usize> TextBuf<N> {
         // (which is UTF-8) or an ASCII digit, so the prefix is valid
         // UTF-8.
         unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
-    }
-}
-
-/// Return the first `n` characters of `s`.  Byte-truncates (the input
-/// is always a kernel-supplied `&'static str` with ASCII-only
-/// plugin/node names, so byte-boundary == char-boundary).
-fn first_n_chars(s: &str, n: usize) -> &str {
-    if s.len() <= n {
-        s
-    } else {
-        &s[..n]
     }
 }
 

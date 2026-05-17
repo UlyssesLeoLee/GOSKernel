@@ -38,6 +38,8 @@ k-chat = { path = "../k-chat" }
 k-nim  = { path = "../k-nim" }
 k-fat32 = { path = "../k-fat32" }
 k-fb = { path = "../k-fb" }
+k-rast = { path = "../k-rast" }
+libm = "0.2"
 # Phase I.3.0 — `vga_320x200` puts the VGA card into mode 13h (320×200
 # × 256-color palette, linear framebuffer at physical 0xA0000) before
 # kernel_main runs.  k-fb wraps the resulting framebuffer; the boot

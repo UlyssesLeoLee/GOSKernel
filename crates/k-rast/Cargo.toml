@@ -1,0 +1,9 @@
+[package]
+name = "k-rast"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+# no_std-friendly math primitives — sin / cos / tan / sqrt.  Pulls
+# zero transitive deps; tiny.
+libm = "0.2"
