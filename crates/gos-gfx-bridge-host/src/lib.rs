@@ -88,6 +88,32 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
     ],
 };
 
+/// Phase I.1.2 — per-resource-kind live-count quota.  `None` means
+/// unlimited (Gen-1 default; production deploy will always pin a
+/// limit).  When `k-vk-host` wires the kernel side, these will be
+/// shadows of supervisor `RESOURCE_GFX_*` quotas, kept here so the
+/// host-side backend can reject early without a kernel round-trip.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GfxQuota {
+    pub max_surfaces: Option<u32>,
+    pub max_pipelines: Option<u32>,
+    pub max_buffers: Option<u32>,
+    pub max_textures: Option<u32>,
+}
+
+impl GfxQuota {
+    /// Convenience for tests / fixtures: hard cap of N for every
+    /// resource kind.
+    pub const fn all(n: u32) -> Self {
+        Self {
+            max_surfaces: Some(n),
+            max_pipelines: Some(n),
+            max_buffers: Some(n),
+            max_textures: Some(n),
+        }
+    }
+}
+
 /// Host-side renderer for Gen-1.  Owns a `wgpu::Device` + `Queue` and
 /// per-resource hash maps keyed by the gos-gfx-protocol handle types.
 /// Synchronous `submit` API — wgpu's command encoder is recorded
@@ -104,6 +130,10 @@ pub struct WgpuBackend {
     /// * 4).  Tests use this for pixel assertions; later slices wire
     /// PNG diff against `test-frames/*.png`.
     last_readback: Option<Vec<u8>>,
+    /// Phase I.1.2 — quota guards.  Checked at the top of each
+    /// `create_*` method; over-quota allocations return
+    /// `GfxError::QuotaExceeded` and don't touch wgpu state.
+    quota: GfxQuota,
 }
 
 impl WgpuBackend {
@@ -139,11 +169,37 @@ impl WgpuBackend {
             next_handle: 1, // 0 is the protocol's invalid sentinel
             frame: None,
             last_readback: None,
+            quota: GfxQuota::default(),
         })
     }
 
     pub fn last_readback(&self) -> Option<&[u8]> {
         self.last_readback.as_deref()
+    }
+
+    /// Phase I.1.2 — install / replace the per-resource quota table.
+    /// Existing in-flight resources are NOT retroactively rejected;
+    /// the cap applies to subsequent `create_*` calls only.
+    pub fn set_quota(&mut self, quota: GfxQuota) {
+        self.quota = quota;
+    }
+
+    pub fn quota(&self) -> GfxQuota {
+        self.quota
+    }
+
+    /// Live counts of each resource kind currently held by the
+    /// backend.  Tests use this to assert that destroy_* actually
+    /// freed the slot.
+    pub fn live_counts(&self) -> (usize, usize, usize, usize) {
+        (self.surfaces.len(), self.pipelines.len(), self.buffers.len(), 0)
+    }
+
+    fn check_quota(live: usize, cap: Option<u32>) -> Result<(), GfxError> {
+        match cap {
+            Some(n) if live as u32 >= n => Err(GfxError::QuotaExceeded),
+            _ => Ok(()),
+        }
     }
 
     fn alloc_handle(&mut self) -> u32 {
@@ -153,6 +209,7 @@ impl WgpuBackend {
     }
 
     pub fn create_surface(&mut self, width: u32, height: u32) -> Result<SurfaceId, GfxError> {
+        Self::check_quota(self.surfaces.len(), self.quota.max_surfaces)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gos-gfx-surface"),
             size: wgpu::Extent3d {
@@ -182,6 +239,7 @@ impl WgpuBackend {
     }
 
     pub fn create_pipeline(&mut self, wgsl: &[u8]) -> Result<PipelineId, GfxError> {
+        Self::check_quota(self.pipelines.len(), self.quota.max_pipelines)?;
         let source = core::str::from_utf8(wgsl).map_err(|_| GfxError::DecodeFailed)?;
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gos-gfx-pipeline-shader"),
@@ -228,6 +286,7 @@ impl WgpuBackend {
     }
 
     pub fn upload_buffer(&mut self, kind: BufferKind, bytes: &[u8]) -> Result<BufferId, GfxError> {
+        Self::check_quota(self.buffers.len(), self.quota.max_buffers)?;
         let usage = match kind {
             BufferKind::Vertex => wgpu::BufferUsages::VERTEX,
             BufferKind::Index => wgpu::BufferUsages::INDEX,
@@ -244,6 +303,35 @@ impl WgpuBackend {
         let id = self.alloc_handle();
         self.buffers.insert(id, buffer);
         Ok(BufferId(id))
+    }
+
+    /// Phase I.1.2 — drop a surface and free its wgpu texture + view.
+    /// Calls against an already-destroyed (or never-allocated) handle
+    /// return `InvalidHandle` rather than silently no-oping; this is
+    /// the contract `k-scene` relies on when verifying its own resource
+    /// bookkeeping.
+    pub fn destroy_surface(&mut self, id: SurfaceId) -> Result<(), GfxError> {
+        if let Some(frame) = self.frame.as_ref() {
+            if frame.surface == id {
+                // Tearing down the surface mid-frame would leave the
+                // command encoder pointing at a deallocated view.
+                // Cypher gate / Phase I scene-graph layer should never
+                // attempt this; surface InvalidState if it does.
+                return Err(GfxError::InvalidState);
+            }
+        }
+        self.surfaces.remove(&id.0).ok_or(GfxError::InvalidHandle)?;
+        Ok(())
+    }
+
+    pub fn destroy_pipeline(&mut self, id: PipelineId) -> Result<(), GfxError> {
+        self.pipelines.remove(&id.0).ok_or(GfxError::InvalidHandle)?;
+        Ok(())
+    }
+
+    pub fn destroy_buffer(&mut self, id: BufferId) -> Result<(), GfxError> {
+        self.buffers.remove(&id.0).ok_or(GfxError::InvalidHandle)?;
+        Ok(())
     }
 
     fn begin_frame(&mut self, surface: SurfaceId) -> Result<(), GfxError> {
@@ -440,19 +528,26 @@ impl RenderBackend for WgpuBackend {
                     .ok_or(GfxError::InvalidState)?;
                 self.end_frame(index_count, instance_count)
             }
+            RenderCommand::DestroySurface(id) => self.destroy_surface(*id),
+            RenderCommand::DestroyPipeline(id) => self.destroy_pipeline(*id),
+            RenderCommand::DestroyBuffer(id) => self.destroy_buffer(*id),
+            RenderCommand::DestroyTexture(_) => {
+                // Texture upload/destroy is part of I.2.x; today the
+                // backend never holds textures, so any DestroyTexture
+                // refers to a handle that never existed.
+                Err(GfxError::InvalidHandle)
+            }
             RenderCommand::CreateSurface { .. }
             | RenderCommand::CreatePipeline { .. }
             | RenderCommand::UploadBuffer { .. }
-            | RenderCommand::UploadTexture { .. }
-            | RenderCommand::DestroySurface(_)
-            | RenderCommand::DestroyPipeline(_)
-            | RenderCommand::DestroyBuffer(_)
-            | RenderCommand::DestroyTexture(_) => {
-                // Resource lifecycle goes through the direct
+            | RenderCommand::UploadTexture { .. } => {
+                // Create / Upload still go through the direct
                 // `create_surface` / `create_pipeline` / `upload_buffer`
-                // methods today (they return the handle synchronously).
-                // The submit() path is reserved for verbs whose
-                // response is implicit (frame-loop verbs).
+                // methods (they return the handle synchronously).  The
+                // submit() path is reserved for verbs whose response
+                // is implicit — frame-loop verbs and Destroy*.  The
+                // wire-encoded create/response dance lands once the
+                // carrier is wired.
                 Err(GfxError::InvalidState)
             }
         }
