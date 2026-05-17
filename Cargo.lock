@@ -52,6 +52,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gos-gfx-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "gos-hal"
 version = "0.2.0"
 dependencies = [
@@ -136,6 +140,7 @@ version = "0.2.0"
 name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "spin",
 ]
@@ -152,6 +157,7 @@ dependencies = [
 name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "gos-runtime",
  "gos-sign",
@@ -216,8 +222,10 @@ dependencies = [
 name = "k-cypher"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "gos-runtime",
+ "gos-supervisor",
 ]
 
 [[package]]

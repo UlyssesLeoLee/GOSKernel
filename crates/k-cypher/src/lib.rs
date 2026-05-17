@@ -395,6 +395,38 @@ fn extract_node_vector(query: &str) -> Option<VectorAddress> {
     VectorAddress::parse(literal)
 }
 
+/// Extract the `n`-th single- or double-quoted literal from the query
+/// (0-indexed).  Used by the H.1.x.3 mutation forms which carry two
+/// node vectors positionally (`CREATE MOUNT 'V_from' -> 'V_to'`)
+/// rather than via the `vector:'...'` key-value syntax of the read
+/// side.  Returns the inner text without quotes.
+fn extract_quoted_at(query: &str, n: usize) -> Option<&str> {
+    let bytes = query.as_bytes();
+    let mut idx = 0usize;
+    let mut hit = 0usize;
+    while idx < bytes.len() {
+        let q = bytes[idx];
+        if q == b'\'' || q == b'"' {
+            let start = idx + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != q {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                return None;
+            }
+            if hit == n {
+                return query.get(start..end);
+            }
+            hit += 1;
+            idx = end + 1;
+        } else {
+            idx += 1;
+        }
+    }
+    None
+}
+
 fn extract_edge_vector(query: &str) -> Option<EdgeVector> {
     let literal = extract_quoted_value_ci(query, "vector")?.trim();
     let trimmed = if starts_with_ci(literal, "e:") {
@@ -453,12 +485,189 @@ fn print_help(sink: &ConsoleSink) {
     print_str(sink, "  MATCH (n {vector:'6.1.0.0'}) CALL activate(n)\n");
     print_str(sink, "  MATCH (n {vector:'6.1.0.0'}) CALL spawn(n)\n");
     print_str(sink, "  MATCH ()-[e {vector:'e:6.1.0.0'}]-() CALL route(e)\n");
+    set_color(sink, 11, 0);
+    print_str(sink, "cypher> mutations (audited via supervisor gate)\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  CREATE MOUNT 'V_from' -> 'V_to'\n");
+    print_str(sink, "  CREATE USE 'V_from' -> 'V_to'\n");
+    print_str(sink, "  DELETE EDGE 'e:V'\n");
+    print_str(sink, "  REBIND USE 'V_from' -> 'V_to'\n");
+}
+
+/// Source attribution stamped into every audited mutation envelope
+/// originating from the cypher shell.  16 bytes ASCII, null-padded.
+const CYPHER_AUDIT_SOURCE: [u8; 16] = *b"K_CYPHER\0\0\0\0\0\0\0\0";
+
+fn try_run_mutation(sink: &ConsoleSink, state: &mut CypherState, query: &str) -> bool {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+
+    let is_create_mount = contains_ci(query, "create mount");
+    let is_create_use = contains_ci(query, "create use");
+    let is_delete_edge = contains_ci(query, "delete edge");
+    let is_rebind_use = contains_ci(query, "rebind use");
+
+    if !(is_create_mount || is_create_use || is_delete_edge || is_rebind_use) {
+        return false;
+    }
+
+    state.executions = state.executions.saturating_add(1);
+
+    if is_delete_edge {
+        let Some(literal) = extract_quoted_at(query, 0) else {
+            mutation_fail(sink, state, "delete edge requires 'e:V' literal");
+            return true;
+        };
+        let trimmed = if starts_with_ci(literal, "e:") {
+            literal.get(2..).unwrap_or(literal)
+        } else {
+            literal
+        };
+        let Some(edge_vector) = EdgeVector::parse(trimmed) else {
+            mutation_fail(sink, state, "delete edge: bad edge vector");
+            return true;
+        };
+        let Some(edge_id) = gos_runtime::edge_id_for_vector(edge_vector) else {
+            mutation_fail(sink, state, "delete edge: not found");
+            return true;
+        };
+        report_mutation_result(
+            sink,
+            state,
+            "delete edge",
+            gos_supervisor::apply_cypher_mutation(
+                CypherMutation::RemoveEdge { edge_id },
+                CYPHER_AUDIT_SOURCE,
+            ),
+        );
+        return true;
+    }
+
+    // CREATE / REBIND all take two positional node-vector literals.
+    let Some(lit_from) = extract_quoted_at(query, 0) else {
+        mutation_fail(sink, state, "mutation requires 'V_from' literal");
+        return true;
+    };
+    let Some(lit_to) = extract_quoted_at(query, 1) else {
+        mutation_fail(sink, state, "mutation requires 'V_to' literal");
+        return true;
+    };
+    let Some(vec_from) = VectorAddress::parse(lit_from) else {
+        mutation_fail(sink, state, "bad V_from");
+        return true;
+    };
+    let Some(vec_to) = VectorAddress::parse(lit_to) else {
+        mutation_fail(sink, state, "bad V_to");
+        return true;
+    };
+    let Some(id_from) = gos_runtime::node_id_for_vec(vec_from) else {
+        mutation_fail(sink, state, "V_from node not found");
+        return true;
+    };
+    let Some(id_to) = gos_runtime::node_id_for_vec(vec_to) else {
+        mutation_fail(sink, state, "V_to node not found");
+        return true;
+    };
+
+    let (label, mutation) = if is_create_mount {
+        (
+            "create mount",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Mount,
+            },
+        )
+    } else if is_create_use {
+        (
+            "create use",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Use,
+            },
+        )
+    } else {
+        debug_assert!(is_rebind_use);
+        (
+            "rebind use",
+            CypherMutation::RebindUse {
+                from: id_from,
+                new_target: id_to,
+            },
+        )
+    };
+
+    report_mutation_result(
+        sink,
+        state,
+        label,
+        gos_supervisor::apply_cypher_mutation(mutation, CYPHER_AUDIT_SOURCE),
+    );
+    true
+}
+
+fn mutation_fail(sink: &ConsoleSink, state: &mut CypherState, msg: &str) {
+    set_color(sink, 12, 0);
+    print_str(sink, "cypher> ");
+    print_str(sink, msg);
+    print_byte(sink, b'\n');
+    set_color(sink, 7, 0);
+    state.faults = state.faults.saturating_add(1);
+}
+
+fn report_mutation_result(
+    sink: &ConsoleSink,
+    state: &mut CypherState,
+    label: &str,
+    result: Result<gos_protocol::EdgeId, gos_cypher_mut::MutationError>,
+) {
+    match result {
+        Ok(_edge_id) => {
+            set_color(sink, 10, 0);
+            print_str(sink, "cypher> ");
+            print_str(sink, label);
+            print_str(sink, " ok\n");
+            set_color(sink, 7, 0);
+        }
+        Err(err) => {
+            set_color(sink, 12, 0);
+            print_str(sink, "cypher> ");
+            print_str(sink, label);
+            print_str(sink, " rejected: ");
+            print_mutation_error(sink, err);
+            print_byte(sink, b'\n');
+            set_color(sink, 7, 0);
+            state.faults = state.faults.saturating_add(1);
+        }
+    }
+}
+
+fn print_mutation_error(sink: &ConsoleSink, err: gos_cypher_mut::MutationError) {
+    use gos_cypher_mut::MutationError;
+    match err {
+        MutationError::UnsupportedMutation => print_str(sink, "unsupported"),
+        MutationError::UnknownEndpoint(_) => print_str(sink, "unknown endpoint"),
+        MutationError::InvalidMountTarget(_) => print_str(sink, "invalid mount target"),
+        MutationError::DispatcherRejected(tag) => {
+            print_str(sink, "gate(");
+            print_num(sink, tag as usize);
+            print_str(sink, ")");
+        }
+    }
 }
 
 fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
     let query = query.trim();
     if query.is_empty() {
         print_help(sink);
+        return;
+    }
+
+    // Phase H.1.x.3 — Cypher writes (CREATE / DELETE / REBIND) are
+    // dispatched first.  Anything that matches the mutation prefix
+    // never reaches the MATCH gate below.  The audited envelope path
+    // (supervisor gate) handles attribution + telemetry.
+    if try_run_mutation(sink, state, query) {
         return;
     }
 

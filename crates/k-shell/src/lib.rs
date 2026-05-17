@@ -2159,6 +2159,64 @@ fn render_graph_footer(sink: &ConsoleSink, state: &ShellState, label: &str) {
     focus_footer_input(sink, state);
 }
 
+/// Phase H.1.x.4 — render the audited-mutation ring captured by the
+/// supervisor `apply_cypher_mutation` gate.  Newest entries are shown
+/// first; an empty ring renders a "no mutations yet" notice.
+fn render_mutations_overview(sink: &ConsoleSink, state: &mut ShellState) {
+    use gos_protocol::ControlPlaneEnvelope;
+    const ROWS: usize = 6;
+    let mut buf: [Option<ControlPlaneEnvelope>; ROWS] = [None; ROWS];
+    let returned = gos_runtime::snapshot_audit_ring(&mut buf);
+    let lifetime = gos_runtime::audit_ring_total();
+
+    state.graph_mode = GRAPH_MODE_INFO;
+    state.graph_offset = 0;
+    state.graph_total = returned;
+    clear_command_area(sink);
+
+    let mut title = LineBuf::<72>::new();
+    title.push_str("AUDITED MUTATIONS  ring=");
+    title.push_dec(returned as u64);
+    title.push_str("  lifetime=");
+    title.push_dec(lifetime);
+    draw_linebuf(sink, GRAPH_VIEW_TITLE_ROW, 4, 11, 0, &title);
+
+    if returned == 0 {
+        draw_text(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW,
+            4,
+            8,
+            0,
+            "no mutations yet",
+        );
+        draw_text(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW + 1,
+            4,
+            8,
+            0,
+            "try: CREATE MOUNT 'V_from' -> 'V_to' (in cypher)",
+        );
+        render_graph_footer(sink, state, "audit ring");
+        return;
+    }
+
+    for row in 0..ROWS {
+        fill_band(sink, GRAPH_VIEW_FIRST_ITEM_ROW + row, 0, SCREEN_WIDTH, 0, 0);
+        let Some(env) = buf[row] else { break };
+        let mut line = LineBuf::<72>::new();
+        line.push_str("src=");
+        line.push_fixed_ascii(&env.subject);
+        line.push_str("  arg0=");
+        line.push_hex(env.arg0);
+        line.push_str("  arg1=");
+        line.push_hex(env.arg1);
+        draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + row, 4, 7, 0, &line);
+    }
+    render_graph_footer(sink, state, "audit ring");
+}
+
 fn render_graph_notice(sink: &ConsoleSink, state: &mut ShellState, title: &str, line1: &str, line2: &str, fg: u8) {
     state.graph_mode = GRAPH_MODE_INFO;
     state.graph_offset = 0;
@@ -2884,6 +2942,12 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         } else {
             render_graph_prev_page(sink, state);
         }
+        return true;
+    }
+    if cmd == "show mutations" {
+        begin_graph_command(sink, state);
+        push_graph_nav_state(state);
+        render_mutations_overview(sink, state);
         return true;
     }
     if cmd == "node" {

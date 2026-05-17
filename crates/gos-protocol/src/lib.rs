@@ -798,6 +798,13 @@ pub enum ControlPlaneMessageKind {
     SnapshotChunk = 0x06,
     Fault = 0x07,
     Metric = 0x08,
+    /// Phase H.1.x — emitted by the supervisor `apply_cypher_mutation`
+    /// gate after a Cypher write has been validated, applied, and
+    /// attributed to a source (shell / k-ai / external admin).  Distinct
+    /// from EdgeUpsert (which `gos_runtime::register_edge` emits at the
+    /// raw table level) so audit subscribers can filter for *intentional*
+    /// graph rewrites without re-seeing every internal upsert.
+    CypherMutationAudited = 0x09,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

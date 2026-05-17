@@ -6,6 +6,7 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
 gos-sign = { path = "../../crates/gos-sign" }

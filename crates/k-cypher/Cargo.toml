@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-runtime = { path = "../gos-runtime" }
+gos-supervisor = { path = "../gos-supervisor" }
+gos-cypher-mut = { path = "../gos-cypher-mut" }

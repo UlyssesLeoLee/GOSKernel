@@ -15,6 +15,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
+name = "gos-cypher-mut"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-protocol"
 version = "0.2.0"
 
@@ -22,6 +30,7 @@ version = "0.2.0"
 name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "spin",
 ]
@@ -38,6 +47,7 @@ dependencies = [
 name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "gos-runtime",
  "gos-sign",
@@ -49,6 +59,7 @@ dependencies = [
 name = "gos-supervisor-harness"
 version = "0.1.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "gos-runtime",
  "gos-sign",

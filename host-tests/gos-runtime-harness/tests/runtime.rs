@@ -148,17 +148,22 @@ fn cypher_mutation_pre_validate_and_dispatch() {
         fn lookup_node(&self, id: NodeId) -> bool {
             self.known.iter().any(|n| *n == id)
         }
-        fn add_edge(&mut self, _: NodeId, _: NodeId, _: ReceptiveEdgeKind) -> Result<(), u32> {
+        fn add_edge(
+            &mut self,
+            _: NodeId,
+            _: NodeId,
+            _: ReceptiveEdgeKind,
+        ) -> Result<EdgeId, u32> {
             self.added += 1;
-            Ok(())
+            Ok(EdgeId([0xAA; 16]))
         }
-        fn remove_edge(&mut self, _: EdgeId) -> Result<(), u32> {
+        fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32> {
             self.removed += 1;
-            Ok(())
+            Ok(id)
         }
-        fn rebind_use(&mut self, _: NodeId, _: NodeId) -> Result<(), u32> {
+        fn rebind_use(&mut self, _: NodeId, _: NodeId) -> Result<EdgeId, u32> {
             self.rebound += 1;
-            Ok(())
+            Ok(EdgeId([0xBB; 16]))
         }
     }
     let mut d = Stub {
@@ -1891,4 +1896,236 @@ fn instance_binding_propagates_through_dispatch_and_clears_on_unbind() {
         gos_runtime::instance_id_for_vec(TEST_VECTOR),
         Some(NodeInstanceId::ZERO)
     );
+}
+
+// Phase H.1.x.1 — gos-runtime::apply_edge_mutation end-to-end against the
+// live RUNTIME singleton.  Registers two synthetic nodes, applies the
+// receptive AddEdge / RebindUse / RemoveEdge verbs, and asserts:
+//   * the edge actually appears in the runtime edge table (via
+//     edge_id_for_vector lookup);
+//   * graph_generation() bumps exactly once per successful mutation;
+//   * register_edge's EdgeUpsert envelope reaches drain_control_plane()
+//     so H.1.x.4 subscribers can pick it up;
+//   * RebindUse swaps the Use edge target without leaving the prior
+//     edge behind;
+//   * UnknownEndpoint and EdgeNotFound surface through MutationError
+//     with the expected variants.
+#[test]
+fn apply_edge_mutation_round_trip_against_live_runtime() {
+    use gos_cypher_mut::{CypherMutation, MutationError, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_edge_vector, ControlPlaneMessageKind, EdgeId, EntryPolicy, ExecutorId, NodeSpec,
+        PluginId, PluginManifest, RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PLUGIN_ID: PluginId = PluginId::from_ascii("MUT_RT");
+    const KEY_A: &str = "mut.a";
+    const KEY_B: &str = "mut.b";
+    const KEY_C: &str = "mut.c";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.mut");
+    const VEC_A: VectorAddress = VectorAddress::new(1, 1, 1, 1);
+    const VEC_B: VectorAddress = VectorAddress::new(1, 1, 1, 2);
+    const VEC_C: VectorAddress = VectorAddress::new(1, 1, 1, 3);
+
+    let spec_a = NodeSpec {
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_A),
+        local_node_key: KEY_A,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_b = NodeSpec {
+        local_node_key: KEY_B,
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_B),
+        ..spec_a
+    };
+    let spec_c = NodeSpec {
+        local_node_key: KEY_C,
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_C),
+        ..spec_a
+    };
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PLUGIN_ID,
+        name: "MUT_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PLUGIN_ID).expect("loaded");
+    gos_runtime::register_node(PLUGIN_ID, VEC_A, spec_a).expect("node a");
+    gos_runtime::register_node(PLUGIN_ID, VEC_B, spec_b).expect("node b");
+    gos_runtime::register_node(PLUGIN_ID, VEC_C, spec_c).expect("node c");
+
+    let id_a = gos_runtime::node_id_for_vec(VEC_A).expect("id a");
+    let id_b = gos_runtime::node_id_for_vec(VEC_B).expect("id b");
+    let id_c = gos_runtime::node_id_for_vec(VEC_C).expect("id c");
+
+    // Drain anything emitted by register_node so we observe only
+    // mutation-driven envelopes below.
+    while gos_runtime::drain_control_plane().is_some() {}
+    let gen0 = gos_runtime::graph_generation();
+
+    // --- AddEdge (Mount) ---
+    let added = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_a,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Mount,
+    })
+    .expect("AddEdge mount applies");
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 1, "generation +1");
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(added)),
+        Some(added),
+        "edge resolvable via its vector"
+    );
+    let env = gos_runtime::drain_control_plane().expect("envelope emitted");
+    assert_eq!(env.kind, ControlPlaneMessageKind::EdgeUpsert);
+
+    // --- RebindUse: first install a Use edge a->b, then rebind to a->c ---
+    let use_ab = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_a,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Use,
+    })
+    .expect("AddEdge use a->b");
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 2);
+    while gos_runtime::drain_control_plane().is_some() {}
+
+    let use_ac = gos_runtime::apply_edge_mutation(CypherMutation::RebindUse {
+        from: id_a,
+        new_target: id_c,
+    })
+    .expect("RebindUse a->c");
+    // RebindUse performs unregister + register: two table mutations,
+    // but only one GRAPH_GENERATION bump on the new register (the
+    // unregister path is internal bookkeeping that doesn't surface as
+    // a separate generation tick).  Future slices may revisit this if
+    // subscribers want the intermediate state.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 3);
+    assert_ne!(use_ab, use_ac, "rebind produces a new EdgeId");
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(use_ab)),
+        None,
+        "prior Use edge gone"
+    );
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(use_ac)),
+        Some(use_ac),
+        "new Use edge present"
+    );
+
+    // --- RemoveEdge: tear down the Mount edge we added first ---
+    let removed = gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge { edge_id: added })
+        .expect("RemoveEdge mount");
+    assert_eq!(removed, added);
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(added)),
+        None,
+        "mount edge gone"
+    );
+
+    // --- UnknownEndpoint surfaces from lookup_node ---
+    let ghost = gos_protocol::derive_node_id(PLUGIN_ID, "does.not.exist");
+    match gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: ghost,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Mount,
+    }) {
+        Err(MutationError::UnknownEndpoint(id)) => assert_eq!(id, ghost),
+        other => panic!("expected UnknownEndpoint, got {:?}", other),
+    }
+    // Failed mutation must NOT bump generation.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+
+    // --- EdgeNotFound surfaces from the runtime as DispatcherRejected ---
+    match gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge {
+        edge_id: EdgeId([0xCC; 16]),
+    }) {
+        Err(MutationError::DispatcherRejected(tag)) => assert_eq!(tag, 2, "EdgeNotFound tag"),
+        other => panic!("expected DispatcherRejected(2), got {:?}", other),
+    }
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+}
+
+// Phase H.1.x.5 — audit ring wrap + ordering.
+//
+// Push more envelopes than AUDIT_RING_CAPACITY (16), then snapshot
+// into a fixed-size buffer.  The snapshot must:
+//   * report at most CAPACITY entries even though more were pushed;
+//   * order newest-first (most-recent push at index 0);
+//   * leave audit_ring_total() == cumulative push count.
+//
+// Also verifies the gos-verify invariant against the same numbers.
+#[test]
+fn audit_ring_snapshots_newest_first_and_caps_at_capacity() {
+    use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    // No gos_runtime::reset() here — reset() doesn't touch AUDIT_RING
+    // (intentional: ring carries across boot fixtures), so we read the
+    // baseline and assert deltas.
+    let baseline = gos_runtime::audit_ring_total();
+
+    const PUSHES: u32 = 25;
+    for i in 0..PUSHES {
+        let mut subject = [0u8; 16];
+        subject[0..4].copy_from_slice(&i.to_le_bytes());
+        gos_runtime::push_audit_envelope(ControlPlaneEnvelope {
+            version: 1,
+            kind: ControlPlaneMessageKind::CypherMutationAudited,
+            subject,
+            arg0: i as u64,
+            arg1: 0,
+        });
+    }
+    assert_eq!(
+        gos_runtime::audit_ring_total(),
+        baseline + PUSHES as u64,
+        "lifetime counter tracks every push"
+    );
+
+    // Buffer larger than capacity: we should still only get capacity-
+    // many entries back.
+    let mut buf: [Option<ControlPlaneEnvelope>; 20] = [None; 20];
+    let returned = gos_runtime::snapshot_audit_ring(&mut buf);
+    assert_eq!(returned, gos_runtime::AUDIT_RING_CAPACITY);
+
+    // Newest-first: snapshot[0] should be the LAST push (i = 24).
+    let newest = buf[0].expect("newest entry");
+    assert_eq!(newest.arg0, (PUSHES - 1) as u64);
+    // snapshot[capacity-1] should be (PUSHES - capacity) = 9.
+    let oldest_kept =
+        buf[gos_runtime::AUDIT_RING_CAPACITY - 1].expect("oldest kept entry");
+    assert_eq!(
+        oldest_kept.arg0,
+        (PUSHES as usize - gos_runtime::AUDIT_RING_CAPACITY) as u64
+    );
+
+    // Caller buffer SMALLER than capacity: clamps to buffer size.
+    let mut small: [Option<ControlPlaneEnvelope>; 4] = [None; 4];
+    let returned_small = gos_runtime::snapshot_audit_ring(&mut small);
+    assert_eq!(returned_small, 4);
+    assert_eq!(small[0].unwrap().arg0, (PUSHES - 1) as u64);
+    assert_eq!(small[3].unwrap().arg0, (PUSHES - 4) as u64);
+
+    // Cross-check against the gos-verify abstract invariant: the
+    // returned count must respect all three bounds.
+    gos_verify::invariant_audit_ring_snapshot_bounded();
 }

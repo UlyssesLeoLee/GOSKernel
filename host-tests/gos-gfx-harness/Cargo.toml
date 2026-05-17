@@ -1,0 +1,9 @@
+[package]
+name = "gos-gfx-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-gfx-protocol = { path = "../../crates/gos-gfx-protocol" }

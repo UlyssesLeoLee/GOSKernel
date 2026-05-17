@@ -723,3 +723,281 @@ fn restart_cap_demotes_to_degraded_and_blocks_new_claims_and_charges() {
         charge_result
     );
 }
+
+// Phase H.1.x.2 — supervisor `apply_cypher_mutation` gate happy path.
+//
+// Sets up a synthetic plugin with two nodes in the runtime, applies an
+// AddEdge through the supervisor gate, and verifies:
+//   * the returned EdgeId is the same one runtime would have produced;
+//   * a CypherMutationAudited envelope reaches the runtime queue with
+//     the expected source attribution (low-level EdgeUpsert from
+//     register_edge is also emitted but we filter for the audited one);
+//   * unknown owner → MUTATION_GATE_OWNER_UNKNOWN tag (no runtime touch);
+//   * RemoveEdge with a non-existent edge_id → MUTATION_GATE_EDGE_NOT_FOUND
+//     (gated before reaching the runtime).
+//
+// The Faulted-module rejection path is covered separately by H.1.x.5
+// once we wire up a synthetic ModuleId-aligned plugin via the supervisor
+// install path.
+#[test]
+fn apply_cypher_mutation_happy_path_emits_audited_envelope() {
+    use gos_cypher_mut::{CypherMutation, MutationError, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_node_id, ControlPlaneMessageKind, EdgeId, EntryPolicy, ExecutorId, NodeSpec,
+        PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+    use gos_supervisor::{
+        apply_cypher_mutation, MUTATION_GATE_EDGE_NOT_FOUND, MUTATION_GATE_OWNER_UNKNOWN,
+    };
+
+    let _guard = test_guard();
+    reset_state();
+    gos_supervisor::bootstrap(0);
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("GATE_RT");
+    const KA: &str = "gate.a";
+    const KB: &str = "gate.b";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.gate");
+    const VA: VectorAddress = VectorAddress::new(2, 2, 2, 1);
+    const VB: VectorAddress = VectorAddress::new(2, 2, 2, 2);
+
+    let spec_a = NodeSpec {
+        node_id: derive_node_id(PID, KA),
+        local_node_key: KA,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_b = NodeSpec {
+        local_node_key: KB,
+        node_id: derive_node_id(PID, KB),
+        ..spec_a
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "GATE_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VA, spec_a).expect("register a");
+    gos_runtime::register_node(PID, VB, spec_b).expect("register b");
+
+    let id_a = gos_runtime::node_id_for_vec(VA).expect("id_a");
+    let id_b = gos_runtime::node_id_for_vec(VB).expect("id_b");
+
+    // Drain anything left over from setup.  Audit ring snapshots are
+    // read-only (no consume), so we record the baseline `wrote` total
+    // and assert it grows by exactly one per successful gate apply.
+    while gos_runtime::drain_control_plane().is_some() {}
+    let audit_baseline = gos_runtime::audit_ring_total();
+
+    // --- Happy path ---
+    let source = *b"K_HARNESS\0\0\0\0\0\0\0";
+    let edge_id = apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: id_a,
+            to: id_b,
+            edge_kind: ReceptiveEdgeKind::Mount,
+        },
+        source,
+    )
+    .expect("AddEdge through gate");
+
+    // Both an EdgeUpsert (from register_edge) and a CypherMutationAudited
+    // (from the gate) must reach the queue.  Filter for the audited one.
+    let mut audited_seen = false;
+    while let Some(env) = gos_runtime::drain_control_plane() {
+        if env.kind == ControlPlaneMessageKind::CypherMutationAudited {
+            assert_eq!(env.subject, source, "envelope carries source");
+            audited_seen = true;
+        }
+    }
+    assert!(
+        audited_seen,
+        "CypherMutationAudited envelope must reach the runtime queue"
+    );
+
+    // Audit ring: exactly one new entry, newest-first, source matches.
+    assert_eq!(
+        gos_runtime::audit_ring_total(),
+        audit_baseline + 1,
+        "audit ring increments on successful gate apply"
+    );
+    use gos_protocol::ControlPlaneEnvelope;
+    let mut ring: [Option<ControlPlaneEnvelope>; 4] = [None; 4];
+    let n = gos_runtime::snapshot_audit_ring(&mut ring);
+    assert!(n >= 1);
+    let head = ring[0].expect("newest audit entry");
+    assert_eq!(head.kind, ControlPlaneMessageKind::CypherMutationAudited);
+    assert_eq!(head.subject, source);
+
+    // Re-derivation: the same (from, to, kind) must round-trip to the
+    // same EdgeId so RemoveEdge can address it later.
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(gos_protocol::derive_edge_vector(edge_id)),
+        Some(edge_id)
+    );
+
+    // --- Unknown owner: gate short-circuits before runtime ---
+    let ghost = derive_node_id(PID, "ghost");
+    match apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: ghost,
+            to: id_b,
+            edge_kind: ReceptiveEdgeKind::Mount,
+        },
+        source,
+    ) {
+        Err(MutationError::DispatcherRejected(tag)) => {
+            assert_eq!(tag, MUTATION_GATE_OWNER_UNKNOWN, "owner unknown tag")
+        }
+        other => panic!("expected DispatcherRejected(OWNER_UNKNOWN), got {:?}", other),
+    }
+
+    // --- Unknown edge for RemoveEdge: gate short-circuits ---
+    match apply_cypher_mutation(
+        CypherMutation::RemoveEdge {
+            edge_id: EdgeId([0xEE; 16]),
+        },
+        source,
+    ) {
+        Err(MutationError::DispatcherRejected(tag)) => {
+            assert_eq!(tag, MUTATION_GATE_EDGE_NOT_FOUND, "edge-not-found tag")
+        }
+        other => panic!("expected DispatcherRejected(EDGE_NOT_FOUND), got {:?}", other),
+    }
+}
+
+// Phase H.1.x.5 — degraded-module gate rejection.
+//
+// Install PROVIDER under the supervisor, register a matching runtime
+// plugin so node lookups resolve to the same ModuleId, and exhaust the
+// restart budget so PROVIDER ends up in Faulted state.  Then attempt
+// a Cypher mutation that targets a node owned by PROVIDER and assert
+// the supervisor gate returns MUTATION_GATE_DEGRADED *without*
+// touching the runtime edge table.
+#[test]
+fn apply_cypher_mutation_rejected_on_degraded_module() {
+    use gos_cypher_mut::{CypherMutation, MutationError, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecutorId, NodeSpec, PluginId, PluginManifest,
+        RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+    use gos_supervisor::{apply_cypher_mutation, MUTATION_GATE_DEGRADED};
+
+    let _guard = test_guard();
+    reset_state();
+    gos_supervisor::bootstrap(0);
+    gos_runtime::reset();
+
+    // Install PROVIDER and realize boot modules so it has an instance.
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    // Register a runtime plugin with the SAME id as PROVIDER's
+    // ModuleId.  This is what lets the supervisor gate trace
+    // node → plugin → module → degraded state.
+    let pid = PluginId(PROVIDER.module_id.0);
+    const KEY: &str = "gate.degraded";
+    const VEC: VectorAddress = VectorAddress::new(9, 9, 9, 1);
+    const KEY2: &str = "gate.degraded.b";
+    const VEC2: VectorAddress = VectorAddress::new(9, 9, 9, 2);
+
+    let spec_a = NodeSpec {
+        node_id: derive_node_id(pid, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: ExecutorId::from_ascii("native.deg"),
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_b = NodeSpec {
+        local_node_key: KEY2,
+        node_id: derive_node_id(pid, KEY2),
+        ..spec_a
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: pid,
+        name: "DEG_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(pid).expect("loaded");
+    gos_runtime::register_node(pid, VEC, spec_a).expect("register a");
+    gos_runtime::register_node(pid, VEC2, spec_b).expect("register b");
+
+    let id_a = gos_runtime::node_id_for_vec(VEC).expect("id_a");
+    let id_b = gos_runtime::node_id_for_vec(VEC2).expect("id_b");
+
+    // Drive PROVIDER to degraded.  PROVIDER has RestartAlways policy,
+    // so faulting MAX+1 times flips it into Faulted state.
+    for _ in 1..=MAX_RESTARTS_BEFORE_DEGRADE {
+        fault_module(provider).expect("fault under cap");
+    }
+    fault_module(provider).expect("fault at cap");
+
+    // Now the gate must reject any mutation whose `from` resolves to a
+    // node owned by PROVIDER's plugin id.
+    let edges_before = {
+        let mut buf = [gos_protocol::GraphEdgeSummary::EMPTY; 4];
+        let (total, _) = gos_runtime::edge_page(0, &mut buf);
+        total
+    };
+    let audit_before = gos_runtime::audit_ring_total();
+
+    match apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: id_a,
+            to: id_b,
+            edge_kind: ReceptiveEdgeKind::Mount,
+        },
+        *b"K_HARNESS\0\0\0\0\0\0\0",
+    ) {
+        Err(MutationError::DispatcherRejected(tag)) => assert_eq!(
+            tag, MUTATION_GATE_DEGRADED,
+            "expected MUTATION_GATE_DEGRADED, got {}",
+            tag
+        ),
+        other => panic!("expected DispatcherRejected(DEGRADED), got {:?}", other),
+    }
+
+    // No side effects: edge table untouched, audit ring untouched.
+    let edges_after = {
+        let mut buf = [gos_protocol::GraphEdgeSummary::EMPTY; 4];
+        let (total, _) = gos_runtime::edge_page(0, &mut buf);
+        total
+    };
+    assert_eq!(edges_after, edges_before, "edge table must be unchanged");
+    assert_eq!(
+        gos_runtime::audit_ring_total(),
+        audit_before,
+        "audit ring must be unchanged on gate rejection"
+    );
+}

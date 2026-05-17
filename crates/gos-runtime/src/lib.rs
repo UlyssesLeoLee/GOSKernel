@@ -3,8 +3,11 @@
 use core::mem::transmute;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use gos_cypher_mut::{
+    CypherMutation, MutationDispatcher, MutationError, ReceptiveEdgeKind,
+};
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
+    derive_edge_id, packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
     ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
     EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
     GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
@@ -14,6 +17,72 @@ use gos_protocol::{
     CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
+
+/// Monotonic counter incremented on every successful edge mutation
+/// applied through `apply_edge_mutation` / `RuntimeDispatcher`.
+/// Subscribers (k-scene, shell `show mutations`, journal flush) use it
+/// as a cheap "did anything change?" probe without locking RUNTIME.
+static GRAPH_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Stable key used when deriving the EdgeId for a Cypher-introduced
+/// Mount edge.  Keeping it constant means the same (from, to) pair
+/// always maps to the same EdgeId — which makes RemoveEdge addressable
+/// without the caller remembering the id we returned.
+const MUTATION_MOUNT_EDGE_KEY: &str = "cypher.mount";
+const MUTATION_USE_EDGE_KEY: &str = "cypher.use";
+
+/// Capacity of the audited-mutation ring.  Shell `show mutations`
+/// renders the contents in reverse insertion order; older entries are
+/// overwritten silently when the supervisor gate continues to fire.
+pub const AUDIT_RING_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy)]
+struct AuditRing {
+    slots: [Option<ControlPlaneEnvelope>; AUDIT_RING_CAPACITY],
+    /// Next write position; ring is full once `wrote >= capacity`.
+    head: usize,
+    /// Total push count (saturating).  Lets shell render "since boot:
+    /// N" without scanning the ring.
+    wrote: u64,
+}
+
+impl AuditRing {
+    const fn new() -> Self {
+        Self {
+            slots: [None; AUDIT_RING_CAPACITY],
+            head: 0,
+            wrote: 0,
+        }
+    }
+
+    fn push(&mut self, env: ControlPlaneEnvelope) {
+        self.slots[self.head] = Some(env);
+        self.head = (self.head + 1) % AUDIT_RING_CAPACITY;
+        self.wrote = self.wrote.saturating_add(1);
+    }
+
+    /// Copy entries into `out` in newest-first order, up to `out.len()`.
+    /// Returns the number actually written.
+    fn snapshot(&self, out: &mut [Option<ControlPlaneEnvelope>]) -> usize {
+        let mut count = 0;
+        for offset in 1..=AUDIT_RING_CAPACITY {
+            if count >= out.len() {
+                break;
+            }
+            let idx = (self.head + AUDIT_RING_CAPACITY - offset) % AUDIT_RING_CAPACITY;
+            match self.slots[idx] {
+                Some(env) => {
+                    out[count] = Some(env);
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        count
+    }
+}
+
+static AUDIT_RING: Mutex<AuditRing> = Mutex::new(AuditRing::new());
 
 pub const MAX_PLUGINS: usize = 32;
 pub const MAX_NODES: usize = 128;
@@ -989,6 +1058,19 @@ impl GraphRuntime {
             .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
     }
 
+    pub fn plugin_id_for_node(&self, node_id: NodeId) -> Option<PluginId> {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
+    }
+
+    /// Phase H.1.x.2 — resolve the `from_node` of an edge.  Supervisor
+    /// gate uses this to find the owning plugin for a RemoveEdge target
+    /// without forcing the caller to remember it.
+    pub fn edge_from_node(&self, edge_id: EdgeId) -> Option<NodeId> {
+        self.edge_slot(edge_id)
+            .and_then(|slot| self.edges[slot].map(|record| record.spec.from_node))
+    }
+
     fn next_work_item(&mut self) -> Option<WorkItem> {
         if let Some(node_id) = self.ready_queue.pop() {
             return Some(WorkItem::Ready(node_id));
@@ -1038,6 +1120,15 @@ impl GraphRuntime {
         self.control_plane.pop()
     }
 
+    /// Phase H.1.x.2 — append a pre-built envelope verbatim.  The
+    /// supervisor's `apply_cypher_mutation` gate uses this to surface
+    /// `CypherMutationAudited` envelopes carrying source attribution
+    /// without round-tripping through the per-field `emit_control_plane`
+    /// helper.  Quietly drops on overflow (same backpressure semantics).
+    pub fn push_envelope(&mut self, envelope: ControlPlaneEnvelope) {
+        let _ = self.control_plane.push_control_plane(envelope);
+    }
+
     pub fn emit_hello(&mut self) {
         self.emit_control_plane(ControlPlaneMessageKind::Hello, [0; 16], self.snapshot().node_count as u64, self.tick);
     }
@@ -1050,6 +1141,10 @@ impl GraphRuntime {
             state: record.lifecycle,
             tick: self.tick,
         })
+    }
+
+    pub fn current_tick(&self) -> u64 {
+        self.tick
     }
 }
 
@@ -1889,12 +1984,48 @@ pub fn drain_control_plane() -> Option<ControlPlaneEnvelope> {
     RUNTIME.lock().drain_control_plane()
 }
 
+pub fn push_envelope(envelope: ControlPlaneEnvelope) {
+    RUNTIME.lock().push_envelope(envelope)
+}
+
+pub fn current_tick() -> u64 {
+    RUNTIME.lock().current_tick()
+}
+
+/// Phase H.1.x.4 — append an audited mutation envelope to the
+/// audit ring.  The supervisor gate calls this AFTER pushing to the
+/// general control-plane queue so subscribers that only care about
+/// audited writes (shell `show mutations`, Phase I `k-scene`) don't
+/// need to filter every Hello/Metric/NodeUpsert.
+pub fn push_audit_envelope(envelope: ControlPlaneEnvelope) {
+    AUDIT_RING.lock().push(envelope);
+}
+
+/// Snapshot the audit ring in newest-first order.  Returns the number
+/// of entries copied into `out` (≤ `out.len()`, ≤ `AUDIT_RING_CAPACITY`).
+pub fn snapshot_audit_ring(out: &mut [Option<ControlPlaneEnvelope>]) -> usize {
+    AUDIT_RING.lock().snapshot(out)
+}
+
+/// Lifetime count of audited mutations pushed since boot (saturating).
+pub fn audit_ring_total() -> u64 {
+    AUDIT_RING.lock().wrote
+}
+
 pub fn last_state_delta(node_id: NodeId) -> Option<StateDelta> {
     RUNTIME.lock().last_state_delta(node_id)
 }
 
 pub fn drain_next_fault() -> Option<VectorAddress> {
     RUNTIME.lock().drain_next_fault()
+}
+
+pub fn plugin_id_for_node(node_id: NodeId) -> Option<PluginId> {
+    RUNTIME.lock().plugin_id_for_node(node_id)
+}
+
+pub fn edge_from_node(edge_id: EdgeId) -> Option<NodeId> {
+    RUNTIME.lock().edge_from_node(edge_id)
 }
 
 pub fn plugin_id_for_vec(vector: VectorAddress) -> Option<PluginId> {
@@ -2000,4 +2131,169 @@ pub fn post_irq_signal(vector: u8, signal: Signal) {
         // interrupt context; the supervisor loop will drain it promptly).
         let _ = RUNTIME.lock().post_signal(target, signal);
     }
+}
+
+// ============================================================================
+// Phase H.1.x.1 — Cypher mutation primitives wired into the runtime edge
+// table.  Exposed as a `MutationDispatcher` impl so the supervisor's
+// H.1.x.2 gate can compose on top (degraded-module check, domain
+// boundary check, audit envelope stamping).  Callers that don't need
+// the supervisor gate (tests, boot-time fixtures) can drive the
+// dispatcher directly via `apply_edge_mutation`.
+//
+// Invariants:
+//   * Every successful mutation bumps `GRAPH_GENERATION` exactly once.
+//   * EdgeId derivation is deterministic on (from, to, edge_kind), so a
+//     subsequent RemoveEdge can re-derive without round-tripping.
+//   * register_edge already emits ControlPlaneMessageKind::EdgeUpsert,
+//     so subscribers see the change without us double-emitting here.
+// ============================================================================
+
+/// Monotonic graph generation; bumped on every successful edge mutation.
+/// `k-scene` polls this in its render loop to decide whether to rebuild
+/// instance buffers.
+pub fn graph_generation() -> u64 {
+    GRAPH_GENERATION.load(Ordering::Acquire)
+}
+
+fn edge_key_for(kind: ReceptiveEdgeKind) -> &'static str {
+    match kind {
+        ReceptiveEdgeKind::Mount => MUTATION_MOUNT_EDGE_KEY,
+        ReceptiveEdgeKind::Use => MUTATION_USE_EDGE_KEY,
+    }
+}
+
+fn runtime_edge_type_for(kind: ReceptiveEdgeKind) -> RuntimeEdgeType {
+    match kind {
+        ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
+        ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
+    }
+}
+
+fn dispatcher_error_for(err: RuntimeError) -> u32 {
+    // Stable u32 tags; supervisor surfaces these via
+    // MutationError::DispatcherRejected without losing the original
+    // classification.
+    match err {
+        RuntimeError::EdgeTableFull => 1,
+        RuntimeError::EdgeNotFound => 2,
+        RuntimeError::NodeArenaFull => 3,
+        RuntimeError::NodeNotFound => 4,
+        RuntimeError::PluginNotFound => 5,
+        RuntimeError::PluginTableFull => 6,
+        RuntimeError::NodeTableFull => 7,
+        RuntimeError::ReadyQueueFull => 8,
+        RuntimeError::SignalQueueFull => 9,
+        RuntimeError::ControlPlaneQueueFull => 10,
+        RuntimeError::LegacyCellMissing => 11,
+        RuntimeError::NativeExecutorMissing => 12,
+        RuntimeError::Fault(_) => 13,
+    }
+}
+
+impl GraphRuntime {
+    fn find_use_edge_from(&self, from: NodeId) -> Option<EdgeId> {
+        self.edges.iter().find_map(|slot| {
+            slot.and_then(|record| {
+                if record.spec.from_node == from
+                    && record.spec.edge_type == RuntimeEdgeType::Use
+                {
+                    Some(record.spec.edge_id)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+}
+
+/// Zero-size dispatcher that drives the live RUNTIME singleton.  Pass
+/// `&mut RuntimeDispatcher` to `gos_cypher_mut::apply_mutation` to
+/// execute mutations against the actual runtime edge table.
+pub struct RuntimeDispatcher;
+
+impl MutationDispatcher for RuntimeDispatcher {
+    fn lookup_node(&self, id: NodeId) -> bool {
+        RUNTIME.lock().node_slot_by_id(id).is_some()
+    }
+
+    fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        kind: ReceptiveEdgeKind,
+    ) -> Result<EdgeId, u32> {
+        let edge_id = derive_edge_id(from, to, edge_key_for(kind));
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: to,
+            edge_type: runtime_edge_type_for(kind),
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        let id = RUNTIME
+            .lock()
+            .register_edge(spec)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+
+    fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32> {
+        RUNTIME
+            .lock()
+            .unregister_edge(id)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32> {
+        // Step 1: tear down any existing Use edge sourced at `from`.
+        // RebindUse is permitted to start from a clean slate, so a
+        // missing prior edge is not an error.
+        let prior = RUNTIME.lock().find_use_edge_from(from);
+        if let Some(old_id) = prior {
+            RUNTIME
+                .lock()
+                .unregister_edge(old_id)
+                .map_err(dispatcher_error_for)?;
+        }
+
+        // Step 2: install the new Use edge.  Reuse add_edge so the
+        // EdgeId derivation + envelope emission paths stay single-
+        // sourced.
+        let edge_id = derive_edge_id(from, new_target, MUTATION_USE_EDGE_KEY);
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: new_target,
+            edge_type: RuntimeEdgeType::Use,
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        let id = RUNTIME
+            .lock()
+            .register_edge(spec)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+}
+
+/// Public convenience entry point: validate + dispatch a `CypherMutation`
+/// against the live runtime edge table.  H.1.x.2 supervisor wraps this
+/// with policy gating; tests and boot fixtures can call directly.
+pub fn apply_edge_mutation(mutation: CypherMutation) -> Result<EdgeId, MutationError> {
+    let mut dispatcher = RuntimeDispatcher;
+    gos_cypher_mut::apply_mutation(&mut dispatcher, mutation)
 }

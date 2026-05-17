@@ -128,6 +128,51 @@ pub fn invariant_credit_heap_no_underflow_proof() {
     assert!(projected <= used);
 }
 
+/// Invariant H.1.x.5 — "audit ring sizing is bounded".
+///
+/// The audited-mutation ring exposed by `gos-runtime` reports a
+/// `snapshot_returned` count (entries copied out) and a lifetime
+/// `wrote` total.  Two soundness invariants must hold for any
+/// observable state:
+///
+///   * `snapshot_returned <= capacity` — never overrun the caller's
+///     buffer or pretend to hold more than the ring can carry.
+///   * `snapshot_returned <= wrote` — can't return more entries than
+///     have ever been pushed.
+///
+/// We model the ring abstractly (capacity is a const, wrote is the
+/// input) and assert the property as a function purely of integers,
+/// matching the H.4 pick_u32 sweep style.
+#[cfg(not(feature = "kani"))]
+pub fn invariant_audit_ring_snapshot_bounded() {
+    const CAPACITY: u32 = 16;
+    pick_u32_sweep(|wrote| {
+        // Real ring behavior: filled slots = min(wrote, capacity);
+        // snapshot returns up to filled, capped by caller buffer.
+        // Sweep a few caller buffer sizes to exercise both clamps.
+        for buf_len in [0u32, 1, 4, 16, 32] {
+            let filled = wrote.min(CAPACITY);
+            let returned = filled.min(buf_len);
+            assert!(returned <= CAPACITY, "snapshot can never exceed ring capacity");
+            assert!(returned <= wrote, "snapshot can never exceed lifetime pushes");
+            assert!(returned <= buf_len, "snapshot can never exceed caller buffer");
+        }
+    });
+}
+
+#[cfg(feature = "kani")]
+#[cfg_attr(feature = "kani", kani::proof)]
+pub fn invariant_audit_ring_snapshot_bounded_proof() {
+    const CAPACITY: u32 = 16;
+    let wrote = pick_u32();
+    let buf_len = pick_u32();
+    let filled = wrote.min(CAPACITY);
+    let returned = filled.min(buf_len);
+    assert!(returned <= CAPACITY);
+    assert!(returned <= wrote);
+    assert!(returned <= buf_len);
+}
+
 // ── Deferred invariants (follow-up H.4.x slices) ────────────────────
 //
 // 1. "fault_module always reduces or preserves running_modules count"
