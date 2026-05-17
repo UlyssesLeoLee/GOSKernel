@@ -1,0 +1,4 @@
+# Dedicated target directory for the wgpu-host build (see
+# .cargo/config.toml for the rationale — kept off the shared kernel
+# target tree to avoid build-std lang-item collisions).
+target-bridge-host/

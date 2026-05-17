@@ -1,0 +1,8 @@
+# Bridge-host runs on the host OS, not bare metal — pin to stable to
+# escape the kernel root's `[unstable] build-std` clause, which cargo's
+# parent-config walk-up otherwise merges into our build and triggers a
+# rustc/LLVM blowup on wgpu's 200-crate graph (OOM + duplicate lang
+# items vs. the prebuilt sysroot).  Stable simply ignores all -Z
+# flags, so the merged build-std becomes a no-op.
+[toolchain]
+channel = "stable"

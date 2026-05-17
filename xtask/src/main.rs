@@ -101,6 +101,25 @@ fn run_test(root: &Path) -> Result<(), u8> {
             .status();
         forward_status(status)?;
     }
+
+    // Phase I.1.1 — gos-gfx-bridge-host runs under the *stable*
+    // toolchain (its rust-toolchain.toml pins stable; see that file
+    // for the rationale).  The kernel-pinned nightly's `build-std`
+    // setting bleeds into wgpu's 200-crate graph and either OOMs
+    // rustc-LLVM or trips E0152 duplicate lang items, so we route
+    // through `rustup run stable cargo test` here instead of
+    // delegating to the default toolchain.  When the kernel nightly
+    // pin advances past the blockers, this branch collapses back
+    // into the loop above.
+    let bridge_host = "crates/gos-gfx-bridge-host";
+    println!("xtask: rustup run stable cargo test in {}", bridge_host);
+    let status = Command::new("rustup")
+        .args(["run", "stable", "cargo", "test"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(root.join(bridge_host))
+        .status();
+    forward_status(status)?;
+
     Ok(())
 }
 

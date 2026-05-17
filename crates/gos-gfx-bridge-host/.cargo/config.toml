@@ -1,0 +1,27 @@
+# Host-only crate: build against the host triple with prebuilt std.
+#
+# Three intentional deviations from the parent kernel workspace's
+# .cargo/config.toml:
+#
+#   1. Override `[build] target` from x86_64-gos-kernel.json to host.
+#
+#   2. Clear `[unstable] build-std`.  The kernel root pins
+#      `build-std = ["core", "compiler_builtins", "alloc"]`; cargo
+#      merges this into our config unless we explicitly overwrite it.
+#      Leaving it on rebuilds std-with-our-flags, which hits rustc
+#      OOM on wgpu's ~200-crate graph AND clashes with the prebuilt
+#      sysroot's libcore (E0152 duplicate lang items).  Setting
+#      `build-std = []` keeps the prebuilt sysroot intact and dodges
+#      both pathologies.
+#
+#   3. Override `target-dir` so wgpu's build artifacts don't leak
+#      into the shared `E:\DevCache\cargo\target\` used by kernel
+#      builds — the two CANNOT coexist in one target dir today
+#      because of (2)'s mixed-std issue.
+[build]
+target = "x86_64-pc-windows-msvc"
+target-dir = "target-bridge-host"
+
+[unstable]
+build-std = []
+build-std-features = []

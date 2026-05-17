@@ -1,0 +1,30 @@
+[package]
+name = "gos-gfx-bridge-host"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace: this crate links wgpu (std-only) so it must NOT
+# be a member of the kernel workspace, which builds against the
+# x86_64-gos-kernel target.  Reachable via path dep from
+# host-tests/gos-gfx-harness; xtask drives test through there.
+[workspace]
+
+# Host-side process (eventually): decodes RenderCommand frames from the
+# kernel-side k-vk-host plugin and dispatches them to wgpu.  Today only
+# the in-process lib API + WgpuBackend impl ship; the binary entry
+# point lands once a real carrier (shared memory / hypervisor escape)
+# is wired.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gos-gfx-protocol = { path = "../gos-gfx-protocol" }
+# Pinned to 0.20.x: wgpu 22 pulls hashbrown 0.15.5 which ICEs the
+# kernel-pinned nightly (2026-04-02; rustc bug, internal compiler
+# error in hir_ty_lowering).  wgpu 0.20 uses hashbrown 0.14, which
+# compiles cleanly on the same nightly.  Revisit once the kernel
+# nightly pin advances past the fix.
+wgpu = "0.20"
+pollster = "0.3"
+bytemuck = { version = "1.16", features = ["derive"] }
