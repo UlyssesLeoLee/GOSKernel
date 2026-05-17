@@ -173,6 +173,7 @@ fn print_runtime_edge_type(sink: &ConsoleSink, edge_type: RuntimeEdgeType) {
         RuntimeEdgeType::Sync => "sync",
         RuntimeEdgeType::Stream => "stream",
         RuntimeEdgeType::Use => "use",
+        RuntimeEdgeType::Link => "link",
     };
     print_str(sink, label);
 }
@@ -490,6 +491,7 @@ fn print_help(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
     print_str(sink, "  CREATE MOUNT 'V_from' -> 'V_to'\n");
     print_str(sink, "  CREATE USE 'V_from' -> 'V_to'\n");
+    print_str(sink, "  LINK 'V_node' -> 'V_iface'\n");
     print_str(sink, "  DELETE EDGE 'e:V'\n");
     print_str(sink, "  REBIND USE 'V_from' -> 'V_to'\n");
 }
@@ -503,10 +505,15 @@ fn try_run_mutation(sink: &ConsoleSink, state: &mut CypherState, query: &str) ->
 
     let is_create_mount = contains_ci(query, "create mount");
     let is_create_use = contains_ci(query, "create use");
+    // LINK is its own top-level verb (no CREATE prefix) so the user-
+    // facing syntax matches the README: `LINK 'V_node' -> 'V_iface'`.
+    // Match on `link ` (with trailing space) so the keyword isn't
+    // confused with any future `*LINK*` literal substring.
+    let is_link = starts_with_ci(query, "link ") || starts_with_ci(query, "link\t");
     let is_delete_edge = contains_ci(query, "delete edge");
     let is_rebind_use = contains_ci(query, "rebind use");
 
-    if !(is_create_mount || is_create_use || is_delete_edge || is_rebind_use) {
+    if !(is_create_mount || is_create_use || is_link || is_delete_edge || is_rebind_use) {
         return false;
     }
 
@@ -584,6 +591,19 @@ fn try_run_mutation(sink: &ConsoleSink, state: &mut CypherState, query: &str) ->
                 from: id_from,
                 to: id_to,
                 edge_kind: ReceptiveEdgeKind::Use,
+            },
+        )
+    } else if is_link {
+        // LINK V_node -> V_iface: establish a declared
+        // correspondence between a runtime node and an
+        // interface-file node.  Same supervisor gate as Mount/Use;
+        // routing semantics are pass-through (see RuntimeEdgeType::Link).
+        (
+            "link",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Link,
             },
         )
     } else {

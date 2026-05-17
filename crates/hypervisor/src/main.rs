@@ -8,7 +8,7 @@ mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
-use gos_protocol::{GraphNodeSummary, RuntimeNodeType, VectorAddress};
+use gos_protocol::{GraphNodeSummary, RuntimeNodeType};
 
 entry_point!(kernel_main);
 
@@ -115,10 +115,21 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
+    // I.3.5 — live repaint loop.  `gos_runtime::graph_generation()`
+    // bumps on every Cypher mutation (H.1.x) and every internal edge
+    // mutation; the framebuffer UI tracks it and re-paints only when
+    // the graph actually changes.  Cheap atomic compare; idle ticks
+    // pay nothing.
+    let mut last_painted_gen = gos_runtime::graph_generation();
     loop {
         x86_64::instructions::interrupts::without_interrupts(|| {
             gos_supervisor::service_system_cycle();
         });
+        let gen_now = gos_runtime::graph_generation();
+        if gen_now != last_painted_gen {
+            paint_boot_ui();
+            last_painted_gen = gen_now;
+        }
         x86_64::instructions::hlt();
     }
 }
@@ -154,9 +165,25 @@ fn paint_boot_ui() {
         return;
     }
 
-    // Reset everything except the header bar (it was painted at
-    // framebuffer init and serves as a "boot in progress" cue
-    // throughout the long supervisor + plugin bring-up).
+    let snapshot = gos_runtime::snapshot();
+    let mut nodes = [GraphNodeSummary::EMPTY; 64];
+    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
+
+    // Header: solid teal band + "GOS · N MOD · M NODES · K EDGES"
+    // The leading dot-glyph is ASCII '.', not unicode middle dot —
+    // BASIC_LEGACY only covers 7-bit ASCII.
+    k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
+    let mut hdr = TextBuf::<40>::new();
+    hdr.push_str("GOS  ");
+    hdr.push_dec(returned as u64);
+    hdr.push_str(" NOD  ");
+    hdr.push_dec(snapshot.edge_count as u64);
+    hdr.push_str(" EDG  G");
+    hdr.push_dec(gos_runtime::graph_generation());
+    k_fb::draw_text(4, 5, hdr.as_str(), k_fb::Color::Foreground);
+
+    // Reset body region (everything below header) so a previous repaint
+    // doesn't leave ghost text behind.
     k_fb::fill_rect(
         0,
         18,
@@ -165,9 +192,6 @@ fn paint_boot_ui() {
         k_fb::Color::Background,
     );
     k_fb::hline(0, 18, k_fb::WIDTH, k_fb::Color::DimWhite);
-
-    let mut nodes = [GraphNodeSummary::EMPTY; 64];
-    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
 
     let max_visible = UI_TILE_COLS * ((k_fb::HEIGHT - UI_GRID_TOP - 20) / (UI_TILE_H + UI_TILE_PAD));
     let shown = returned.min(max_visible);
@@ -179,13 +203,16 @@ fn paint_boot_ui() {
         let color = classify_node(&nodes[i]);
         k_fb::fill_rect(x, y, UI_TILE_W, UI_TILE_H, color);
         k_fb::stroke_rect(x, y, UI_TILE_W, UI_TILE_H, k_fb::Color::DimWhite);
-        // 4-pixel "vector level" accent at the top-left corner —
-        // distinguishes nodes from the same plugin without text.
-        let accent = accent_for(nodes[i].vector);
-        k_fb::fill_rect(x + 2, y + 2, 4, 4, accent);
+        // First 4 chars of plugin_name (4 × 8 = 32 px fits inside the
+        // 36-px tile with a 2 px inset both sides).  Drawn over the
+        // tile body in Foreground; the per-tile classify_node fill
+        // colour stays the dominant visual cue when reading at a
+        // glance.
+        let label = first_n_chars(nodes[i].plugin_name, 4);
+        k_fb::draw_text(x + 2, y + 4, label, k_fb::Color::Foreground);
     }
 
-    // Footer divider + discovered-vs-installed progress.
+    // Footer: divider + progress bar + status text.
     k_fb::hline(0, UI_FOOTER_Y, k_fb::WIDTH, k_fb::Color::DimWhite);
     let progress_w = if total == 0 {
         0
@@ -196,8 +223,78 @@ fn paint_boot_ui() {
     if progress_w > 0 {
         k_fb::fill_rect(0, UI_PROGRESS_Y, progress_w, UI_PROGRESS_H, k_fb::Color::Highlight);
     }
+    let mut footer = TextBuf::<40>::new();
+    footer.push_str("READY  RDY=");
+    footer.push_dec(snapshot.ready_queue_len as u64);
+    footer.push_str(" SIG=");
+    footer.push_dec(snapshot.signal_queue_len as u64);
+    k_fb::draw_text(4, 192, footer.as_str(), k_fb::Color::Foreground);
 
     k_fb::present();
+}
+
+/// Tiny no_std string builder used by the framebuffer UI to format
+/// counts inline.  Stack-only; truncates silently if the caller asks
+/// to push past `N`.  Kept inline here rather than promoting to k-fb
+/// because it's specific to the kernel-side panel layout.
+struct TextBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> TextBuf<N> {
+    fn new() -> Self {
+        Self { buf: [0u8; N], len: 0 }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        for b in s.bytes() {
+            if self.len >= N {
+                break;
+            }
+            self.buf[self.len] = b;
+            self.len += 1;
+        }
+    }
+
+    fn push_dec(&mut self, mut value: u64) {
+        if value == 0 {
+            self.push_str("0");
+            return;
+        }
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        while value > 0 {
+            digits[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            if self.len >= N {
+                break;
+            }
+            self.buf[self.len] = digits[i];
+            self.len += 1;
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: every byte we pushed was either ASCII from a `&str`
+        // (which is UTF-8) or an ASCII digit, so the prefix is valid
+        // UTF-8.
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+/// Return the first `n` characters of `s`.  Byte-truncates (the input
+/// is always a kernel-supplied `&'static str` with ASCII-only
+/// plugin/node names, so byte-boundary == char-boundary).
+fn first_n_chars(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        s
+    } else {
+        &s[..n]
+    }
 }
 
 fn classify_node(node: &GraphNodeSummary) -> k_fb::Color {
@@ -207,22 +304,6 @@ fn classify_node(node: &GraphNodeSummary) -> k_fb::Color {
         RuntimeNodeType::Service => k_fb::Color::NodeService,
         RuntimeNodeType::PluginEntry | RuntimeNodeType::Compute => k_fb::Color::NodeApp,
         _ => k_fb::Color::NodeOther,
-    }
-}
-
-fn accent_for(vector: VectorAddress) -> k_fb::Color {
-    // Cheap XOR hash over the 4 vector levels so sibling nodes from
-    // one plugin still read as distinct in the tile grid.
-    let h = vector.l4 ^ ((vector.l3 & 0xFF) as u8) ^ ((vector.l2 & 0xFF) as u8) ^ ((vector.offset & 0xFF) as u8);
-    match h & 0x7 {
-        0 => k_fb::Color::Highlight,
-        1 => k_fb::Color::NodeKernel,
-        2 => k_fb::Color::NodeService,
-        3 => k_fb::Color::NodeDriver,
-        4 => k_fb::Color::NodeApp,
-        5 => k_fb::Color::NodeOther,
-        6 => k_fb::Color::DimWhite,
-        _ => k_fb::Color::Foreground,
     }
 }
 

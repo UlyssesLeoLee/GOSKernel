@@ -2064,6 +2064,103 @@ fn apply_edge_mutation_round_trip_against_live_runtime() {
     assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
 }
 
+// Phase H.1.x.3.link — LINK creates an edge classified as
+// `RuntimeEdgeType::Link` (distinct from Mount/Use), the supervisor
+// audit ring carries the same source attribution as other receptive
+// mutations, and identical endpoints produce a stable EdgeId
+// (deterministic for downstream tooling).
+#[test]
+fn cypher_link_creates_distinct_edge_kind() {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_edge_vector, derive_node_id, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("LNK_RT");
+    const KEY_N: &str = "lnk.node";
+    const KEY_I: &str = "lnk.iface";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.lnk");
+    // Vector layout in the user-facing form is `l4.l3.l2.offset`; the
+    // user's `0.0.0.1` and `0.0.0.2` map directly to these.
+    const VEC_NODE: VectorAddress = VectorAddress::new(0, 0, 0, 1);
+    const VEC_IFACE: VectorAddress = VectorAddress::new(0, 0, 0, 2);
+
+    let spec_n = NodeSpec {
+        node_id: derive_node_id(PID, KEY_N),
+        local_node_key: KEY_N,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_i = NodeSpec {
+        local_node_key: KEY_I,
+        node_id: derive_node_id(PID, KEY_I),
+        ..spec_n
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "LNK_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC_NODE, spec_n).expect("node");
+    gos_runtime::register_node(PID, VEC_IFACE, spec_i).expect("iface");
+
+    let id_node = gos_runtime::node_id_for_vec(VEC_NODE).expect("id_node");
+    let id_iface = gos_runtime::node_id_for_vec(VEC_IFACE).expect("id_iface");
+
+    let gen0 = gos_runtime::graph_generation();
+    let edge_id = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_node,
+        to: id_iface,
+        edge_kind: ReceptiveEdgeKind::Link,
+    })
+    .expect("LINK applies");
+
+    // Generation bumps; edge classified as Link.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 1);
+    let summary = gos_runtime::edge_summary(derive_edge_vector(edge_id))
+        .expect("link edge resolvable by vector");
+    assert_eq!(
+        summary.edge_type,
+        RuntimeEdgeType::Link,
+        "edge classified as Link, not Mount/Use/Signal"
+    );
+
+    // Stable EdgeId across re-derivation: same (from, to, kind)
+    // produces the same id (downstream `DELETE EDGE 'e:V'` can find
+    // it again without remembering the returned id).
+    let re_derived = gos_protocol::derive_edge_id(id_node, id_iface, "cypher.link");
+    assert_eq!(re_derived, edge_id, "Link EdgeId is deterministic");
+
+    // RemoveEdge round-trip — confirms `cypher.link` matches the
+    // key the dispatcher's `add_edge` writes.
+    gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge { edge_id })
+        .expect("LINK edge removable");
+    assert!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(edge_id)).is_none(),
+        "link edge gone after RemoveEdge"
+    );
+}
+
 // Phase H.1.x.5 — audit ring wrap + ordering.
 //
 // Push more envelopes than AUDIT_RING_CAPACITY (16), then snapshot

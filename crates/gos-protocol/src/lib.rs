@@ -731,6 +731,15 @@ pub enum RuntimeEdgeType {
     Sync = 0x07,
     Stream = 0x08,
     Use = 0x09,
+    /// Phase H.1.x.3.link — user-declared correspondence between a
+    /// graph node and an interface-file node, established via the
+    /// Cypher `LINK` verb.  Semantically distinct from Mount (which
+    /// attaches a node into another's namespace) and Use (which
+    /// selects one of several providers): a Link declares "this
+    /// runtime node IS represented by that interface descriptor."
+    /// No automatic routing happens on Link edges in Gen-1 — they're
+    /// metadata edges traversed by tooling.
+    Link = 0x0A,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

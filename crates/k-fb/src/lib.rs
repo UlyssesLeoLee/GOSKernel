@@ -214,3 +214,89 @@ pub fn stroke_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
 /// Mode 13h writes are immediately visible; this hook exists for
 /// future VBE LFB / virtio-gpu paths that need an explicit flush.
 pub fn present() {}
+
+// ── Phase I.3.4 — 8×8 ASCII glyph rendering ────────────────────────
+//
+// Backed by `font8x8::legacy::BASIC_LEGACY` (public-domain BIOS-PC
+// 8×8 font, 128 ASCII glyphs × 8 bytes).  Each glyph byte encodes
+// one pixel row, LSB = leftmost pixel.
+//
+// `draw_glyph` writes only the SET bits — background pixels are left
+// untouched.  Callers that want a solid background fill it first via
+// `fill_rect`.  This keeps the text path cheap and makes labels on
+// arbitrary tile colours readable without per-glyph alpha logic.
+
+pub const GLYPH_W: usize = 8;
+pub const GLYPH_H: usize = 8;
+
+/// Draw a single ASCII character.  Out-of-range chars become a small
+/// solid block (visible diagnostic for "unsupported codepoint" without
+/// crashing the renderer).
+pub fn draw_glyph(x: usize, y: usize, ch: char, color: Color) {
+    let Some(fb) = fb_ptr() else { return };
+    if x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    let glyph = if (ch as u32) < 128 {
+        &font8x8::legacy::BASIC_LEGACY[ch as usize]
+    } else {
+        // Unsupported codepoint sentinel — draw a 4×4 dot so it stands
+        // out without consuming the whole 8×8 cell.
+        let _guard = LOCK.lock();
+        for py in 0..4 {
+            for px in 0..4 {
+                let sx = x + 2 + px;
+                let sy = y + 2 + py;
+                if sx < WIDTH && sy < HEIGHT {
+                    unsafe {
+                        fb.add(sy * WIDTH + sx).write(color.idx());
+                    }
+                }
+            }
+        }
+        return;
+    };
+    let _guard = LOCK.lock();
+    for row in 0..GLYPH_H {
+        let bits = glyph[row];
+        let py = y + row;
+        if py >= HEIGHT {
+            break;
+        }
+        for col in 0..GLYPH_W {
+            if bits & (1 << col) != 0 {
+                let px = x + col;
+                if px >= WIDTH {
+                    continue;
+                }
+                unsafe {
+                    fb.add(py * WIDTH + px).write(color.idx());
+                }
+            }
+        }
+    }
+}
+
+/// Draw an ASCII string left-to-right starting at (x, y).  Non-ASCII
+/// chars render via the `draw_glyph` sentinel.  No wrapping — callers
+/// that need it pre-truncate.
+pub fn draw_text(x: usize, y: usize, text: &str, color: Color) {
+    let mut cx = x;
+    for ch in text.chars() {
+        if cx + GLYPH_W > WIDTH {
+            break;
+        }
+        draw_glyph(cx, y, ch, color);
+        cx += GLYPH_W;
+    }
+}
+
+/// Convenience: draw text inside a colored background box that's
+/// exactly the right size, with 1 px inset.  Used by the boot UI
+/// header so the title reads cleanly on any palette.
+pub fn draw_text_boxed(x: usize, y: usize, text: &str, fg: Color, bg: Color) {
+    let w = text.chars().count() * GLYPH_W + 4;
+    let h = GLYPH_H + 4;
+    fill_rect(x, y, w.min(WIDTH.saturating_sub(x)), h, bg);
+    draw_text(x + 2, y + 2, text, fg);
+}

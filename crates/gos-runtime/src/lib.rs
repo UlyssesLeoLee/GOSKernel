@@ -30,6 +30,7 @@ static GRAPH_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// without the caller remembering the id we returned.
 const MUTATION_MOUNT_EDGE_KEY: &str = "cypher.mount";
 const MUTATION_USE_EDGE_KEY: &str = "cypher.use";
+const MUTATION_LINK_EDGE_KEY: &str = "cypher.link";
 
 /// Capacity of the audited-mutation ring.  Shell `show mutations`
 /// renders the contents in reverse insertion order; older entries are
@@ -926,7 +927,12 @@ impl GraphRuntime {
             RuntimeEdgeType::Spawn
             | RuntimeEdgeType::Signal
             | RuntimeEdgeType::Mount
-            | RuntimeEdgeType::Use => {
+            | RuntimeEdgeType::Use
+            | RuntimeEdgeType::Link => {
+                // Link is metadata (declared correspondence between a
+                // node and an interface-file node); routing a signal
+                // along one just delivers the payload like Mount/Use
+                // do, no special handling in Gen-1.
                 let target_vec = self.node_vector(edge.to_node)?;
                 self.post_signal(target_vec, signal)?;
             }
@@ -2160,6 +2166,7 @@ fn edge_key_for(kind: ReceptiveEdgeKind) -> &'static str {
     match kind {
         ReceptiveEdgeKind::Mount => MUTATION_MOUNT_EDGE_KEY,
         ReceptiveEdgeKind::Use => MUTATION_USE_EDGE_KEY,
+        ReceptiveEdgeKind::Link => MUTATION_LINK_EDGE_KEY,
     }
 }
 
@@ -2167,6 +2174,7 @@ fn runtime_edge_type_for(kind: ReceptiveEdgeKind) -> RuntimeEdgeType {
     match kind {
         ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
         ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
+        ReceptiveEdgeKind::Link => RuntimeEdgeType::Link,
     }
 }
 

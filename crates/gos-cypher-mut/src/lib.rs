@@ -65,6 +65,10 @@ pub enum CypherMutation {
 pub enum ReceptiveEdgeKind {
     Mount = 1,
     Use = 2,
+    /// Phase H.1.x.3.link — declared correspondence between a runtime
+    /// node and an interface-file node.  See `RuntimeEdgeType::Link`
+    /// for semantics; the Cypher surface is the `LINK` verb.
+    Link = 3,
 }
 
 /// Every accepted mutation produces one of these.  Caller writes it
@@ -124,7 +128,9 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
             edge_kind,
             ..
         } => match edge_kind {
-            ReceptiveEdgeKind::Mount | ReceptiveEdgeKind::Use => Ok(()),
+            ReceptiveEdgeKind::Mount
+            | ReceptiveEdgeKind::Use
+            | ReceptiveEdgeKind::Link => Ok(()),
         },
         CypherMutation::RemoveEdge { .. } | CypherMutation::RebindUse { .. } => Ok(()),
     }

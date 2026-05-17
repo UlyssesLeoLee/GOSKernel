@@ -1084,6 +1084,7 @@ fn edge_type_label(edge_type: gos_protocol::RuntimeEdgeType) -> &'static str {
         gos_protocol::RuntimeEdgeType::Sync => "sync",
         gos_protocol::RuntimeEdgeType::Stream => "stream",
         gos_protocol::RuntimeEdgeType::Use => "use",
+        gos_protocol::RuntimeEdgeType::Link => "link",
     }
 }
 

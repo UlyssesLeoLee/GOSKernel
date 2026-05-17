@@ -7,3 +7,6 @@ edition = "2021"
 gos-hal = { path = "../gos-hal" }
 x86_64 = "0.14"
 spin = "0.9"
+# 1 KiB ASCII bitmap font (public-domain BIOS 8×8) — pulls just the
+# `legacy::BASIC_LEGACY` table, no allocator, no unicode tables.
+font8x8 = { version = "0.3.1", default-features = false }
