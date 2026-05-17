@@ -698,9 +698,19 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // Visual cue if the framebuffer is up: solid crimson with a tiny
     // amber band so a passer-by in QEMU can tell the kernel halted
     // even without serial visibility.
+    //
+    // Disable interrupts first, then bypass `k-fb`'s mutex via the
+    // `force_*` no-lock variants: a panic mid-`paint_3d_view` would
+    // otherwise spin-deadlock on the held `LOCK` and the crimson
+    // screen would never paint.  See `k_fb::force_clear` safety
+    // comment for the contract — the only caller that satisfies it
+    // is this panic_handler.
     if k_fb::ready() {
-        k_fb::clear(k_fb::Color::Error);
-        k_fb::fill_rect(0, 0, k_fb::WIDTH, 8, k_fb::Color::Highlight);
+        unsafe {
+            x86_64::instructions::interrupts::disable();
+            k_fb::force_clear(k_fb::Color::Error);
+            k_fb::force_fill_rect(0, 0, k_fb::WIDTH, 8, k_fb::Color::Highlight);
+        }
     }
     loop {
         x86_64::instructions::hlt();

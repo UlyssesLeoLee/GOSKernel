@@ -8,6 +8,68 @@
 
 ---
 
+## ⚠️ 实施现状（2026-05-17 之后的实际走向）
+
+本文档原文是 Gen-1 host-bridged Vulkan 的规划稿。**真实落地走了两条并行线**，请对照阅读，不要把原文档当作"已发生"的事实。
+
+### 线 A — host 端 wgpu 可视化（I.0 → I.2.2 实际完成）
+
+- **后端选择改为 wgpu，不是 `ash`/Vulkan**。原因：开发-期更友好的跨后端、单一 crate 解决所有平台；后续如有需要可换回 `ash`。
+- ✅ **I.0** `gos-gfx-protocol` crate（无 std）：RenderCommand 枚举 + handle 类型 + Bridge wire format（16-byte 帧头 + CRC32-IEEE） + `RenderBackend` trait
+- ✅ **I.1.0** Wire transport：encode/decode round-trip + 25k 随机字节 fuzz test（gfx-harness）
+- ✅ **I.1.1** `gos-gfx-bridge-host` crate（standalone workspace，stable toolchain）：`WgpuBackend` headless → 单三角形 渲染测试通过
+- ✅ **I.1.2** Quota + handle 回收 + decoder fuzz
+- ✅ **I.2.0** `k-scene` crate：SceneSnapshot → RenderCommand 流，100-node 网格 trace 测试
+- ✅ **I.2.2** `gos-visualize` 可执行二进制（winit + wgpu surface + push-constant view-proj）：宿主机上启动可旋转 3D demo，64 个 cube + 键盘控制相机
+
+**未完成 / 推迟（原文档列为 release blocker，实际未交付）：**
+
+- ❌ **I.4.1–I.4.8 测试基础设施全部 deferred**：
+  - lavapipe golden frame diff（I.4.3）—— **没建**
+  - `gfx-smoke` / `gfx-interact` / `gfx-update-goldens` xtask verb —— **没建**
+  - `gos-gfx-bench` 性能回归 —— **没建**
+  - `gos-gfx-fuzz` cargo fuzz target（only the in-line property test in gfx-harness exists）—— **没建**
+  - manual QA checklist `doc/PHASE_I_QA.md` —— **没建**
+- ❌ **`k-vk-host` 内核插件**：原文档说"内核侧 plugin，把命令推到 hypervisor bridge"——**这个 crate 不存在**。Bridge transport 只在 host 端单元测试里跑过 round-trip
+- ❌ **真实 carrier**（共享内存 ring / hypervisor escape）：原文档说 I.1.0 ABI 之后开始接 carrier ——**未启动**。今天 wgpu host backend 只接受 in-process 调用，没有跨 process / 跨 VM 边界
+- ❌ **I.1.1 golden PNG diff**：原计划 lavapipe + 像素 SSIM，**实际只跑了"≥50 colored pixels"启发式**
+
+### 线 B — 内核内软光栅 UI（I.3.0 → I.3.11 实际完成，原文档完全没规划）
+
+这是一条与原文档**正交的线**，2026-05-17 之后用户要求"3D 界面要在虚拟机里启动"才开的支线。所有内容均在 mode 13h（320×200×256 色板）实现，零 GPU 依赖：
+
+- ✅ **I.3.0** bootloader `vga_320x200` feature 接通，拿到线性 framebuffer
+- ✅ **I.3.1** `k-fb` crate：palette + clear / fill_rect / hline / vline / stroke_rect / put_pixel
+- ✅ **I.3.2** Boot 末尾画 tile-grid kernel 节点列表
+- ✅ **I.3.4** `font8x8` 接入 + `draw_glyph` / `draw_text`
+- ✅ **I.3.5** `graph_generation` tick 触发实时重绘
+- ✅ **I.3.8** `k-rast` crate（无 std + libm）：Mat4 (perspective/look_at/mul) + Bresenham line + 半空间扫描三角形填充 + painter's algorithm 深度排序；`paint_3d_view` 替换 tile-grid 为 3D cube + edge line 场景，自动 yaw 旋转
+- ✅ **I.3.9** F1-F8 键盘 → camera（k-ps2 IRQ post stage 写 k-fb 公共原子）
+- ✅ **I.3.10** Cube 顶部标注 plugin name（projected screen pos + shadow outline）
+- ✅ **I.3.11** Mouse hit-test + 选中环 + 右下角详情面板（plugin/vector/type）
+
+**线 B 的已知债务**（参见审核报告 2026-05-17）：
+
+- `k-fb::LOCK` 是 per-pixel `spin::Mutex`，单 CPU 下隐性，SMP 上线后 cache-line ping-pong。今天已加 `force_clear` / `force_fill_rect` 无锁变体专给 panic_handler 用，避开 panic 死锁
+- `SELECTED_NODE_SLOT: AtomicI8` 上限 127 节点；MAX_NODES = 64 当下安全
+- `k-rast::tests` 内联在 no_std crate 里、workspace target 是 kernel，`cargo xtask test` **不会执行这些 assert**。需要后续把它们搬到 `host-tests/k-rast-harness`
+- `bridge-host` 的 `.cargo/config.toml target-dir` 是相对路径，从 workspace 根跑 `cargo -p` 会选错 target dir；xtask 用 `current_dir` 规避了
+
+### 线 A vs 线 B 的关系
+
+两条线**几乎独立**：
+- 线 A 的产物（wgpu / winit visualizer）跑在宿主机上，**永远不在 QEMU 里**
+- 线 B 的产物（mode 13h + k-rast）跑在 QEMU 内核里，**永远不调用 wgpu**
+- 共用的只有 `k-scene` 的几何 helper（cube vertex 布局），且共享程度有限
+
+**何时合流？** 在原文档的 I.2 (virtio-gpu) 真正落地、内核能跨 hypervisor 边界把 RenderCommand marshall 给 host 的那一天。目前没有切片正在做这件事；这是 Phase I.x 长期方向。
+
+### Reading guide
+
+下面的原文档（"## 设计立场"开始）**仍是 Gen-1 的正式规范**，描述目标态。实际进度按以上"现状"反映。新切片若要按原文档继续推（比如真正补 I.4.3 lavapipe goldens），应同时更新本节 ✅ / ❌ 状态。
+
+---
+
 ## 设计立场
 
 GOS 是图论 OS，UI 也必须是**图原生**的：节点 = 渲染单元，边 = 视觉/数据通路，相机/主题/布局都是图节点。Vulkan 只是底层管线，不应泄漏到 shell/cypher 语义。

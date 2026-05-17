@@ -215,6 +215,49 @@ pub fn stroke_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
 /// future VBE LFB / virtio-gpu paths that need an explicit flush.
 pub fn present() {}
 
+// ── Panic-safe (no-lock) paint variants ────────────────────────────
+//
+// The regular `clear` / `fill_rect` paths acquire `LOCK` per call.
+// That is fine from the idle paint loop, but DANGEROUS from the
+// `#[panic_handler]`: if the panic fired while the idle loop held the
+// mutex (e.g. mid-`paint_3d_view`'s pixel loop), the panic UI would
+// spin-deadlock and the user would see a frozen mid-frame image
+// instead of the diagnostic crimson screen.
+//
+// `force_*` variants bypass the mutex.  Caller is responsible for
+// disabling interrupts first so no IRQ writer can race.  Intended
+// EXCLUSIVELY for the panic-paint path on its way to `hlt` forever.
+//
+// # Safety
+// Two contracts:
+//   1. Interrupts must be disabled when called.
+//   2. The kernel must be on a one-way path to halt (no rendering
+//      loop will resume).  Concurrent live writers ARE a data race
+//      and UB; `force_*` is named loudly to discourage misuse.
+
+pub unsafe fn force_clear(color: Color) {
+    let Some(fb) = fb_ptr() else { return };
+    unsafe {
+        core::ptr::write_bytes(fb, color.idx(), PIXELS);
+    }
+}
+
+pub unsafe fn force_fill_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
+    let Some(fb) = fb_ptr() else { return };
+    if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 {
+        return;
+    }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let row_len = x_end - x;
+    for py in y..y_end {
+        let row_start = unsafe { fb.add(py * WIDTH + x) };
+        unsafe {
+            core::ptr::write_bytes(row_start, color.idx(), row_len);
+        }
+    }
+}
+
 // ── Phase I.3.9 — shared camera input atomics ─────────────────────
 //
 // k-fb hosts this state because it's the only kernel-side crate that
