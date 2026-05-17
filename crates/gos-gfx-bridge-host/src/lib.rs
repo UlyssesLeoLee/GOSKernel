@@ -208,7 +208,17 @@ impl WgpuBackend {
         h
     }
 
-    pub fn create_surface(&mut self, width: u32, height: u32) -> Result<SurfaceId, GfxError> {
+    // Inherent versions of the resource-create methods.  Kept under
+    // `_inherent`-suffixed names so the trait impl above can delegate
+    // without name-collision recursion.  External callers (tests,
+    // future kernel-side k-vk-host) should use the trait methods
+    // (`<WgpuBackend as RenderBackend>::create_surface`) — they
+    // resolve to these bodies.
+    fn create_surface_inherent(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<SurfaceId, GfxError> {
         Self::check_quota(self.surfaces.len(), self.quota.max_surfaces)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gos-gfx-surface"),
@@ -238,7 +248,7 @@ impl WgpuBackend {
         Ok(SurfaceId(id))
     }
 
-    pub fn create_pipeline(&mut self, wgsl: &[u8]) -> Result<PipelineId, GfxError> {
+    fn create_pipeline_inherent(&mut self, wgsl: &[u8]) -> Result<PipelineId, GfxError> {
         Self::check_quota(self.pipelines.len(), self.quota.max_pipelines)?;
         let source = core::str::from_utf8(wgsl).map_err(|_| GfxError::DecodeFailed)?;
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -285,7 +295,11 @@ impl WgpuBackend {
         Ok(PipelineId(id))
     }
 
-    pub fn upload_buffer(&mut self, kind: BufferKind, bytes: &[u8]) -> Result<BufferId, GfxError> {
+    fn upload_buffer_inherent(
+        &mut self,
+        kind: BufferKind,
+        bytes: &[u8],
+    ) -> Result<BufferId, GfxError> {
         Self::check_quota(self.buffers.len(), self.quota.max_buffers)?;
         let usage = match kind {
             BufferKind::Vertex => wgpu::BufferUsages::VERTEX,
@@ -467,6 +481,26 @@ impl WgpuBackend {
 }
 
 impl RenderBackend for WgpuBackend {
+    // Resource creation: bodies live below as inherent methods; we
+    // can't delegate from here via `Self::name` because that would
+    // resolve to the trait method and recurse.  Universal function
+    // call form picks the inherent.
+    fn create_surface(&mut self, width: u32, height: u32) -> Result<SurfaceId, GfxError> {
+        WgpuBackend::create_surface_inherent(self, width, height)
+    }
+
+    fn create_pipeline(&mut self, shader: &[u8]) -> Result<PipelineId, GfxError> {
+        WgpuBackend::create_pipeline_inherent(self, shader)
+    }
+
+    fn upload_buffer(
+        &mut self,
+        kind: BufferKind,
+        bytes: &[u8],
+    ) -> Result<BufferId, GfxError> {
+        WgpuBackend::upload_buffer_inherent(self, kind, bytes)
+    }
+
     fn submit(&mut self, cmd: &RenderCommand<'_>) -> Result<(), GfxError> {
         // Resource creates would normally return their handle via a
         // response channel; for Gen-1 the harness drives the backend

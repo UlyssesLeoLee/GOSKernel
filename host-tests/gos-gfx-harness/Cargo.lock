@@ -7,8 +7,22 @@ name = "gos-gfx-harness"
 version = "0.1.0"
 dependencies = [
  "gos-gfx-protocol",
+ "gos-protocol",
+ "k-scene",
 ]
 
 [[package]]
 name = "gos-gfx-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "gos-protocol"
+version = "0.2.0"
+
+[[package]]
+name = "k-scene"
+version = "0.2.0"
+dependencies = [
+ "gos-gfx-protocol",
+ "gos-protocol",
+]

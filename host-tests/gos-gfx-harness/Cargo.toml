@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 gos-gfx-protocol = { path = "../../crates/gos-gfx-protocol" }
+gos-protocol = { path = "../../crates/gos-protocol" }
+k-scene = { path = "../../crates/k-scene" }

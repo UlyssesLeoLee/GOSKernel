@@ -426,12 +426,45 @@ pub fn read_bridge_frame(input: &[u8]) -> Result<(RenderCommand<'static>, usize)
 /// into `ash` (Vulkan) or `wgpu`; future I.2 virtio-gpu impl wraps the
 /// guest paravirt queue.
 ///
-/// `submit` is called once per decoded frame.  The backend is free to
-/// batch internally (e.g. coalesce many DrawInstanced under one Vulkan
-/// command buffer) — the protocol semantics are "BeginFrame ... draws
-/// ... EndFrame triggers vkQueueSubmit + vkQueuePresent".
+/// `submit` is for frame-loop verbs (BeginFrame / Bind* / DrawInstanced
+/// / EndFrame / Destroy*).  Resource creation verbs need to return a
+/// handle synchronously and so live on their own methods.  Default
+/// impls return `InvalidState` so a partial backend (e.g. a wire-
+/// format unit-test stub that only exercises `submit`) doesn't have
+/// to spell every method.
+///
+/// The backend is free to batch internally — the protocol semantics
+/// are "BeginFrame ... draws ... EndFrame triggers vkQueueSubmit +
+/// vkQueuePresent".
 pub trait RenderBackend {
     fn submit(&mut self, cmd: &RenderCommand<'_>) -> Result<(), GfxError>;
+
+    /// Allocate an off-screen render target of the given size and
+    /// return its opaque handle.  The carrier-bridged equivalent
+    /// posts a CreateSurface frame and awaits the response.
+    fn create_surface(
+        &mut self,
+        _width: u32,
+        _height: u32,
+    ) -> Result<SurfaceId, GfxError> {
+        Err(GfxError::InvalidState)
+    }
+
+    /// Compile a shader blob (WGSL or SPIR-V per the carrier's
+    /// convention) into a render pipeline.
+    fn create_pipeline(&mut self, _shader: &[u8]) -> Result<PipelineId, GfxError> {
+        Err(GfxError::InvalidState)
+    }
+
+    /// Upload an opaque byte buffer of the given kind and return its
+    /// handle.  Caller is responsible for COPY_BUFFER_ALIGNMENT (4 B).
+    fn upload_buffer(
+        &mut self,
+        _kind: BufferKind,
+        _bytes: &[u8],
+    ) -> Result<BufferId, GfxError> {
+        Err(GfxError::InvalidState)
+    }
 }
 
 // ── Compile-time sanity ─────────────────────────────────────────────
