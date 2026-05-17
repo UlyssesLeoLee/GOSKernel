@@ -81,20 +81,47 @@ impl Color {
     }
 }
 
-/// 6-bit RGB triplet (0..63 per channel) as the VGA DAC expects.
+/// Phase I.3.x — cyber/neon palette (6-bit RGB per channel).
+///
+/// Slots 0..11 are the named `Color` variants above.  Slots 16..55
+/// hold five 8-step Lambertian shading ramps used by the 3D scene
+/// painter: each cube face picks `HUE_*_RAMP_BASE + (shade 0..7)`
+/// based on `normal · light` so cubes read as 3D-lit objects rather
+/// than flat sprites.
 const PALETTE: &[(u8, u8, u8)] = &[
-    (5, 6, 9),     // 0 Background   — near-black slate
-    (8, 18, 24),   // 1 HeaderBar    — deep teal
-    (52, 50, 44),  // 2 Foreground   — warm off-white
-    (40, 30, 12),  // 3 NodeKernel   — ochre
-    (18, 36, 22),  // 4 NodeService  — jade
-    (50, 36, 14),  // 5 NodeDriver   — amber
-    (28, 18, 40),  // 6 NodeApp      — violet
-    (40, 24, 28),  // 7 NodeOther    — dusty rose
-    (18, 18, 22),  // 8 BarEmpty     — soft grey
-    (58, 52, 16),  // 9 Highlight    — sun yellow
-    (50, 12, 14),  // 10 Error       — crimson
-    (35, 35, 38),  // 11 DimWhite    — soft frame line
+    (2, 4, 10),    // 0 Background   — deep space blue (near void)
+    (4, 18, 28),   // 1 HeaderBar    — neon-cyan dim band
+    (55, 58, 60),  // 2 Foreground   — warm phosphor white
+    (8, 40, 56),   // 3 NodeKernel   — cyan mid (kept for legacy)
+    (16, 50, 32),  // 4 NodeService  — mint mid
+    (52, 44, 8),   // 5 NodeDriver   — sun-amber mid
+    (48, 12, 40),  // 6 NodeApp      — magenta mid
+    (48, 24, 32),  // 7 NodeOther    — rose mid
+    (8, 12, 18),   // 8 BarEmpty     — abyssal grey
+    (58, 58, 16),  // 9 Highlight    — electric yellow
+    (60, 8, 12),   // 10 Error       — neon red
+    (30, 40, 46),  // 11 DimWhite    — cool dim frame line
+];
+
+/// Base palette indices for each 8-step Lambertian shading ramp.
+/// `(slot 0 = dark shadow, slot 7 = full-lit highlight)`.  Reserved
+/// from index 16 onward so the named Color enum stays at 0..15 even
+/// if we add a few more named entries later.
+pub const HUE_CYAN_BASE: u8 = 16;
+pub const HUE_MAGENTA_BASE: u8 = 24;
+pub const HUE_YELLOW_BASE: u8 = 32;
+pub const HUE_MINT_BASE: u8 = 40;
+pub const HUE_ROSE_BASE: u8 = 48;
+
+/// Peak (full-lit) 6-bit RGB for each hue ramp.  Shading divides
+/// each channel by `8 / (1 + shade)` to roughly approximate a 25%
+/// ambient floor (`shade=0`) up to 100% direct lighting (`shade=7`).
+const HUE_PEAKS: &[(u8, u8, u8)] = &[
+    (16, 48, 60),  // cyan   — hardware / kernel
+    (60, 16, 50),  // magenta — driver
+    (60, 50, 12),  // yellow — service
+    (20, 58, 42),  // mint   — app / plugin entry
+    (58, 28, 38),  // rose   — other / generic
 ];
 
 /// Install the palette + cache the framebuffer base.  Call once from
@@ -109,10 +136,7 @@ const PALETTE: &[(u8, u8, u8)] = &[
 pub unsafe fn init(phys_offset: u64) {
     FB_VIRT.store(phys_offset + FB_PHYS, Ordering::SeqCst);
 
-    // Program the 12 palette slots we own.  Bootloader's mode-13h
-    // setup leaves a default palette in place; we overwrite only
-    // what we use so anything still indexing into the default high
-    // slots (debug code, future themes) keeps working.
+    // Program the 12 named palette slots (0..11).
     let mut idx_port: Port<u8> = Port::new(DAC_INDEX);
     let mut data_port: Port<u8> = Port::new(DAC_DATA);
     for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
@@ -121,6 +145,27 @@ pub unsafe fn init(phys_offset: u64) {
             data_port.write(r);
             data_port.write(g);
             data_port.write(b);
+        }
+    }
+    // Generate the five Lambertian shading ramps starting at slot 16.
+    // Each ramp interpolates from a 12.5%-of-peak shadow (shade 0) up
+    // to the full peak (shade 7) linearly per channel.
+    for (hue_idx, &peak) in HUE_PEAKS.iter().enumerate() {
+        let base_slot = 16 + (hue_idx as u8) * 8;
+        for shade in 0..8u8 {
+            // Brightness scale: (1 + shade) / 8 — i.e. shade 0 = 1/8,
+            // shade 7 = 8/8.  Channel = peak * scale (saturated at 63).
+            let scale = (1u32 + shade as u32).min(8);
+            let scaled = |c: u8| {
+                let v = (c as u32 * scale) / 8;
+                v.min(63) as u8
+            };
+            unsafe {
+                idx_port.write(base_slot + shade);
+                data_port.write(scaled(peak.0));
+                data_port.write(scaled(peak.1));
+                data_port.write(scaled(peak.2));
+            }
         }
     }
 }
@@ -162,6 +207,20 @@ pub fn put_pixel(x: usize, y: usize, color: Color) {
     let _guard = LOCK.lock();
     unsafe {
         fb.add(y * WIDTH + x).write(color.idx());
+    }
+}
+
+/// Set a single pixel by raw 8-bit palette index.  Used by the 3D
+/// scene painter to pick from the Lambertian shading ramps (slots
+/// 16..55) without enumerating each shade in the `Color` enum.
+pub fn put_pixel_raw(x: usize, y: usize, palette_idx: u8) {
+    if x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    let Some(fb) = fb_ptr() else { return };
+    let _guard = LOCK.lock();
+    unsafe {
+        fb.add(y * WIDTH + x).write(palette_idx);
     }
 }
 

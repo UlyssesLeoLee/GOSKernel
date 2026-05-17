@@ -256,8 +256,8 @@ fn paint_3d_view(frame: u64) {
     for slot in 0..depth_count {
         let i = depths[slot].0;
         let centre = node_world_position(i, returned_n);
-        let color = classify_node(&nodes[i]);
-        draw_cube(centre, color, &view_proj);
+        let hue_base = classify_node_hue(&nodes[i]);
+        draw_cube(centre, hue_base, &view_proj);
     }
 
     // Edges: lines between projected centres.  Drawn AFTER cubes so
@@ -390,19 +390,35 @@ fn paint_3d_view(frame: u64) {
         );
     }
 
-    // Selection halo: white ring (one pixel thicker than hover so
-    // both can coexist when hovering the selected node).
+    // Selection halo: sci-fi pulsing two-ring effect.  Outer ring is
+    // fixed at +3 px and dims with the breathing phase; inner ring
+    // pulses radius ±2 px on a ~1.2 Hz cycle (sin of frame counter).
     if selected >= 0 && (selected as usize) < returned_n {
         let i = selected as usize;
         let (sx, sy, ok) = node_centre_screen[i];
         if ok {
-            let r = HIT_HALF_PX + 2;
+            let phase = libm::sinf(frame as f32 * 0.18);
+            let inner_r = HIT_HALF_PX + 2 + (phase * 2.0) as i32;
+            let outer_r = HIT_HALF_PX + 5;
+            // Outer ring (steady neon-cyan rim using brightest mint
+            // shade — reads as "highlight" without colliding with any
+            // node's ramp).
             k_fb::stroke_rect(
-                (sx - r).max(0) as usize,
-                (sy - r).max(0) as usize,
-                ((r * 2) as usize).min(k_fb::WIDTH),
-                ((r * 2) as usize).min(k_fb::HEIGHT),
+                (sx - outer_r).max(0) as usize,
+                (sy - outer_r).max(0) as usize,
+                ((outer_r * 2) as usize).min(k_fb::WIDTH),
+                ((outer_r * 2) as usize).min(k_fb::HEIGHT),
                 k_fb::Color::Foreground,
+            );
+            // Inner pulsing ring in Highlight (electric yellow) —
+            // shifts radius with phase so the eye reads it as
+            // "breathing".
+            k_fb::stroke_rect(
+                (sx - inner_r).max(0) as usize,
+                (sy - inner_r).max(0) as usize,
+                ((inner_r * 2) as usize).min(k_fb::WIDTH),
+                ((inner_r * 2) as usize).min(k_fb::HEIGHT),
+                k_fb::Color::Highlight,
             );
         }
     }
@@ -530,17 +546,31 @@ const CUBE_TRIS: [[usize; 3]; 12] = [
     [1, 5, 6], [1, 6, 2],
 ];
 
-fn draw_cube(centre: Vec3, color: k_fb::Color, view_proj: &Mat4) {
-    // Project all 8 corners.
+/// Sci-fi cube draw: per-face Lambertian shading against a fixed
+/// world-space "key light" pulls each face's shade slot from the
+/// node's 8-step palette ramp, so cubes read as 3D-lit solids
+/// instead of flat sprites.  Outline accent uses the brightest
+/// shade so silhouettes glow.
+fn draw_cube(centre: Vec3, hue_base: u8, view_proj: &Mat4) {
+    // Fixed key light, normalised once at compile-time-ish.  Coming
+    // from upper-right-front; bias toward Y so the top face is the
+    // brightest in the default camera framing.
+    const LIGHT: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
+    const LIGHT_LEN: f32 = 1.0; // pre-normalised in choice of components
+    const AMBIENT: f32 = 0.18;
+
+    // Project all 8 corners.  Also keep world coords so we can build
+    // each triangle's geometric normal for shading.
     let mut screen = [(0i32, 0i32, true); 8];
+    let mut world: [Vec3; 8] = [Vec3::new(0.0, 0.0, 0.0); 8];
     for j in 0..8 {
         let l = CUBE_CORNERS_LOCAL[j];
-        let world = Vec3::new(
+        world[j] = Vec3::new(
             centre.x + l.0 * CUBE_HALF,
             centre.y + l.1 * CUBE_HALF,
             centre.z + l.2 * CUBE_HALF,
         );
-        let clip = view_proj.transform_point(world);
+        let clip = view_proj.transform_point(world[j]);
         match project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32) {
             Some((sx, sy, _)) => screen[j] = (sx, sy, true),
             None => screen[j] = (0, 0, false),
@@ -554,18 +584,30 @@ fn draw_cube(centre: Vec3, color: k_fb::Color, view_proj: &Mat4) {
         if !(ok0 && ok1 && ok2) {
             continue;
         }
-        // Screen-space back-face cull: positive signed area means the
-        // triangle faces away from the camera (CCW-world -> CW-screen
-        // after Y flip).  Skip those — they're occluded by the front
-        // faces of the same cube.
+        // Screen-space back-face cull.
         let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
         if area2 <= 0 {
             continue;
         }
+        // World-space face normal: (v1-v0) × (v2-v0), normalised.
+        let v0 = world[tri[0]];
+        let v1 = world[tri[1]];
+        let v2 = world[tri[2]];
+        let edge_a = v1.sub(v0);
+        let edge_b = v2.sub(v0);
+        let normal = edge_a.cross(edge_b).normalize();
+        // Lambertian intensity: clamp to [AMBIENT, 1.0].  Light is
+        // unit-length so no extra divide.  Bias slightly so totally
+        // back-facing surfaces still have some shadow tone.
+        let n_dot_l = normal.dot(LIGHT) / LIGHT_LEN;
+        let intensity = (n_dot_l * 0.5 + 0.5).max(AMBIENT).min(1.0);
+        // Map to one of 8 shading slots (0 darkest, 7 brightest).
+        let shade = (intensity * 7.999) as u8;
+        let palette_idx = hue_base + shade.min(7);
         k_rast::fill_triangle(
             |x, y| {
                 if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                    k_fb::put_pixel(x as usize, y as usize, color);
+                    k_fb::put_pixel_raw(x as usize, y as usize, palette_idx);
                 }
             },
             SCENE_WIDTH,
@@ -576,8 +618,10 @@ fn draw_cube(centre: Vec3, color: k_fb::Color, view_proj: &Mat4) {
         );
     }
 
-    // Outline the cube silhouette with the dim white frame line so
-    // adjacent same-colour cubes still read as separate.
+    // Outline the cube silhouette using the brightest shade of this
+    // node's ramp — gives every cube a subtle neon rim consistent
+    // with its hue rather than a uniform grey frame.
+    let rim_idx = hue_base + 7;
     for tri in &CUBE_TRIS {
         let (x0, y0, ok0) = screen[tri[0]];
         let (x1, y1, ok1) = screen[tri[1]];
@@ -591,7 +635,7 @@ fn draw_cube(centre: Vec3, color: k_fb::Color, view_proj: &Mat4) {
         }
         let put = |x: i32, y: i32| {
             if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                k_fb::put_pixel(x as usize, y as usize, k_fb::Color::DimWhite);
+                k_fb::put_pixel_raw(x as usize, y as usize, rim_idx);
             }
         };
         k_rast::draw_line(put, x0, y0, x1, y1);
@@ -673,13 +717,16 @@ impl<const N: usize> TextBuf<N> {
     }
 }
 
-fn classify_node(node: &GraphNodeSummary) -> k_fb::Color {
+/// Phase I.3.x sci-fi shading — map node type to the base palette
+/// index of an 8-step Lambertian ramp.  Cube draw code adds the
+/// per-face shade (0..7) to this base to pick the actual lit colour.
+fn classify_node_hue(node: &GraphNodeSummary) -> u8 {
     match node.node_type {
-        RuntimeNodeType::Hardware => k_fb::Color::NodeKernel,
-        RuntimeNodeType::Driver => k_fb::Color::NodeDriver,
-        RuntimeNodeType::Service => k_fb::Color::NodeService,
-        RuntimeNodeType::PluginEntry | RuntimeNodeType::Compute => k_fb::Color::NodeApp,
-        _ => k_fb::Color::NodeOther,
+        RuntimeNodeType::Hardware => k_fb::HUE_CYAN_BASE,
+        RuntimeNodeType::Driver => k_fb::HUE_MAGENTA_BASE,
+        RuntimeNodeType::Service => k_fb::HUE_YELLOW_BASE,
+        RuntimeNodeType::PluginEntry | RuntimeNodeType::Compute => k_fb::HUE_MINT_BASE,
+        _ => k_fb::HUE_ROSE_BASE,
     }
 }
 
