@@ -343,6 +343,153 @@ fn write_quad_indices(node_count: usize, out: &mut [u8]) -> usize {
     off
 }
 
+// ── Phase I.2.2 — 3D cube geometry for the rotatable demo ──────────
+//
+// The 2D quad path above stays the canonical wire output for k-scene
+// (frame loop test + future bare-metal carrier).  The 3D cube path
+// below is a *parallel* helper used by the windowed demo binary,
+// which renders nodes as small cubes in world space so camera
+// rotation has an unmistakable visual effect.  No new render-command
+// machinery is required — the binary uses these helpers as plain
+// byte generators and drives wgpu directly with push-constant
+// view/projection matrices.
+//
+// Vertex layout per cube vertex:   position(vec3) + color(vec3) = 24 B
+// 8 verts per cube; 12 triangles × 3 indices = 36 indices per cube.
+
+/// Bytes per 3D vertex on the wire (vec3 position + vec3 color).
+pub const BYTES_PER_CUBE_VERTEX: usize = 4 * 3 + 4 * 3;
+pub const VERTICES_PER_CUBE: usize = 8;
+pub const INDICES_PER_CUBE: usize = 36;
+
+pub const fn cube_vertex_buffer_bytes_for(n: usize) -> usize {
+    n * VERTICES_PER_CUBE * BYTES_PER_CUBE_VERTEX
+}
+pub const fn cube_index_buffer_bytes_for(n: usize) -> usize {
+    n * INDICES_PER_CUBE * BYTES_PER_INDEX
+}
+
+/// Half-edge of each node cube in *world* units (k-scene world space
+/// is the same NDC-ish span as the 2D layout, just elevated to z=0).
+const NODE_CUBE_HALF: f32 = 0.04;
+
+/// World-space grid layout — same isqrt grid as the 2D path, but
+/// returns 3D centres (z=0 plane).  Later force-directed slices
+/// elevate node z by some property.
+pub fn cube_centre(index: usize, total: usize) -> (f32, f32, f32) {
+    let (cx, cy) = node_centre(index, total);
+    (cx, cy, 0.0)
+}
+
+/// Write `nodes.len()` cube vertex sets into `out`.  Returns bytes
+/// written.  Caller must size `out` per
+/// `cube_vertex_buffer_bytes_for(nodes.len())`.
+pub fn write_cube_vertices(nodes: &[SceneNode], out: &mut [u8]) -> usize {
+    let h = NODE_CUBE_HALF;
+    let mut off = 0;
+    for (i, node) in nodes.iter().enumerate() {
+        let (cx, cy, cz) = cube_centre(i, nodes.len());
+        // 8 corners: (±h, ±h, ±h) around the centre.
+        let corners: [[f32; 3]; 8] = [
+            [cx - h, cy - h, cz - h], // 0: -x -y -z
+            [cx + h, cy - h, cz - h], // 1: +x -y -z
+            [cx + h, cy + h, cz - h], // 2: +x +y -z
+            [cx - h, cy + h, cz - h], // 3: -x +y -z
+            [cx - h, cy - h, cz + h], // 4: -x -y +z
+            [cx + h, cy - h, cz + h], // 5: +x -y +z
+            [cx + h, cy + h, cz + h], // 6: +x +y +z
+            [cx - h, cy + h, cz + h], // 7: -x +y +z
+        ];
+        for v in corners {
+            write_f32_le(&mut out[off..off + 4], v[0]);
+            off += 4;
+            write_f32_le(&mut out[off..off + 4], v[1]);
+            off += 4;
+            write_f32_le(&mut out[off..off + 4], v[2]);
+            off += 4;
+            write_f32_le(&mut out[off..off + 4], node.color[0]);
+            off += 4;
+            write_f32_le(&mut out[off..off + 4], node.color[1]);
+            off += 4;
+            write_f32_le(&mut out[off..off + 4], node.color[2]);
+            off += 4;
+        }
+    }
+    off
+}
+
+/// Write `node_count` cube-index sets into `out` (u16 LE).  12 faces
+/// × 2 triangles × 3 indices = 36 indices per cube, with consistent
+/// counter-clockwise winding for back-face culling (when the camera
+/// looks at the cube exterior).
+pub fn write_cube_indices(node_count: usize, out: &mut [u8]) -> usize {
+    let mut off = 0;
+    // Per-cube template (indices into the 8-corner array above):
+    //   -z face: 0 1 2  0 2 3
+    //   +z face: 4 6 5  4 7 6
+    //   -y face: 0 4 5  0 5 1
+    //   +y face: 3 2 6  3 6 7
+    //   -x face: 0 3 7  0 7 4
+    //   +x face: 1 5 6  1 6 2
+    const TEMPLATE: [u16; 36] = [
+        0, 1, 2, 0, 2, 3, // -z
+        4, 6, 5, 4, 7, 6, // +z
+        0, 4, 5, 0, 5, 1, // -y
+        3, 2, 6, 3, 6, 7, // +y
+        0, 3, 7, 0, 7, 4, // -x
+        1, 5, 6, 1, 6, 2, // +x
+    ];
+    for i in 0..node_count {
+        let base = (i * VERTICES_PER_CUBE) as u16;
+        for &t in &TEMPLATE {
+            let ix = base + t;
+            out[off..off + 2].copy_from_slice(&ix.to_le_bytes());
+            off += 2;
+        }
+    }
+    off
+}
+
+/// WGSL shader for the 3D cube demo.  Push constant carries a 4×4
+/// view*projection matrix; vertex stage multiplies world-space
+/// position by it.  Fragment stage shades flat by the per-vertex
+/// colour with simple z-based brightness so cubes read as solid
+/// objects under rotation.
+pub const NODE_CUBE_WGSL: &str = r#"
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) color:    vec3<f32>,
+};
+struct VsOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0)       color:         vec3<f32>,
+    @location(1)       depth:         f32,
+};
+struct Push {
+    view_proj: mat4x4<f32>,
+};
+var<push_constant> pc: Push;
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    let clip = pc.view_proj * vec4<f32>(in.position, 1.0);
+    out.clip_position = clip;
+    out.color = in.color;
+    // Normalised device depth in [0,1] — used by the fragment stage
+    // for cheap "darker as it recedes" shading without a real light.
+    out.depth = clip.z / clip.w;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Brightness ramp: 0.45 at far plane, 1.0 at near plane.
+    let brightness = mix(0.45, 1.0, clamp(1.0 - in.depth, 0.0, 1.0));
+    return vec4<f32>(in.color * brightness, 1.0);
+}
+"#;
+
 fn write_f32_le(out: &mut [u8], value: f32) {
     out.copy_from_slice(&value.to_le_bytes());
 }

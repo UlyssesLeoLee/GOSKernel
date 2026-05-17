@@ -20,6 +20,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gos-gfx-protocol = { path = "../gos-gfx-protocol" }
+k-scene = { path = "../k-scene" }
 # Pinned to 0.20.x: wgpu 22 pulls hashbrown 0.15.5 which ICEs the
 # kernel-pinned nightly (2026-04-02; rustc bug, internal compiler
 # error in hir_ty_lowering).  wgpu 0.20 uses hashbrown 0.14, which
@@ -28,3 +29,12 @@ gos-gfx-protocol = { path = "../gos-gfx-protocol" }
 wgpu = "0.20"
 pollster = "0.3"
 bytemuck = { version = "1.16", features = ["derive"] }
+# Phase I.2.2 — windowed demo binary only.  Kept on 0.29.x to match
+# wgpu 0.20's documented surface-creation API; winit 0.30 reworked
+# the event loop and would land in a follow-up.
+winit = "0.29"
+gos-protocol = { path = "../gos-protocol" }
+
+[[bin]]
+name = "gos-visualize"
+path = "src/bin/visualize.rs"
