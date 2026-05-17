@@ -8,6 +8,7 @@ mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
+use gos_protocol::{GraphNodeSummary, RuntimeNodeType, VectorAddress};
 
 entry_point!(kernel_main);
 
@@ -34,6 +35,20 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Store the physical memory offset for DMA address translation in k-net and other drivers.
     gos_hal::phys::set_phys_offset(boot_info.physical_memory_offset);
     raw_serial_println(format_args!("boot: vaddr/meta initialized, phys_offset={:#x}", boot_info.physical_memory_offset));
+
+    // Phase I.3.1 — bring up the VGA mode-13h framebuffer (the
+    // bootloader's `vga_320x200` feature switched the card before
+    // entering `kernel_main`).  Clearing to Background immediately
+    // gives any observer in QEMU a "kernel is alive" signal instead
+    // of the leftover BIOS splash.
+    unsafe {
+        k_fb::init(boot_info.physical_memory_offset);
+    }
+    k_fb::clear(k_fb::Color::Background);
+    // Header bar serves as the boot-progress indicator: dim teal
+    // throughout init, becomes solid at "entering steady-state".
+    k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
+    raw_serial_println(format_args!("boot: framebuffer up (mode 13h, 320x200)"));
 
     raw_serial_println(format_args!("boot: staging supervisor domains"));
     gos_supervisor::bootstrap(boot_info as *const _ as u64);
@@ -90,6 +105,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     unsafe { ring3::init(); }
     raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
+    // Phase I.3.2 — paint the kernel-node UI before going interactive.
+    // Static one-shot for now; the I.3.x refresh hook will repaint on
+    // graph-generation ticks once `gos_runtime::graph_generation()` is
+    // wired into the boot loop.
+    paint_boot_ui();
+    raw_serial_println(format_args!("boot: framebuffer UI painted"));
+
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
@@ -98,6 +120,109 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
             gos_supervisor::service_system_cycle();
         });
         x86_64::instructions::hlt();
+    }
+}
+
+// ─── Phase I.3.2 — boot UI painter ──────────────────────────────────
+//
+// Draws the kernel-node tile grid into the mode-13h framebuffer.  No
+// text yet (font glyphs are I.3.x); each node is a colour-coded tile
+// classified by `RuntimeNodeType`, framed with a thin DimWhite outline
+// so identical-classified tiles still read as discrete entities.  A
+// bottom progress bar shows live-vs-discovered ratio.
+//
+// Layout (320×200, top-left origin):
+//   y  0..18   header bar     (HeaderBar, painted earlier)
+//   y 18..19   underline      (DimWhite)
+//   y 22..180  tile grid      (8 cols × N rows, 36×16 tiles, 4px pad)
+//   y 184..185 footer divider (DimWhite)
+//   y 185..189 progress bar   (Highlight, width = returned/total)
+//   y 192..199 status row     (reserved for I.3.x text)
+
+const UI_GRID_TOP: usize = 22;
+const UI_TILE_COLS: usize = 8;
+const UI_TILE_W: usize = 36;
+const UI_TILE_H: usize = 16;
+const UI_TILE_PAD: usize = 4;
+const UI_GRID_LEFT: usize = 8;
+const UI_FOOTER_Y: usize = 184;
+const UI_PROGRESS_Y: usize = 185;
+const UI_PROGRESS_H: usize = 4;
+
+fn paint_boot_ui() {
+    if !k_fb::ready() {
+        return;
+    }
+
+    // Reset everything except the header bar (it was painted at
+    // framebuffer init and serves as a "boot in progress" cue
+    // throughout the long supervisor + plugin bring-up).
+    k_fb::fill_rect(
+        0,
+        18,
+        k_fb::WIDTH,
+        k_fb::HEIGHT - 18,
+        k_fb::Color::Background,
+    );
+    k_fb::hline(0, 18, k_fb::WIDTH, k_fb::Color::DimWhite);
+
+    let mut nodes = [GraphNodeSummary::EMPTY; 64];
+    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
+
+    let max_visible = UI_TILE_COLS * ((k_fb::HEIGHT - UI_GRID_TOP - 20) / (UI_TILE_H + UI_TILE_PAD));
+    let shown = returned.min(max_visible);
+    for i in 0..shown {
+        let col = i % UI_TILE_COLS;
+        let row = i / UI_TILE_COLS;
+        let x = UI_GRID_LEFT + col * (UI_TILE_W + UI_TILE_PAD);
+        let y = UI_GRID_TOP + row * (UI_TILE_H + UI_TILE_PAD);
+        let color = classify_node(&nodes[i]);
+        k_fb::fill_rect(x, y, UI_TILE_W, UI_TILE_H, color);
+        k_fb::stroke_rect(x, y, UI_TILE_W, UI_TILE_H, k_fb::Color::DimWhite);
+        // 4-pixel "vector level" accent at the top-left corner —
+        // distinguishes nodes from the same plugin without text.
+        let accent = accent_for(nodes[i].vector);
+        k_fb::fill_rect(x + 2, y + 2, 4, 4, accent);
+    }
+
+    // Footer divider + discovered-vs-installed progress.
+    k_fb::hline(0, UI_FOOTER_Y, k_fb::WIDTH, k_fb::Color::DimWhite);
+    let progress_w = if total == 0 {
+        0
+    } else {
+        returned.saturating_mul(k_fb::WIDTH) / total
+    };
+    k_fb::fill_rect(0, UI_PROGRESS_Y, k_fb::WIDTH, UI_PROGRESS_H, k_fb::Color::BarEmpty);
+    if progress_w > 0 {
+        k_fb::fill_rect(0, UI_PROGRESS_Y, progress_w, UI_PROGRESS_H, k_fb::Color::Highlight);
+    }
+
+    k_fb::present();
+}
+
+fn classify_node(node: &GraphNodeSummary) -> k_fb::Color {
+    match node.node_type {
+        RuntimeNodeType::Hardware => k_fb::Color::NodeKernel,
+        RuntimeNodeType::Driver => k_fb::Color::NodeDriver,
+        RuntimeNodeType::Service => k_fb::Color::NodeService,
+        RuntimeNodeType::PluginEntry | RuntimeNodeType::Compute => k_fb::Color::NodeApp,
+        _ => k_fb::Color::NodeOther,
+    }
+}
+
+fn accent_for(vector: VectorAddress) -> k_fb::Color {
+    // Cheap XOR hash over the 4 vector levels so sibling nodes from
+    // one plugin still read as distinct in the tile grid.
+    let h = vector.l4 ^ ((vector.l3 & 0xFF) as u8) ^ ((vector.l2 & 0xFF) as u8) ^ ((vector.offset & 0xFF) as u8);
+    match h & 0x7 {
+        0 => k_fb::Color::Highlight,
+        1 => k_fb::Color::NodeKernel,
+        2 => k_fb::Color::NodeService,
+        3 => k_fb::Color::NodeDriver,
+        4 => k_fb::Color::NodeApp,
+        5 => k_fb::Color::NodeOther,
+        6 => k_fb::Color::DimWhite,
+        _ => k_fb::Color::Foreground,
     }
 }
 
@@ -113,6 +238,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         ));
     }
     raw_serial_println(format_args!("{}", info));
+    // Visual cue if the framebuffer is up: solid crimson with a tiny
+    // amber band so a passer-by in QEMU can tell the kernel halted
+    // even without serial visibility.
+    if k_fb::ready() {
+        k_fb::clear(k_fb::Color::Error);
+        k_fb::fill_rect(0, 0, k_fb::WIDTH, 8, k_fb::Color::Highlight);
+    }
     loop {
         x86_64::instructions::hlt();
     }

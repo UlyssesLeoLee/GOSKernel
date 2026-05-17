@@ -25,6 +25,15 @@ name = "bootloader"
 version = "0.9.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f6a8a495d2f93fe3d6eb3a224f9aa749a63cfd746ed03eb5ddcbd00ade7d8f"
+dependencies = [
+ "font8x8",
+]
+
+[[package]]
+name = "font8x8"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e63201c624b8c8883921b1a1accc8916c4fa9dbfb15d122b26e4dde945b86bbf"
 
 [[package]]
 name = "gos-ai-bridge"
@@ -96,6 +105,7 @@ dependencies = [
  "k-cuda-host",
  "k-cypher",
  "k-fat32",
+ "k-fb",
  "k-gdt",
  "k-heap",
  "k-idt",
@@ -234,6 +244,15 @@ version = "0.1.0"
 dependencies = [
  "gos-protocol",
  "gos-vfs",
+]
+
+[[package]]
+name = "k-fb"
+version = "0.2.0"
+dependencies = [
+ "gos-hal",
+ "spin",
+ "x86_64",
 ]
 
 [[package]]

@@ -1,0 +1,9 @@
+[package]
+name = "k-fb"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gos-hal = { path = "../gos-hal" }
+x86_64 = "0.14"
+spin = "0.9"
