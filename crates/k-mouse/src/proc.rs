@@ -81,4 +81,9 @@ fn apply_delta(state: &mut super::MouseState, dx: i32, dy: i32, buttons: u8) {
     state.row = (state.y_px / 16) as u8;
     state.buttons = buttons;
     state.visible = 1;
+    // Phase I.3.11 — publish to the shared atomics consumed by the
+    // mode-13h painter.  640×400 -> 320×200 halve.
+    super::MOUSE_X.store(state.x_px / 2, Ordering::Relaxed);
+    super::MOUSE_Y.store(state.y_px / 2, Ordering::Relaxed);
+    super::MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
 }

@@ -173,6 +173,26 @@ const MAX_EDGES: usize = 128;
 /// motion without being dizzying.
 const YAW_PER_FRAME: f32 = 0.04;
 
+// ── Phase I.3.11 — mouse hit-test + click latch ────────────────────
+//
+// `SELECTED_NODE_SLOT` indexes into the snapshot's node array.  -1
+// means "no selection".  Updated when the user left-clicks while
+// hovering a cube; cleared by F6 (camera reset) or by clicking
+// empty space.  The detail panel reads it each frame.
+//
+// `MOUSE_PREV_BTN` provides cheap edge-detection so a held button
+// doesn't re-fire the selection action every frame.
+
+use core::sync::atomic::{AtomicI8, AtomicU8 as AtomicU8Btn};
+static SELECTED_NODE_SLOT: AtomicI8 = AtomicI8::new(-1);
+static MOUSE_PREV_BTN: AtomicU8Btn = AtomicU8Btn::new(0);
+
+/// Half-extent in screen pixels used for hit-testing each cube.
+/// Larger than the rendered cube on screen so the user has a
+/// reasonable click target even when the perspective shrinks
+/// far-side cubes.
+const HIT_HALF_PX: i32 = 8;
+
 fn paint_3d_view(frame: u64) {
     if !k_fb::ready() {
         return;
@@ -308,6 +328,127 @@ fn paint_3d_view(frame: u64) {
             }
         }
         k_fb::draw_text(lx, ly, label, k_fb::Color::Foreground);
+    }
+
+    // ── I.3.11 — mouse cursor + click-to-select ──────────────────
+    // Snapshot atomics once per frame.
+    let mouse_x = k_mouse::MOUSE_X.load(Ordering::Relaxed);
+    let mouse_y = k_mouse::MOUSE_Y.load(Ordering::Relaxed);
+    let mouse_btn = k_mouse::MOUSE_BUTTONS.load(Ordering::Relaxed);
+    let prev_btn = MOUSE_PREV_BTN.swap(mouse_btn, Ordering::Relaxed);
+    let left_pressed = (mouse_btn & 0x01) != 0;
+    let left_edge = left_pressed && (prev_btn & 0x01) == 0;
+
+    // Hit-test the topmost cube under the cursor (iterate near→far so
+    // the closer of two overlapping cubes wins).
+    let mut hover_slot: i8 = -1;
+    for slot in (0..depth_count).rev() {
+        let i = depths[slot].0;
+        let (sx, sy, ok) = node_centre_screen[i];
+        if !ok {
+            continue;
+        }
+        if (mouse_x - sx).abs() <= HIT_HALF_PX && (mouse_y - sy).abs() <= HIT_HALF_PX {
+            hover_slot = i as i8;
+            break;
+        }
+    }
+
+    // Click edge: latch new selection (or clear if cursor was over
+    // empty space).
+    if left_edge {
+        SELECTED_NODE_SLOT.store(hover_slot, Ordering::Relaxed);
+    }
+    let selected = SELECTED_NODE_SLOT.load(Ordering::Relaxed);
+
+    // Cursor crosshair: 5-pixel '+' in Highlight, clipped to screen.
+    if mouse_x >= 0 && mouse_x < SCENE_WIDTH && mouse_y >= 0 && mouse_y < SCENE_HEIGHT {
+        for dx in -2..=2 {
+            let cx = mouse_x + dx;
+            if cx >= 0 && cx < SCENE_WIDTH && mouse_y >= HEADER_H && mouse_y < FOOTER_Y {
+                k_fb::put_pixel(cx as usize, mouse_y as usize, k_fb::Color::Highlight);
+            }
+        }
+        for dy in -2..=2 {
+            let cy = mouse_y + dy;
+            if cy >= HEADER_H && cy < FOOTER_Y && mouse_x >= 0 && mouse_x < SCENE_WIDTH {
+                k_fb::put_pixel(mouse_x as usize, cy as usize, k_fb::Color::Highlight);
+            }
+        }
+    }
+
+    // Hover halo: yellow ring around the hovered cube.
+    if hover_slot >= 0 {
+        let i = hover_slot as usize;
+        let (sx, sy, _ok) = node_centre_screen[i];
+        k_fb::stroke_rect(
+            (sx - HIT_HALF_PX - 1).max(0) as usize,
+            (sy - HIT_HALF_PX - 1).max(0) as usize,
+            ((HIT_HALF_PX * 2 + 2) as usize).min(k_fb::WIDTH),
+            ((HIT_HALF_PX * 2 + 2) as usize).min(k_fb::HEIGHT),
+            k_fb::Color::Highlight,
+        );
+    }
+
+    // Selection halo: white ring (one pixel thicker than hover so
+    // both can coexist when hovering the selected node).
+    if selected >= 0 && (selected as usize) < returned_n {
+        let i = selected as usize;
+        let (sx, sy, ok) = node_centre_screen[i];
+        if ok {
+            let r = HIT_HALF_PX + 2;
+            k_fb::stroke_rect(
+                (sx - r).max(0) as usize,
+                (sy - r).max(0) as usize,
+                ((r * 2) as usize).min(k_fb::WIDTH),
+                ((r * 2) as usize).min(k_fb::HEIGHT),
+                k_fb::Color::Foreground,
+            );
+        }
+    }
+
+    // Detail panel: bottom-right corner for the SELECTED node.
+    // 132×40 box with 3 text rows (plugin, vector, type).
+    if selected >= 0 && (selected as usize) < returned_n {
+        let node = &nodes[selected as usize];
+        const PANEL_W: usize = 132;
+        const PANEL_H: usize = 44;
+        let px = k_fb::WIDTH - PANEL_W - 2;
+        let py = FOOTER_Y as usize - PANEL_H - 2;
+        k_fb::fill_rect(px, py, PANEL_W, PANEL_H, k_fb::Color::HeaderBar);
+        k_fb::stroke_rect(px, py, PANEL_W, PANEL_H, k_fb::Color::DimWhite);
+
+        // Row 1: plugin name (full)
+        let mut row1 = TextBuf::<20>::new();
+        row1.push_str(node.plugin_name);
+        k_fb::draw_text(px + 4, py + 4, row1.as_str(), k_fb::Color::Foreground);
+
+        // Row 2: vector address
+        let mut row2 = TextBuf::<24>::new();
+        row2.push_dec(node.vector.l4 as u64);
+        row2.push_str(".");
+        row2.push_dec(node.vector.l3 as u64);
+        row2.push_str(".");
+        row2.push_dec(node.vector.l2 as u64);
+        row2.push_str(".");
+        row2.push_dec(node.vector.offset as u64);
+        k_fb::draw_text(px + 4, py + 16, row2.as_str(), k_fb::Color::Foreground);
+
+        // Row 3: node type
+        let type_label = match node.node_type {
+            RuntimeNodeType::Hardware => "HW",
+            RuntimeNodeType::Driver => "DRV",
+            RuntimeNodeType::Service => "SVC",
+            RuntimeNodeType::PluginEntry => "PE",
+            RuntimeNodeType::Compute => "CPU",
+            RuntimeNodeType::Router => "RTR",
+            RuntimeNodeType::Aggregator => "AGG",
+            RuntimeNodeType::Vector => "VEC",
+        };
+        let mut row3 = TextBuf::<24>::new();
+        row3.push_str("TYPE: ");
+        row3.push_str(type_label);
+        k_fb::draw_text(px + 4, py + 28, row3.as_str(), k_fb::Color::Foreground);
     }
 
     // Header text: "GOS  N NOD  M EDG  G<gen>"
