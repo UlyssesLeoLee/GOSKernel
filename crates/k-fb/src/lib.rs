@@ -215,6 +215,34 @@ pub fn stroke_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
 /// future VBE LFB / virtio-gpu paths that need an explicit flush.
 pub fn present() {}
 
+// ── Phase I.3.9 — shared camera input atomics ─────────────────────
+//
+// k-fb hosts this state because it's the only kernel-side crate that
+// both the input driver (k-ps2) and the boot UI painter
+// (hypervisor::paint_3d_view) already depend on / are reachable from.
+// Atomics keep the IRQ-context writer (PS/2 post stage) safely
+// concurrent with the idle-loop reader without needing a Mutex.
+//
+// Deltas are *accumulators*: the painter snapshots+clears them each
+// frame so a held key produces continuous motion at the painter's
+// repaint rate, not at the keyboard's autorepeat rate.
+
+use core::sync::atomic::{AtomicBool, AtomicI32};
+
+/// True when auto-rotate yaw advance should run.  F1 toggles.
+pub static CAMERA_AUTO_ROTATE: AtomicBool = AtomicBool::new(true);
+
+/// Cumulative camera bias in fixed-point milli-radians.
+/// `i32::MAX ≈ 2.1×10⁶ rad` — comfortably more headroom than the
+/// camera ever needs.  Painter divides by 1000.0 to convert to f32
+/// radians before applying.
+pub static CAMERA_YAW_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
+pub static CAMERA_PITCH_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
+
+/// Camera orbit radius in millimetre-equivalent fixed-point.  Start
+/// at 3.5 units = 3500 mrad-equivalent.  F6 resets, F7/F8 zoom.
+pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(3500);
+
 // ── Phase I.3.4 — 8×8 ASCII glyph rendering ────────────────────────
 //
 // Backed by `font8x8::legacy::BASIC_LEGACY` (public-domain BIOS-PC

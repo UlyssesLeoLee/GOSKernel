@@ -386,6 +386,7 @@ dependencies = [
  "gos-hal",
  "gos-protocol",
  "gos-runtime",
+ "k-fb",
  "k-ime",
  "k-pic",
  "k-shell",

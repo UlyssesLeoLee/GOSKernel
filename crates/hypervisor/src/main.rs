@@ -184,10 +184,17 @@ fn paint_3d_view(frame: u64) {
     let mut edges = [GraphEdgeSummary::EMPTY; MAX_EDGES];
     let (_total_e, returned_e) = gos_runtime::edge_page(0, &mut edges);
 
-    // Camera: orbit around origin at fixed radius + pitch.
-    let yaw = (frame as f32) * YAW_PER_FRAME;
-    let pitch: f32 = 0.45;
-    let radius: f32 = 3.5;
+    // Camera: orbit around origin at fixed radius + pitch.  Phase
+    // I.3.9 — F-keys (handled by k-ps2) bias yaw/pitch/radius via
+    // the shared atomics in k-fb; F1 toggles auto-yaw.
+    use core::sync::atomic::Ordering;
+    let auto_on = k_fb::CAMERA_AUTO_ROTATE.load(Ordering::Relaxed);
+    let yaw_bias = k_fb::CAMERA_YAW_BIAS_MRAD.load(Ordering::Relaxed) as f32 / 1000.0;
+    let pitch_bias = k_fb::CAMERA_PITCH_BIAS_MRAD.load(Ordering::Relaxed) as f32 / 1000.0;
+    let radius = (k_fb::CAMERA_RADIUS_MM.load(Ordering::Relaxed).max(800) as f32) / 1000.0;
+    let auto_yaw = if auto_on { (frame as f32) * YAW_PER_FRAME } else { 0.0 };
+    let yaw = auto_yaw + yaw_bias;
+    let pitch: f32 = (0.45 + pitch_bias).clamp(-1.4, 1.4);
     let eye = Vec3::new(
         radius * libm::cosf(pitch) * libm::sinf(yaw),
         radius * libm::sinf(pitch),
@@ -204,17 +211,19 @@ fn paint_3d_view(frame: u64) {
     k_fb::fill_rect(0, 0, k_fb::WIDTH, HEADER_H as usize, k_fb::Color::HeaderBar);
 
     // Project node centres + classify colour.  We need both screen
-    // coordinates (for edges) and view-space depth (for painter's
-    // sort).
+    // coordinates (for edges + I.3.10 labels) and view-space depth
+    // (for painter's sort).
     let mut node_centre_screen = [(0i32, 0i32, false); MAX_NODES];
+    let mut node_depth_z = [0f32; MAX_NODES];
     let mut depths: [(usize, f32); MAX_NODES] = [(0, 0.0); MAX_NODES];
     let mut depth_count = 0usize;
     for i in 0..returned_n {
         let centre = node_world_position(i, returned_n);
         let clip = view_proj.transform_point(centre);
-        if let Some((sx, sy, _z)) = project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32)
+        if let Some((sx, sy, z)) = project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32)
         {
             node_centre_screen[i] = (sx, sy, true);
+            node_depth_z[i] = z;
             // depth: distance² from camera.  Larger = farther.
             let to_cam = centre.sub(eye);
             depths[depth_count] = (i, to_cam.dot(to_cam));
@@ -257,6 +266,50 @@ fn paint_3d_view(frame: u64) {
         );
     }
 
+    // I.3.10 — node labels.  Project each node's centre to screen,
+    // place the first ~6 chars of its plugin_name just above the
+    // cube.  We iterate in NEAR-FIRST order (reverse of the cube
+    // draw order) so labels for closer cubes overdraw labels for
+    // farther ones when they overlap.  Frustum-clipped cubes have
+    // `node_centre_screen[i].2 == false` and skip silently.  Skip
+    // labels whose ndc.z is past the far plane (z > 0.99) — they're
+    // basically dust on the horizon.
+    for slot in (0..depth_count).rev() {
+        let i = depths[slot].0;
+        let (sx, sy, ok) = node_centre_screen[i];
+        if !ok {
+            continue;
+        }
+        if node_depth_z[i] > 0.99 {
+            continue;
+        }
+        let name = nodes[i].plugin_name;
+        // Drop the K_ prefix (every kernel module is K_FOO) for legibility.
+        let trimmed = name.strip_prefix("K_").unwrap_or(name);
+        let bytes = trimmed.as_bytes();
+        let label_len = bytes.len().min(6);
+        let label = unsafe { core::str::from_utf8_unchecked(&bytes[..label_len]) };
+        // Position: a few pixels above the cube top, centred-ish.
+        // 6 chars × 8 px = 48 px wide; cube screen height varies with
+        // distance, so use a fixed 14 px offset.
+        let text_w = (label_len * 8) as i32;
+        let lx = (sx - text_w / 2).max(0) as usize;
+        let ly = (sy - 16).max(HEADER_H + 1) as usize;
+        if lx + (label_len * 8) > k_fb::WIDTH || ly + 8 >= FOOTER_Y as usize {
+            continue;
+        }
+        // Two-pass shadow so the label reads on any cube colour: a
+        // 1-pixel offset Background outline behind the Foreground.
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let bx = lx as i32 + dx;
+            let by = ly as i32 + dy;
+            if bx >= 0 && by >= 0 {
+                k_fb::draw_text(bx as usize, by as usize, label, k_fb::Color::Background);
+            }
+        }
+        k_fb::draw_text(lx, ly, label, k_fb::Color::Foreground);
+    }
+
     // Header text: "GOS  N NOD  M EDG  G<gen>"
     let mut hdr = TextBuf::<40>::new();
     hdr.push_str("GOS  ");
@@ -269,14 +322,11 @@ fn paint_3d_view(frame: u64) {
 
     // Footer status.
     k_fb::hline(0, FOOTER_Y as usize, k_fb::WIDTH, k_fb::Color::DimWhite);
-    let mut footer = TextBuf::<40>::new();
-    footer.push_str("3D  RDY=");
-    footer.push_dec(snapshot.ready_queue_len as u64);
-    footer.push_str(" SIG=");
-    footer.push_dec(snapshot.signal_queue_len as u64);
-    footer.push_str("  F");
-    footer.push_dec(frame);
+    let mut footer = TextBuf::<48>::new();
+    footer.push_str(if auto_on { "3D  " } else { "PAUSE  " });
+    footer.push_str("F1 PAUSE  F2/3 YAW  F4/5 PIT  F7/8 Z  F6 RST");
     k_fb::draw_text(4, 192, footer.as_str(), k_fb::Color::Foreground);
+    let _ = snapshot; // RDY/SIG counters can return when there's row space
 
     k_fb::present();
 }

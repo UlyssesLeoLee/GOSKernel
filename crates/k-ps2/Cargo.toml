@@ -11,6 +11,10 @@ k-pic        = { path = "../k-pic" }
 k-vga        = { path = "../k-vga" }
 k-shell      = { path = "../k-shell" }
 k-ime        = { path = "../k-ime" }
+# Phase I.3.9 — intercept F-keys to drive the in-kernel 3D camera.
+# k-fb hosts the shared atomics; k-ps2 writes into them from the IRQ
+# post stage before falling through to the shell-routing path.
+k-fb         = { path = "../k-fb" }
 pc-keyboard  = "0.7.0"
 spin         = "0.9"
 x86_64       = "0.14"

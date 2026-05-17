@@ -40,14 +40,64 @@ pub fn process(
                 Some(Output::Utf8(arr, bytes.len()))
             }
         }
-        DecodedKey::RawKey(k) => match k {
-            pc_keyboard::KeyCode::Backspace => Some(Output::Ascii(0x08)),
-            pc_keyboard::KeyCode::ArrowUp   => Some(Output::Ascii(INPUT_KEY_UP)),
-            pc_keyboard::KeyCode::ArrowDown => Some(Output::Ascii(INPUT_KEY_DOWN)),
-            pc_keyboard::KeyCode::PageUp    => Some(Output::Ascii(INPUT_KEY_PAGE_UP)),
-            pc_keyboard::KeyCode::PageDown  => Some(Output::Ascii(INPUT_KEY_PAGE_DOWN)),
-            pc_keyboard::KeyCode::Escape    => Some(Output::Ascii(0x1B)),
-            _ => None,
-        },
+        DecodedKey::RawKey(k) => {
+            use core::sync::atomic::Ordering;
+            // Phase I.3.9 — F-keys drive the boot-UI 3D camera.  No
+            // shell route is emitted for these (the shell would just
+            // ignore them anyway); the camera state lives in k-fb
+            // atomics that `paint_3d_view` snapshots each frame.
+            const YAW_STEP_MRAD: i32 = 80;   // ~4.6° per keypress
+            const PITCH_STEP_MRAD: i32 = 80;
+            const ZOOM_STEP_MM: i32 = 250;   // 0.25 world units
+            match k {
+                pc_keyboard::KeyCode::F1 => {
+                    let cur = k_fb::CAMERA_AUTO_ROTATE.load(Ordering::Relaxed);
+                    k_fb::CAMERA_AUTO_ROTATE.store(!cur, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F2 => {
+                    k_fb::CAMERA_YAW_BIAS_MRAD.fetch_sub(YAW_STEP_MRAD, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F3 => {
+                    k_fb::CAMERA_YAW_BIAS_MRAD.fetch_add(YAW_STEP_MRAD, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F4 => {
+                    k_fb::CAMERA_PITCH_BIAS_MRAD.fetch_add(PITCH_STEP_MRAD, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F5 => {
+                    k_fb::CAMERA_PITCH_BIAS_MRAD.fetch_sub(PITCH_STEP_MRAD, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F6 => {
+                    // Reset everything to the boot-time default.
+                    k_fb::CAMERA_YAW_BIAS_MRAD.store(0, Ordering::Relaxed);
+                    k_fb::CAMERA_PITCH_BIAS_MRAD.store(0, Ordering::Relaxed);
+                    k_fb::CAMERA_RADIUS_MM.store(3500, Ordering::Relaxed);
+                    k_fb::CAMERA_AUTO_ROTATE.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F7 => {
+                    k_fb::CAMERA_RADIUS_MM.fetch_sub(ZOOM_STEP_MM, Ordering::Relaxed);
+                    return None;
+                }
+                pc_keyboard::KeyCode::F8 => {
+                    k_fb::CAMERA_RADIUS_MM.fetch_add(ZOOM_STEP_MM, Ordering::Relaxed);
+                    return None;
+                }
+                _ => {}
+            }
+            match k {
+                pc_keyboard::KeyCode::Backspace => Some(Output::Ascii(0x08)),
+                pc_keyboard::KeyCode::ArrowUp   => Some(Output::Ascii(INPUT_KEY_UP)),
+                pc_keyboard::KeyCode::ArrowDown => Some(Output::Ascii(INPUT_KEY_DOWN)),
+                pc_keyboard::KeyCode::PageUp    => Some(Output::Ascii(INPUT_KEY_PAGE_UP)),
+                pc_keyboard::KeyCode::PageDown  => Some(Output::Ascii(INPUT_KEY_PAGE_DOWN)),
+                pc_keyboard::KeyCode::Escape    => Some(Output::Ascii(0x1B)),
+                _ => None,
+            }
+        }
     }
 }
