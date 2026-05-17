@@ -450,6 +450,211 @@ pub fn write_cube_indices(node_count: usize, out: &mut [u8]) -> usize {
     off
 }
 
+// ── Phase I.2.x sci-fi — UV sphere + cable tube geometry ───────────
+//
+// `gos-visualize` host binary uses these for the "cosmic metal balls
+// + ropes" look.  Vertex layout differs from cubes: pos(vec3) +
+// normal(vec3) + color(vec3) = 36 bytes, three Float32x3 attributes
+// at locations 0/1/2.
+
+/// Bytes per sci-fi vertex.
+pub const BYTES_PER_PBR_VERTEX: usize = 4 * 3 + 4 * 3 + 4 * 3;
+
+/// Generate UV-sphere vertices + indices for a single instance
+/// centred at `centre` with radius `radius`, coloured `color`.
+/// Returns (vertices_written, indices_written) in bytes.  Caller is
+/// responsible for sizing the output slices; use
+/// `sphere_vertex_bytes_for(stacks, slices)` /
+/// `sphere_index_bytes_for(stacks, slices)` for capacity planning.
+pub const fn sphere_vertex_count(stacks: usize, slices: usize) -> usize {
+    (stacks + 1) * (slices + 1)
+}
+pub const fn sphere_index_count(stacks: usize, slices: usize) -> usize {
+    stacks * slices * 6
+}
+pub const fn sphere_vertex_bytes_for(stacks: usize, slices: usize) -> usize {
+    sphere_vertex_count(stacks, slices) * BYTES_PER_PBR_VERTEX
+}
+pub const fn sphere_index_bytes_for(stacks: usize, slices: usize) -> usize {
+    sphere_index_count(stacks, slices) * BYTES_PER_INDEX
+}
+
+/// Write one sphere into `vbuf` / `ibuf`, starting from vertex offset
+/// `base_vertex` (so multiple spheres can share one large buffer).
+/// Returns `(vertices_appended, indices_appended)`.
+///
+/// Recommended grid: `stacks = 8, slices = 12` — 117 verts + 144 tris
+/// per ball; coarse-enough for the small screen rendering distance,
+/// fine-enough that silhouettes read as smooth.
+pub fn write_sphere(
+    centre: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    stacks: usize,
+    slices: usize,
+    base_vertex: u16,
+    vbuf: &mut [u8],
+    ibuf: &mut [u8],
+) -> (usize, usize) {
+    let mut voff = 0;
+    for i in 0..=stacks {
+        // Latitude angle 0..PI (top to bottom).
+        let theta = (i as f32) * core::f32::consts::PI / (stacks as f32);
+        let sin_t = libm_sinf(theta);
+        let cos_t = libm_cosf(theta);
+        for j in 0..=slices {
+            // Longitude angle 0..2PI.
+            let phi = (j as f32) * 2.0 * core::f32::consts::PI / (slices as f32);
+            let sin_p = libm_sinf(phi);
+            let cos_p = libm_cosf(phi);
+            // Unit sphere coords; also serve as the normal.
+            let nx = sin_t * cos_p;
+            let ny = cos_t;
+            let nz = sin_t * sin_p;
+            let px = centre[0] + nx * radius;
+            let py = centre[1] + ny * radius;
+            let pz = centre[2] + nz * radius;
+            write_f32_le(&mut vbuf[voff..voff + 4], px);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], py);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], pz);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], nx);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], ny);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], nz);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], color[0]);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], color[1]);
+            voff += 4;
+            write_f32_le(&mut vbuf[voff..voff + 4], color[2]);
+            voff += 4;
+        }
+    }
+    let mut ioff = 0;
+    for i in 0..stacks {
+        for j in 0..slices {
+            let a = base_vertex + (i * (slices + 1) + j) as u16;
+            let b = a + (slices + 1) as u16;
+            // Two CCW triangles per quad.
+            for ix in [a, b, a + 1, b, b + 1, a + 1] {
+                ibuf[ioff..ioff + 2].copy_from_slice(&ix.to_le_bytes());
+                ioff += 2;
+            }
+        }
+    }
+    (sphere_vertex_count(stacks, slices), sphere_index_count(stacks, slices))
+}
+
+/// Generate a cable / cylinder tube between two world-space endpoints.
+/// `sides` controls cross-section resolution (6–8 reads as a rope
+/// without looking faceted at typical render distances).
+pub const fn tube_vertex_count(sides: usize) -> usize {
+    sides * 2
+}
+pub const fn tube_index_count(sides: usize) -> usize {
+    sides * 6
+}
+pub const fn tube_vertex_bytes_for(sides: usize) -> usize {
+    tube_vertex_count(sides) * BYTES_PER_PBR_VERTEX
+}
+pub const fn tube_index_bytes_for(sides: usize) -> usize {
+    tube_index_count(sides) * BYTES_PER_INDEX
+}
+
+/// Write a cable tube into `vbuf` / `ibuf`.  Caller picks an
+/// arbitrary `up` vector that's not parallel to the cable axis;
+/// `[0,1,0]` is a safe default unless the cable points nearly
+/// vertical.
+pub fn write_tube(
+    from: [f32; 3],
+    to: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    sides: usize,
+    base_vertex: u16,
+    vbuf: &mut [u8],
+    ibuf: &mut [u8],
+) -> (usize, usize) {
+    // Axis = (to - from).normalize().  Build an orthonormal basis
+    // (right, up_basis, axis); ring vertices live in the (right,
+    // up_basis) plane.
+    let ax = to[0] - from[0];
+    let ay = to[1] - from[1];
+    let az = to[2] - from[2];
+    let alen = libm_sqrtf(ax * ax + ay * ay + az * az).max(1.0e-6);
+    let axis = [ax / alen, ay / alen, az / alen];
+    // Pick a stable reference up: if axis is too close to world Y,
+    // fall back to world X.
+    let ref_up = if axis[1].abs() > 0.95 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    // right = ref_up × axis, normalised.
+    let rx = ref_up[1] * axis[2] - ref_up[2] * axis[1];
+    let ry = ref_up[2] * axis[0] - ref_up[0] * axis[2];
+    let rz = ref_up[0] * axis[1] - ref_up[1] * axis[0];
+    let rlen = libm_sqrtf(rx * rx + ry * ry + rz * rz).max(1.0e-6);
+    let right = [rx / rlen, ry / rlen, rz / rlen];
+    // up_basis = axis × right (already orthonormal).
+    let ux = axis[1] * right[2] - axis[2] * right[1];
+    let uy = axis[2] * right[0] - axis[0] * right[2];
+    let uz = axis[0] * right[1] - axis[1] * right[0];
+    let up_basis = [ux, uy, uz];
+
+    let mut voff = 0;
+    for &endpoint in &[from, to] {
+        for s in 0..sides {
+            let angle = (s as f32) * 2.0 * core::f32::consts::PI / (sides as f32);
+            let ca = libm_cosf(angle);
+            let sa = libm_sinf(angle);
+            // Normal = unit ring direction (points radially outward).
+            let nx = right[0] * ca + up_basis[0] * sa;
+            let ny = right[1] * ca + up_basis[1] * sa;
+            let nz = right[2] * ca + up_basis[2] * sa;
+            let px = endpoint[0] + nx * radius;
+            let py = endpoint[1] + ny * radius;
+            let pz = endpoint[2] + nz * radius;
+            for f in [px, py, pz, nx, ny, nz, color[0], color[1], color[2]] {
+                write_f32_le(&mut vbuf[voff..voff + 4], f);
+                voff += 4;
+            }
+        }
+    }
+    // Side quads: stitch ring 0 to ring 1.  Each side = 2 triangles.
+    let mut ioff = 0;
+    for s in 0..sides {
+        let s_next = (s + 1) % sides;
+        let a0 = base_vertex + s as u16;
+        let a1 = base_vertex + s_next as u16;
+        let b0 = base_vertex + (sides + s) as u16;
+        let b1 = base_vertex + (sides + s_next) as u16;
+        // CCW when viewed from outside.
+        for ix in [a0, b0, a1, a1, b0, b1] {
+            ibuf[ioff..ioff + 2].copy_from_slice(&ix.to_le_bytes());
+            ioff += 2;
+        }
+    }
+    (tube_vertex_count(sides), tube_index_count(sides))
+}
+
+#[inline]
+fn libm_sinf(x: f32) -> f32 {
+    libm::sinf(x)
+}
+#[inline]
+fn libm_cosf(x: f32) -> f32 {
+    libm::cosf(x)
+}
+#[inline]
+fn libm_sqrtf(x: f32) -> f32 {
+    libm::sqrtf(x)
+}
+
 /// WGSL shader for the 3D cube demo.  Push constant carries a 4×4
 /// view*projection matrix; vertex stage multiplies world-space
 /// position by it.  Fragment stage shades flat by the per-vertex

@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-gfx-protocol = { path = "../gos-gfx-protocol" }
+# Used by sphere / cable geometry generators (sin / cos / sqrt).
+# Same crate the kernel-side k-rast pulls; tiny, no transitive deps.
+libm = "0.2"
