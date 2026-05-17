@@ -192,6 +192,104 @@ fn fs_bg(in: BgVsOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(nebula + star_color, 1.0);
 }
+
+// ── Post-process pipelines (bloom + tonemap) ──────────────────────
+//
+// Both pipelines run a full-screen triangle (no vertex buffer; the
+// shader generates positions from the vertex index).  Bind group 0
+// supplies a linear sampler + one or two HDR source textures.
+
+struct PostVsOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0)       uv: vec2<f32>,
+};
+
+@vertex
+fn vs_post(@builtin(vertex_index) i: u32) -> PostVsOut {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var out: PostVsOut;
+    let p = pos[i];
+    out.clip_position = vec4<f32>(p, 0.0, 1.0);
+    // UV = (p + 1) / 2, with V flipped so (0,0) is the top-left
+    // texel (matches wgpu's image-space convention).
+    out.uv = vec2<f32>((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);
+    return out;
+}
+
+// Bloom extract + blur: sample the HDR target, threshold to keep
+// only "above-LDR" energy (luma > 1.0), then 5×5 box-blur the
+// surviving pixels.  Half-res target keeps cost cheap; the bilinear
+// sampler on the composite pass smooths the upsample.
+
+@group(0) @binding(0) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(1) var hdr_samp: sampler;
+
+fn relative_luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@fragment
+fn fs_bloom(in: PostVsOut) -> @location(0) vec4<f32> {
+    // 5×5 box-average with luminance threshold = 0.9.  Sample step
+    // is one HDR-texel relative to the half-res target.  Using
+    // texture_dimensions to compute the step avoids hard-coding a
+    // resolution.
+    let dims = vec2<f32>(textureDimensions(hdr_tex, 0));
+    let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+    var acc = vec3<f32>(0.0);
+    let threshold = 0.9;
+    let kernel_radius = 2;
+    let kernel_diameter = 5.0;
+    var weight_sum = 0.0;
+    for (var dy = -kernel_radius; dy <= kernel_radius; dy = dy + 1) {
+        for (var dx = -kernel_radius; dx <= kernel_radius; dx = dx + 1) {
+            let uv = in.uv + vec2<f32>(f32(dx) * step.x * 2.0, f32(dy) * step.y * 2.0);
+            let c = textureSample(hdr_tex, hdr_samp, uv).rgb;
+            // Soft threshold: subtract floor, allow negative clamp.
+            let luma = relative_luminance(c);
+            let factor = max(luma - threshold, 0.0) / max(luma, 0.0001);
+            acc = acc + c * factor;
+            weight_sum = weight_sum + 1.0;
+        }
+    }
+    let bloom = acc / weight_sum;
+    return vec4<f32>(bloom, 1.0);
+}
+
+// Composite: HDR + bloom -> ACES tonemap -> swapchain (sRGB).
+
+@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
+
+fn aces_film(x: vec3<f32>) -> vec3<f32> {
+    // ACES approximation (Krzysztof Narkowicz 2015).  Maps HDR to
+    // LDR with a filmic toe + shoulder; widely used as a "good
+    // enough" tonemap for realtime work.
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e),
+                 vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@fragment
+fn fs_composite(in: PostVsOut) -> @location(0) vec4<f32> {
+    let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    // Bloom is on a half-res target; the bilinear sampler upsamples
+    // smoothly.  Additive blend; intensity tuned to look strong
+    // without nuking the underlying scene.
+    let bloom = textureSample(bloom_tex, hdr_samp, in.uv).rgb;
+    let combined = hdr + bloom * 1.6;
+    let mapped = aces_film(combined);
+    // Output is into an sRGB swapchain — the conversion is handled
+    // by the surface format, we just write linear values.
+    return vec4<f32>(mapped, 1.0);
+}
 "#;
 
 #[derive(Debug, Clone, Copy)]
@@ -294,6 +392,22 @@ fn main() {
     surface.configure(&device, &surface_cfg);
 
     let mut depth_view = create_depth(&device, surface_cfg.width, surface_cfg.height);
+    // HDR pipeline: scene + background render into a Rgba16Float
+    // offscreen target so post-process (bloom + tonemap) sees real
+    // > 1.0 highlights.  Bloom texture is half-res for cheaper blur
+    // sampling; the bilinear sampler smooths it back to full size in
+    // the composite pass.
+    let mut offscreen = make_offscreen(&device, surface_cfg.width, surface_cfg.height);
+    let post_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("post-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
 
     // ── Geometry ─────────────────────────────────────────────────
     let nodes = synth_nodes(NODE_COUNT);
@@ -419,7 +533,7 @@ fn main() {
             entry_point: "fs_scene",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
+                format: HDR_FORMAT,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -454,7 +568,7 @@ fn main() {
             entry_point: "fs_bg",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
+                format: HDR_FORMAT,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -474,6 +588,96 @@ fn main() {
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    // Post-process bind group layout — three entries used by both
+    // bloom (HDR + sampler; ignores slot 2) and composite (HDR +
+    // sampler + bloom).  Single layout keeps the pipeline-layout
+    // arithmetic simple; the bloom pipeline binds the HDR texture
+    // in slot 2 as a harmless dummy.
+    let post_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("post-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    });
+    let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("post-layout"),
+        bind_group_layouts: &[&post_bgl],
+        push_constant_ranges: &[],
+    });
+    let bloom_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("bloom-pipeline"),
+        layout: Some(&post_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_post",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_bloom",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+    let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("composite-pipeline"),
+        layout: Some(&post_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_post",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_composite",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
     });
@@ -502,6 +706,7 @@ fn main() {
                         surface_cfg.height = size.height;
                         surface.configure(&device, &surface_cfg);
                         depth_view = create_depth(&device, size.width, size.height);
+                        offscreen = make_offscreen(&device, size.width, size.height);
                         camera.aspect = size.width as f32 / size.height as f32;
                     }
                     WindowEvent::KeyboardInput {
@@ -556,13 +761,68 @@ fn main() {
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("frame"),
                             });
+
+                        // Bind groups rebuilt each frame so a resize
+                        // (which recreates the offscreen views)
+                        // doesn't require manual invalidation.
+                        let bloom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("bloom-bg"),
+                            layout: &post_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &offscreen.hdr_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&post_sampler),
+                                },
+                                // Slot 2 unused by fs_bloom; bind hdr
+                                // again as a harmless dummy.
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &offscreen.hdr_view,
+                                    ),
+                                },
+                            ],
+                        });
+                        let composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("composite-bg"),
+                            layout: &post_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &offscreen.hdr_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&post_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &offscreen.bloom_view,
+                                    ),
+                                },
+                            ],
+                        });
+
+                        // Pass 1 — scene + background into the HDR
+                        // offscreen target.  This is where the real
+                        // > 1.0 highlights are produced (specular
+                        // peaks, fresnel rim, bright stars).
                         {
-                            let mut pass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("main"),
+                            let mut pass = encoder.begin_render_pass(
+                                &wgpu::RenderPassDescriptor {
+                                    label: Some("scene-pass"),
                                     color_attachments: &[Some(
                                         wgpu::RenderPassColorAttachment {
-                                            view: &view,
+                                            view: &offscreen.hdr_view,
                                             resolve_target: None,
                                             ops: wgpu::Operations {
                                                 load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -587,26 +847,18 @@ fn main() {
                                     ),
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
-                                });
-                            // Background first; depth = 1.0 means
-                            // any later scene draw with closer depth
-                            // overwrites cleanly.
+                                },
+                            );
                             pass.set_pipeline(&bg_pipeline);
                             pass.set_push_constants(
-                                wgpu::ShaderStages::VERTEX
-                                    | wgpu::ShaderStages::FRAGMENT,
+                                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                                 0,
                                 &push_bytes,
                             );
                             pass.draw(0..3, 0..1);
-
-                            // Scene (spheres + cables share one
-                            // indexed draw — they're packed back-to-
-                            // back in the same vertex+index buffer).
                             pass.set_pipeline(&scene_pipeline);
                             pass.set_push_constants(
-                                wgpu::ShaderStages::VERTEX
-                                    | wgpu::ShaderStages::FRAGMENT,
+                                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                                 0,
                                 &push_bytes,
                             );
@@ -617,6 +869,71 @@ fn main() {
                             );
                             pass.draw_indexed(0..total_index_count, 0, 0..1);
                         }
+
+                        // Pass 2 — bloom extract + blur into the
+                        // half-res bloom target.  Reads HDR via
+                        // bloom_bg.
+                        {
+                            let mut pass = encoder.begin_render_pass(
+                                &wgpu::RenderPassDescriptor {
+                                    label: Some("bloom-pass"),
+                                    color_attachments: &[Some(
+                                        wgpu::RenderPassColorAttachment {
+                                            view: &offscreen.bloom_view,
+                                            resolve_target: None,
+                                            ops: wgpu::Operations {
+                                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                                    r: 0.0,
+                                                    g: 0.0,
+                                                    b: 0.0,
+                                                    a: 1.0,
+                                                }),
+                                                store: wgpu::StoreOp::Store,
+                                            },
+                                        },
+                                    )],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                },
+                            );
+                            pass.set_pipeline(&bloom_pipeline);
+                            pass.set_bind_group(0, &bloom_bg, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+
+                        // Pass 3 — composite HDR + bloom into the
+                        // swapchain, applying ACES tonemap on the
+                        // way out.
+                        {
+                            let mut pass = encoder.begin_render_pass(
+                                &wgpu::RenderPassDescriptor {
+                                    label: Some("composite-pass"),
+                                    color_attachments: &[Some(
+                                        wgpu::RenderPassColorAttachment {
+                                            view: &view,
+                                            resolve_target: None,
+                                            ops: wgpu::Operations {
+                                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                                    r: 0.0,
+                                                    g: 0.0,
+                                                    b: 0.0,
+                                                    a: 1.0,
+                                                }),
+                                                store: wgpu::StoreOp::Store,
+                                            },
+                                        },
+                                    )],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                },
+                            );
+                            pass.set_pipeline(&composite_pipeline);
+                            pass.set_bind_group(0, &composite_bg, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+
                         queue.submit(Some(encoder.finish()));
                         frame.present();
 
@@ -649,6 +966,61 @@ fn create_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
         view_formats: &[],
     });
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// HDR colour format for the offscreen target.  16-bit float per
+/// channel lets specular highlights + fresnel rims exceed 1.0 so
+/// the bloom extract has actual highlight energy to gather.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+struct Offscreen {
+    _hdr_tex: wgpu::Texture,
+    hdr_view: wgpu::TextureView,
+    _bloom_tex: wgpu::Texture,
+    bloom_view: wgpu::TextureView,
+}
+
+fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
+    let hdr_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr-color"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let hdr_view = hdr_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // Half-res bloom target — cheaper blur sampling; bilinear
+    // upsample in composite hides the resolution drop.
+    let bloom_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bloom"),
+        size: wgpu::Extent3d {
+            width: (w / 2).max(1),
+            height: (h / 2).max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let bloom_view = bloom_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    Offscreen {
+        _hdr_tex: hdr_tex,
+        hdr_view,
+        _bloom_tex: bloom_tex,
+        bloom_view,
+    }
 }
 
 struct DemoNode {
