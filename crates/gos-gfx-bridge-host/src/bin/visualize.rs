@@ -133,6 +133,14 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
               * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// Roughness-aware fresnel for IBL ambient — Sébastien Lagarde 2014.
+// Pulls F toward F0 as roughness rises, matching the way diffuse
+// environment energy bleeds into the specular term on rough surfaces.
+fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let r = max(vec3<f32>(1.0 - roughness), f0);
+    return f0 + (r - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 @fragment
 fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal);
@@ -175,16 +183,36 @@ fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     let radiance = vec3<f32>(1.0, 0.95, 0.88) * 4.0;
     let lo = (k_d * albedo / PI + specular) * radiance * n_dot_l;
 
-    // Hemispheric ambient: sky tint above, ground tint below, blend
-    // by the normal's vertical component.  Stand-in until IBL lands.
-    let sky_tint = vec3<f32>(0.10, 0.13, 0.22);
-    let ground_tint = vec3<f32>(0.04, 0.03, 0.05);
-    let hemi = mix(ground_tint, sky_tint, (n.y + 1.0) * 0.5);
-    let ambient = hemi * albedo * (1.0 - metallic * 0.4);
+    // ── IBL ambient (procedural environment) ─────────────────────
+    //
+    // Sample the same nebula function fs_bg renders, parameterised
+    // by surface normal (diffuse irradiance) and reflection vector
+    // (specular env).  This is a procedural stand-in for a real
+    // prefiltered cubemap: no convolution, no BRDF LUT, but the
+    // ambient term now varies with where on the sky each surface
+    // is "looking", which is the visual point of IBL.
+    let r_vec = reflect(-v, n);
+    let env_diffuse_color  = nebula_color(dir_to_uv(n), 0.0);
+    // Roughness drives a low-pass on the reflection sample by
+    // thinning the high-frequency octave (passes 0..1 to
+    // `nebula_color`; 1 = blurred mirror, 0 = sharp environment).
+    let env_specular_color = nebula_color(dir_to_uv(r_vec), roughness);
 
-    // Fresnel rim retained — physically it's already in `specular`,
-    // but the explicit rim boost preserves the sci-fi silhouette
-    // glow we tuned in the previous slice.
+    // Roughness-aware fresnel for the IBL specular term — Lagarde 2014.
+    let f_ibl = fresnel_schlick_roughness(n_dot_v, f0, roughness);
+    let k_d_ibl = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);
+
+    // Boost factor pushes env-sampled tones into a comfortable
+    // perceptual brightness; nebula values are in [0, ~0.4] which
+    // would be too dim as-is.
+    let env_boost = 4.0;
+    let ambient_diffuse  = env_diffuse_color  * env_boost * albedo * k_d_ibl;
+    let ambient_specular = env_specular_color * env_boost * f_ibl;
+    let ambient = ambient_diffuse + ambient_specular;
+
+    // Fresnel rim retained — physically already inside `specular` /
+    // `ambient_specular`, but the explicit boost preserves the
+    // sci-fi silhouette glow tuned in the previous slice.
     let rim = albedo * pow(1.0 - n_dot_v, 4.0) * 0.5;
 
     return vec4<f32>(ambient + lo + rim, 1.0);
@@ -250,30 +278,45 @@ fn fbm(p: vec2<f32>) -> f32 {
     return v;
 }
 
-@fragment
-fn fs_bg(in: BgVsOut) -> @location(0) vec4<f32> {
-    // Animated nebula: two FBM layers slowly drifting in opposite
-    // directions create swirling cloud structure.  Hue picked from a
-    // deep purple-to-teal axis so the foreground (warm sphere
-    // highlights, electric-yellow stars) reads cleanly on top.
+// Shared nebula evaluator — used by `fs_bg` for the background and
+// by `fs_scene`'s IBL ambient term so the environment lighting on
+// metallic surfaces actually reflects the sky we're rendering
+// behind them.  `flow_uv` is a 2D coordinate in nebula-space (NDC
+// for fs_bg, equirectangular projection of a world direction for
+// IBL); `freq_lod` thins the high-frequency octave for rough-surface
+// blur approximation.
+fn nebula_color(flow_uv: vec2<f32>, freq_lod: f32) -> vec3<f32> {
     let drift0 = pc.time.x * 0.018;
     let drift1 = pc.time.x * -0.012;
-    let layer0 = fbm(in.ndc * 1.4 + vec2<f32>(drift0, drift0 * 0.6));
-    let layer1 = fbm(in.ndc * 2.7 + vec2<f32>(drift1, drift1 * -0.8));
+    let f_lo = mix(1.4, 0.7, freq_lod);
+    let f_hi = mix(2.7, 1.0, freq_lod);
+    let layer0 = fbm(flow_uv * f_lo + vec2<f32>(drift0, drift0 * 0.6));
+    let layer1 = fbm(flow_uv * f_hi + vec2<f32>(drift1, drift1 * -0.8));
     let cloud = pow(layer0 * 0.65 + layer1 * 0.35, 1.6);
-
-    // Vertical falloff retained — gives the scene a horizon-ish
-    // orientation cue under the swirling clouds.
-    let v_axis = in.ndc.y * 0.5 + 0.5;
+    let v_axis = flow_uv.y * 0.5 + 0.5;
     let base = mix(
-        vec3<f32>(0.015, 0.020, 0.050),  // bottom — near-black void
-        vec3<f32>(0.030, 0.050, 0.110),  // top — faint deep teal
-        v_axis,
+        vec3<f32>(0.015, 0.020, 0.050),
+        vec3<f32>(0.030, 0.050, 0.110),
+        clamp(v_axis, 0.0, 1.0),
     );
-    let nebula_peak_a = vec3<f32>(0.20, 0.10, 0.35);  // royal purple
-    let nebula_peak_b = vec3<f32>(0.05, 0.25, 0.35);  // cyan-teal
-    let nebula_mix = mix(nebula_peak_a, nebula_peak_b, layer1);
-    let nebula = base + nebula_mix * cloud * 0.55;
+    let peak_a = vec3<f32>(0.20, 0.10, 0.35);
+    let peak_b = vec3<f32>(0.05, 0.25, 0.35);
+    let peak_mix = mix(peak_a, peak_b, layer1);
+    return base + peak_mix * cloud * 0.55;
+}
+
+// Equirectangular projection: world-space direction → 2D coords for
+// `nebula_color`.  Maps `dir = (0, 1, 0)` (zenith) to `(_, 1)` so the
+// nebula's vertical hue axis aligns with world up.
+fn dir_to_uv(dir: vec3<f32>) -> vec2<f32> {
+    let phi = atan2(dir.z, dir.x);
+    let theta_y = clamp(dir.y, -1.0, 1.0);
+    return vec2<f32>(phi / (2.0 * PI), theta_y);
+}
+
+@fragment
+fn fs_bg(in: BgVsOut) -> @location(0) vec4<f32> {
+    let nebula = nebula_color(in.ndc, 0.0);
 
     // Star layer: each pixel is at most one star.  Quantise NDC into
     // a 480×300 grid; for each cell, hash the cell index to a star
