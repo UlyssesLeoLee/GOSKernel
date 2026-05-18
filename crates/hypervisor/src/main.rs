@@ -183,15 +183,30 @@ const YAW_PER_FRAME: f32 = 0.04;
 // `MOUSE_PREV_BTN` provides cheap edge-detection so a held button
 // doesn't re-fire the selection action every frame.
 
-use core::sync::atomic::{AtomicI8, AtomicU8 as AtomicU8Btn};
+use core::sync::atomic::{AtomicI8, AtomicI32 as AtomicI32M, AtomicU8 as AtomicU8Btn};
 static SELECTED_NODE_SLOT: AtomicI8 = AtomicI8::new(-1);
 static MOUSE_PREV_BTN: AtomicU8Btn = AtomicU8Btn::new(0);
+
+// Phase I.3.x — mouse-drag orbit.  Each frame compares the current
+// k_mouse cursor against the previous-frame snapshot; when the left
+// button is held over empty space the delta drives the camera yaw /
+// pitch biases in k-fb.  Sentinel -1 indicates "no prior frame yet"
+// so the very first drag tick doesn't apply a junk delta from the
+// initial cursor (160, 100).
+static PREV_MOUSE_X: AtomicI32M = AtomicI32M::new(-1);
+static PREV_MOUSE_Y: AtomicI32M = AtomicI32M::new(-1);
 
 /// Half-extent in screen pixels used for hit-testing each cube.
 /// Larger than the rendered cube on screen so the user has a
 /// reasonable click target even when the perspective shrinks
 /// far-side cubes.
 const HIT_HALF_PX: i32 = 8;
+
+/// Mouse-orbit sensitivity in mrad / pixel.  60 mrad ≈ 3.4°.
+/// Tuned by feel — fast enough that small drags rotate visibly,
+/// slow enough that the camera doesn't whip past every cube.
+const ORBIT_YAW_MRAD_PER_PX: i32 = 8;
+const ORBIT_PITCH_MRAD_PER_PX: i32 = 6;
 
 fn paint_3d_view(frame: u64) {
     if !k_fb::ready() {
@@ -330,7 +345,7 @@ fn paint_3d_view(frame: u64) {
         k_fb::draw_text(lx, ly, label, k_fb::Color::Foreground);
     }
 
-    // ── I.3.11 — mouse cursor + click-to-select ──────────────────
+    // ── I.3.11 / I.3.12 — mouse cursor + click-to-select + drag-orbit ──
     // Snapshot atomics once per frame.
     let mouse_x = k_mouse::MOUSE_X.load(Ordering::Relaxed);
     let mouse_y = k_mouse::MOUSE_Y.load(Ordering::Relaxed);
@@ -355,11 +370,37 @@ fn paint_3d_view(frame: u64) {
     }
 
     // Click edge: latch new selection (or clear if cursor was over
-    // empty space).
-    if left_edge {
+    // empty space).  Triggers ONLY on press, not during a drag —
+    // dragging from a cube initiates orbit + leaves selection alone.
+    if left_edge && hover_slot >= 0 {
         SELECTED_NODE_SLOT.store(hover_slot, Ordering::Relaxed);
+    } else if left_edge && hover_slot < 0 {
+        // Clicking empty space clears selection.
+        SELECTED_NODE_SLOT.store(-1, Ordering::Relaxed);
     }
     let selected = SELECTED_NODE_SLOT.load(Ordering::Relaxed);
+
+    // Drag-orbit: while the left button is held over empty space,
+    // mouse deltas drive the camera's yaw/pitch bias atomics.  When
+    // the user is hovering a cube and presses, that's a select-click;
+    // dragging off-cube subsequently still orbits because we re-test
+    // hover each frame.  Initial PREV_MOUSE = -1 sentinel suppresses
+    // the very first delta after boot.
+    let prev_mx = PREV_MOUSE_X.swap(mouse_x, Ordering::Relaxed);
+    let prev_my = PREV_MOUSE_Y.swap(mouse_y, Ordering::Relaxed);
+    if left_pressed && hover_slot < 0 && prev_mx >= 0 && prev_my >= 0 {
+        let dx = mouse_x - prev_mx;
+        let dy = mouse_y - prev_my;
+        if dx != 0 {
+            k_fb::CAMERA_YAW_BIAS_MRAD
+                .fetch_add(dx * ORBIT_YAW_MRAD_PER_PX, Ordering::Relaxed);
+        }
+        if dy != 0 {
+            // Inverted: dragging up rotates view up (raises pitch).
+            k_fb::CAMERA_PITCH_BIAS_MRAD
+                .fetch_add(-dy * ORBIT_PITCH_MRAD_PER_PX, Ordering::Relaxed);
+        }
+    }
 
     // Cursor crosshair: 5-pixel '+' in Highlight, clipped to screen.
     if mouse_x >= 0 && mouse_x < SCENE_WIDTH && mouse_y >= 0 && mouse_y < SCENE_HEIGHT {
@@ -422,6 +463,79 @@ fn paint_3d_view(frame: u64) {
             );
         }
     }
+
+    // ── Gizmo: 3-axis orientation indicator ──────────────────────
+    // Upper-right corner widget.  Projects the three world-space
+    // axes through the camera's view (no translation, no perspective
+    // — just the rotation effect) so the user always sees which
+    // direction is X / Y / Z.  Reads as "orbit handle" even though
+    // it isn't actually clickable; the whole empty-space area now
+    // serves that role via the drag handler above.
+    const GIZMO_CX: i32 = SCENE_WIDTH - 24;
+    const GIZMO_CY: i32 = HEADER_H + 18;
+    const GIZMO_LEN: f32 = 12.0;
+    // Camera basis: the same three vectors look_at builds from
+    // (eye, target=origin, up).  We don't need the full matrix —
+    // the dot of each world axis with right / true_up / forward
+    // gives its screen projection directly.
+    let forward = Vec3::new(-eye.x, -eye.y, -eye.z).normalize();
+    let world_up = Vec3::new(0.0, 1.0, 0.0);
+    let right = forward.cross(world_up).normalize();
+    let true_up = right.cross(forward);
+    // Helper: project a world axis to gizmo-local screen coords.
+    // Screen X = world_axis · right; screen Y flipped because image
+    // space Y is down.
+    let project_axis = |axis: Vec3| -> (i32, i32) {
+        let sx = (axis.dot(right) * GIZMO_LEN) as i32;
+        let sy = -(axis.dot(true_up) * GIZMO_LEN) as i32;
+        (sx, sy)
+    };
+    let (ax_x, ay_x) = project_axis(Vec3::new(1.0, 0.0, 0.0));
+    let (ax_y, ay_y) = project_axis(Vec3::new(0.0, 1.0, 0.0));
+    let (ax_z, ay_z) = project_axis(Vec3::new(0.0, 0.0, 1.0));
+    // Three colored Bresenham lines from gizmo centre.  R = X, G = Y,
+    // B = Z (standard convention).  Brightness encodes whether axis
+    // points toward camera (bright) or away (dim) via the forward
+    // dot — gives the gizmo subtle depth cue.
+    let axis_brightness = |axis: Vec3| -> k_fb::Color {
+        let d = axis.dot(forward);
+        if d > 0.3 {
+            k_fb::Color::DimWhite
+        } else {
+            k_fb::Color::Foreground
+        }
+    };
+    let draw_axis = |dx: i32, dy: i32, hue: k_fb::Color, _shade: k_fb::Color| {
+        let put = |x: i32, y: i32| {
+            if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                k_fb::put_pixel(x as usize, y as usize, hue);
+            }
+        };
+        k_rast::draw_line(put, GIZMO_CX, GIZMO_CY, GIZMO_CX + dx, GIZMO_CY + dy);
+    };
+    // X axis — drawn in NodeService (yellow) for warmth, since the
+    // "red" we'd normally use is reserved for Error.
+    draw_axis(
+        ax_x,
+        ay_x,
+        k_fb::Color::NodeService,
+        axis_brightness(Vec3::new(1.0, 0.0, 0.0)),
+    );
+    draw_axis(
+        ax_y,
+        ay_y,
+        k_fb::Color::NodeApp,
+        axis_brightness(Vec3::new(0.0, 1.0, 0.0)),
+    );
+    draw_axis(
+        ax_z,
+        ay_z,
+        k_fb::Color::NodeKernel,
+        axis_brightness(Vec3::new(0.0, 0.0, 1.0)),
+    );
+    // Centre marker pixel so the gizmo origin is visible even when
+    // all three axes point sideways.
+    k_fb::put_pixel(GIZMO_CX as usize, GIZMO_CY as usize, k_fb::Color::Foreground);
 
     // Detail panel: bottom-right corner for the SELECTED node.
     // 132×40 box with 3 text rows (plugin, vector, type).
