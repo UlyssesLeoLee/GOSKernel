@@ -339,32 +339,78 @@ fn relative_luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// ── 3-level bloom mip chain ────────────────────────────────────────
+//
+// Pipeline (5 render passes):
+//   1. fs_bloom_extract: HDR → bloom_h2.  Threshold + 5×5 blur in
+//      one pass; pixels under the threshold drop out completely.
+//   2. fs_bloom_downsample: bloom_h2 → bloom_h4 (4-sample box).
+//   3. fs_bloom_downsample: bloom_h4 → bloom_h8 (same shader,
+//      different bind group).
+//   4. fs_bloom_upsample: bloom_h8 → bloom_h4 (additive blend
+//      via pipeline blend state — LoadOp::Load preserves the
+//      existing h4 content from pass 2).
+//   5. fs_bloom_upsample: bloom_h4 → bloom_h2 (likewise).
+//
+// Composite then samples just bloom_h2, which now contains the
+// fully accumulated multi-octave glow.
+
 @fragment
-fn fs_bloom(in: PostVsOut) -> @location(0) vec4<f32> {
-    // 5×5 box-average with luminance threshold = 0.9.  Sample step
-    // is one HDR-texel relative to the half-res target.  Using
-    // texture_dimensions to compute the step avoids hard-coding a
-    // resolution.
+fn fs_bloom_extract(in: PostVsOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(hdr_tex, 0));
     let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
     var acc = vec3<f32>(0.0);
-    let threshold = 0.9;
+    let threshold = 0.85;
     let kernel_radius = 2;
-    let kernel_diameter = 5.0;
     var weight_sum = 0.0;
     for (var dy = -kernel_radius; dy <= kernel_radius; dy = dy + 1) {
         for (var dx = -kernel_radius; dx <= kernel_radius; dx = dx + 1) {
             let uv = in.uv + vec2<f32>(f32(dx) * step.x * 2.0, f32(dy) * step.y * 2.0);
             let c = textureSample(hdr_tex, hdr_samp, uv).rgb;
-            // Soft threshold: subtract floor, allow negative clamp.
             let luma = relative_luminance(c);
             let factor = max(luma - threshold, 0.0) / max(luma, 0.0001);
             acc = acc + c * factor;
             weight_sum = weight_sum + 1.0;
         }
     }
-    let bloom = acc / weight_sum;
-    return vec4<f32>(bloom, 1.0);
+    return vec4<f32>(acc / weight_sum, 1.0);
+}
+
+// Downsample: 4-tap box average from the higher-res source.  Used
+// twice (h2 → h4 and h4 → h8) with different bind groups; same
+// pipeline.
+@fragment
+fn fs_bloom_downsample(in: PostVsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(hdr_tex, 0));
+    let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+    let off = vec2<f32>(step.x * 0.5, step.y * 0.5);
+    let a = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(-off.x, -off.y)).rgb;
+    let b = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>( off.x, -off.y)).rgb;
+    let c = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(-off.x,  off.y)).rgb;
+    let d = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>( off.x,  off.y)).rgb;
+    return vec4<f32>((a + b + c + d) * 0.25, 1.0);
+}
+
+// Upsample: 9-sample tent filter from the lower-res source, written
+// with **additive blend** (set on the pipeline) so each call
+// accumulates onto whatever lower-frequency content the target
+// already holds.  Used twice (h8 → h4 and h4 → h2).
+@fragment
+fn fs_bloom_upsample(in: PostVsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(hdr_tex, 0));
+    let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+    // 3×3 tent kernel; centre weight 4, edge 2, corner 1.  Sum 16.
+    let centre = textureSample(hdr_tex, hdr_samp, in.uv).rgb * 4.0;
+    let n  = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(0.0, -step.y)).rgb * 2.0;
+    let s  = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(0.0,  step.y)).rgb * 2.0;
+    let e  = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>( step.x, 0.0)).rgb * 2.0;
+    let w  = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(-step.x, 0.0)).rgb * 2.0;
+    let ne = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>( step.x, -step.y)).rgb;
+    let nw = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(-step.x, -step.y)).rgb;
+    let se = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>( step.x,  step.y)).rgb;
+    let sw = textureSample(hdr_tex, hdr_samp, in.uv + vec2<f32>(-step.x,  step.y)).rgb;
+    let total = (centre + n + s + e + w + ne + nw + se + sw) / 16.0;
+    return vec4<f32>(total, 1.0);
 }
 
 // Composite: HDR + bloom -> ACES tonemap -> swapchain (sRGB).
@@ -795,30 +841,55 @@ fn main() {
         bind_group_layouts: &[&post_bgl],
         push_constant_ranges: &[],
     });
-    let bloom_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("bloom-pipeline"),
-        layout: Some(&post_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_post",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[],
+    let make_post_pipeline = |label: &'static str,
+                              entry: &'static str,
+                              format: wgpu::TextureFormat,
+                              blend: Option<wgpu::BlendState>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&post_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_post",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: entry,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        })
+    };
+    let bloom_extract_pipeline =
+        make_post_pipeline("bloom-extract", "fs_bloom_extract", HDR_FORMAT, None);
+    let bloom_down_pipeline =
+        make_post_pipeline("bloom-downsample", "fs_bloom_downsample", HDR_FORMAT, None);
+    // Upsample uses additive blend so each level accumulates onto the
+    // existing higher-res content from the previous downsample chain.
+    let additive_blend = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_bloom",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
+        alpha: wgpu::BlendComponent::REPLACE,
+    };
+    let bloom_up_pipeline = make_post_pipeline(
+        "bloom-upsample",
+        "fs_bloom_upsample",
+        HDR_FORMAT,
+        Some(additive_blend),
+    );
     let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("composite-pipeline"),
         layout: Some(&post_layout),
@@ -986,16 +1057,43 @@ fn main() {
                                 ],
                             })
                         };
-                        let bloom_bg = make_bg(
-                            "bloom-bg",
+                        // Bind groups: only slot 0 (hdr_tex) varies
+                        // across the bloom passes; the others get
+                        // harmless dummies.
+                        let extract_bg = make_bg(
+                            "bloom-extract-bg",
                             &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                        );
+                        let down_h4_bg = make_bg(
+                            "bloom-down-h4-bg",
+                            &offscreen.bloom_h2_view,
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                        );
+                        let down_h8_bg = make_bg(
+                            "bloom-down-h8-bg",
+                            &offscreen.bloom_h4_view,
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                        );
+                        let up_h4_bg = make_bg(
+                            "bloom-up-h4-bg",
+                            &offscreen.bloom_h8_view,
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                        );
+                        let up_h2_bg = make_bg(
+                            "bloom-up-h2-bg",
+                            &offscreen.bloom_h4_view,
                             &offscreen.hdr_view,
                             &offscreen.hdr_view,
                         );
                         let composite_bg = make_bg(
                             "composite-bg",
                             &offscreen.hdr_view,
-                            &offscreen.bloom_view,
+                            &offscreen.bloom_h2_view,
                             &offscreen.hdr_view,
                         );
                         let fxaa_bg = make_bg(
@@ -1063,24 +1161,33 @@ fn main() {
                             pass.draw_indexed(0..total_index_count, 0, 0..1);
                         }
 
-                        // Pass 2 — bloom extract + blur into the
-                        // half-res bloom target.  Reads HDR via
-                        // bloom_bg.
-                        {
+                        // Pass 2a — extract: HDR → bloom_h2 with
+                        // luminance threshold.  Clear target first.
+                        let bloom_pass = |encoder: &mut wgpu::CommandEncoder,
+                                          label: &'static str,
+                                          target: &wgpu::TextureView,
+                                          pipeline: &wgpu::RenderPipeline,
+                                          bind: &wgpu::BindGroup,
+                                          load_clear: bool| {
+                            let load = if load_clear {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 1.0,
+                                })
+                            } else {
+                                wgpu::LoadOp::Load
+                            };
                             let mut pass = encoder.begin_render_pass(
                                 &wgpu::RenderPassDescriptor {
-                                    label: Some("bloom-pass"),
+                                    label: Some(label),
                                     color_attachments: &[Some(
                                         wgpu::RenderPassColorAttachment {
-                                            view: &offscreen.bloom_view,
+                                            view: target,
                                             resolve_target: None,
                                             ops: wgpu::Operations {
-                                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                                    r: 0.0,
-                                                    g: 0.0,
-                                                    b: 0.0,
-                                                    a: 1.0,
-                                                }),
+                                                load,
                                                 store: wgpu::StoreOp::Store,
                                             },
                                         },
@@ -1090,10 +1197,58 @@ fn main() {
                                     occlusion_query_set: None,
                                 },
                             );
-                            pass.set_pipeline(&bloom_pipeline);
-                            pass.set_bind_group(0, &bloom_bg, &[]);
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, bind, &[]);
                             pass.draw(0..3, 0..1);
-                        }
+                        };
+
+                        bloom_pass(
+                            &mut encoder,
+                            "bloom-extract",
+                            &offscreen.bloom_h2_view,
+                            &bloom_extract_pipeline,
+                            &extract_bg,
+                            true,
+                        );
+                        // Pass 2b — downsample h2 → h4.
+                        bloom_pass(
+                            &mut encoder,
+                            "bloom-down-h4",
+                            &offscreen.bloom_h4_view,
+                            &bloom_down_pipeline,
+                            &down_h4_bg,
+                            true,
+                        );
+                        // Pass 2c — downsample h4 → h8.
+                        bloom_pass(
+                            &mut encoder,
+                            "bloom-down-h8",
+                            &offscreen.bloom_h8_view,
+                            &bloom_down_pipeline,
+                            &down_h8_bg,
+                            true,
+                        );
+                        // Pass 2d — upsample h8 → h4 (LoadOp::Load
+                        // so the downsampled h4 content survives;
+                        // pipeline has additive blend so this
+                        // accumulates on top).
+                        bloom_pass(
+                            &mut encoder,
+                            "bloom-up-h4",
+                            &offscreen.bloom_h4_view,
+                            &bloom_up_pipeline,
+                            &up_h4_bg,
+                            false,
+                        );
+                        // Pass 2e — upsample h4 → h2.
+                        bloom_pass(
+                            &mut encoder,
+                            "bloom-up-h2",
+                            &offscreen.bloom_h2_view,
+                            &bloom_up_pipeline,
+                            &up_h2_bg,
+                            false,
+                        );
 
                         // Pass 3 — composite HDR + bloom into the
                         // LDR intermediate, applying ACES tonemap.
@@ -1206,10 +1361,37 @@ const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 struct Offscreen {
     _hdr_tex: wgpu::Texture,
     hdr_view: wgpu::TextureView,
-    _bloom_tex: wgpu::Texture,
-    bloom_view: wgpu::TextureView,
+    // 3-level bloom pyramid.  h2 is the final result composite reads
+    // from; h4 / h8 are intermediates accumulated into during the
+    // upsample chain.
+    _bloom_h2_tex: wgpu::Texture,
+    bloom_h2_view: wgpu::TextureView,
+    _bloom_h4_tex: wgpu::Texture,
+    bloom_h4_view: wgpu::TextureView,
+    _bloom_h8_tex: wgpu::Texture,
+    bloom_h8_view: wgpu::TextureView,
     _ldr_tex: wgpu::Texture,
     ldr_view: wgpu::TextureView,
+}
+
+fn make_bloom_level(device: &wgpu::Device, label: &str, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
@@ -1229,24 +1411,9 @@ fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
         view_formats: &[],
     });
     let hdr_view = hdr_tex.create_view(&wgpu::TextureViewDescriptor::default());
-    let bloom_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("bloom"),
-        size: wgpu::Extent3d {
-            width: (w / 2).max(1),
-            height: (h / 2).max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let bloom_view = bloom_tex.create_view(&wgpu::TextureViewDescriptor::default());
-    // LDR intermediate consumed by FXAA.  Full-res; pixel count tied
-    // to the surface so FXAA samples are texel-aligned.
+    let (bloom_h2_tex, bloom_h2_view) = make_bloom_level(device, "bloom-h2", w / 2, h / 2);
+    let (bloom_h4_tex, bloom_h4_view) = make_bloom_level(device, "bloom-h4", w / 4, h / 4);
+    let (bloom_h8_tex, bloom_h8_view) = make_bloom_level(device, "bloom-h8", w / 8, h / 8);
     let ldr_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ldr"),
         size: wgpu::Extent3d {
@@ -1266,8 +1433,12 @@ fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
     Offscreen {
         _hdr_tex: hdr_tex,
         hdr_view,
-        _bloom_tex: bloom_tex,
-        bloom_view,
+        _bloom_h2_tex: bloom_h2_tex,
+        bloom_h2_view,
+        _bloom_h4_tex: bloom_h4_tex,
+        bloom_h4_view,
+        _bloom_h8_tex: bloom_h8_tex,
+        bloom_h8_view,
         _ldr_tex: ldr_tex,
         ldr_view,
     }
