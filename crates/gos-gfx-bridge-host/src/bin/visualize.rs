@@ -90,39 +90,104 @@ fn vs_scene(in: VsIn) -> VsOut {
     return out;
 }
 
+// ── Cook-Torrance / GGX BRDF helpers ──────────────────────────────
+//
+// Standard real-time microfacet pipeline:
+//   * D = GGX (Trowbridge-Reitz) normal distribution
+//   * G = Smith pair of Schlick-GGX geometry terms
+//   * F = Schlick fresnel
+//
+// Material model: per-fragment `metallic` + `roughness` in [0,1].
+// F0 (base reflectance at normal incidence) is 4% for dielectrics,
+// tinted by albedo for metals (the standard physically-based
+// approximation).
+
+const PI: f32 = 3.14159265358979;
+
+fn distribution_ggx(n: vec3<f32>, h: vec3<f32>, roughness: f32) -> f32 {
+    let a  = roughness * roughness;
+    let a2 = a * a;
+    let n_dot_h = max(dot(n, h), 0.0);
+    let n_dot_h2 = n_dot_h * n_dot_h;
+    let denom_part = (n_dot_h2 * (a2 - 1.0) + 1.0);
+    return a2 / (PI * denom_part * denom_part);
+}
+
+fn geometry_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    // Direct-lighting form of k.  IBL uses a different k; that
+    // branch lives in the IBL slice.
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return n_dot_x / (n_dot_x * (1.0 - k) + k);
+}
+
+fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
+    let n_dot_v = max(dot(n, v), 0.0);
+    let n_dot_l = max(dot(n, l), 0.0);
+    return geometry_schlick_ggx(n_dot_v, roughness)
+         * geometry_schlick_ggx(n_dot_l, roughness);
+}
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0)
+              * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 @fragment
 fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal);
     let v = normalize(pc.eye.xyz - in.world_position);
-    // Key light from upper-right-front, normalised.
     let l = normalize(vec3<f32>(0.55, 0.72, -0.42));
     let h = normalize(l + v);
 
-    // Lambert diffuse with soft wrap so back faces aren't pitch black.
-    let n_dot_l = dot(n, l);
-    let diffuse = max(n_dot_l * 0.5 + 0.5, 0.0);
+    // Material — Gen-1 single-material setup.  Roughness picked to
+    // give a tight-but-not-mirror highlight (brushed metal); metallic
+    // 0.85 means most of the reflection comes from the albedo-tinted
+    // F0 rather than a white dielectric.  Per-instance differentiation
+    // (spheres vs. cables, plus eventual user-driven palettes) lands
+    // when we add a vertex attribute for it.
+    let roughness = 0.38;
+    let metallic = 0.85;
+    let albedo = in.color;
 
-    // Blinn-Phong specular — high exponent for metallic-tight
-    // highlights.
-    let n_dot_h = max(dot(n, h), 0.0);
-    let spec = pow(n_dot_h, 48.0);
+    // F0: 4% baseline for dielectric reflectance, lerped to albedo
+    // for metals.
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
-    // Fresnel rim — Schlick approximation.  Brightest at glancing
-    // angles, vanishes at normal incidence.  Multiplies by colour to
-    // keep the rim tint coherent with the ball / cable hue.
+    let n_dot_l = max(dot(n, l), 0.0);
     let n_dot_v = max(dot(n, v), 0.0);
-    let fresnel = pow(1.0 - n_dot_v, 4.0);
+    let h_dot_v = max(dot(h, v), 0.0);
 
-    // Tone composition: dim ambient (cool blue), warm hue diffuse,
-    // bright specular tint biased toward white, fresnel adds same
-    // hue back at rim for the "outlined metal" look.
-    let ambient = vec3<f32>(0.06, 0.08, 0.13);
-    let diff_color = in.color * (0.35 + 0.65 * diffuse);
-    let spec_color = mix(in.color, vec3<f32>(1.0, 1.0, 1.0), 0.6) * spec * 0.9;
-    let rim_color = in.color * fresnel * 0.85;
-    let final_color = ambient + diff_color + spec_color + rim_color;
+    let d_term = distribution_ggx(n, h, roughness);
+    let g_term = geometry_smith(n, v, l, roughness);
+    let f_term = fresnel_schlick(h_dot_v, f0);
 
-    return vec4<f32>(final_color, 1.0);
+    let specular_num = d_term * g_term * f_term;
+    let specular_den = 4.0 * n_dot_v * n_dot_l + 0.0001;
+    let specular = specular_num / specular_den;
+
+    // Energy conservation: diffuse fraction = (1 - fresnel) * (1 - metallic).
+    let k_s = f_term;
+    let k_d = (vec3<f32>(1.0) - k_s) * (1.0 - metallic);
+
+    // Key-light radiance (slightly warm, well above LDR so bloom has
+    // something to feed on).
+    let radiance = vec3<f32>(1.0, 0.95, 0.88) * 4.0;
+    let lo = (k_d * albedo / PI + specular) * radiance * n_dot_l;
+
+    // Hemispheric ambient: sky tint above, ground tint below, blend
+    // by the normal's vertical component.  Stand-in until IBL lands.
+    let sky_tint = vec3<f32>(0.10, 0.13, 0.22);
+    let ground_tint = vec3<f32>(0.04, 0.03, 0.05);
+    let hemi = mix(ground_tint, sky_tint, (n.y + 1.0) * 0.5);
+    let ambient = hemi * albedo * (1.0 - metallic * 0.4);
+
+    // Fresnel rim retained — physically it's already in `specular`,
+    // but the explicit rim boost preserves the sci-fi silhouette
+    // glow we tuned in the previous slice.
+    let rim = albedo * pow(1.0 - n_dot_v, 4.0) * 0.5;
+
+    return vec4<f32>(ambient + lo + rim, 1.0);
 }
 
 // ── Background pipeline (starfield + nebula) ──────────────────────
@@ -157,16 +222,58 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(h) * 43758.5453);
 }
 
+// 2D value noise: bilerp between four corner hashes with a smooth
+// (cubic Hermite) interpolant.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 4-octave fractional Brownian motion.  Each octave doubles the
+// frequency and halves the amplitude.  Total ~12 noise samples per
+// pixel — affordable at full-res background.
+fn fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var freq = 1.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        v = v + amp * value_noise(p * freq);
+        freq = freq * 2.0;
+        amp = amp * 0.5;
+    }
+    return v;
+}
+
 @fragment
 fn fs_bg(in: BgVsOut) -> @location(0) vec4<f32> {
-    // Nebula gradient: vertical falloff with subtle hue shift.  Adds
-    // depth without overcomplicating the look.
-    let v = in.ndc.y * 0.5 + 0.5;
-    let nebula = mix(
-        vec3<f32>(0.02, 0.03, 0.07),     // bottom — near-black ink
-        vec3<f32>(0.04, 0.06, 0.14),     // top — faint deep teal
-        v,
+    // Animated nebula: two FBM layers slowly drifting in opposite
+    // directions create swirling cloud structure.  Hue picked from a
+    // deep purple-to-teal axis so the foreground (warm sphere
+    // highlights, electric-yellow stars) reads cleanly on top.
+    let drift0 = pc.time.x * 0.018;
+    let drift1 = pc.time.x * -0.012;
+    let layer0 = fbm(in.ndc * 1.4 + vec2<f32>(drift0, drift0 * 0.6));
+    let layer1 = fbm(in.ndc * 2.7 + vec2<f32>(drift1, drift1 * -0.8));
+    let cloud = pow(layer0 * 0.65 + layer1 * 0.35, 1.6);
+
+    // Vertical falloff retained — gives the scene a horizon-ish
+    // orientation cue under the swirling clouds.
+    let v_axis = in.ndc.y * 0.5 + 0.5;
+    let base = mix(
+        vec3<f32>(0.015, 0.020, 0.050),  // bottom — near-black void
+        vec3<f32>(0.030, 0.050, 0.110),  // top — faint deep teal
+        v_axis,
     );
+    let nebula_peak_a = vec3<f32>(0.20, 0.10, 0.35);  // royal purple
+    let nebula_peak_b = vec3<f32>(0.05, 0.25, 0.35);  // cyan-teal
+    let nebula_mix = mix(nebula_peak_a, nebula_peak_b, layer1);
+    let nebula = base + nebula_mix * cloud * 0.55;
 
     // Star layer: each pixel is at most one star.  Quantise NDC into
     // a 480×300 grid; for each cell, hash the cell index to a star
