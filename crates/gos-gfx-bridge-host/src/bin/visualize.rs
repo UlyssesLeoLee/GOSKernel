@@ -286,9 +286,67 @@ fn fs_composite(in: PostVsOut) -> @location(0) vec4<f32> {
     let bloom = textureSample(bloom_tex, hdr_samp, in.uv).rgb;
     let combined = hdr + bloom * 1.6;
     let mapped = aces_film(combined);
-    // Output is into an sRGB swapchain — the conversion is handled
-    // by the surface format, we just write linear values.
+    // Output is linear into a Rgba8Unorm LDR target consumed by the
+    // FXAA pass.  Final sRGB conversion happens at the swapchain
+    // write in fs_fxaa (which targets the sRGB swapchain).
     return vec4<f32>(mapped, 1.0);
+}
+
+// ── FXAA (Fast Approximate Anti-Aliasing) ──────────────────────────
+//
+// Simplified FXAA: detect edges by luma min/max contrast in a 5-tap
+// cross, classify edge direction by central second-derivative sign,
+// blend 1.5 texels perpendicular.  Less than 30 ops per pixel; trades
+// some quality vs. full FXAA 3.11 for code size.
+
+@group(0) @binding(3) var ldr_tex: texture_2d<f32>;
+
+fn luma_of(c: vec3<f32>) -> f32 {
+    // BT.601 weights — what FXAA was designed around.
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+@fragment
+fn fs_fxaa(in: PostVsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(ldr_tex, 0));
+    let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+    let c  = textureSample(ldr_tex, hdr_samp, in.uv).rgb;
+    let n  = textureSample(ldr_tex, hdr_samp, in.uv + vec2<f32>(0.0, -step.y)).rgb;
+    let s  = textureSample(ldr_tex, hdr_samp, in.uv + vec2<f32>(0.0,  step.y)).rgb;
+    let e  = textureSample(ldr_tex, hdr_samp, in.uv + vec2<f32>( step.x, 0.0)).rgb;
+    let w  = textureSample(ldr_tex, hdr_samp, in.uv + vec2<f32>(-step.x, 0.0)).rgb;
+    let lc = luma_of(c);
+    let ln = luma_of(n);
+    let ls = luma_of(s);
+    let le = luma_of(e);
+    let lw = luma_of(w);
+    let lmin = min(min(min(min(lc, ln), ls), le), lw);
+    let lmax = max(max(max(max(lc, ln), ls), le), lw);
+    let contrast = lmax - lmin;
+    // Threshold below which the pixel is "flat" and gets no AA.
+    // 0.06 is a conservative default; tighter values catch more
+    // edges but soften legitimate texture detail.
+    if (contrast < 0.06) {
+        return vec4<f32>(c, 1.0);
+    }
+    // Edge orientation: second-derivative magnitude along each axis.
+    let horiz = abs(le + lw - 2.0 * lc);
+    let vert  = abs(ln + ls - 2.0 * lc);
+    let is_horizontal = horiz >= vert;
+    var dir = vec2<f32>(0.0, 0.0);
+    if (is_horizontal) {
+        let grad = ln - ls;
+        dir = vec2<f32>(0.0, sign(grad) * step.y);
+    } else {
+        let grad = le - lw;
+        dir = vec2<f32>(sign(grad) * step.x, 0.0);
+    }
+    let blur1 = textureSample(ldr_tex, hdr_samp, in.uv + dir * 0.5).rgb;
+    let blur2 = textureSample(ldr_tex, hdr_samp, in.uv + dir * 1.5).rgb;
+    // Mix center with a perpendicular blur — 0.7 blend reads as
+    // "softened edge" without losing the underlying colour.
+    let aa = mix(c, mix(blur1, blur2, 0.5), 0.7);
+    return vec4<f32>(aa, 1.0);
 }
 "#;
 
@@ -592,40 +650,37 @@ fn main() {
         multiview: None,
     });
 
-    // Post-process bind group layout — three entries used by both
-    // bloom (HDR + sampler; ignores slot 2) and composite (HDR +
-    // sampler + bloom).  Single layout keeps the pipeline-layout
-    // arithmetic simple; the bloom pipeline binds the HDR texture
-    // in slot 2 as a harmless dummy.
+    // Post-process bind group layout — four entries shared by all
+    // post-process pipelines (bloom, composite, fxaa).  Each
+    // pipeline references a subset; unused slots get a harmless
+    // dummy binding (the HDR view) to satisfy the layout.
+    //
+    //   @binding(0) hdr_tex     — composite reads
+    //   @binding(1) sampler     — all pipelines read
+    //   @binding(2) bloom_tex   — composite reads
+    //   @binding(3) ldr_tex     — fxaa reads
+    let texture_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
     let post_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("post-bgl"),
         entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
+            texture_entry(0),
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
+            texture_entry(2),
+            texture_entry(3),
         ],
     });
     let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -669,6 +724,32 @@ fn main() {
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: "fs_composite",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: LDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+    // FXAA: reads the LDR target, smooths luminance edges, writes
+    // to the swapchain (sRGB conversion happens at write).
+    let fxaa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("fxaa-pipeline"),
+        layout: Some(&post_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_post",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_fxaa",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
@@ -765,52 +846,57 @@ fn main() {
                         // Bind groups rebuilt each frame so a resize
                         // (which recreates the offscreen views)
                         // doesn't require manual invalidation.
-                        let bloom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("bloom-bg"),
-                            layout: &post_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &offscreen.hdr_view,
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&post_sampler),
-                                },
-                                // Slot 2 unused by fs_bloom; bind hdr
-                                // again as a harmless dummy.
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &offscreen.hdr_view,
-                                    ),
-                                },
-                            ],
-                        });
-                        let composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("composite-bg"),
-                            layout: &post_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &offscreen.hdr_view,
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&post_sampler),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &offscreen.bloom_view,
-                                    ),
-                                },
-                            ],
-                        });
+                        // Helper: bind-group factory.  Every layout
+                        // slot must be filled; pipelines that don't
+                        // reference a slot just get the HDR view as
+                        // a harmless dummy.
+                        let make_bg = |label: &'static str,
+                                       slot0: &wgpu::TextureView,
+                                       slot2: &wgpu::TextureView,
+                                       slot3: &wgpu::TextureView| {
+                            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some(label),
+                                layout: &post_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(slot0),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &post_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::TextureView(slot2),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource: wgpu::BindingResource::TextureView(slot3),
+                                    },
+                                ],
+                            })
+                        };
+                        let bloom_bg = make_bg(
+                            "bloom-bg",
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                        );
+                        let composite_bg = make_bg(
+                            "composite-bg",
+                            &offscreen.hdr_view,
+                            &offscreen.bloom_view,
+                            &offscreen.hdr_view,
+                        );
+                        let fxaa_bg = make_bg(
+                            "fxaa-bg",
+                            &offscreen.hdr_view,
+                            &offscreen.hdr_view,
+                            &offscreen.ldr_view,
+                        );
 
                         // Pass 1 — scene + background into the HDR
                         // offscreen target.  This is where the real
@@ -903,12 +989,43 @@ fn main() {
                         }
 
                         // Pass 3 — composite HDR + bloom into the
-                        // swapchain, applying ACES tonemap on the
-                        // way out.
+                        // LDR intermediate, applying ACES tonemap.
                         {
                             let mut pass = encoder.begin_render_pass(
                                 &wgpu::RenderPassDescriptor {
                                     label: Some("composite-pass"),
+                                    color_attachments: &[Some(
+                                        wgpu::RenderPassColorAttachment {
+                                            view: &offscreen.ldr_view,
+                                            resolve_target: None,
+                                            ops: wgpu::Operations {
+                                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                                    r: 0.0,
+                                                    g: 0.0,
+                                                    b: 0.0,
+                                                    a: 1.0,
+                                                }),
+                                                store: wgpu::StoreOp::Store,
+                                            },
+                                        },
+                                    )],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                },
+                            );
+                            pass.set_pipeline(&composite_pipeline);
+                            pass.set_bind_group(0, &composite_bg, &[]);
+                            pass.draw(0..3, 0..1);
+                        }
+
+                        // Pass 4 — FXAA from LDR into the swapchain.
+                        // sRGB conversion is handled by the surface
+                        // format on write.
+                        {
+                            let mut pass = encoder.begin_render_pass(
+                                &wgpu::RenderPassDescriptor {
+                                    label: Some("fxaa-pass"),
                                     color_attachments: &[Some(
                                         wgpu::RenderPassColorAttachment {
                                             view: &view,
@@ -929,8 +1046,8 @@ fn main() {
                                     occlusion_query_set: None,
                                 },
                             );
-                            pass.set_pipeline(&composite_pipeline);
-                            pass.set_bind_group(0, &composite_bg, &[]);
+                            pass.set_pipeline(&fxaa_pipeline);
+                            pass.set_bind_group(0, &fxaa_bg, &[]);
                             pass.draw(0..3, 0..1);
                         }
 
@@ -973,11 +1090,19 @@ fn create_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
 /// the bloom extract has actual highlight energy to gather.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// LDR intermediate format consumed by FXAA.  `Rgba8Unorm` (linear
+/// 8-bit) — the FXAA pass writes the gamma-corrected output to the
+/// sRGB swapchain.  The 8-bit quantisation is fine since the
+/// composite pass has already tonemapped HDR → [0,1].
+const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
 struct Offscreen {
     _hdr_tex: wgpu::Texture,
     hdr_view: wgpu::TextureView,
     _bloom_tex: wgpu::Texture,
     bloom_view: wgpu::TextureView,
+    _ldr_tex: wgpu::Texture,
+    ldr_view: wgpu::TextureView,
 }
 
 fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
@@ -997,8 +1122,6 @@ fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
         view_formats: &[],
     });
     let hdr_view = hdr_tex.create_view(&wgpu::TextureViewDescriptor::default());
-    // Half-res bloom target — cheaper blur sampling; bilinear
-    // upsample in composite hides the resolution drop.
     let bloom_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("bloom"),
         size: wgpu::Extent3d {
@@ -1015,11 +1138,31 @@ fn make_offscreen(device: &wgpu::Device, w: u32, h: u32) -> Offscreen {
         view_formats: &[],
     });
     let bloom_view = bloom_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // LDR intermediate consumed by FXAA.  Full-res; pixel count tied
+    // to the surface so FXAA samples are texel-aligned.
+    let ldr_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ldr"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: LDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let ldr_view = ldr_tex.create_view(&wgpu::TextureViewDescriptor::default());
     Offscreen {
         _hdr_tex: hdr_tex,
         hdr_view,
         _bloom_tex: bloom_tex,
         bloom_view,
+        _ldr_tex: ldr_tex,
+        ldr_view,
     }
 }
 
