@@ -60,9 +60,10 @@ const TUBE_RADIUS: f32 = 0.012;
 /// triangle that paints a starfield + nebula gradient at z = 1.0.
 const SHADER_WGSL: &str = r#"
 struct Push {
-    view_proj: mat4x4<f32>,
-    eye:       vec4<f32>,    // .xyz = camera position, .w unused
-    time:      vec4<f32>,    // .x = seconds since boot, rest unused
+    view_proj:       mat4x4<f32>,
+    light_view_proj: mat4x4<f32>,
+    eye:             vec4<f32>,    // .xyz = camera position
+    time:            vec4<f32>,    // .x = seconds since boot
 };
 var<push_constant> pc: Push;
 
@@ -88,6 +89,49 @@ fn vs_scene(in: VsIn) -> VsOut {
     out.world_normal = in.normal;
     out.color = in.color;
     return out;
+}
+
+// Shadow pass: same geometry as the scene, projected by the light
+// view-proj matrix.  Depth-only; no fragment stage.
+@vertex
+fn vs_shadow(in: VsIn) -> @builtin(position) vec4<f32> {
+    return pc.light_view_proj * vec4<f32>(in.position, 1.0);
+}
+
+// Shadow sampling — bound on scene pipeline only.  `shadow_tex` is a
+// depth texture (Depth32Float); `shadow_samp` is a comparison
+// sampler that returns 0.0/1.0 for "in shadow / lit" per tap.
+@group(0) @binding(0) var shadow_tex: texture_depth_2d;
+@group(0) @binding(1) var shadow_samp: sampler_comparison;
+
+fn sample_shadow_pcf(world_pos: vec3<f32>, n_dot_l: f32) -> f32 {
+    // Project world position into the light's clip space.
+    let proj = pc.light_view_proj * vec4<f32>(world_pos, 1.0);
+    let ndc = proj.xyz / proj.w;
+    // Outside the shadow map frustum → fully lit.
+    if (any(abs(ndc.xy) > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    // NDC (-1..1) → UV (0..1) with V flipped (wgpu image-space Y is down).
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    // Slope-scaled bias: surfaces nearly edge-on to the light need more
+    // bias to avoid surface acne.
+    let bias = max(0.0008 * (1.0 - n_dot_l), 0.0002);
+    let depth_ref = ndc.z - bias;
+    // 3×3 PCF — soft shadow edges.  Texel step computed from texture
+    // size so sampling is resolution-independent.
+    let dims = vec2<f32>(textureDimensions(shadow_tex, 0));
+    let step = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+    var acc = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx) * step.x, f32(dy) * step.y);
+            acc = acc + textureSampleCompareLevel(
+                shadow_tex, shadow_samp, uv + offset, depth_ref,
+            );
+        }
+    }
+    return acc / 9.0;
 }
 
 // ── Cook-Torrance / GGX BRDF helpers ──────────────────────────────
@@ -179,9 +223,11 @@ fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     let k_d = (vec3<f32>(1.0) - k_s) * (1.0 - metallic);
 
     // Key-light radiance (slightly warm, well above LDR so bloom has
-    // something to feed on).
+    // something to feed on).  Direct contribution gated by the
+    // shadow-map sample at this fragment.
     let radiance = vec3<f32>(1.0, 0.95, 0.88) * 4.0;
-    let lo = (k_d * albedo / PI + specular) * radiance * n_dot_l;
+    let shadow_factor = sample_shadow_pcf(in.world_position, n_dot_l);
+    let lo = (k_d * albedo / PI + specular) * radiance * n_dot_l * shadow_factor;
 
     // ── IBL ambient (procedural environment) ─────────────────────
     //
@@ -610,10 +656,11 @@ fn main() {
         &wgpu::DeviceDescriptor {
             label: Some("gos-visualize"),
             required_features: wgpu::Features::PUSH_CONSTANTS,
-            // Push constant size: 64 (mat4) + 16 (eye) + 16 (time pad) = 96 B.
-            // Bump from 64; downlevel default is 0 so we set it explicitly.
+            // Push constant size: 64 (view_proj) + 64 (light_view_proj)
+            // + 16 (eye) + 16 (time) = 160 B.  Round up to 192 — well
+            // under the 256-byte ceiling most desktop drivers expose.
             required_limits: wgpu::Limits {
-                max_push_constant_size: 128,
+                max_push_constant_size: 192,
                 ..wgpu::Limits::downlevel_defaults()
             },
         },
@@ -744,35 +791,117 @@ fn main() {
         label: Some("cosmic-shader"),
         source: wgpu::ShaderSource::Wgsl(SHADER_WGSL.into()),
     });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("cosmic-pipeline-layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            range: 0..96,
-        }],
+    // Shadow map: fixed 1024×1024 Depth32Float.  Bound to scene
+    // pipeline via `shadow_bgl`; written by shadow pipeline.
+    const SHADOW_RES: u32 = 1024;
+    let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow-map"),
+        size: wgpu::Extent3d {
+            width: SHADOW_RES,
+            height: SHADOW_RES,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
     });
-    let vertex_layout = wgpu::VertexBufferLayout {
-        array_stride: BYTES_PER_PBR_VERTEX as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
+    let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let shadow_comparison_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shadow-comparison-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    });
+    let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("shadow-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
             },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 12,
-                shader_location: 1,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 24,
-                shader_location: 2,
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
             },
         ],
+    });
+    let shadow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shadow-bg"),
+        layout: &shadow_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&shadow_comparison_sampler),
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cosmic-pipeline-layout"),
+        bind_group_layouts: &[&shadow_bgl],
+        push_constant_ranges: &[wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            range: 0..160,
+        }],
+    });
+    // Shadow pass uses the same vertex layout but only the
+    // `light_view_proj` push constant.  No fragment stage (depth-only).
+    let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("shadow-pipeline-layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::VERTEX,
+            range: 0..160,
+        }],
+    });
+    // `VertexBufferLayout` borrows `attributes`, so two consumers
+    // (scene + shadow pipelines) each get an independently
+    // constructed value.  The attributes slice is `'static` from a
+    // const expression and shared.
+    const VERTEX_ATTRS: [wgpu::VertexAttribute; 3] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 12,
+            shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 24,
+            shader_location: 2,
+        },
+    ];
+    let make_vertex_layout = || wgpu::VertexBufferLayout {
+        array_stride: BYTES_PER_PBR_VERTEX as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &VERTEX_ATTRS,
     };
+    let vertex_layout = make_vertex_layout();
     let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("scene-pipeline"),
         layout: Some(&pipeline_layout),
@@ -803,6 +932,40 @@ fn main() {
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shadow-pipeline"),
+        layout: Some(&shadow_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_shadow",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[make_vertex_layout()],
+        },
+        // Depth-only — no fragment stage, no colour target.
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // Cull FRONT for the shadow pass — common trick to bias
+            // the depth bias problem to the back faces instead of
+            // the lit front faces (peter-panning over surface acne).
+            cull_mode: Some(wgpu::Face::Front),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
@@ -1043,7 +1206,11 @@ fn main() {
                         let view_proj = camera.view_proj();
                         let eye = camera.eye();
                         let elapsed = (now - start_time).as_secs_f32();
-                        let push_bytes = build_push_constants(view_proj, eye, elapsed);
+                        // Light view-proj is static — could be hoisted
+                        // out of the loop if the light ever stops
+                        // animating.  Cheap to rebuild for now.
+                        let lvp = light_view_proj();
+                        let push_bytes = build_push_constants(view_proj, lvp, eye, elapsed);
 
                         let frame = match surface.get_current_texture() {
                             Ok(f) => f,
@@ -1146,6 +1313,44 @@ fn main() {
                             &offscreen.ldr_view,
                         );
 
+                        // Pass 0 — shadow map.  Render scene geometry
+                        // from the key light's POV, depth-only, into
+                        // the shadow texture.  Background pipeline is
+                        // skipped (a full-screen quad at the far
+                        // plane never occludes anything anyway).
+                        {
+                            let mut pass = encoder.begin_render_pass(
+                                &wgpu::RenderPassDescriptor {
+                                    label: Some("shadow-pass"),
+                                    color_attachments: &[],
+                                    depth_stencil_attachment: Some(
+                                        wgpu::RenderPassDepthStencilAttachment {
+                                            view: &shadow_view,
+                                            depth_ops: Some(wgpu::Operations {
+                                                load: wgpu::LoadOp::Clear(1.0),
+                                                store: wgpu::StoreOp::Store,
+                                            }),
+                                            stencil_ops: None,
+                                        },
+                                    ),
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                },
+                            );
+                            pass.set_pipeline(&shadow_pipeline);
+                            pass.set_push_constants(
+                                wgpu::ShaderStages::VERTEX,
+                                0,
+                                &push_bytes,
+                            );
+                            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                            pass.set_index_buffer(
+                                index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            pass.draw_indexed(0..total_index_count, 0, 0..1);
+                        }
+
                         // Pass 1 — scene + background into the HDR
                         // offscreen target.  This is where the real
                         // > 1.0 highlights are produced (specular
@@ -1183,6 +1388,12 @@ fn main() {
                                     occlusion_query_set: None,
                                 },
                             );
+                            // Background + scene share the layout
+                            // that now declares the shadow bind group
+                            // at @group(0); both pipelines need it
+                            // bound even though only `fs_scene`
+                            // actually samples it.
+                            pass.set_bind_group(0, &shadow_bg, &[]);
                             pass.set_pipeline(&bg_pipeline);
                             pass.set_push_constants(
                                 wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -1557,28 +1768,73 @@ fn synth_edges(n: usize) -> Vec<DemoEdge> {
 
 // ── Push-constant packing ───────────────────────────────────────────
 
-fn build_push_constants(view_proj: [[f32; 4]; 4], eye: [f32; 3], time: f32) -> [u8; 96] {
-    let mut out = [0u8; 96];
-    // mat4x4 in column-major (WGSL convention).  Our matrix is
-    // row-major (rows are arrays), so transpose during the copy.
+fn write_mat4_col_major(out: &mut [u8], m: [[f32; 4]; 4]) {
     let mut off = 0;
     for col in 0..4 {
         for row in 0..4 {
-            out[off..off + 4].copy_from_slice(&view_proj[row][col].to_le_bytes());
+            out[off..off + 4].copy_from_slice(&m[row][col].to_le_bytes());
             off += 4;
         }
     }
+}
+
+fn build_push_constants(
+    view_proj: [[f32; 4]; 4],
+    light_view_proj: [[f32; 4]; 4],
+    eye: [f32; 3],
+    time: f32,
+) -> [u8; 160] {
+    let mut out = [0u8; 160];
+    write_mat4_col_major(&mut out[0..64], view_proj);
+    write_mat4_col_major(&mut out[64..128], light_view_proj);
     // eye vec4: xyz + zero padding to match alignment.
-    out[64..68].copy_from_slice(&eye[0].to_le_bytes());
-    out[68..72].copy_from_slice(&eye[1].to_le_bytes());
-    out[72..76].copy_from_slice(&eye[2].to_le_bytes());
-    out[76..80].copy_from_slice(&0.0_f32.to_le_bytes());
+    out[128..132].copy_from_slice(&eye[0].to_le_bytes());
+    out[132..136].copy_from_slice(&eye[1].to_le_bytes());
+    out[136..140].copy_from_slice(&eye[2].to_le_bytes());
+    out[140..144].copy_from_slice(&0.0_f32.to_le_bytes());
     // time vec4: x + padding.
-    out[80..84].copy_from_slice(&time.to_le_bytes());
-    out[84..88].copy_from_slice(&0.0_f32.to_le_bytes());
-    out[88..92].copy_from_slice(&0.0_f32.to_le_bytes());
-    out[92..96].copy_from_slice(&0.0_f32.to_le_bytes());
+    out[144..148].copy_from_slice(&time.to_le_bytes());
+    out[148..152].copy_from_slice(&0.0_f32.to_le_bytes());
+    out[152..156].copy_from_slice(&0.0_f32.to_le_bytes());
+    out[156..160].copy_from_slice(&0.0_f32.to_le_bytes());
     out
+}
+
+/// Orthographic projection matching the wgpu/Vulkan convention
+/// (z in [0, 1]).  Used by the shadow camera so the depth values
+/// the comparison sampler reads back are in the expected range.
+fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    let rl = right - left;
+    let tb = top - bottom;
+    let fn_ = far - near;
+    [
+        [2.0 / rl, 0.0, 0.0, 0.0],
+        [0.0, 2.0 / tb, 0.0, 0.0],
+        [0.0, 0.0, -1.0 / fn_, 0.0],
+        [
+            -(right + left) / rl,
+            -(top + bottom) / tb,
+            -near / fn_,
+            1.0,
+        ],
+    ]
+}
+
+/// Build the directional light's view-projection matrix.  Matches the
+/// LIGHT direction in `fs_scene` so the shadow ray walks back toward
+/// the same key light position.
+fn light_view_proj() -> [[f32; 4]; 4] {
+    let light_dir = vec3_normalize([0.55, 0.72, -0.42]);
+    let light_eye = [
+        light_dir[0] * 6.0,
+        light_dir[1] * 6.0,
+        light_dir[2] * 6.0,
+    ];
+    let view = look_at(light_eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    // Ortho frustum sized to comfortably contain the node-sphere
+    // shell + cable network.  Tweaked by feeling.
+    let proj = ortho(-2.5, 2.5, -2.5, 2.5, 0.1, 12.0);
+    mat4_mul(proj, view)
 }
 
 // ── Mat4 math (host-side, kept inline; the kernel side uses k-rast) ──
