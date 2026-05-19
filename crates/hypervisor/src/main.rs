@@ -286,9 +286,22 @@ fn paint_3d_view(frame: u64) {
         draw_node_solid(centre, hue_base, fog, &view_proj);
     }
 
-    // Edges: lines between projected centres.  Drawn AFTER cubes so
-    // they always read as overlay.  Lines are short enough that we
-    // don't bother with depth-aware drawing.
+    // Edges: lines between projected centres, styled by edge type
+    // (I.4.3).  Pattern is applied via a step counter incremented in
+    // the per-pixel closure that Bresenham invokes once per step.
+    //
+    //   Mount   — solid 2-px parallel (heavy structural attachment)
+    //   Use     — dashed 2-on / 2-off (capability lookup)
+    //   Depend  — dotted 1-on / 3-off (cold/declarative)
+    //   Signal  — solid pulsed (frame-modulated brightness)
+    //   Link    — bright gradient ends (metadata correspondence)
+    //   _       — DimWhite hairline
+    //
+    // The pulse phase comes from `frame` so animation runs at the
+    // repaint rate (~50 Hz @ REPAINT_TICKS=2).
+    use core::cell::Cell;
+    let pulse_phase = libm::sinf(frame as f32 * 0.22);
+    let pulse_on = pulse_phase > -0.4; // ~70% duty cycle for "active" feel
     for i in 0..returned_e {
         let from_idx = find_node_index(&nodes[..returned_n], edges[i].from_vector);
         let to_idx = find_node_index(&nodes[..returned_n], edges[i].to_vector);
@@ -299,17 +312,99 @@ fn paint_3d_view(frame: u64) {
             continue;
         }
         let color = classify_edge(edges[i].edge_type);
-        k_rast::draw_line(
-            |x, y| {
-                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                    k_fb::put_pixel(x as usize, y as usize, color);
-                }
-            },
-            fx,
-            fy,
-            tx,
-            ty,
-        );
+        let style = edge_style(edges[i].edge_type);
+        let step = Cell::new(0i32);
+        let total_len_est = (tx - fx).abs().max((ty - fy).abs()).max(1);
+        match style {
+            EdgeStyle::Solid => {
+                k_rast::draw_line(
+                    |x, y| {
+                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        }
+                    },
+                    fx, fy, tx, ty,
+                );
+            }
+            EdgeStyle::Dashed => {
+                k_rast::draw_line(
+                    |x, y| {
+                        let t = step.get();
+                        step.set(t + 1);
+                        // 2 on, 2 off → period 4
+                        if (t & 0x03) < 2
+                            && x >= 0 && x < SCENE_WIDTH
+                            && y >= HEADER_H && y < FOOTER_Y
+                        {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        }
+                    },
+                    fx, fy, tx, ty,
+                );
+            }
+            EdgeStyle::Dotted => {
+                k_rast::draw_line(
+                    |x, y| {
+                        let t = step.get();
+                        step.set(t + 1);
+                        // 1 on, 3 off → period 4
+                        if (t & 0x03) == 0
+                            && x >= 0 && x < SCENE_WIDTH
+                            && y >= HEADER_H && y < FOOTER_Y
+                        {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        }
+                    },
+                    fx, fy, tx, ty,
+                );
+            }
+            EdgeStyle::SolidPulsed => {
+                let draw_color = if pulse_on { color } else { k_fb::Color::DimWhite };
+                k_rast::draw_line(
+                    |x, y| {
+                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                            k_fb::put_pixel(x as usize, y as usize, draw_color);
+                        }
+                    },
+                    fx, fy, tx, ty,
+                );
+            }
+            EdgeStyle::GradientEnds => {
+                // Bright color in the first/last quarter, DimWhite in
+                // the middle half — communicates "metadata link" as
+                // a soft thread between two solid endpoints.
+                let q1 = total_len_est / 4;
+                let q3 = total_len_est - q1;
+                k_rast::draw_line(
+                    |x, y| {
+                        let t = step.get();
+                        step.set(t + 1);
+                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                            let c = if t < q1 || t > q3 { color } else { k_fb::Color::DimWhite };
+                            k_fb::put_pixel(x as usize, y as usize, c);
+                        }
+                    },
+                    fx, fy, tx, ty,
+                );
+            }
+            EdgeStyle::DoubleSolid => {
+                // Render the line twice with a 1-px perpendicular
+                // offset to read as a "rail" — Mount is a structural
+                // attachment and deserves visual weight.
+                let dx = tx - fx;
+                let dy = ty - fy;
+                let len = libm::sqrtf((dx * dx + dy * dy) as f32).max(1.0);
+                let ox = libm::roundf(-(dy as f32) / len) as i32;
+                let oy = libm::roundf((dx as f32) / len) as i32;
+                let put_solid = |x: i32, y: i32| {
+                    if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                        k_fb::put_pixel(x as usize, y as usize, color);
+                    }
+                };
+                k_rast::draw_line(put_solid, fx, fy, tx, ty);
+                k_rast::draw_line(put_solid, fx + ox, fy + oy, tx + ox, ty + oy);
+            }
+        }
     }
 
     // I.3.10 — node labels.  Project each node's centre to screen,
@@ -784,6 +879,34 @@ fn find_node_index(
     vector: VectorAddress,
 ) -> Option<usize> {
     nodes.iter().position(|n| n.vector == vector)
+}
+
+/// Visual style applied to an edge in the 3D scene.  Decoupled from
+/// hue (which is set by `classify_edge`) so a future palette tweak
+/// doesn't have to thread style through too.  See the rendering loop
+/// in `paint_3d_view` for per-style implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeStyle {
+    Solid,
+    SolidPulsed,
+    Dashed,
+    Dotted,
+    GradientEnds,
+    DoubleSolid,
+}
+
+fn edge_style(kind: gos_protocol::RuntimeEdgeType) -> EdgeStyle {
+    use gos_protocol::RuntimeEdgeType;
+    match kind {
+        RuntimeEdgeType::Mount => EdgeStyle::DoubleSolid,
+        RuntimeEdgeType::Use => EdgeStyle::Dashed,
+        RuntimeEdgeType::Depend => EdgeStyle::Dotted,
+        RuntimeEdgeType::Signal | RuntimeEdgeType::Call | RuntimeEdgeType::Spawn => {
+            EdgeStyle::SolidPulsed
+        }
+        RuntimeEdgeType::Link => EdgeStyle::GradientEnds,
+        _ => EdgeStyle::Solid,
+    }
 }
 
 fn classify_edge(kind: gos_protocol::RuntimeEdgeType) -> k_fb::Color {
