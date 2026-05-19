@@ -687,15 +687,167 @@ fn paint_3d_view(frame: u64) {
         k_fb::draw_text(px + 4, py + 28, row3.as_str(), k_fb::Color::Foreground);
     }
 
-    // Header text: "GOS  N NOD  M EDG  G<gen>"
-    let mut hdr = TextBuf::<40>::new();
-    hdr.push_str("GOS  ");
-    hdr.push_dec(returned_n as u64);
-    hdr.push_str(" NOD  ");
-    hdr.push_dec(snapshot.edge_count as u64);
-    hdr.push_str(" EDG  G");
-    hdr.push_dec(gos_runtime::graph_generation());
-    k_fb::draw_text(4, 3, hdr.as_str(), k_fb::Color::Foreground);
+    // Header (I.4.4 refresh): brand chip on the left, three count
+    // sections separated by ASCII bar glyphs.  Brand uses the brighter
+    // foreground; counts use foreground; separators use DimWhite so
+    // the eye sees the count numbers as the data.
+    //
+    //   GOS-KRN | 25 NOD | 63 EDG | G147
+    //
+    // 8 px font × 40 chars = 320 px exactly; the layout caps at 38
+    // chars to leave a 2-char right margin.
+    k_fb::draw_text(4, 3, "GOS-KRN", k_fb::Color::Highlight);
+    k_fb::draw_text(4 + 7 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_a = TextBuf::<10>::new();
+    count_a.push_dec(returned_n as u64);
+    count_a.push_str(" NOD");
+    k_fb::draw_text(4 + 9 * 8, 3, count_a.as_str(), k_fb::Color::Foreground);
+    k_fb::draw_text(4 + 16 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_b = TextBuf::<10>::new();
+    count_b.push_dec(snapshot.edge_count as u64);
+    count_b.push_str(" EDG");
+    k_fb::draw_text(4 + 18 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
+    k_fb::draw_text(4 + 25 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_c = TextBuf::<10>::new();
+    count_c.push_str("G");
+    count_c.push_dec(gos_runtime::graph_generation());
+    k_fb::draw_text(4 + 27 * 8, 3, count_c.as_str(), k_fb::Color::Foreground);
+
+    // ── I.4.5 — edge-style legend strip ──────────────────────────────
+    // Bottom-left of the scene area, just above the footer hairline.
+    // Four miniature edge samples teach the user the colour+pattern
+    // language without consuming a separate help screen.  Each chip:
+    // 14-px-wide sample line, then a 3-char label.
+    {
+        let chip_y = FOOTER_Y as usize - 10;
+        let chip_baseline_y = FOOTER_Y as usize - 11;
+        let sample_w: i32 = 14;
+        let chip_pitch: i32 = sample_w + 4 * 8 + 4;
+        let chips: [(EdgeStyle, k_fb::Color, &str); 4] = [
+            (EdgeStyle::DoubleSolid, k_fb::Color::NodeDriver, "MNT"),
+            (EdgeStyle::Dashed, k_fb::Color::NodeService, "USE"),
+            (EdgeStyle::SolidPulsed, k_fb::Color::NodeApp, "SIG"),
+            (EdgeStyle::GradientEnds, k_fb::Color::Highlight, "LNK"),
+        ];
+        let mut cx: i32 = 4;
+        for &(style, color, label) in &chips {
+            // Sample mini-edge from (cx, chip_y+3) to (cx+sample_w, chip_y+3).
+            let x0 = cx;
+            let x1 = cx + sample_w;
+            let y_line = chip_y as i32 + 3;
+            let step = Cell::new(0i32);
+            match style {
+                EdgeStyle::DoubleSolid => {
+                    k_rast::draw_line(
+                        |x, y| if x >= 0 && x < SCENE_WIDTH && y >= 0 && y < SCENE_HEIGHT {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        },
+                        x0, y_line, x1, y_line,
+                    );
+                    k_rast::draw_line(
+                        |x, y| if x >= 0 && x < SCENE_WIDTH && y >= 0 && y < SCENE_HEIGHT {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        },
+                        x0, y_line + 1, x1, y_line + 1,
+                    );
+                }
+                EdgeStyle::Dashed => {
+                    k_rast::draw_line(
+                        |x, y| {
+                            let t = step.get();
+                            step.set(t + 1);
+                            if (t & 0x03) < 2
+                                && x >= 0 && x < SCENE_WIDTH
+                                && y >= 0 && y < SCENE_HEIGHT
+                            {
+                                k_fb::put_pixel(x as usize, y as usize, color);
+                            }
+                        },
+                        x0, y_line, x1, y_line,
+                    );
+                }
+                EdgeStyle::SolidPulsed => {
+                    let draw_color = if pulse_on { color } else { k_fb::Color::DimWhite };
+                    k_rast::draw_line(
+                        |x, y| if x >= 0 && x < SCENE_WIDTH && y >= 0 && y < SCENE_HEIGHT {
+                            k_fb::put_pixel(x as usize, y as usize, draw_color);
+                        },
+                        x0, y_line, x1, y_line,
+                    );
+                }
+                EdgeStyle::GradientEnds => {
+                    let q = sample_w / 4;
+                    k_rast::draw_line(
+                        |x, y| {
+                            let t = step.get();
+                            step.set(t + 1);
+                            if x >= 0 && x < SCENE_WIDTH && y >= 0 && y < SCENE_HEIGHT {
+                                let c = if t < q || t > sample_w - q { color } else { k_fb::Color::DimWhite };
+                                k_fb::put_pixel(x as usize, y as usize, c);
+                            }
+                        },
+                        x0, y_line, x1, y_line,
+                    );
+                }
+                _ => {
+                    k_rast::draw_line(
+                        |x, y| if x >= 0 && x < SCENE_WIDTH && y >= 0 && y < SCENE_HEIGHT {
+                            k_fb::put_pixel(x as usize, y as usize, color);
+                        },
+                        x0, y_line, x1, y_line,
+                    );
+                }
+            }
+            k_fb::draw_text((cx + sample_w + 3) as usize, chip_baseline_y, label, k_fb::Color::Foreground);
+            cx += chip_pitch;
+        }
+    }
+
+    // ── I.4.6 — hover tooltip ────────────────────────────────────────
+    // 1-line label near the cursor when hovering an unselected node.
+    // Shows `<plugin> · <TYPE>` so the user can read the node id
+    // without committing to a click.  Renders with a thin background
+    // box for legibility against any cube colour.
+    if hover_slot >= 0 && hover_slot != selected {
+        let i = hover_slot as usize;
+        let node = &nodes[i];
+        let type_label = match node.node_type {
+            RuntimeNodeType::Hardware => "HW",
+            RuntimeNodeType::Driver => "DRV",
+            RuntimeNodeType::Service => "SVC",
+            RuntimeNodeType::PluginEntry => "PE",
+            RuntimeNodeType::Compute => "CPU",
+            RuntimeNodeType::Router => "RTR",
+            RuntimeNodeType::Aggregator => "AGG",
+            RuntimeNodeType::Vector => "VEC",
+        };
+        let trimmed = node.plugin_name.strip_prefix("K_").unwrap_or(node.plugin_name);
+        let trimmed_bytes = trimmed.as_bytes();
+        let name_len = trimmed_bytes.len().min(8);
+        let name_str = unsafe { core::str::from_utf8_unchecked(&trimmed_bytes[..name_len]) };
+        let mut tip = TextBuf::<20>::new();
+        tip.push_str(name_str);
+        tip.push_str(" ");
+        tip.push_str(type_label);
+        let txt = tip.as_str();
+        let txt_w = (txt.len() * 8) as i32;
+        let txt_h: i32 = 10;
+        // Place 8 px to the right and above the cursor; flip side if
+        // it would clip past the right edge.
+        let mut tx = mouse_x + 10;
+        let mut ty = mouse_y - txt_h - 4;
+        if tx + txt_w + 4 > SCENE_WIDTH {
+            tx = mouse_x - txt_w - 6;
+        }
+        if ty < HEADER_H + 2 {
+            ty = mouse_y + 8;
+        }
+        if tx >= 0 && ty >= HEADER_H && tx + txt_w + 4 < SCENE_WIDTH && ty + txt_h < FOOTER_Y {
+            k_fb::fill_rect(tx as usize, ty as usize, (txt_w + 4) as usize, txt_h as usize, k_fb::Color::HeaderBar);
+            k_fb::stroke_rect(tx as usize, ty as usize, (txt_w + 4) as usize, txt_h as usize, k_fb::Color::DimWhite);
+            k_fb::draw_text((tx + 2) as usize, (ty + 1) as usize, txt, k_fb::Color::Foreground);
+        }
+    }
 
     // Footer status.
     k_fb::hline(0, FOOTER_Y as usize, k_fb::WIDTH, k_fb::Color::DimWhite);
