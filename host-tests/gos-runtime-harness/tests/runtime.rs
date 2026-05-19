@@ -2366,3 +2366,137 @@ fn resolve_capability_with_edge_attributes_to_runtime_graph() {
     let (total_after_miss, _) = gos_runtime::edge_page(0, &mut edges_after);
     assert_eq!(total_after_miss, 1);
 }
+
+// Audit P0 #2 — `register_node_routes` must lift its conditional-route
+// targets into the runtime edge table as Signal edges so cross-plugin
+// routing topology is graph-visible.  Without this, plugins like k-ps2
+// dispatched signals through node-local route tables that the graph
+// never saw — circumventing the graph thesis for IRQ-driven traffic.
+//
+// The test verifies:
+//   1. registering routes to two distinct peers yields exactly two
+//      Signal edges with correct from/to wiring
+//   2. distinct route keys to the same peer remain distinct edges
+//      (so different signal channels stay separable in the graph)
+//   3. idempotency: calling register_node_routes again with the same
+//      table does not duplicate edges
+//   4. routes whose target node is not registered are skipped silently
+//      (boot ordering may resolve them on a later call)
+//   5. self-routes (target == source vector) do not produce edges
+#[test]
+fn register_node_routes_lifts_static_targets_to_signal_edges() {
+    use gos_protocol::{
+        derive_node_id, ConditionalRoute, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("ROUTE_RT");
+    const SRC_KEY: &str = "route.src";
+    const PEER_A_KEY: &str = "route.peer.a";
+    const PEER_B_KEY: &str = "route.peer.b";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.route");
+    const SRC_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 1);
+    const PEER_A_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 2);
+    const PEER_B_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 3);
+    const UNKNOWN_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 99);
+
+    fn node(pid: PluginId, key: &'static str, exec: ExecutorId) -> NodeSpec {
+        NodeSpec {
+            node_id: derive_node_id(pid, key),
+            local_node_key: key,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: exec,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        }
+    }
+
+    let src_spec = node(PID, SRC_KEY, EXEC);
+    let a_spec = node(PID, PEER_A_KEY, EXEC);
+    let b_spec = node(PID, PEER_B_KEY, EXEC);
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "ROUTE_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, SRC_VEC, src_spec).expect("src");
+    gos_runtime::register_node(PID, PEER_A_VEC, a_spec).expect("peer a");
+    gos_runtime::register_node(PID, PEER_B_VEC, b_spec).expect("peer b");
+
+    // Edge table empty before any route registration.
+    let mut buf = [gos_protocol::GraphEdgeSummary::EMPTY; 16];
+    let (before, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(before, 0);
+
+    // Two routes to distinct peers → exactly two Signal edges.
+    let routes = [
+        ConditionalRoute { key: 0, target: PEER_A_VEC },
+        ConditionalRoute { key: 1, target: PEER_B_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &routes).expect("register routes");
+
+    let (after, ret) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after, 2, "two distinct peers ⇒ two edges");
+    assert_eq!(ret, 2);
+    for edge in &buf[..2] {
+        assert_eq!(edge.edge_type, RuntimeEdgeType::Signal);
+        assert_eq!(edge.from_vector, SRC_VEC);
+        assert!(edge.to_vector == PEER_A_VEC || edge.to_vector == PEER_B_VEC);
+    }
+
+    // Idempotency: re-registering the same table doesn't bump edge count.
+    gos_runtime::register_node_routes(SRC_VEC, &routes).expect("re-register");
+    let (after_again, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after_again, 2, "idempotent re-registration");
+
+    // Distinct route keys to the SAME peer remain distinct edges.
+    let multi_key = [
+        ConditionalRoute { key: 0, target: PEER_A_VEC },
+        ConditionalRoute { key: 7, target: PEER_A_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &multi_key).expect("multi-key");
+    let (after_multi, _) = gos_runtime::edge_page(0, &mut buf);
+    // We now have: (src→A,key=0), (src→B,key=1), (src→A,key=7).  The first
+    // two were registered above; the new key=7 adds a third.
+    assert_eq!(
+        after_multi, 3,
+        "different route keys to same peer ⇒ separate edges"
+    );
+
+    // Routes whose target isn't a registered node are skipped silently.
+    let with_unknown = [
+        ConditionalRoute { key: 9, target: UNKNOWN_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &with_unknown).expect("with unknown");
+    let (after_unknown, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(
+        after_unknown, 3,
+        "unknown target skipped, no new edge"
+    );
+
+    // Self-route is filtered (target == source).
+    let self_route = [
+        ConditionalRoute { key: 4, target: SRC_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &self_route).expect("self route");
+    let (after_self, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after_self, 3, "self-route filtered, no new edge");
+}

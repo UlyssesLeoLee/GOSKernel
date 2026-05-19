@@ -576,11 +576,56 @@ impl GraphRuntime {
         routes: &[ConditionalRoute],
     ) -> Result<(), RuntimeError> {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
-        let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+        let from_node_id = {
+            let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+            let count = routes.len().min(MAX_CONDITIONAL_ROUTES);
+            record.route_count = count as u8;
+            for (i, r) in routes.iter().take(count).enumerate() {
+                record.routes[i] = *r;
+            }
+            record.spec.node_id
+        };
+
+        // Audit P0 #2 — lift conditional-route static targets to declared
+        // Signal edges in the runtime graph.  Before this fix the route
+        // table populated by `register_node_routes` was a node-local
+        // dispatch hint invisible to the graph; cross-plugin signal flow
+        // bypassed the edge table entirely.  Each known target now becomes
+        // an idempotent Signal edge stamped with the route key so tooling
+        // (Cypher, visualizer) sees the topology.  Targets that aren't yet
+        // registered are skipped silently — boot ordering may resolve them
+        // later via a subsequent register_node_routes call.
         let count = routes.len().min(MAX_CONDITIONAL_ROUTES);
-        record.route_count = count as u8;
-        for (i, r) in routes.iter().take(count).enumerate() {
-            record.routes[i] = *r;
+        for r in routes.iter().take(count) {
+            let Some(to_node_id) = self.node_id_for_vec(r.target) else {
+                continue;
+            };
+            if from_node_id == to_node_id {
+                continue;
+            }
+            // Distinguish edges per route key so different keys yield distinct
+            // edges (route 0 vs route 1 to the same peer remain separate in
+            // the graph).  Gen-1 derive_edge_id label encodes the key byte.
+            let label_bytes = [b'r', b'o', b'u', b't', b'e', b'.', b'0' + (r.key / 100) % 10, b'0' + (r.key / 10) % 10, b'0' + r.key % 10];
+            // SAFETY: label_bytes is ASCII digits only — valid UTF-8.
+            let label = match core::str::from_utf8(&label_bytes) {
+                Ok(s) => s,
+                Err(_) => "route.???",
+            };
+            let edge_id = derive_edge_id(from_node_id, to_node_id, label);
+            let spec = EdgeSpec {
+                edge_id,
+                from_node: from_node_id,
+                to_node: to_node_id,
+                edge_type: RuntimeEdgeType::Signal,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::Direct,
+                capability_namespace: Some("route"),
+                capability_binding: None,
+                vector_ref: None,
+            };
+            let _ = self.register_edge(spec);
         }
         Ok(())
     }
