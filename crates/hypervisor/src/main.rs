@@ -267,12 +267,23 @@ fn paint_3d_view(frame: u64) {
     }
     sort_by_depth_desc(&mut depths[..depth_count]);
 
-    // Cubes (painter's order: far first, near last).
+    // Octahedral cores (painter's order: far first, near last).  Fog
+    // factor [0,1] is the normalised distance-from-camera bucketed by
+    // the precomputed depth² we already sorted on — gives "near = full
+    // colour, far = receding into nebula" without a second pass.
+    let max_depth_sq = depths[..depth_count]
+        .iter()
+        .fold(0.0_f32, |acc, &(_, d)| if d > acc { d } else { acc })
+        .max(1e-3);
     for slot in 0..depth_count {
-        let i = depths[slot].0;
+        let (i, d_sq) = depths[slot];
         let centre = node_world_position(i, returned_n);
         let hue_base = classify_node_hue(&nodes[i]);
-        draw_cube(centre, hue_base, &view_proj);
+        // sqrt → linear distance, then normalise.  Apply a soft curve
+        // so middle-distance nodes don't dim too aggressively.
+        let lin = libm::sqrtf(d_sq / max_depth_sq);
+        let fog = (lin * lin * 0.9).clamp(0.0, 1.0);
+        draw_node_solid(centre, hue_base, fog, &view_proj);
     }
 
     // Edges: lines between projected centres.  Drawn AFTER cubes so
@@ -628,61 +639,72 @@ fn isqrt_ceil(n: usize) -> usize {
     s
 }
 
-const CUBE_HALF: f32 = 0.10;
+// ── Node shape: octahedral crystal core (I.4.1) ────────────────────
+//
+// We previously rendered every node as a small cube (8 verts / 12
+// triangles).  Switching to a regular octahedron (6 verts / 8 tris)
+// is cheaper to rasterise AND gives every node a faceted "crystal"
+// silhouette that reads as a graph-vertex rather than a building.
+// Each face is a single triangle, so the 8-step Lambertian shading
+// produces sharper highlight/shadow contrast — more sci-fi, less
+// blockprint.
+//
+// Octahedron half-extent slightly larger than the old cube's so the
+// projected on-screen footprint is comparable.
 
-/// 8 corners of a unit cube centred at the origin (the per-node
-/// world transform just translates).  Order matches `CUBE_FACES`
-/// below.
-const CUBE_CORNERS_LOCAL: [(f32, f32, f32); 8] = [
-    (-1.0, -1.0, -1.0),
-    (1.0, -1.0, -1.0),
-    (1.0, 1.0, -1.0),
-    (-1.0, 1.0, -1.0),
-    (-1.0, -1.0, 1.0),
-    (1.0, -1.0, 1.0),
-    (1.0, 1.0, 1.0),
-    (-1.0, 1.0, 1.0),
+const NODE_HALF: f32 = 0.13;
+
+/// 6 vertices: ±X, ±Y, ±Z poles of a unit octahedron.
+/// Indices: 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z.
+const OCTA_CORNERS_LOCAL: [(f32, f32, f32); 6] = [
+    (-1.0, 0.0, 0.0),  // 0 -X
+    (1.0, 0.0, 0.0),   // 1 +X
+    (0.0, -1.0, 0.0),  // 2 -Y (bottom)
+    (0.0, 1.0, 0.0),   // 3 +Y (top)
+    (0.0, 0.0, -1.0),  // 4 -Z
+    (0.0, 0.0, 1.0),   // 5 +Z
 ];
 
-/// 12 triangles, 2 per face, CCW winding when viewed from outside.
-const CUBE_TRIS: [[usize; 3]; 12] = [
-    // -z face
-    [0, 1, 2], [0, 2, 3],
-    // +z face
-    [4, 6, 5], [4, 7, 6],
-    // -y face
-    [0, 4, 5], [0, 5, 1],
-    // +y face
-    [3, 2, 6], [3, 6, 7],
-    // -x face
-    [0, 3, 7], [0, 7, 4],
-    // +x face
-    [1, 5, 6], [1, 6, 2],
+/// 8 triangular faces, CCW winding when viewed from outside.
+/// Upper hemisphere fan around +Y, lower hemisphere fan around -Y.
+const OCTA_TRIS: [[usize; 3]; 8] = [
+    // Upper hemisphere (apex = 3 = +Y).
+    [3, 5, 1], // +Y → +Z → +X
+    [3, 1, 4], // +Y → +X → -Z
+    [3, 4, 0], // +Y → -Z → -X
+    [3, 0, 5], // +Y → -X → +Z
+    // Lower hemisphere (apex = 2 = -Y).
+    [2, 1, 5], // -Y → +X → +Z
+    [2, 4, 1], // -Y → -Z → +X
+    [2, 0, 4], // -Y → -X → -Z
+    [2, 5, 0], // -Y → +Z → -X
 ];
 
-/// Sci-fi cube draw: per-face Lambertian shading against a fixed
-/// world-space "key light" pulls each face's shade slot from the
-/// node's 8-step palette ramp, so cubes read as 3D-lit solids
-/// instead of flat sprites.  Outline accent uses the brightest
-/// shade so silhouettes glow.
-fn draw_cube(centre: Vec3, hue_base: u8, view_proj: &Mat4) {
-    // Fixed key light, normalised once at compile-time-ish.  Coming
-    // from upper-right-front; bias toward Y so the top face is the
-    // brightest in the default camera framing.
+/// Sci-fi octahedral crystal draw (I.4.1+I.4.2): per-face Lambertian
+/// shading pulls a slot from the node's 8-step hue ramp; depth-fog
+/// then biases that slot down for nodes near the far plane so the
+/// scene reads in spatial layers.  Rim outline uses the brightest
+/// shade so silhouettes pop against the dark background.
+///
+/// `fog`: 0.0 = full strength (near camera), 1.0 = fully faded
+/// (at the far plane).  Subtracts up to ~4 shade slots so the
+/// farthest nodes still draw but recede visually.
+fn draw_node_solid(centre: Vec3, hue_base: u8, fog: f32, view_proj: &Mat4) {
+    // Fixed key light: upper-right-front, biased toward Y so the
+    // top facets read as the brightest in the default camera framing.
     const LIGHT: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
-    const LIGHT_LEN: f32 = 1.0; // pre-normalised in choice of components
+    const LIGHT_LEN: f32 = 1.0;
     const AMBIENT: f32 = 0.18;
 
-    // Project all 8 corners.  Also keep world coords so we can build
-    // each triangle's geometric normal for shading.
-    let mut screen = [(0i32, 0i32, true); 8];
-    let mut world: [Vec3; 8] = [Vec3::new(0.0, 0.0, 0.0); 8];
-    for j in 0..8 {
-        let l = CUBE_CORNERS_LOCAL[j];
+    // Project all 6 vertices.  Keep world coords for normal recovery.
+    let mut screen = [(0i32, 0i32, true); 6];
+    let mut world: [Vec3; 6] = [Vec3::new(0.0, 0.0, 0.0); 6];
+    for j in 0..6 {
+        let l = OCTA_CORNERS_LOCAL[j];
         world[j] = Vec3::new(
-            centre.x + l.0 * CUBE_HALF,
-            centre.y + l.1 * CUBE_HALF,
-            centre.z + l.2 * CUBE_HALF,
+            centre.x + l.0 * NODE_HALF,
+            centre.y + l.1 * NODE_HALF,
+            centre.z + l.2 * NODE_HALF,
         );
         let clip = view_proj.transform_point(world[j]);
         match project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32) {
@@ -691,33 +713,33 @@ fn draw_cube(centre: Vec3, hue_base: u8, view_proj: &Mat4) {
         }
     }
 
-    for tri in &CUBE_TRIS {
+    // Depth-fog: subtract up to 4 shade slots based on `fog`.  Clamp
+    // so faces always pick a valid slot inside [0..=7].
+    let fog_bias = (fog.clamp(0.0, 1.0) * 4.0) as u8;
+
+    for tri in &OCTA_TRIS {
         let (x0, y0, ok0) = screen[tri[0]];
         let (x1, y1, ok1) = screen[tri[1]];
         let (x2, y2, ok2) = screen[tri[2]];
         if !(ok0 && ok1 && ok2) {
             continue;
         }
-        // Screen-space back-face cull.
+        // Screen-space back-face cull (CCW winding ⇒ positive area).
         let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
         if area2 <= 0 {
             continue;
         }
-        // World-space face normal: (v1-v0) × (v2-v0), normalised.
         let v0 = world[tri[0]];
         let v1 = world[tri[1]];
         let v2 = world[tri[2]];
         let edge_a = v1.sub(v0);
         let edge_b = v2.sub(v0);
         let normal = edge_a.cross(edge_b).normalize();
-        // Lambertian intensity: clamp to [AMBIENT, 1.0].  Light is
-        // unit-length so no extra divide.  Bias slightly so totally
-        // back-facing surfaces still have some shadow tone.
         let n_dot_l = normal.dot(LIGHT) / LIGHT_LEN;
         let intensity = (n_dot_l * 0.5 + 0.5).max(AMBIENT).min(1.0);
-        // Map to one of 8 shading slots (0 darkest, 7 brightest).
-        let shade = (intensity * 7.999) as u8;
-        let palette_idx = hue_base + shade.min(7);
+        let shade_raw = (intensity * 7.999) as u8;
+        let shade = shade_raw.saturating_sub(fog_bias).min(7);
+        let palette_idx = hue_base + shade;
         k_rast::fill_triangle(
             |x, y| {
                 if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
@@ -732,11 +754,10 @@ fn draw_cube(centre: Vec3, hue_base: u8, view_proj: &Mat4) {
         );
     }
 
-    // Outline the cube silhouette using the brightest shade of this
-    // node's ramp — gives every cube a subtle neon rim consistent
-    // with its hue rather than a uniform grey frame.
-    let rim_idx = hue_base + 7;
-    for tri in &CUBE_TRIS {
+    // Outline: brightest shade, also fogged so distant rims dim too.
+    let rim_shade = 7u8.saturating_sub(fog_bias).min(7);
+    let rim_idx = hue_base + rim_shade;
+    for tri in &OCTA_TRIS {
         let (x0, y0, ok0) = screen[tri[0]];
         let (x1, y1, ok1) = screen[tri[1]];
         let (x2, y2, ok2) = screen[tri[2]];
