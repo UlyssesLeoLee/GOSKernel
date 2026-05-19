@@ -91,6 +91,32 @@ pub const MAX_EDGES: usize = 512;
 pub const MAX_READY_QUEUE: usize = 256;
 pub const MAX_SIGNAL_QUEUE: usize = 512;
 pub const MAX_FAULT_QUEUE: usize = 32;
+
+/// Audit P1 #3 — node-granular fault attribution.
+///
+/// When a native executor returns `ExecStatus::Fault`, the runtime
+/// captures the failing node together with the caller-chain context and
+/// the terminal status.  Prior to this struct the fault queue stored
+/// only the bare `VectorAddress`, which made it impossible for the
+/// supervisor or audit log to distinguish "module X faulted on its own"
+/// from "module X faulted while servicing a signal posted by module Y".
+/// The caller field is `None` for top-of-stack dispatches (boot
+/// bootstrap, idle pump) and `Some(prev_dispatch_vec)` whenever the
+/// executor was invoked from inside another node's dispatch frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultEvent {
+    pub callee: VectorAddress,
+    pub caller: Option<VectorAddress>,
+    pub status: ExecStatus,
+}
+
+impl FaultEvent {
+    pub const EMPTY: Self = Self {
+        callee: VectorAddress::new(0, 0, 0, 0),
+        caller: None,
+        status: ExecStatus::Done,
+    };
+}
 pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
@@ -345,7 +371,7 @@ pub struct GraphRuntime {
     edges: [Option<EdgeRecord>; MAX_EDGES],
     ready_queue: RingQueue<NodeId, MAX_READY_QUEUE>,
     signal_queue: RingQueue<RuntimeSignal, MAX_SIGNAL_QUEUE>,
-    fault_queue: RingQueue<VectorAddress, MAX_FAULT_QUEUE>,
+    fault_queue: RingQueue<FaultEvent, MAX_FAULT_QUEUE>,
     call_frames: [Option<CallFrame>; MAX_CALL_FRAMES],
     wait_sets: [Option<WaitSet>; MAX_WAITSETS],
     barriers: [Option<Barrier>; MAX_BARRIERS],
@@ -439,6 +465,7 @@ impl GraphRuntime {
             plugin_name: self.plugin_name(record.plugin_id),
             local_node_key: record.spec.local_node_key,
             node_type: record.spec.node_type,
+            sub_domain: record.spec.node_type.sub_domain(),
             lifecycle: record.lifecycle,
             entry_policy: record.spec.entry_policy,
             executor_id: record.spec.executor_id,
@@ -1158,6 +1185,8 @@ impl GraphRuntime {
         status: ExecStatus,
         initialized: bool,
         terminated: bool,
+        callee_vec: VectorAddress,
+        caller_vec: Option<VectorAddress>,
     ) {
         if let Some(mut record) = self.nodes[slot] {
             if let NodeBinding::Native(mut binding) = record.binding {
@@ -1175,13 +1204,33 @@ impl GraphRuntime {
             self.state_delta(record.spec.node_id, record.lifecycle);
 
             if status == ExecStatus::Fault {
-                let _ = self.fault_queue.push(record.vector);
+                // Audit P1 #3 — capture node-granular attribution
+                // (callee + caller + terminal status) instead of just
+                // the failing vector.  The supervisor's legacy path
+                // continues to work via drain_next_fault(), which
+                // projects FaultEvent::callee for callers that
+                // haven't migrated to the enriched API.
+                let event = FaultEvent {
+                    callee: callee_vec,
+                    caller: caller_vec.filter(|prev| *prev != callee_vec),
+                    status,
+                };
+                let _ = self.fault_queue.push(event);
             }
         }
     }
 
-    pub fn drain_next_fault(&mut self) -> Option<VectorAddress> {
+    /// Drain the next fault event with full attribution context
+    /// (callee + caller + status).  Audit P1 #3.
+    pub fn drain_next_fault_event(&mut self) -> Option<FaultEvent> {
         self.fault_queue.pop()
+    }
+
+    /// Back-compat projection — returns only the failing node's vector.
+    /// New code should prefer `drain_next_fault_event` for full
+    /// attribution.
+    pub fn drain_next_fault(&mut self) -> Option<VectorAddress> {
+        self.fault_queue.pop().map(|e| e.callee)
     }
 
     pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
@@ -1355,12 +1404,19 @@ pub fn reset_boot_fallback_alloc_count() {
 // plain Mutex<Option<_>> is sufficient.
 static CURRENT_DISPATCH: Mutex<Option<VectorAddress>> = Mutex::new(None);
 
-fn set_current_dispatch(vector: VectorAddress) {
-    *CURRENT_DISPATCH.lock() = Some(vector);
+/// Sets the dispatching node and returns the previous value so the
+/// caller can restore it (stack-style nesting).  Audit P1 #3 — the
+/// previous dispatch is the *caller* in fault-attribution terms.
+fn set_current_dispatch(vector: VectorAddress) -> Option<VectorAddress> {
+    let mut slot = CURRENT_DISPATCH.lock();
+    let prev = *slot;
+    *slot = Some(vector);
+    prev
 }
 
-fn clear_current_dispatch() {
-    *CURRENT_DISPATCH.lock() = None;
+/// Restores a saved previous-dispatch value (or clears when None).
+fn restore_current_dispatch(prev: Option<VectorAddress>) {
+    *CURRENT_DISPATCH.lock() = prev;
 }
 
 fn current_dispatch_instance() -> Option<NodeInstanceId> {
@@ -1895,7 +1951,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             let mut status = ExecStatus::Done;
             let terminated = matches!(signal, Signal::Terminate);
 
-            set_current_dispatch(dispatch.vector);
+            let caller_vec = set_current_dispatch(dispatch.vector);
             // Phase B.4.4: bracket the native callback in a CR3
             // trampoline.  Currently a no-op when target root == live
             // CR3 (every builtin until ELF loader ships), but the
@@ -1931,7 +1987,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             }
 
             drop(_domain_guard);
-            clear_current_dispatch();
+            restore_current_dispatch(caller_vec);
 
             // ── Conditional routing (LangGraph-style) ────────────────────────
             // When on_event returns Route:
@@ -1964,7 +2020,14 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
 
             {
                 let mut runtime = RUNTIME.lock();
-                runtime.finish_native_invocation(dispatch.slot, status, initialized, terminated);
+                runtime.finish_native_invocation(
+                    dispatch.slot,
+                    status,
+                    initialized,
+                    terminated,
+                    dispatch.vector,
+                    caller_vec,
+                );
             }
 
             // Phase E.1: soft preemption.  If the supervisor flagged the
@@ -2032,7 +2095,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             let mut initialized = binding.initialized;
             let mut status = ExecStatus::Done;
 
-            set_current_dispatch(dispatch.vector);
+            let caller_vec = set_current_dispatch(dispatch.vector);
             let _domain_guard = DomainGuard::enter(dispatch.instance_id);
 
             if !binding.initialized {
@@ -2053,11 +2116,18 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             }
 
             drop(_domain_guard);
-            clear_current_dispatch();
+            restore_current_dispatch(caller_vec);
 
             {
                 let mut runtime = RUNTIME.lock();
-                runtime.finish_native_invocation(dispatch.slot, status, initialized, false);
+                runtime.finish_native_invocation(
+                    dispatch.slot,
+                    status,
+                    initialized,
+                    false,
+                    dispatch.vector,
+                    caller_vec,
+                );
             }
 
             // Phase E.1: soft preemption mirror of the route_signal path.
@@ -2174,6 +2244,14 @@ pub fn last_state_delta(node_id: NodeId) -> Option<StateDelta> {
 
 pub fn drain_next_fault() -> Option<VectorAddress> {
     RUNTIME.lock().drain_next_fault()
+}
+
+/// Audit P1 #3 — drain a fault event with node-granular attribution
+/// (callee + caller + terminal status).  Returns None when the queue
+/// is empty.  Supervisor code should prefer this over the legacy
+/// `drain_next_fault` to take advantage of caller-aware fault policy.
+pub fn drain_next_fault_event() -> Option<FaultEvent> {
+    RUNTIME.lock().drain_next_fault_event()
 }
 
 pub fn plugin_id_for_node(node_id: NodeId) -> Option<PluginId> {

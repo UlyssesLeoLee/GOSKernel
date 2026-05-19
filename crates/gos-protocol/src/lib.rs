@@ -719,6 +719,45 @@ pub enum RuntimeNodeType {
     Vector = 0xFF,
 }
 
+/// Audit P2 #4 — supervisor sub-domain class derived from a node's
+/// `RuntimeNodeType`.  Each runtime node maps to exactly one
+/// sub-domain so the supervisor (and tooling) can apply
+/// class-uniform isolation/observability policy across plugins:
+/// every Hardware node shares the same bare-metal sub-domain, every
+/// Driver node shares the kernel-driver sub-domain, etc.  The
+/// supervisor's per-plugin domain remains the unit of CR3 isolation;
+/// this enum partitions nodes ORTHOGONALLY by class so policy lookup
+/// can be `(plugin_domain, sub_domain)` keyed.
+///
+/// Gen-1 surfaces this on `GraphNodeSummary` so the visualizer and
+/// Cypher can colour/filter by sub-domain.  A future supervisor
+/// change will use the same mapping for hard isolation buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeSubDomain {
+    Hardware = 0x01,
+    KernelDriver = 0x02,
+    Service = 0x03,
+    Compute = 0x04,
+    Routing = 0x05,
+    Vector = 0x06,
+}
+
+impl RuntimeNodeType {
+    pub const fn sub_domain(self) -> NodeSubDomain {
+        match self {
+            RuntimeNodeType::Hardware => NodeSubDomain::Hardware,
+            RuntimeNodeType::Driver => NodeSubDomain::KernelDriver,
+            RuntimeNodeType::Service => NodeSubDomain::Service,
+            RuntimeNodeType::PluginEntry => NodeSubDomain::Service,
+            RuntimeNodeType::Compute => NodeSubDomain::Compute,
+            RuntimeNodeType::Router => NodeSubDomain::Routing,
+            RuntimeNodeType::Aggregator => NodeSubDomain::Routing,
+            RuntimeNodeType::Vector => NodeSubDomain::Vector,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RuntimeEdgeType {
@@ -1314,6 +1353,31 @@ pub struct PluginManifest {
     pub policy_hash: [u8; 16],
 }
 
+/// Audit P2 #5 — verify every declared edge in a plugin manifest is
+/// well-formed and self-rooted.  Returns `true` when all edges pass:
+///   * `edge_id != EdgeId::ZERO` (real hash output)
+///   * `from_node != NodeId::ZERO` and `to_node != NodeId::ZERO`
+///   * `from_node` matches one of the manifest's own `nodes` entries
+///
+/// Cross-plugin edges must flow through `imports`/`depends_on`, which
+/// the bundle loader auto-synthesises into Mount/Depend edges.  This
+/// check closes the spoof hole where a malicious plugin could declare
+/// an edge that *originates* in some other plugin's node.
+pub fn manifest_edges_well_formed(manifest: &PluginManifest) -> bool {
+    for edge in manifest.edges {
+        if edge.edge_id == EdgeId::ZERO
+            || edge.from_node == NodeId::ZERO
+            || edge.to_node == NodeId::ZERO
+        {
+            return false;
+        }
+        if !manifest.nodes.iter().any(|n| n.node_id == edge.from_node) {
+            return false;
+        }
+    }
+    true
+}
+
 impl PluginManifest {
     pub const fn empty(plugin_id: PluginId, name: &'static str) -> Self {
         Self {
@@ -1583,6 +1647,7 @@ pub struct GraphNodeSummary {
     pub plugin_name: &'static str,
     pub local_node_key: &'static str,
     pub node_type: RuntimeNodeType,
+    pub sub_domain: NodeSubDomain,
     pub lifecycle: NodeLifecycle,
     pub entry_policy: EntryPolicy,
     pub executor_id: ExecutorId,
@@ -1597,6 +1662,7 @@ impl GraphNodeSummary {
         plugin_name: "",
         local_node_key: "",
         node_type: RuntimeNodeType::Hardware,
+        sub_domain: NodeSubDomain::Hardware,
         lifecycle: NodeLifecycle::Discovered,
         entry_policy: EntryPolicy::Manual,
         executor_id: ExecutorId::ZERO,

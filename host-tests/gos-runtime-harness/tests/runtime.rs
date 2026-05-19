@@ -2500,3 +2500,223 @@ fn register_node_routes_lifts_static_targets_to_signal_edges() {
     let (after_self, _) = gos_runtime::edge_page(0, &mut buf);
     assert_eq!(after_self, 3, "self-route filtered, no new edge");
 }
+
+// Audit P1 #3 — fault attribution must surface the full
+// (callee, caller, status) triple, not just the callee vector.  The
+// legacy `drain_next_fault` projection continues to work so prior
+// supervisor code stays correct.
+//
+// We re-use the faulting executor at the top of this file: signalling
+// TEST_VECTOR triggers ExecStatus::Fault and pushes a FaultEvent onto
+// the queue.  Since the harness drives `route_signal` directly (no
+// outer node is dispatching), `caller` must be None — top-of-stack.
+#[test]
+fn fault_event_captures_node_granular_attribution() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    install_test_node();
+
+    // Sanity — queue empty.
+    assert!(gos_runtime::drain_next_fault_event().is_none());
+
+    let _ = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 });
+
+    let event = gos_runtime::drain_next_fault_event()
+        .expect("fault event captured");
+    assert_eq!(event.callee, TEST_VECTOR);
+    assert_eq!(event.caller, None, "top-of-stack dispatch ⇒ no caller");
+    assert_eq!(event.status, ExecStatus::Fault);
+
+    // Queue drained.
+    assert!(gos_runtime::drain_next_fault_event().is_none());
+
+    // Back-compat projection still works.
+    install_test_node();
+    let _ = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 });
+    assert_eq!(gos_runtime::drain_next_fault(), Some(TEST_VECTOR));
+    assert!(gos_runtime::drain_next_fault().is_none());
+}
+
+// Audit P2 #4 — RuntimeNodeType must map deterministically into a
+// supervisor sub-domain class, and `GraphNodeSummary` must surface
+// the mapping so tooling can group/colour by sub-domain.  This locks
+// in the orthogonal partition (per-plugin domain × per-class
+// sub-domain) that a future supervisor change will key isolation off.
+#[test]
+fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
+    use gos_protocol::{NodeSubDomain, RuntimeNodeType};
+
+    // Pure-mapping audit: stable, covers every variant.
+    assert_eq!(RuntimeNodeType::Hardware.sub_domain(), NodeSubDomain::Hardware);
+    assert_eq!(RuntimeNodeType::Driver.sub_domain(), NodeSubDomain::KernelDriver);
+    assert_eq!(RuntimeNodeType::Service.sub_domain(), NodeSubDomain::Service);
+    assert_eq!(RuntimeNodeType::PluginEntry.sub_domain(), NodeSubDomain::Service);
+    assert_eq!(RuntimeNodeType::Compute.sub_domain(), NodeSubDomain::Compute);
+    assert_eq!(RuntimeNodeType::Router.sub_domain(), NodeSubDomain::Routing);
+    assert_eq!(RuntimeNodeType::Aggregator.sub_domain(), NodeSubDomain::Routing);
+    assert_eq!(RuntimeNodeType::Vector.sub_domain(), NodeSubDomain::Vector);
+
+    // Runtime path: the install_test_node() helper registers a Service
+    // node; its summary must report Service sub-domain.
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    install_test_node();
+
+    let mut nodes = [gos_protocol::GraphNodeSummary::EMPTY; 4];
+    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
+    assert!(total >= 1);
+    assert!(returned >= 1);
+
+    let summary = nodes
+        .iter()
+        .find(|n| n.vector == TEST_VECTOR)
+        .copied()
+        .expect("test node visible in node_page");
+    assert_eq!(summary.node_type, RuntimeNodeType::Service);
+    assert_eq!(summary.sub_domain, NodeSubDomain::Service);
+}
+
+// Audit P2 #5 — `manifest_edges_well_formed` accepts well-formed
+// self-rooted edges and rejects:
+//   * zero edge_id / from_node / to_node
+//   * from_node that is not in the manifest's own `nodes` slice
+//
+// This is the integrity gate that prevents a plugin from declaring an
+// edge that *originates* in another plugin's node.  Cross-plugin
+// edges must flow through `imports`/`depends_on`, which the bundle
+// loader auto-synthesises into Mount/Depend.
+#[test]
+fn manifest_edges_well_formed_accepts_self_rooted_rejects_malformed() {
+    use gos_protocol::{
+        derive_edge_id, derive_node_id, manifest_edges_well_formed, EdgeId, EdgeSpec, EntryPolicy,
+        ExecutorId, NodeId, NodeSpec, PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType,
+        RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    const PID: PluginId = PluginId::from_ascii("EDGE_VAL");
+    const FROM_KEY: &str = "edge.from";
+    const TO_KEY: &str = "edge.to";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.edge");
+    const FROM_NID: NodeId = derive_node_id(PID, FROM_KEY);
+    const TO_NID: NodeId = derive_node_id(PID, TO_KEY);
+    const FOREIGN_NID: NodeId = derive_node_id(PluginId::from_ascii("OTHER"), "their.node");
+
+    const NODES: &[NodeSpec] = &[
+        NodeSpec {
+            node_id: FROM_NID,
+            local_node_key: FROM_KEY,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: EXEC,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        },
+        NodeSpec {
+            node_id: TO_NID,
+            local_node_key: TO_KEY,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: EXEC,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        },
+    ];
+
+    fn manifest_with(edges: &'static [EdgeSpec]) -> PluginManifest {
+        PluginManifest {
+            abi_version: GOS_ABI_VERSION,
+            plugin_id: PID,
+            name: "EDGE_VAL",
+            version: 1,
+            depends_on: &[],
+            permissions: &[],
+            exports: &[],
+            imports: &[],
+            nodes: NODES,
+            edges,
+            signature: None,
+            policy_hash: [0; 16],
+        }
+    }
+
+    // Empty edges slice — trivially well-formed.
+    assert!(manifest_edges_well_formed(&manifest_with(&[])));
+
+    // Well-formed self-rooted edge.
+    const GOOD: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "good"),
+        from_node: FROM_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(manifest_edges_well_formed(&manifest_with(GOOD)));
+
+    // Zero edge_id — rejected.
+    const ZERO_ID: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: EdgeId::ZERO,
+        from_node: FROM_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_ID)));
+
+    // Zero from_node — rejected.
+    const ZERO_FROM: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "zero-from"),
+        from_node: NodeId::ZERO,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_FROM)));
+
+    // Zero to_node — rejected.
+    const ZERO_TO: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "zero-to"),
+        from_node: FROM_NID,
+        to_node: NodeId::ZERO,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_TO)));
+
+    // from_node references a foreign plugin's node — rejected (spoof
+    // attempt: declaring an edge that originates outside this plugin).
+    const FOREIGN_FROM: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FOREIGN_NID, TO_NID, "foreign"),
+        from_node: FOREIGN_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(FOREIGN_FROM)));
+}

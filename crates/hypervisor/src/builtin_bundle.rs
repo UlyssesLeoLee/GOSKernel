@@ -15,6 +15,12 @@ pub enum BuiltinBootError {
     PermissionDenied(PluginId),
     UnresolvedImport(PluginId, &'static str),
     Runtime(RuntimeError),
+    /// Audit P2 #5 — a declared edge in `PluginManifest::edges` is
+    /// malformed (zero edge_id, zero endpoints, or `from_node` not in
+    /// the plugin's own `nodes` slice).  Cross-plugin edges must flow
+    /// through `imports`/`depends_on`, which the bundle loader then
+    /// synthesises into the runtime graph automatically.
+    MalformedEdgeDeclaration(PluginId),
 }
 
 impl From<RuntimeError> for BuiltinBootError {
@@ -1478,6 +1484,13 @@ fn validate_manifest(manifest: PluginManifest) -> Result<(), BuiltinBootError> {
     // must not exceed host's minor.  Patch is observational only.
     if !gos_protocol::abi_compatible(manifest.abi_version, GOS_ABI_VERSION) {
         return Err(BuiltinBootError::AbiVersionMismatch(manifest.plugin_id));
+    }
+    // Audit P2 #5 — strict-edge declaration check.  See
+    // `gos_protocol::manifest_edges_well_formed` for the policy.
+    if !gos_protocol::manifest_edges_well_formed(&manifest) {
+        return Err(BuiltinBootError::MalformedEdgeDeclaration(
+            manifest.plugin_id,
+        ));
     }
     Ok(())
 }
