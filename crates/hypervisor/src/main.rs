@@ -315,13 +315,33 @@ fn paint_3d_view(frame: u64) {
         .max(1e-3);
     for slot in 0..depth_count {
         let (i, d_sq) = depths[slot];
+        let (sx, sy, ok) = node_centre_screen[i];
+        if !ok {
+            continue;
+        }
+        // Compute projected screen radius by projecting the world
+        // centre + a sideways unit-radius offset and measuring the
+        // screen-space delta.  Falls back to 4 px if the offset
+        // projection clips (shouldn't normally happen with centre
+        // in frustum).
         let centre = node_world_position(i, returned_n);
+        let offset = Vec3::new(centre.x + NODE_HALF, centre.y, centre.z);
+        let r_px = match project_to_screen(
+            view_proj.transform_point(offset),
+            k_fb::WIDTH as u32,
+            k_fb::HEIGHT as u32,
+        ) {
+            Some((ox, _oy, _)) => (ox - sx).abs().max(2),
+            None => 4,
+        };
         let hue_base = classify_node_hue(&nodes[i]);
-        // sqrt → linear distance, then normalise.  Apply a soft curve
-        // so middle-distance nodes don't dim too aggressively.
         let lin = libm::sqrtf(d_sq / max_depth_sq);
         let fog = (lin * lin * 0.9).clamp(0.0, 1.0);
-        draw_node_solid(centre, hue_base, fog, &view_proj);
+        // Specular boost: bumped by hover/select for haptic feedback
+        // (I.6.4).  Hooked into hover_slot/selected later in the
+        // function — for now leave at 0 (boost wired up in I.6.4).
+        let specular_boost = 0.0_f32;
+        draw_node_sphere(sx, sy, r_px, hue_base, fog, specular_boost);
     }
 
     // Edges: lines between projected centres, styled by edge type
@@ -337,7 +357,15 @@ fn paint_3d_view(frame: u64) {
     //
     // The pulse phase comes from `frame` so animation runs at the
     // repaint rate (~50 Hz @ REPAINT_TICKS=2).
-    use core::cell::Cell;
+    // ── Phase I.6.2 — rope edges with catenary sag + thickness ──
+    //
+    // Edges are now ropes: each one sampled as a chain of short
+    // straight segments along a parabolic "sag" curve so long edges
+    // visibly droop the way a real rope in zero-g + screen-gravity
+    // would.  Thickness (2-4 px) is drawn by stamping the per-pixel
+    // Bresenham closure with a center brightest + perpendicular halo
+    // dimmer.  Style (pattern, pulse, gradient, mount-rigid) is
+    // layered on top.
     let pulse_phase = libm::sinf(frame as f32 * 0.22);
     let pulse_on = pulse_phase > -0.4; // ~70% duty cycle for "active" feel
     for i in 0..returned_e {
@@ -351,98 +379,7 @@ fn paint_3d_view(frame: u64) {
         }
         let color = classify_edge(edges[i].edge_type);
         let style = edge_style(edges[i].edge_type);
-        let step = Cell::new(0i32);
-        let total_len_est = (tx - fx).abs().max((ty - fy).abs()).max(1);
-        match style {
-            EdgeStyle::Solid => {
-                k_rast::draw_line(
-                    |x, y| {
-                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                            k_fb::put_pixel(x as usize, y as usize, color);
-                        }
-                    },
-                    fx, fy, tx, ty,
-                );
-            }
-            EdgeStyle::Dashed => {
-                k_rast::draw_line(
-                    |x, y| {
-                        let t = step.get();
-                        step.set(t + 1);
-                        // 2 on, 2 off → period 4
-                        if (t & 0x03) < 2
-                            && x >= 0 && x < SCENE_WIDTH
-                            && y >= HEADER_H && y < FOOTER_Y
-                        {
-                            k_fb::put_pixel(x as usize, y as usize, color);
-                        }
-                    },
-                    fx, fy, tx, ty,
-                );
-            }
-            EdgeStyle::Dotted => {
-                k_rast::draw_line(
-                    |x, y| {
-                        let t = step.get();
-                        step.set(t + 1);
-                        // 1 on, 3 off → period 4
-                        if (t & 0x03) == 0
-                            && x >= 0 && x < SCENE_WIDTH
-                            && y >= HEADER_H && y < FOOTER_Y
-                        {
-                            k_fb::put_pixel(x as usize, y as usize, color);
-                        }
-                    },
-                    fx, fy, tx, ty,
-                );
-            }
-            EdgeStyle::SolidPulsed => {
-                let draw_color = if pulse_on { color } else { k_fb::Color::DimWhite };
-                k_rast::draw_line(
-                    |x, y| {
-                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                            k_fb::put_pixel(x as usize, y as usize, draw_color);
-                        }
-                    },
-                    fx, fy, tx, ty,
-                );
-            }
-            EdgeStyle::GradientEnds => {
-                // Bright color in the first/last quarter, DimWhite in
-                // the middle half — communicates "metadata link" as
-                // a soft thread between two solid endpoints.
-                let q1 = total_len_est / 4;
-                let q3 = total_len_est - q1;
-                k_rast::draw_line(
-                    |x, y| {
-                        let t = step.get();
-                        step.set(t + 1);
-                        if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                            let c = if t < q1 || t > q3 { color } else { k_fb::Color::DimWhite };
-                            k_fb::put_pixel(x as usize, y as usize, c);
-                        }
-                    },
-                    fx, fy, tx, ty,
-                );
-            }
-            EdgeStyle::DoubleSolid => {
-                // Render the line twice with a 1-px perpendicular
-                // offset to read as a "rail" — Mount is a structural
-                // attachment and deserves visual weight.
-                let dx = tx - fx;
-                let dy = ty - fy;
-                let len = libm::sqrtf((dx * dx + dy * dy) as f32).max(1.0);
-                let ox = libm::roundf(-(dy as f32) / len) as i32;
-                let oy = libm::roundf((dx as f32) / len) as i32;
-                let put_solid = |x: i32, y: i32| {
-                    if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                        k_fb::put_pixel(x as usize, y as usize, color);
-                    }
-                };
-                k_rast::draw_line(put_solid, fx, fy, tx, ty);
-                k_rast::draw_line(put_solid, fx + ox, fy + oy, tx + ox, ty + oy);
-            }
-        }
+        draw_rope_edge(fx, fy, tx, ty, color, style, pulse_on);
     }
 
     // I.3.10 — node labels.  Project each node's centre to screen,
@@ -773,7 +710,7 @@ fn paint_3d_view(frame: u64) {
             let x0 = cx;
             let x1 = cx + sample_w;
             let y_line = chip_y as i32 + 3;
-            let step = Cell::new(0i32);
+            let step = core::cell::Cell::new(0i32);
             match style {
                 EdgeStyle::DoubleSolid => {
                     k_rast::draw_line(
@@ -934,31 +871,7 @@ fn isqrt_ceil(n: usize) -> usize {
 
 const NODE_HALF: f32 = 0.13;
 
-/// 6 vertices: ±X, ±Y, ±Z poles of a unit octahedron.
-/// Indices: 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z.
-const OCTA_CORNERS_LOCAL: [(f32, f32, f32); 6] = [
-    (-1.0, 0.0, 0.0),  // 0 -X
-    (1.0, 0.0, 0.0),   // 1 +X
-    (0.0, -1.0, 0.0),  // 2 -Y (bottom)
-    (0.0, 1.0, 0.0),   // 3 +Y (top)
-    (0.0, 0.0, -1.0),  // 4 -Z
-    (0.0, 0.0, 1.0),   // 5 +Z
-];
-
-/// 8 triangular faces, CCW winding when viewed from outside.
-/// Upper hemisphere fan around +Y, lower hemisphere fan around -Y.
-const OCTA_TRIS: [[usize; 3]; 8] = [
-    // Upper hemisphere (apex = 3 = +Y).
-    [3, 5, 1], // +Y → +Z → +X
-    [3, 1, 4], // +Y → +X → -Z
-    [3, 4, 0], // +Y → -Z → -X
-    [3, 0, 5], // +Y → -X → +Z
-    // Lower hemisphere (apex = 2 = -Y).
-    [2, 1, 5], // -Y → +X → +Z
-    [2, 4, 1], // -Y → -Z → +X
-    [2, 0, 4], // -Y → -X → -Z
-    [2, 5, 0], // -Y → +Z → -X
-];
+// (Octahedron facet arrays removed in I.6.1 — sphere LOD replaces them.)
 
 /// Sci-fi octahedral crystal draw (I.4.1+I.4.2): per-face Lambertian
 /// shading pulls a slot from the node's 8-step hue ramp; depth-fog
@@ -969,94 +882,283 @@ const OCTA_TRIS: [[usize; 3]; 8] = [
 /// `fog`: 0.0 = full strength (near camera), 1.0 = fully faded
 /// (at the far plane).  Subtracts up to ~4 shade slots so the
 /// farthest nodes still draw but recede visually.
-fn draw_node_solid(centre: Vec3, hue_base: u8, fog: f32, view_proj: &Mat4) {
-    // Fixed key light: upper-right-front, biased toward Y so the
-    // top facets read as the brightest in the default camera framing.
-    const LIGHT: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
-    const LIGHT_LEN: f32 = 1.0;
-    const AMBIENT: f32 = 0.18;
+// ── Phase I.6.1 — metallic-sphere LOD renderer ─────────────────────
+//
+// Replaces the octahedral facets with per-pixel sphere shading
+// + screen-space LOD.  Each node is a metallic ball lit by a fixed
+// key light; the shader runs Lambert diffuse + a tight Phong
+// specular highlight and maps the final intensity into the node's
+// per-hue 8-slot ramp (the same ramps used by all previous
+// versions, so the palette doesn't change).
+//
+// Three LOD tiers based on the projected screen radius `r_px`:
+//
+//   LOD_HIGH   r_px >= 6   — full per-pixel sphere with specular
+//   LOD_MID    r_px >= 3   — 5×5 disc with Lambert ramp, no specular
+//   LOD_LOW    r_px  < 3   — 2-pixel dot in the node's rim shade
+//
+// The caller pre-computes the screen-space centre and radius from
+// the projected world centre + a unit-scaled offset so we don't
+// need view_proj here (also lets the physics step move the node
+// without a re-project per LOD pass).
+//
+// The "metal" feel comes from:
+//   * a high specular exponent (32) → a tight bright spot
+//   * the spot is biased toward the brightest shade slot (7)
+//   * background ambient stays low (AMBIENT = 0.10) → high contrast
+//
+// `fog`: 0.0 near, 1.0 far — biases the shade index down so distant
+//   balls recede into the nebula background.
 
-    // Project all 6 vertices.  Keep world coords for normal recovery.
-    let mut screen = [(0i32, 0i32, true); 6];
-    let mut world: [Vec3; 6] = [Vec3::new(0.0, 0.0, 0.0); 6];
-    for j in 0..6 {
-        let l = OCTA_CORNERS_LOCAL[j];
-        world[j] = Vec3::new(
-            centre.x + l.0 * NODE_HALF,
-            centre.y + l.1 * NODE_HALF,
-            centre.z + l.2 * NODE_HALF,
-        );
-        let clip = view_proj.transform_point(world[j]);
-        match project_to_screen(clip, k_fb::WIDTH as u32, k_fb::HEIGHT as u32) {
-            Some((sx, sy, _)) => screen[j] = (sx, sy, true),
-            None => screen[j] = (0, 0, false),
-        }
+const LIGHT_DIR: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
+const AMBIENT: f32 = 0.10;
+const SPECULAR_EXP: f32 = 32.0;
+const SPECULAR_STRENGTH: f32 = 0.75;
+
+fn draw_node_sphere(sx: i32, sy: i32, r_px: i32, hue_base: u8, fog: f32, specular_boost: f32) {
+    if r_px < 1 {
+        return;
     }
-
-    // Depth-fog: subtract up to 4 shade slots based on `fog`.  Clamp
-    // so faces always pick a valid slot inside [0..=7].
     let fog_bias = (fog.clamp(0.0, 1.0) * 4.0) as u8;
 
-    for tri in &OCTA_TRIS {
-        let (x0, y0, ok0) = screen[tri[0]];
-        let (x1, y1, ok1) = screen[tri[1]];
-        let (x2, y2, ok2) = screen[tri[2]];
-        if !(ok0 && ok1 && ok2) {
-            continue;
-        }
-        // Screen-space back-face cull (CCW winding ⇒ positive area).
-        let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
-        if area2 <= 0 {
-            continue;
-        }
-        let v0 = world[tri[0]];
-        let v1 = world[tri[1]];
-        let v2 = world[tri[2]];
-        let edge_a = v1.sub(v0);
-        let edge_b = v2.sub(v0);
-        let normal = edge_a.cross(edge_b).normalize();
-        let n_dot_l = normal.dot(LIGHT) / LIGHT_LEN;
-        let intensity = (n_dot_l * 0.5 + 0.5).max(AMBIENT).min(1.0);
-        let shade_raw = (intensity * 7.999) as u8;
-        let shade = shade_raw.saturating_sub(fog_bias).min(7);
-        let palette_idx = hue_base + shade;
-        k_rast::fill_triangle(
-            |x, y| {
-                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                    k_fb::put_pixel_raw(x as usize, y as usize, palette_idx);
+    // ── LOD_LOW: just a 1-or-2 px dot ──
+    if r_px < 3 {
+        let rim_shade = 7u8.saturating_sub(fog_bias).min(7);
+        let idx = hue_base + rim_shade;
+        for dy in 0..=1 {
+            for dx in 0..=1 {
+                let px = sx + dx;
+                let py = sy + dy;
+                if px >= 0 && px < SCENE_WIDTH && py >= HEADER_H && py < FOOTER_Y {
+                    k_fb::put_pixel_raw(px as usize, py as usize, idx);
                 }
-            },
-            SCENE_WIDTH,
-            SCENE_HEIGHT,
-            (x0, y0),
-            (x1, y1),
-            (x2, y2),
-        );
+            }
+        }
+        return;
     }
 
-    // Outline: brightest shade, also fogged so distant rims dim too.
-    let rim_shade = 7u8.saturating_sub(fog_bias).min(7);
-    let rim_idx = hue_base + rim_shade;
-    for tri in &OCTA_TRIS {
-        let (x0, y0, ok0) = screen[tri[0]];
-        let (x1, y1, ok1) = screen[tri[1]];
-        let (x2, y2, ok2) = screen[tri[2]];
-        if !(ok0 && ok1 && ok2) {
+    // ── LOD_MID and LOD_HIGH share the same per-pixel loop; the
+    //    specular pass is gated by `r_px >= 6`. ──
+    let do_specular = r_px >= 6;
+    let r_f = r_px as f32;
+    let r2 = r_f * r_f;
+
+    // View direction in screen space is essentially (0, 0, -1)
+    // (camera looks down -Z after the view transform); the Phong
+    // reflect vector for a sphere normal is straightforward in
+    // tangent space.  We approximate the half-vector by mixing the
+    // light direction with the view direction (0, 0, -1) before
+    // dotting with the per-pixel normal.
+    let half = Vec3::new(LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z - 1.0).normalize();
+
+    for dy in -r_px..=r_px {
+        let py = sy + dy;
+        if py < HEADER_H || py >= FOOTER_Y {
             continue;
         }
-        let area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
-        if area2 <= 0 {
+        // Half-width of the sphere at this row (Pythagoras).
+        let dy_f = dy as f32;
+        let row_inside = r2 - dy_f * dy_f;
+        if row_inside <= 0.0 {
             continue;
         }
+        let row_half = libm::sqrtf(row_inside) as i32;
+        for dx in -row_half..=row_half {
+            let px = sx + dx;
+            if px < 0 || px >= SCENE_WIDTH {
+                continue;
+            }
+            // Sphere-space normal.  Z is the "out of screen"
+            // component derived from the screen disc constraint.
+            let dx_f = dx as f32;
+            let z2 = row_inside - dx_f * dx_f;
+            if z2 <= 0.0 {
+                continue;
+            }
+            let nx = dx_f / r_f;
+            let ny = dy_f / r_f;
+            let nz = libm::sqrtf(z2) / r_f;
+            // Y is screen-down → flip so up-light reads correctly.
+            let normal = Vec3::new(nx, -ny, nz);
+
+            // Diffuse + ambient.
+            let n_dot_l = normal.dot(LIGHT_DIR).max(0.0);
+            let diffuse = n_dot_l * (1.0 - AMBIENT) + AMBIENT;
+            // Specular (Blinn-Phong half-vector).
+            let mut intensity = diffuse;
+            if do_specular {
+                let n_dot_h = normal.dot(half).max(0.0);
+                let spec_pow = pow_approx(n_dot_h, SPECULAR_EXP);
+                intensity += spec_pow * (SPECULAR_STRENGTH + specular_boost);
+            }
+            intensity = intensity.clamp(0.0, 1.0);
+            let shade_raw = (intensity * 7.999) as u8;
+            let shade = shade_raw.saturating_sub(fog_bias).min(7);
+            k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
+        }
+    }
+}
+
+// ── Phase I.6.2 — rope edge renderer ─────────────────────────────
+//
+// Renders an edge as a parabolically-sagging rope with thickness
+// shading and per-style pattern overlays.  Sampled in 2..=8 segments
+// based on screen-space length.  The sag vector is screen-down
+// (positive Y), which reads as "gravity pulling the rope" since the
+// camera is upright by convention.
+//
+// Style mapping:
+//   Solid         → 2-px rope, no pattern
+//   Dashed        → 2-px rope, 2-on/2-off via per-pixel step counter
+//   Dotted        → 2-px rope, 1-on/3-off
+//   SolidPulsed   → 2-px rope, pulse_on toggles color vs DimWhite
+//   GradientEnds  → 3-px rope, bright at first/last quarter
+//   DoubleSolid   → 4-px rigid mount (no sag, heaviest line)
+fn draw_rope_edge(
+    fx: i32,
+    fy: i32,
+    tx: i32,
+    ty: i32,
+    color: k_fb::Color,
+    style: EdgeStyle,
+    pulse_on: bool,
+) {
+    let dx = (tx - fx) as f32;
+    let dy = (ty - fy) as f32;
+    let len_f = libm::sqrtf(dx * dx + dy * dy).max(1.0);
+
+    // Mount is a rigid structural attachment — render as a 4-px
+    // straight beam, no sag.
+    if matches!(style, EdgeStyle::DoubleSolid) {
+        let nx = libm::roundf(-dy / len_f) as i32;
+        let ny = libm::roundf(dx / len_f) as i32;
         let put = |x: i32, y: i32| {
             if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                k_fb::put_pixel_raw(x as usize, y as usize, rim_idx);
+                k_fb::put_pixel(x as usize, y as usize, color);
             }
         };
-        k_rast::draw_line(put, x0, y0, x1, y1);
-        k_rast::draw_line(put, x1, y1, x2, y2);
-        k_rast::draw_line(put, x2, y2, x0, y0);
+        for o in -1..=2 {
+            k_rast::draw_line(put, fx + nx * o, fy + ny * o, tx + nx * o, ty + ny * o);
+        }
+        return;
     }
+
+    // Sag amount: proportional to length, capped at 8 px.  A rope of
+    // 64 px sags 8 px in the middle.
+    let sag_px = (len_f * 0.12).min(8.0);
+
+    // Number of segments — more for long edges so the curve is smooth.
+    let segments = ((len_f / 12.0) as usize).clamp(2, 8);
+
+    // Sample the catenary at `segments + 1` points.  Each point's Y
+    // gets `sag * 4 * t * (1 - t)` added so t=0 and t=1 stay at the
+    // endpoints and t=0.5 sags the full amount.
+    let mut pts: [(i32, i32); 9] = [(0, 0); 9];
+    let n_pts = segments + 1;
+    for i in 0..n_pts {
+        let t = i as f32 / segments as f32;
+        let lin_x = fx as f32 + dx * t;
+        let lin_y = fy as f32 + dy * t;
+        let sag = sag_px * 4.0 * t * (1.0 - t);
+        pts[i] = (lin_x as i32, (lin_y + sag) as i32);
+    }
+
+    // Direction-dependent halo offset.  For more-horizontal lines
+    // the halo is vertical (±1 in Y); for more-vertical lines it's
+    // horizontal (±1 in X).  Cheap heuristic via the original
+    // endpoint delta.
+    let halo_vertical = dx.abs() > dy.abs();
+    let halo_dx = if halo_vertical { 0 } else { 1 };
+    let halo_dy = if halo_vertical { 1 } else { 0 };
+
+    // Style → (period, mask) for the pattern.
+    // 0x00..0xFF mask: 1 bits at periodic positions paint, 0 bits skip.
+    // For "dashed" 2 on / 2 off, the simplest is `(t & 3) < 2`.
+    let (period_mask, period_on): (i32, i32) = match style {
+        EdgeStyle::Dashed => (3, 2),   // (t & 3) < 2
+        EdgeStyle::Dotted => (3, 1),   // (t & 3) < 1
+        _ => (0, 1),                    // always-on
+    };
+
+    // GradientEnds bright window.
+    let total_steps_est = len_f as i32;
+    let q1 = total_steps_est / 4;
+    let q3 = total_steps_est - q1;
+    let is_gradient = matches!(style, EdgeStyle::GradientEnds);
+
+    // SolidPulsed swap to DimWhite on the off phase.
+    let main_color = if matches!(style, EdgeStyle::SolidPulsed) && !pulse_on {
+        k_fb::Color::DimWhite
+    } else {
+        color
+    };
+
+    use core::cell::Cell;
+    let global_step = Cell::new(0i32);
+
+    for seg in 0..segments {
+        let (x0, y0) = pts[seg];
+        let (x1, y1) = pts[seg + 1];
+
+        // Center pixels (bright) — stamped through pattern/gradient.
+        let center_color = main_color;
+        let halo_color = k_fb::Color::DimWhite;
+        k_rast::draw_line(
+            |x, y| {
+                let t = global_step.get();
+                global_step.set(t + 1);
+                // Pattern gate.
+                let pat_on = period_mask == 0 || (t & period_mask) < period_on;
+                if !pat_on {
+                    return;
+                }
+                // GradientEnds bright window.
+                let chosen = if is_gradient && (t >= q1 && t <= q3) {
+                    k_fb::Color::DimWhite
+                } else {
+                    center_color
+                };
+                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                    k_fb::put_pixel(x as usize, y as usize, chosen);
+                }
+                // Halo pixel: always painted (no pattern) so the
+                // rope reads as a continuous 2-px ribbon even when
+                // the centre is dashed.
+                let hx = x + halo_dx;
+                let hy = y + halo_dy;
+                if hx >= 0 && hx < SCENE_WIDTH && hy >= HEADER_H && hy < FOOTER_Y {
+                    k_fb::put_pixel(hx as usize, hy as usize, halo_color);
+                }
+            },
+            x0, y0, x1, y1,
+        );
+
+        // GradientEnds gets a 3rd-pixel halo on the OTHER side too
+        // so it reads visually heavier than the standard rope.
+        if is_gradient {
+            let put = |x: i32, y: i32| {
+                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
+                    k_fb::put_pixel(x as usize, y as usize, halo_color);
+                }
+            };
+            k_rast::draw_line(put, x0 - halo_dx, y0 - halo_dy, x1 - halo_dx, y1 - halo_dy);
+        }
+    }
+}
+
+/// Cheap pow approximation good enough for specular falloff in
+/// 256-colour space.  Uses 5 squarings → exponent up to 32.
+/// libm::powf would be the proper call but pulls a chunkier path;
+/// this stays branch-light for the hot per-pixel loop.
+fn pow_approx(base: f32, exp: f32) -> f32 {
+    // For exponent ≈ 32, repeated squaring of base does it in 5 steps.
+    let mut acc = base.max(0.0);
+    let target_steps = libm::log2f(exp.max(1.0)) as i32;
+    let steps = target_steps.clamp(0, 6);
+    for _ in 0..steps {
+        acc *= acc;
+    }
+    acc
 }
 
 fn find_node_index(
