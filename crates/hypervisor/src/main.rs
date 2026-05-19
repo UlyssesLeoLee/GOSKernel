@@ -267,6 +267,34 @@ fn paint_3d_view(frame: u64) {
     }
     sort_by_depth_desc(&mut depths[..depth_count]);
 
+    // I.4.7 — sub-domain halos.  Before drawing any octahedral core,
+    // paint a thin 1-px ring around each node's projected centre with
+    // a colour derived from `NodeSubDomain` (the partition introduced
+    // by audit P2 #4).  All halos paint first as a separate pass so
+    // the octahedra naturally overlap and hide the inner portion,
+    // leaving a thin colored frame that reads as "this node belongs
+    // to <class>" — finally making the orthogonal partition visible.
+    //
+    // Skip halos for nodes whose projected position is near the
+    // header/footer edge so we don't paint into reserved bands.
+    let halo_half: i32 = 9; // slightly larger than HIT_HALF_PX (8) so
+                            // ~1 px of halo pokes out around the octa
+    for slot in 0..depth_count {
+        let i = depths[slot].0;
+        let (sx, sy, ok) = node_centre_screen[i];
+        if !ok {
+            continue;
+        }
+        let halo_color = sub_domain_color(nodes[i].sub_domain);
+        let x = (sx - halo_half).max(0);
+        let y = (sy - halo_half).max(HEADER_H);
+        let w = (halo_half * 2).min(SCENE_WIDTH - x);
+        let h = (halo_half * 2).min(FOOTER_Y - y);
+        if w > 0 && h > 0 {
+            k_fb::stroke_rect(x as usize, y as usize, w as usize, h as usize, halo_color);
+        }
+    }
+
     // Octahedral cores (painter's order: far first, near last).  Fog
     // factor [0,1] is the normalised distance-from-camera bucketed by
     // the precomputed depth² we already sorted on — gives "near = full
@@ -1058,6 +1086,23 @@ fn edge_style(kind: gos_protocol::RuntimeEdgeType) -> EdgeStyle {
         }
         RuntimeEdgeType::Link => EdgeStyle::GradientEnds,
         _ => EdgeStyle::Solid,
+    }
+}
+
+/// Map a `NodeSubDomain` partition to a palette colour for the
+/// halo ring drawn under each node (I.4.7).  Mirrors the per-class
+/// intent set by audit P2 #4: Hardware/KernelDriver/Service are the
+/// three dense kernel classes, Compute/Routing are graph-flow
+/// classes, Vector is the rare "raw pointer addressed" fallback.
+fn sub_domain_color(sub: gos_protocol::NodeSubDomain) -> k_fb::Color {
+    use gos_protocol::NodeSubDomain;
+    match sub {
+        NodeSubDomain::Hardware => k_fb::Color::NodeKernel,    // cyan
+        NodeSubDomain::KernelDriver => k_fb::Color::NodeDriver, // amber
+        NodeSubDomain::Service => k_fb::Color::NodeService,    // mint
+        NodeSubDomain::Compute => k_fb::Color::NodeApp,        // magenta
+        NodeSubDomain::Routing => k_fb::Color::NodeOther,      // rose
+        NodeSubDomain::Vector => k_fb::Color::DimWhite,
     }
 }
 
