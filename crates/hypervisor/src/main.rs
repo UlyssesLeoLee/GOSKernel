@@ -231,6 +231,11 @@ fn paint_3d_view(frame: u64) {
     let mut edges = [GraphEdgeSummary::EMPTY; MAX_EDGES];
     let (_total_e, returned_e) = gos_runtime::edge_page(0, &mut edges);
 
+    // ── Phase I.6.3 — advance the soft-body Verlet step once per
+    //    frame BEFORE any projection so node_world_position sees
+    //    today's positions, not yesterday's.
+    physics_step(&nodes[..returned_n], returned_n, &edges[..returned_e], returned_e);
+
     // Camera: orbit around origin at fixed radius + pitch.  Phase
     // I.3.9 — F-keys (handled by k-ps2) bias yaw/pitch/radius via
     // the shared atomics in k-fb; F1 toggles auto-yaw.
@@ -337,10 +342,11 @@ fn paint_3d_view(frame: u64) {
         let hue_base = classify_node_hue(&nodes[i]);
         let lin = libm::sqrtf(d_sq / max_depth_sq);
         let fog = (lin * lin * 0.9).clamp(0.0, 1.0);
-        // Specular boost: bumped by hover/select for haptic feedback
-        // (I.6.4).  Hooked into hover_slot/selected later in the
-        // function — for now leave at 0 (boost wired up in I.6.4).
-        let specular_boost = 0.0_f32;
+        // I.6.4 — specular boost driven by the per-node flash
+        // counter (set on click/select) so a freshly-touched ball
+        // glints, decaying over ~14 frames.
+        let flash = physics_flash_value(i) as f32;
+        let specular_boost = flash * 0.045;
         draw_node_sphere(sx, sy, r_px, hue_base, fog, specular_boost);
     }
 
@@ -377,7 +383,24 @@ fn paint_3d_view(frame: u64) {
         if !(fok && tok) {
             continue;
         }
-        let color = classify_edge(edges[i].edge_type);
+        let base_color = classify_edge(edges[i].edge_type);
+        // I.6.4 — edge tension glow: probe the simulated 3D
+        // distance between endpoints; if it deviates from the
+        // rest length by > 15 % the rope is visibly stretched or
+        // compressed → swap to Highlight so the user reads it as
+        // "this connection is under load."
+        let from_w = node_world_position(fi, returned_n);
+        let to_w = node_world_position(ti, returned_n);
+        let dxw = to_w.x - from_w.x;
+        let dyw = to_w.y - from_w.y;
+        let dzw = to_w.z - from_w.z;
+        let len_w = libm::sqrtf(dxw * dxw + dyw * dyw + dzw * dzw);
+        let strain = libm::fabsf(len_w - PHYS_REST_LEN) / PHYS_REST_LEN;
+        let color = if strain > 0.15 {
+            k_fb::Color::Highlight
+        } else {
+            base_color
+        };
         let style = edge_style(edges[i].edge_type);
         draw_rope_edge(fx, fy, tx, ty, color, style, pulse_on);
     }
@@ -455,6 +478,9 @@ fn paint_3d_view(frame: u64) {
     // dragging from a cube initiates orbit + leaves selection alone.
     if left_edge && hover_slot >= 0 {
         SELECTED_NODE_SLOT.store(hover_slot, Ordering::Relaxed);
+        // I.6.4 — click flash: bump the per-node specular boost so
+        // the sphere reads a tactile "ping" on the next ~14 frames.
+        physics_flash(hover_slot as usize);
     } else if left_edge && hover_slot < 0 {
         // Clicking empty space clears selection.
         SELECTED_NODE_SLOT.store(-1, Ordering::Relaxed);
@@ -830,13 +856,187 @@ fn paint_3d_view(frame: u64) {
     let _ = auto_on;
 }
 
-/// World-space centre for the i-th node.  Lays nodes out on a 3D
-/// grid centred at the origin.  Spread tuned so the scene fits the
-/// frustum at the camera radius used above.
-fn node_world_position(i: usize, total: usize) -> Vec3 {
-    // Use isqrt to pick a square grid in the XZ plane; Y is the
-    // index `mod 3` so we get some vertical separation that reads
-    // as 3D when the camera orbits.
+// ── Phase I.6.3 — Verlet physics for the node/edge graph ──────────
+//
+// The boot UI's nodes are no longer fixed at their grid positions —
+// they're now particles in a soft mass-spring system.  Each frame:
+//   1. Verlet integrate: pos += (pos - prev_pos) * damping
+//   2. Each node is pulled gently back toward its grid "home"
+//      (anchor spring) so the overall layout stays recognizable.
+//   3. Each edge is a Hooke spring between its endpoints with a
+//      rest length matching the grid spacing.  Stretched edges
+//      pull their endpoints together; compressed ones push apart.
+//   4. Flash counters decay (used by I.6.4 to render selection
+//      pings as a specular boost on the metallic sphere).
+//
+// Stability tuning:
+//   ANCHOR_K = 0.05   weak: lets the graph deform but never drift
+//   EDGE_K   = 0.06   moderate: ropes have visible tension flex
+//   DAMPING  = 0.86   below 1 always so kinetic energy bleeds off
+//
+// On graph-generation change (new nodes added via Cypher) we
+// re-seed: every node snaps to its grid home and history resets.
+
+const PHYS_NODES: usize = MAX_NODES;
+const PHYS_REST_LEN: f32 = 0.45;
+const PHYS_ANCHOR_K: f32 = 0.05;
+const PHYS_EDGE_K: f32 = 0.06;
+const PHYS_DAMPING: f32 = 0.86;
+
+struct PhysicsState {
+    pos: [Vec3; PHYS_NODES],
+    prev_pos: [Vec3; PHYS_NODES],
+    home: [Vec3; PHYS_NODES],
+    /// Per-node "ping" timer.  Set by `physics_flash` when the user
+    /// hovers or selects a node; decays one frame at a time and
+    /// drives the specular boost in the sphere shader.
+    flash: [u8; PHYS_NODES],
+    node_count: usize,
+    seeded: bool,
+}
+
+impl PhysicsState {
+    const fn new() -> Self {
+        Self {
+            pos: [Vec3 { x: 0.0, y: 0.0, z: 0.0 }; PHYS_NODES],
+            prev_pos: [Vec3 { x: 0.0, y: 0.0, z: 0.0 }; PHYS_NODES],
+            home: [Vec3 { x: 0.0, y: 0.0, z: 0.0 }; PHYS_NODES],
+            flash: [0; PHYS_NODES],
+            node_count: 0,
+            seeded: false,
+        }
+    }
+}
+
+static PHYSICS: spin::Mutex<PhysicsState> = spin::Mutex::new(PhysicsState::new());
+
+/// Compute the rigid "home" grid position for the i-th of `total`
+/// nodes.  Pre-I.6.3 this was the per-frame position; now it's the
+/// anchor that the spring system relaxes toward.
+fn node_home_position(i: usize, total: usize) -> Vec3 {
+    let cols = isqrt_ceil(total).max(1);
+    let row = (i / cols) as i32;
+    let col = (i % cols) as i32;
+    let layer = (i % 3) as i32 - 1;
+    let cols_i = cols as i32;
+    let span_x = (col - cols_i / 2) as f32 * 0.45;
+    let span_z = (row - cols_i / 2) as f32 * 0.45;
+    let span_y = layer as f32 * 0.18;
+    Vec3::new(span_x, span_y, span_z)
+}
+
+/// Run one Verlet step + anchor + edge springs + flash decay.
+/// Re-seeds when the node count changes so newly-Cypher-added nodes
+/// snap to their grid home rather than spawning at the origin.
+fn physics_step(
+    nodes: &[GraphNodeSummary],
+    returned_n: usize,
+    edges: &[GraphEdgeSummary],
+    returned_e: usize,
+) {
+    let mut p = PHYSICS.lock();
+    let n = returned_n.min(PHYS_NODES);
+
+    if !p.seeded || p.node_count != n {
+        for i in 0..n {
+            let h = node_home_position(i, n);
+            p.pos[i] = h;
+            p.prev_pos[i] = h;
+            p.home[i] = h;
+            p.flash[i] = 0;
+        }
+        p.node_count = n;
+        p.seeded = true;
+        return;
+    }
+
+    // 1. Verlet integration with damping.
+    for i in 0..n {
+        let vx = (p.pos[i].x - p.prev_pos[i].x) * PHYS_DAMPING;
+        let vy = (p.pos[i].y - p.prev_pos[i].y) * PHYS_DAMPING;
+        let vz = (p.pos[i].z - p.prev_pos[i].z) * PHYS_DAMPING;
+        let new_pos = Vec3::new(p.pos[i].x + vx, p.pos[i].y + vy, p.pos[i].z + vz);
+        p.prev_pos[i] = p.pos[i];
+        p.pos[i] = new_pos;
+    }
+
+    // 2. Anchor spring toward grid home.
+    for i in 0..n {
+        let h = p.home[i];
+        p.pos[i].x += (h.x - p.pos[i].x) * PHYS_ANCHOR_K;
+        p.pos[i].y += (h.y - p.pos[i].y) * PHYS_ANCHOR_K;
+        p.pos[i].z += (h.z - p.pos[i].z) * PHYS_ANCHOR_K;
+    }
+
+    // 3. Edge springs (Hooke).  Snap endpoint indices each call so
+    // re-seeding doesn't break refs.
+    for e in &edges[..returned_e.min(edges.len())] {
+        let fi_opt = find_node_index(&nodes[..n], e.from_vector);
+        let ti_opt = find_node_index(&nodes[..n], e.to_vector);
+        let (Some(fi), Some(ti)) = (fi_opt, ti_opt) else { continue };
+        if fi >= n || ti >= n {
+            continue;
+        }
+        let dx = p.pos[ti].x - p.pos[fi].x;
+        let dy = p.pos[ti].y - p.pos[fi].y;
+        let dz = p.pos[ti].z - p.pos[fi].z;
+        let len = libm::sqrtf(dx * dx + dy * dy + dz * dz).max(0.001);
+        let stretch = len - PHYS_REST_LEN;
+        let force = stretch * PHYS_EDGE_K;
+        let nx = dx / len * force;
+        let ny = dy / len * force;
+        let nz = dz / len * force;
+        p.pos[fi].x += nx;
+        p.pos[fi].y += ny;
+        p.pos[fi].z += nz;
+        p.pos[ti].x -= nx;
+        p.pos[ti].y -= ny;
+        p.pos[ti].z -= nz;
+    }
+
+    // 4. Flash decay (I.6.4 feedback).
+    for i in 0..n {
+        if p.flash[i] > 0 {
+            p.flash[i] -= 1;
+        }
+    }
+}
+
+/// Trigger a selection/click "ping" on the given node — boosts the
+/// metallic sphere's specular highlight for several frames so the
+/// click reads as a tactile flash.
+fn physics_flash(node_idx: usize) {
+    if node_idx >= PHYS_NODES {
+        return;
+    }
+    PHYSICS.lock().flash[node_idx] = 14;
+}
+
+/// Read the current flash counter for the i-th node.  Returns 0 if
+/// out of range — caller treats that as "no boost".
+fn physics_flash_value(i: usize) -> u8 {
+    PHYSICS.lock().flash.get(i).copied().unwrap_or(0)
+}
+
+/// Read a snapshot of the i-th node's simulated position.
+fn node_world_position(i: usize, _total: usize) -> Vec3 {
+    PHYSICS.lock().pos[i.min(PHYS_NODES - 1)]
+}
+
+/// Original grid-derived position (pre-physics).  Kept for any
+/// callsites that intentionally want the rigid layout.  Currently
+/// unused in render but referenced by the physics seed.
+#[allow(dead_code)]
+fn node_world_position_grid(i: usize, total: usize) -> Vec3 {
+    node_home_position(i, total)
+}
+
+/// World-space centre for the i-th node — kept as the legacy entry
+/// for the original grid formula.  Now superseded by the physics
+/// state above; left here in case future code wants to ask for the
+/// rigid layout.
+#[allow(dead_code)]
+fn node_world_position_legacy(i: usize, total: usize) -> Vec3 {
     let cols = isqrt_ceil(total).max(1);
     let row = (i / cols) as i32;
     let col = (i % cols) as i32;
