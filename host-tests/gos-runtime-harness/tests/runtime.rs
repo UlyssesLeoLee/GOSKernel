@@ -2226,3 +2226,143 @@ fn audit_ring_snapshots_newest_first_and_caps_at_capacity() {
     // returned count must respect all three bounds.
     gos_verify::invariant_audit_ring_snapshot_bounded();
 }
+
+// Phase H.1.x.5 / Architecture P0 #1 — graph-attributed capability
+// resolution.  When a caller is supplied, `resolve_capability_with_edge`
+// must:
+//   1. return the same `VectorAddress` as the unattributed lookup
+//      (semantic equivalence — never block resolution by failing to
+//      register the edge)
+//   2. register exactly one `Use` edge from caller → provider
+//   3. stamp the matching capability namespace / name on the edge so
+//      Cypher tools and audit consumers can see WHICH capability the
+//      use refers to
+//   4. be idempotent: a second resolve of the same (caller, provider,
+//      ns, cap) does not bump the edge count
+//   5. skip edge registration when `caller_vec == None` (read-only
+//      mode for tests and snapshot replay)
+#[test]
+fn resolve_capability_with_edge_attributes_to_runtime_graph() {
+    use gos_protocol::{
+        derive_node_id, CapabilitySpec, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("CAP_RT");
+    const PROVIDER_KEY: &str = "cap.provider";
+    const CALLER_KEY: &str = "cap.caller";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.cap");
+    const PROVIDER_VEC: VectorAddress = VectorAddress::new(8, 8, 8, 1);
+    const CALLER_VEC: VectorAddress = VectorAddress::new(8, 8, 8, 2);
+
+    const EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
+        namespace: "vga",
+        name: "console",
+    }];
+
+    let provider_spec = NodeSpec {
+        node_id: derive_node_id(PID, PROVIDER_KEY),
+        local_node_key: PROVIDER_KEY,
+        node_type: RuntimeNodeType::Driver,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: EXPORTS,
+        vector_ref: None,
+    };
+    let caller_spec = NodeSpec {
+        node_id: derive_node_id(PID, CALLER_KEY),
+        local_node_key: CALLER_KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "CAP_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, PROVIDER_VEC, provider_spec).expect("provider");
+    gos_runtime::register_node(PID, CALLER_VEC, caller_spec).expect("caller");
+
+    // Sanity: unattributed resolve still works the legacy way.
+    assert_eq!(
+        gos_runtime::resolve_capability(b"vga", b"console"),
+        Some(PROVIDER_VEC)
+    );
+
+    // Edge table empty before any attributed resolve.
+    let mut edges_before = [gos_protocol::GraphEdgeSummary::EMPTY; 8];
+    let (edges_before_total, _) = gos_runtime::edge_page(0, &mut edges_before);
+    assert_eq!(edges_before_total, 0);
+
+    // First attributed resolve registers exactly one `Use` edge with
+    // the capability strings stamped.
+    let resolved = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(resolved, Some(PROVIDER_VEC));
+
+    let mut edges_after = [gos_protocol::GraphEdgeSummary::EMPTY; 8];
+    let (edges_after_total, edges_after_returned) =
+        gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(edges_after_total, 1, "exactly one edge registered");
+    assert_eq!(edges_after_returned, 1);
+    let edge = edges_after[0];
+    assert_eq!(edge.edge_type, RuntimeEdgeType::Use);
+    assert_eq!(edge.from_vector, CALLER_VEC);
+    assert_eq!(edge.to_vector, PROVIDER_VEC);
+
+    // Idempotency: second resolve of the same capability does not bump
+    // the edge count.
+    let resolved_2 = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(resolved_2, Some(PROVIDER_VEC));
+    let (total_after_2, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_2, 1, "idempotent — second resolve doesn't duplicate edge");
+
+    // Read-only mode (caller=None) returns the lookup but never
+    // touches the edge table.
+    let resolved_anon = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        None,
+    );
+    assert_eq!(resolved_anon, Some(PROVIDER_VEC));
+    let (total_after_anon, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_anon, 1);
+
+    // Unknown capability returns None and does NOT register any edge.
+    let missing = gos_runtime::resolve_capability_with_edge(
+        b"nope",
+        b"missing",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(missing, None);
+    let (total_after_miss, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_miss, 1);
+}

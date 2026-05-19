@@ -806,12 +806,92 @@ impl GraphRuntime {
         namespace: &[u8],
         capability: &[u8],
     ) -> Option<VectorAddress> {
+        // Read-only variant retained for callers that don't want the
+        // graph-edge side effect (test fixtures, snapshot replay).
+        // The kernel ABI path goes through `resolve_capability_with_edge`
+        // so cross-plugin imports light up in the runtime graph.
         self.nodes.iter().flatten().find_map(|record| {
             let exported = record.spec.exports.iter().any(|export| {
                 export.namespace.as_bytes() == namespace && export.name.as_bytes() == capability
             });
             exported.then_some(record.vector)
         })
+    }
+
+    /// Phase H.1.x.5 — graph-attributed capability resolution.
+    ///
+    /// Same as `resolve_capability` for the lookup, but additionally
+    /// registers a `RuntimeEdgeType::Use` edge from the caller node
+    /// to the provider node with the matching capability strings
+    /// stamped on the edge.  Idempotent: subsequent calls with the
+    /// same `(caller, provider)` pair reuse the same EdgeId, so a
+    /// node that resolves the same capability every dispatch only
+    /// creates the edge once.
+    ///
+    /// Caller identity normally comes from `CURRENT_DISPATCH` (the
+    /// vector of the node the runtime is currently invoking — set
+    /// in the dispatch path); the free-function wrapper handles that
+    /// automatically.  `caller_vec = None` skips edge creation,
+    /// matching the read-only `resolve_capability` semantics.
+    pub fn resolve_capability_with_edge(
+        &mut self,
+        namespace: &[u8],
+        capability: &[u8],
+        caller_vec: Option<VectorAddress>,
+    ) -> Option<VectorAddress> {
+        // Find the providing node + grab its `&'static str` export
+        // strings (so the edge's `capability_namespace` /
+        // `capability_binding` fields stay statically-typed without
+        // an arena).
+        let mut found: Option<(VectorAddress, &'static str, &'static str)> = None;
+        for record_opt in self.nodes.iter() {
+            if let Some(record) = record_opt {
+                for export in record.spec.exports.iter() {
+                    if export.namespace.as_bytes() == namespace
+                        && export.name.as_bytes() == capability
+                    {
+                        found = Some((record.vector, export.namespace, export.name));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+        }
+        let (provider_vec, ns_str, cap_str) = match found {
+            Some(t) => t,
+            None => return None,
+        };
+        if let Some(caller_v) = caller_vec {
+            if caller_v != provider_vec {
+                let from_node = self.node_id_for_vec(caller_v);
+                let to_node = self.node_id_for_vec(provider_vec);
+                if let (Some(from_id), Some(to_id)) = (from_node, to_node) {
+                    // Gen-1: one Use edge per (caller, provider) pair.
+                    // Multiple distinct capabilities between the same
+                    // pair currently share the edge and the
+                    // first-recorded binding is preserved.  Tracked
+                    // for a follow-up that derives edge_id from
+                    // `(from, to, ns/cap)` instead.
+                    let edge_id = derive_edge_id(from_id, to_id, "cap.use");
+                    let spec = EdgeSpec {
+                        edge_id,
+                        from_node: from_id,
+                        to_node: to_id,
+                        edge_type: RuntimeEdgeType::Use,
+                        weight: 1.0,
+                        acl_mask: u64::MAX,
+                        route_policy: RoutePolicy::Direct,
+                        capability_namespace: Some(ns_str),
+                        capability_binding: Some(cap_str),
+                        vector_ref: None,
+                    };
+                    let _ = self.register_edge(spec);
+                }
+            }
+        }
+        Some(provider_vec)
     }
 
     pub fn enqueue_ready(&mut self, node_id: NodeId) -> Result<(), RuntimeError> {
@@ -1538,7 +1618,17 @@ unsafe extern "C" fn kernel_resolve_capability(
 
     let namespace = unsafe { core::slice::from_raw_parts(namespace, namespace_len) };
     let name = unsafe { core::slice::from_raw_parts(name, name_len) };
-    resolve_capability(namespace, name)
+    // Phase H.1.x.5 — the kernel ABI path reads CURRENT_DISPATCH to
+    // attribute the resolve to whichever node was executing.  This
+    // is what turns cross-plugin imports into real runtime graph
+    // edges (`Use` with capability_binding stamped), satisfying the
+    // architecture audit's P0 #1.  Test fixtures and snapshot
+    // replay use the bare `resolve_capability` free fn (below) and
+    // skip edge attribution by passing None.
+    let caller = *CURRENT_DISPATCH.lock();
+    RUNTIME
+        .lock()
+        .resolve_capability_with_edge(namespace, name, caller)
         .map(|vector| vector.as_u64())
         .unwrap_or(0)
 }
@@ -1673,6 +1763,21 @@ pub fn edge_page<const N: usize>(
 
 pub fn resolve_capability(namespace: &[u8], capability: &[u8]) -> Option<VectorAddress> {
     RUNTIME.lock().resolve_capability(namespace, capability)
+}
+
+/// Graph-attributed capability resolver — public wrapper around
+/// `Runtime::resolve_capability_with_edge` so test fixtures (and
+/// any in-tree caller that wants to bypass `CURRENT_DISPATCH` and
+/// pass an explicit caller vector) can drive the same path the
+/// kernel ABI uses on the IRQ-driven dispatch loop.
+pub fn resolve_capability_with_edge(
+    namespace: &[u8],
+    capability: &[u8],
+    caller: Option<VectorAddress>,
+) -> Option<VectorAddress> {
+    RUNTIME
+        .lock()
+        .resolve_capability_with_edge(namespace, capability, caller)
 }
 
 /// Register a conditional-route table for a node (LangGraph-style fan-out).
