@@ -345,6 +345,83 @@ pub static CAMERA_PITCH_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 /// at 3.5 units = 3500 mrad-equivalent.  F6 resets, F7/F8 zoom.
 pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(3500);
 
+// ── Phase I.5 — kernel-UI command bar + mode switch ───────────────
+//
+// The boot UI runs in two modes:
+//   * `UI_MODE_OS_SHELL`     — title + system status + command bar.
+//                              The default after boot.
+//   * `UI_MODE_KERNEL_VIEW`  — the live 3D graph (octahedra + edges +
+//                              halos + gizmo).
+//
+// A character ring buffer fed by k-ps2 lets the painter drain typed
+// keystrokes per frame.  Commands typed into the bar (`kernel`, `os`,
+// `help`, …) switch modes / produce log lines.  The scrollback panel
+// is collapsed by default and toggled with F9.
+//
+// Why state lives in k-fb: it's already the kernel-side crate every
+// other UI consumer depends on (k-ps2, hypervisor::main, k-panic),
+// so adding the shared input ring here avoids a fresh crate or
+// circular dep.  Single-CPU boot ⇒ Mutex is uncontended in practice.
+
+pub const UI_MODE_OS_SHELL: u8 = 0;
+pub const UI_MODE_KERNEL_VIEW: u8 = 1;
+
+pub static UI_MODE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(UI_MODE_OS_SHELL);
+
+pub static UI_SCROLLBACK_EXPANDED: AtomicBool = AtomicBool::new(false);
+
+/// Fixed-capacity SPSC byte ring for keystrokes flowing from the
+/// PS/2 driver into the boot UI loop.  Capacity 64 is plenty: the
+/// painter drains every frame (~50 Hz) and the keyboard tops out
+/// at ~30 cps even with autorepeat on.
+const TYPED_RING_CAP: usize = 64;
+
+struct TypedRing {
+    buf: [u8; TYPED_RING_CAP],
+    head: usize, // write index
+    tail: usize, // read index
+}
+
+impl TypedRing {
+    const fn new() -> Self {
+        Self { buf: [0; TYPED_RING_CAP], head: 0, tail: 0 }
+    }
+    fn push(&mut self, b: u8) -> bool {
+        let next = (self.head + 1) % TYPED_RING_CAP;
+        if next == self.tail {
+            return false; // drop on overflow rather than block
+        }
+        self.buf[self.head] = b;
+        self.head = next;
+        true
+    }
+    fn pop(&mut self) -> Option<u8> {
+        if self.head == self.tail {
+            return None;
+        }
+        let b = self.buf[self.tail];
+        self.tail = (self.tail + 1) % TYPED_RING_CAP;
+        Some(b)
+    }
+}
+
+static TYPED_RING: Mutex<TypedRing> = Mutex::new(TypedRing::new());
+
+/// Called from k-ps2's `proc::process` to mirror an ASCII keystroke
+/// into the kernel-UI input channel in parallel with the existing
+/// shell route.  Dropping on overflow is acceptable: the user types
+/// way slower than the painter drains.
+pub fn push_typed_char(b: u8) {
+    TYPED_RING.lock().push(b);
+}
+
+/// Drain one queued keystroke for the boot UI loop.  Returns None
+/// when the ring is empty.
+pub fn pop_typed_char() -> Option<u8> {
+    TYPED_RING.lock().pop()
+}
+
 // ── Phase I.3.4 — 8×8 ASCII glyph rendering ────────────────────────
 //
 // Backed by `font8x8::legacy::BASIC_LEGACY` (public-domain BIOS-PC

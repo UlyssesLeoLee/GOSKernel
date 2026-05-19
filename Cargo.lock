@@ -130,6 +130,7 @@ dependencies = [
  "k-vga",
  "k-vmm",
  "libm",
+ "spin",
  "x86_64",
 ]
 

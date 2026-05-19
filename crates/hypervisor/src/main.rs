@@ -109,7 +109,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Phase I.3.8 — first 3D paint before going interactive.  Idle
     // loop below repaints continuously to keep the camera rotation
     // smooth.
-    paint_3d_view(0);
+    paint_frame(0);
     raw_serial_println(format_args!("boot: framebuffer 3D scene painted"));
 
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
@@ -132,7 +132,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let gen_now = gos_runtime::graph_generation();
         let graph_dirty = gen_now != last_painted_gen;
         if graph_dirty || frame_counter % REPAINT_TICKS == 0 {
-            paint_3d_view(frame_counter);
+            paint_frame(frame_counter);
             last_painted_gen = gen_now;
         }
         x86_64::instructions::hlt();
@@ -164,7 +164,19 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 const SCENE_WIDTH: i32 = k_fb::WIDTH as i32;
 const SCENE_HEIGHT: i32 = k_fb::HEIGHT as i32;
 const HEADER_H: i32 = 14;
-const FOOTER_Y: i32 = 192;
+/// Bottom edge of the scene-body clipping window.  All node/edge
+/// paint stays above this Y; the command bar + scrollback overlay
+/// (I.5) own everything below.
+const FOOTER_Y: i32 = 178;
+/// Command-input bar geometry (I.5).  Always visible at the bottom
+/// of the screen.  Slim 14 px row that holds `> <typed>_` with a
+/// blinking cursor.
+const CMD_BAR_TOP: i32 = 184;
+const CMD_BAR_H: i32 = 14;
+/// Height of the scrollback panel when F9 has expanded it.  Sits
+/// just above the command bar, overlapping the lower portion of
+/// the scene area as a translucent-feeling deck.
+const SCROLLBACK_H: i32 = 84;
 const MAX_NODES: usize = 64;
 const MAX_EDGES: usize = 128;
 
@@ -240,10 +252,8 @@ fn paint_3d_view(frame: u64) {
     let proj = Mat4::perspective(60.0_f32.to_radians(), aspect, 0.1, 100.0);
     let view_proj = proj.mul(view);
 
-    // Background + header band + footer band so the body region paints
-    // fresh every frame (no leftover ghosts from the previous tick).
-    k_fb::clear(k_fb::Color::Background);
-    k_fb::fill_rect(0, 0, k_fb::WIDTH, HEADER_H as usize, k_fb::Color::HeaderBar);
+    // Background + header band painted by `paint_frame` (I.5).
+    // This function now only owns the kernel-view body.
 
     // Project node centres + classify colour.  We need both screen
     // coordinates (for edges + I.3.10 labels) and view-space depth
@@ -877,15 +887,10 @@ fn paint_3d_view(frame: u64) {
         }
     }
 
-    // Footer status.
+    // I.5 — scene-bottom hairline (was the old footer hairline).
     k_fb::hline(0, FOOTER_Y as usize, k_fb::WIDTH, k_fb::Color::DimWhite);
-    let mut footer = TextBuf::<48>::new();
-    footer.push_str(if auto_on { "3D  " } else { "PAUSE  " });
-    footer.push_str("F1 PAUSE  F2/3 YAW  F4/5 PIT  F7/8 Z  F6 RST");
-    k_fb::draw_text(4, 192, footer.as_str(), k_fb::Color::Foreground);
-    let _ = snapshot; // RDY/SIG counters can return when there's row space
-
-    k_fb::present();
+    let _ = snapshot; // RDY/SIG counters return when there's row space
+    let _ = auto_on;
 }
 
 /// World-space centre for the i-th node.  Lays nodes out on a 3D
@@ -1169,6 +1174,482 @@ impl<const N: usize> TextBuf<N> {
         // (which is UTF-8) or an ASCII digit, so the prefix is valid
         // UTF-8.
         unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase I.5 — kernel-UI command bar + scrollback + mode switch
+// ═══════════════════════════════════════════════════════════════════
+//
+// The boot UI now runs in two modes (toggle via typed commands or
+// Esc):
+//
+//   OsShell    — title + system status; the "desktop" entry point
+//                where the user types commands to navigate.  This
+//                is the boot default.
+//   KernelView — the existing 3D graph scene (octahedra + edges
+//                + halos + gizmo).  Reached by typing `kernel`.
+//
+// A 14-px command bar pinned to the bottom is always visible.  An
+// 84-px scrollback panel toggled by F9 (or `log` / `clear` to clear)
+// floats above the bar showing recent output.  Both are painted by
+// `paint_frame`, which dispatches to either `paint_3d_view`
+// (kernel-view body) or `paint_os_shell_body` for the upper region.
+//
+// Input arrives via `k_fb::pop_typed_char` (fed by k-ps2's `proc`
+// stage), so the existing capability route to k-shell is unchanged
+// — both consumers see every keystroke.
+
+const CMD_LINE_CAP: usize = 56;     // typed input chars
+const SCROLLBACK_LINES: usize = 10; // scrollback ring depth
+const SCROLLBACK_LINE_CAP: usize = 44; // chars per line at 8 px width
+
+struct UiState {
+    /// Current input line being edited; bytes[..len] is valid ASCII.
+    line: [u8; CMD_LINE_CAP],
+    line_len: usize,
+    /// Scrollback ring.  `lines[(head + N - i - 1) % N]` is the i-th
+    /// most recent line (0 = newest).  `count` tracks how many slots
+    /// have been written; clamps at `SCROLLBACK_LINES`.
+    lines: [[u8; SCROLLBACK_LINE_CAP]; SCROLLBACK_LINES],
+    line_lens: [usize; SCROLLBACK_LINES],
+    head: usize,
+    count: usize,
+}
+
+impl UiState {
+    const fn new() -> Self {
+        Self {
+            line: [0; CMD_LINE_CAP],
+            line_len: 0,
+            lines: [[0; SCROLLBACK_LINE_CAP]; SCROLLBACK_LINES],
+            line_lens: [0; SCROLLBACK_LINES],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    fn append_char(&mut self, b: u8) {
+        if self.line_len < CMD_LINE_CAP {
+            self.line[self.line_len] = b;
+            self.line_len += 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.line_len > 0 {
+            self.line_len -= 1;
+        }
+    }
+
+    fn clear_line(&mut self) {
+        self.line_len = 0;
+    }
+
+    fn current_line(&self) -> &str {
+        // SAFETY: only printable ASCII appended via `append_char`.
+        unsafe { core::str::from_utf8_unchecked(&self.line[..self.line_len]) }
+    }
+
+    fn log(&mut self, text: &str) {
+        let slot = self.head;
+        let bytes = text.as_bytes();
+        let n = bytes.len().min(SCROLLBACK_LINE_CAP);
+        self.lines[slot][..n].copy_from_slice(&bytes[..n]);
+        self.line_lens[slot] = n;
+        self.head = (self.head + 1) % SCROLLBACK_LINES;
+        if self.count < SCROLLBACK_LINES {
+            self.count += 1;
+        }
+    }
+
+    fn clear_log(&mut self) {
+        self.count = 0;
+        self.head = 0;
+    }
+
+    /// Iterate lines from oldest to newest (display order top→bottom).
+    fn iter_oldest_first(&self) -> impl Iterator<Item = &str> + '_ {
+        let count = self.count;
+        let head = self.head;
+        (0..count).map(move |i| {
+            let idx = (head + SCROLLBACK_LINES - count + i) % SCROLLBACK_LINES;
+            // SAFETY: only printable ASCII written via `log`.
+            unsafe { core::str::from_utf8_unchecked(&self.lines[idx][..self.line_lens[idx]]) }
+        })
+    }
+}
+
+static UI_STATE: spin::Mutex<UiState> = spin::Mutex::new(UiState::new());
+
+/// Drain queued keystrokes from `k_fb::pop_typed_char`, applying
+/// them to the input line.  Enter submits the line through
+/// `interpret_command`; Esc toggles mode; Backspace edits.
+fn drain_ui_input() {
+    while let Some(b) = k_fb::pop_typed_char() {
+        match b {
+            b'\r' | b'\n' => {
+                // Snapshot the line, clear it, then interpret.  We
+                // copy out so `interpret_command` can hold the lock
+                // again to append to the scrollback.
+                let mut buf = [0u8; CMD_LINE_CAP];
+                let len;
+                {
+                    let mut ui = UI_STATE.lock();
+                    len = ui.line_len;
+                    buf[..len].copy_from_slice(&ui.line[..len]);
+                    ui.clear_line();
+                }
+                // SAFETY: only printable ASCII written via append_char.
+                let line = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+                interpret_command(line);
+            }
+            0x08 => UI_STATE.lock().backspace(),
+            0x1B => {
+                // Esc — toggle mode.
+                use core::sync::atomic::Ordering;
+                let cur = k_fb::UI_MODE.load(Ordering::Relaxed);
+                let next = if cur == k_fb::UI_MODE_KERNEL_VIEW {
+                    k_fb::UI_MODE_OS_SHELL
+                } else {
+                    k_fb::UI_MODE_KERNEL_VIEW
+                };
+                k_fb::UI_MODE.store(next, Ordering::Relaxed);
+            }
+            0x20..=0x7E => UI_STATE.lock().append_char(b),
+            _ => {} // ignore other control codes
+        }
+    }
+}
+
+/// Interpret a submitted command line.  Echoes the input + any
+/// output into the scrollback.  Unknown commands produce a hint.
+fn interpret_command(raw: &str) {
+    use core::sync::atomic::Ordering;
+
+    // Trim trailing whitespace.
+    let line = raw.trim_end_matches(|c: char| c == ' ' || c == '\t');
+    {
+        // Echo the prompt+command into the scrollback first.
+        let mut echo = TextBuf::<60>::new();
+        echo.push_str("> ");
+        let take = line.len().min(56);
+        echo.push_str(unsafe { core::str::from_utf8_unchecked(&line.as_bytes()[..take]) });
+        UI_STATE.lock().log(echo.as_str());
+    }
+
+    if line.is_empty() {
+        return;
+    }
+
+    // Lower-case first token compare (manual since we're no_std).
+    let token_end = line.find(' ').unwrap_or(line.len());
+    let cmd = &line[..token_end];
+
+    let mut ui = UI_STATE.lock();
+    match cmd {
+        "kernel" | "k" | "kview" => {
+            k_fb::UI_MODE.store(k_fb::UI_MODE_KERNEL_VIEW, Ordering::Relaxed);
+            ui.log("[mode] kernel view");
+        }
+        "os" | "shell" | "exit" => {
+            k_fb::UI_MODE.store(k_fb::UI_MODE_OS_SHELL, Ordering::Relaxed);
+            ui.log("[mode] os shell");
+        }
+        "log" => {
+            // Toggle scrollback expand/collapse.
+            let cur = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
+            k_fb::UI_SCROLLBACK_EXPANDED.store(!cur, Ordering::Relaxed);
+        }
+        "clear" | "cls" => {
+            ui.clear_log();
+        }
+        "help" | "?" => {
+            ui.log("commands:");
+            ui.log("  kernel | k        enter 3D graph view");
+            ui.log("  os | exit         return to OS shell");
+            ui.log("  nodes / edges     graph stats");
+            ui.log("  gen               graph generation");
+            ui.log("  log               toggle scrollback (F9)");
+            ui.log("  clear             wipe scrollback");
+            ui.log("  Esc               toggle mode");
+        }
+        "nodes" => {
+            let mut buf = [GraphNodeSummary::EMPTY; MAX_NODES];
+            let (total, returned) = gos_runtime::node_page(0, &mut buf);
+            // Tally per sub_domain.
+            let mut hw = 0usize;
+            let mut drv = 0usize;
+            let mut svc = 0usize;
+            let mut cpu = 0usize;
+            let mut rtr = 0usize;
+            let mut vec_ct = 0usize;
+            use gos_protocol::NodeSubDomain;
+            for n in &buf[..returned] {
+                match n.sub_domain {
+                    NodeSubDomain::Hardware => hw += 1,
+                    NodeSubDomain::KernelDriver => drv += 1,
+                    NodeSubDomain::Service => svc += 1,
+                    NodeSubDomain::Compute => cpu += 1,
+                    NodeSubDomain::Routing => rtr += 1,
+                    NodeSubDomain::Vector => vec_ct += 1,
+                }
+            }
+            let mut row = TextBuf::<48>::new();
+            row.push_str("nodes total=");
+            row.push_dec(total as u64);
+            row.push_str(" returned=");
+            row.push_dec(returned as u64);
+            ui.log(row.as_str());
+            let mut row2 = TextBuf::<48>::new();
+            row2.push_str("  HW=");
+            row2.push_dec(hw as u64);
+            row2.push_str(" DRV=");
+            row2.push_dec(drv as u64);
+            row2.push_str(" SVC=");
+            row2.push_dec(svc as u64);
+            ui.log(row2.as_str());
+            let mut row3 = TextBuf::<48>::new();
+            row3.push_str("  CPU=");
+            row3.push_dec(cpu as u64);
+            row3.push_str(" RTR=");
+            row3.push_dec(rtr as u64);
+            row3.push_str(" VEC=");
+            row3.push_dec(vec_ct as u64);
+            ui.log(row3.as_str());
+        }
+        "edges" => {
+            let snap = gos_runtime::snapshot();
+            let mut row = TextBuf::<48>::new();
+            row.push_str("edges count=");
+            row.push_dec(snap.edge_count as u64);
+            ui.log(row.as_str());
+        }
+        "gen" => {
+            let mut row = TextBuf::<48>::new();
+            row.push_str("graph_generation=");
+            row.push_dec(gos_runtime::graph_generation());
+            ui.log(row.as_str());
+        }
+        _ => {
+            let mut row = TextBuf::<48>::new();
+            row.push_str("unknown: ");
+            let take = cmd.len().min(32);
+            row.push_str(unsafe { core::str::from_utf8_unchecked(&cmd.as_bytes()[..take]) });
+            row.push_str(" (try 'help')");
+            ui.log(row.as_str());
+        }
+    }
+}
+
+/// Top-level paint coordinator.  Drains input, paints the header
+/// + body (mode-dependent) + scrollback (when expanded) + command
+/// bar.  Replaces the direct `paint_3d_view` call from boot.
+fn paint_frame(frame: u64) {
+    if !k_fb::ready() {
+        return;
+    }
+    drain_ui_input();
+
+    use core::sync::atomic::Ordering;
+    let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
+    let scrollback_open = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
+
+    k_fb::clear(k_fb::Color::Background);
+    k_fb::fill_rect(0, 0, k_fb::WIDTH, HEADER_H as usize, k_fb::Color::HeaderBar);
+
+    match mode {
+        k_fb::UI_MODE_KERNEL_VIEW => paint_3d_view(frame),
+        _ => paint_os_shell_body(frame),
+    }
+
+    if scrollback_open {
+        paint_scrollback();
+    }
+    paint_command_bar(frame, mode);
+
+    k_fb::present();
+}
+
+/// OS-shell body: the entry-point view the user sees by default.
+/// Big brand title centred near the top of the body region, then a
+/// 2-column status grid showing plugin/node/edge counts plus the
+/// current mode + scrollback state.  Designed to feel like a clean
+/// boot terminal, not a wallpaper.
+fn paint_os_shell_body(frame: u64) {
+    use core::sync::atomic::Ordering;
+    let _ = frame;
+
+    // Header text mirrors kernel-view but tagged with mode.
+    let snap = gos_runtime::snapshot();
+    let mut nodes_buf = [GraphNodeSummary::EMPTY; MAX_NODES];
+    let (total_n, returned_n) = gos_runtime::node_page(0, &mut nodes_buf);
+    let _ = total_n;
+
+    k_fb::draw_text(4, 3, "GOS-OS", k_fb::Color::Highlight);
+    k_fb::draw_text(4 + 6 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_a = TextBuf::<14>::new();
+    count_a.push_dec(returned_n as u64);
+    count_a.push_str(" NOD");
+    k_fb::draw_text(4 + 8 * 8, 3, count_a.as_str(), k_fb::Color::Foreground);
+    k_fb::draw_text(4 + 15 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_b = TextBuf::<14>::new();
+    count_b.push_dec(snap.edge_count as u64);
+    count_b.push_str(" EDG");
+    k_fb::draw_text(4 + 17 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
+    k_fb::draw_text(4 + 24 * 8, 3, "|", k_fb::Color::DimWhite);
+    k_fb::draw_text(4 + 26 * 8, 3, "shell", k_fb::Color::NodeService);
+
+    // Big brand title centred at ~y=40.
+    let title = "GOS  /  GRAPH OS";
+    let tx = (k_fb::WIDTH as i32 - title.len() as i32 * 8) / 2;
+    k_fb::draw_text(tx as usize, 40, title, k_fb::Color::Foreground);
+    let sub = "graph theory kernel";
+    let sx = (k_fb::WIDTH as i32 - sub.len() as i32 * 8) / 2;
+    k_fb::draw_text(sx as usize, 52, sub, k_fb::Color::DimWhite);
+
+    // Status grid centred at y=78.  Three rows, two columns each.
+    // Read several runtime stats and lay them out as `label  value`
+    // pairs.  Uses DimWhite for labels and Highlight for the values
+    // so the data jumps off the dark background.
+    let mode_label = if k_fb::UI_MODE.load(Ordering::Relaxed) == k_fb::UI_MODE_KERNEL_VIEW {
+        "KERNEL"
+    } else {
+        "SHELL"
+    };
+    let scroll_label = if k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed) {
+        "OPEN"
+    } else {
+        "HIDDEN"
+    };
+
+    let row_y = [78usize, 92, 106];
+    let labels = [
+        ("plugins  ", "nodes    "),
+        ("edges    ", "gen      "),
+        ("mode     ", "scroll   "),
+    ];
+    let mut plugins_buf = TextBuf::<8>::new();
+    plugins_buf.push_dec(snap.plugin_count as u64);
+    let mut nodes_buf2 = TextBuf::<8>::new();
+    nodes_buf2.push_dec(snap.node_count as u64);
+    let mut edges_buf = TextBuf::<8>::new();
+    edges_buf.push_dec(snap.edge_count as u64);
+    let mut gen_buf = TextBuf::<12>::new();
+    gen_buf.push_str("G");
+    gen_buf.push_dec(gos_runtime::graph_generation());
+    let values: [(&str, &str); 3] = [
+        (plugins_buf.as_str(), nodes_buf2.as_str()),
+        (edges_buf.as_str(), gen_buf.as_str()),
+        (mode_label, scroll_label),
+    ];
+
+    let col_left_x = 60usize;
+    let col_right_x = 180usize;
+    for i in 0..3 {
+        let (l_lbl, r_lbl) = labels[i];
+        let (l_val, r_val) = values[i];
+        k_fb::draw_text(col_left_x, row_y[i], l_lbl, k_fb::Color::DimWhite);
+        k_fb::draw_text(col_left_x + 9 * 8, row_y[i], l_val, k_fb::Color::Highlight);
+        k_fb::draw_text(col_right_x, row_y[i], r_lbl, k_fb::Color::DimWhite);
+        k_fb::draw_text(col_right_x + 9 * 8, row_y[i], r_val, k_fb::Color::Highlight);
+    }
+
+    // Hint near the bottom of body (just above command bar / scrollback).
+    let hint = "type 'kernel' to launch 3D view  |  'help' for commands";
+    let hx = (k_fb::WIDTH as i32 - hint.len() as i32 * 8) / 2;
+    // Clamp left if hint is wider than screen.
+    let hint_x = hx.max(2) as usize;
+    k_fb::draw_text(hint_x, 130, hint, k_fb::Color::Foreground);
+
+    // Subtle bottom hairline above the command bar zone.
+    k_fb::hline(0, FOOTER_Y as usize, k_fb::WIDTH, k_fb::Color::DimWhite);
+}
+
+/// Paint the always-visible command-input bar at the bottom of the
+/// screen.  Layout: HeaderBar-tinted strip, `> ` prompt in Highlight,
+/// typed text in Foreground, blinking 1-px cursor in Foreground at
+/// the current insertion point.  Frame counter drives the blink at
+/// ~2.5 Hz so the user has a clear "I can type here" affordance.
+fn paint_command_bar(frame: u64, mode: u8) {
+    let bar_y = CMD_BAR_TOP as usize;
+    let bar_h = CMD_BAR_H as usize;
+    k_fb::fill_rect(0, bar_y, k_fb::WIDTH, bar_h, k_fb::Color::HeaderBar);
+    k_fb::hline(0, bar_y, k_fb::WIDTH, k_fb::Color::DimWhite);
+
+    // Prompt and typed text.
+    let prompt_x = 4usize;
+    let prompt_y = bar_y + 3;
+    k_fb::draw_text(prompt_x, prompt_y, ">", k_fb::Color::Highlight);
+
+    let ui = UI_STATE.lock();
+    let line = ui.current_line();
+    let line_len = line.len();
+    let text_x = prompt_x + 2 * 8;
+    // Truncate from the head if the user types past the visible width.
+    let max_visible_chars = ((k_fb::WIDTH - text_x - 12) / 8).min(CMD_LINE_CAP);
+    let visible_start = line_len.saturating_sub(max_visible_chars);
+    let visible = unsafe {
+        core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
+    };
+    k_fb::draw_text(text_x, prompt_y, visible, k_fb::Color::Foreground);
+
+    // Blinking cursor: 1-px solid line under the insertion point.
+    let cursor_on = (frame / 16) & 1 == 0;
+    if cursor_on {
+        let cursor_x = text_x + (line_len - visible_start) * 8;
+        if cursor_x + 6 < k_fb::WIDTH {
+            k_fb::fill_rect(cursor_x, prompt_y, 6, 8, k_fb::Color::Foreground);
+        }
+    }
+
+    // Right-side mode pill: shows `[KRN]` or `[SHELL]` so the user
+    // always knows which view is current.
+    let pill = match mode {
+        k_fb::UI_MODE_KERNEL_VIEW => "[KRN]",
+        _ => "[SHELL]",
+    };
+    let px = k_fb::WIDTH - pill.len() * 8 - 4;
+    k_fb::draw_text(px, prompt_y, pill, k_fb::Color::NodeService);
+}
+
+/// Paint the collapsible scrollback panel.  Stacks the N most recent
+/// log lines bottom-up (newest just above the command bar).  Painted
+/// only when `UI_SCROLLBACK_EXPANDED` is true.
+fn paint_scrollback() {
+    let panel_top = (CMD_BAR_TOP - SCROLLBACK_H - 1) as usize;
+    let panel_h = SCROLLBACK_H as usize;
+    // Body fill + 1-px frame in DimWhite so it reads as a "deck".
+    k_fb::fill_rect(0, panel_top, k_fb::WIDTH, panel_h, k_fb::Color::HeaderBar);
+    k_fb::stroke_rect(0, panel_top, k_fb::WIDTH, panel_h, k_fb::Color::DimWhite);
+
+    // Title pip in the top-left corner.
+    k_fb::draw_text(4, panel_top + 1, "LOG", k_fb::Color::Highlight);
+    let toggle = " F9 close";
+    k_fb::draw_text(4 + 3 * 8, panel_top + 1, toggle, k_fb::Color::DimWhite);
+
+    // Lines, packed bottom-up so the newest sits just above the cmd bar.
+    let ui = UI_STATE.lock();
+    let inset_x = 4usize;
+    let line_h = 9usize; // 8 px glyph + 1 px gap
+    // Reserve top 10 px for the title row.
+    let usable_top = panel_top + 11;
+    let usable_bot = panel_top + panel_h - 2;
+    let max_rows = (usable_bot - usable_top) / line_h;
+    // Pull the most recent `max_rows` lines.
+    let total = ui.count;
+    let skip = total.saturating_sub(max_rows);
+    let visible_count = total - skip;
+    let start_y = usable_bot - visible_count * line_h;
+    let mut y = start_y;
+    for (i, line) in ui.iter_oldest_first().enumerate() {
+        if i < skip {
+            continue;
+        }
+        let take = line.len().min(SCROLLBACK_LINE_CAP);
+        let trimmed = unsafe { core::str::from_utf8_unchecked(&line.as_bytes()[..take]) };
+        k_fb::draw_text(inset_x, y, trimmed, k_fb::Color::Foreground);
+        y += line_h;
     }
 }
 

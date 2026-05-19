@@ -32,6 +32,12 @@ pub fn process(
             let s = ch.encode_utf8(&mut buf);
             let bytes = s.as_bytes();
             if bytes.len() == 1 {
+                // Phase I.5 — mirror printable + control ASCII into
+                // the kernel-UI command-bar ring.  The shell still
+                // receives the same byte via the conditional-route
+                // table (Output::Ascii path below), so both consumers
+                // see the keystroke.
+                k_fb::push_typed_char(bytes[0]);
                 Some(Output::Ascii(bytes[0]))
             } else {
                 // Copy the multi-byte sequence into a fixed-size array.
@@ -87,7 +93,24 @@ pub fn process(
                     k_fb::CAMERA_RADIUS_MM.fetch_add(ZOOM_STEP_MM, Ordering::Relaxed);
                     return None;
                 }
+                pc_keyboard::KeyCode::F9 => {
+                    // Phase I.5 — toggle scrollback panel.
+                    let cur = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
+                    k_fb::UI_SCROLLBACK_EXPANDED.store(!cur, Ordering::Relaxed);
+                    return None;
+                }
                 _ => {}
+            }
+            // Phase I.5 — mirror control keys (Backspace / Esc /
+            // arrows) into the UI ring as well, so the command bar
+            // can edit / cancel without going through the shell.
+            let mirror = match k {
+                pc_keyboard::KeyCode::Backspace => Some(0x08u8),
+                pc_keyboard::KeyCode::Escape => Some(0x1Bu8),
+                _ => None,
+            };
+            if let Some(b) = mirror {
+                k_fb::push_typed_char(b);
             }
             match k {
                 pc_keyboard::KeyCode::Backspace => Some(Output::Ascii(0x08)),
