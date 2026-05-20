@@ -1260,8 +1260,11 @@ fn draw_node_sphere(
     let r_f = r_px as f32;
     let r2 = r_f * r_f;
 
-    // PBR setup.  View direction = (0, 0, -1) (camera looks down -Z).
-    let view = Vec3::new(0.0, 0.0, -1.0);
+    // PBR setup.  The screen-space sphere normal has positive Z
+    // (pointing out of the screen, toward the camera), so the view
+    // vector FROM-surface-TO-camera is (0, 0, +1).  Half-vector is
+    // light + view, renormalised.
+    let view = Vec3::new(0.0, 0.0, 1.0);
     let half = Vec3::new(LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z + view.z).normalize();
 
     // Base reflectance F0: dielectrics ≈ 0.04, metals tint with hue.
@@ -1321,14 +1324,15 @@ fn draw_node_sphere(
             }
 
             // Environment reflection (cheap procedural sampler).
-            // Reflection direction = reflect(-V, N) = 2(N·V)N - V
-            //                       = 2(N·V)N + (0,0,1)
-            //                  → (2 N·V × N.x, 2 N·V × N.y, 2 N·V × N.z + 1)
+            // With view = (0, 0, +1), the reflection of the view ray
+            // off the sphere normal is R = 2(N·V)N - V → screen
+            // centre reflects back at camera, silhouettes reflect
+            // outward to the "horizon".
             let two_ndotv = 2.0 * normal.dot(view);
             let refl = Vec3::new(
                 two_ndotv * normal.x,
                 two_ndotv * normal.y,
-                two_ndotv * normal.z + 1.0,
+                two_ndotv * normal.z - 1.0,
             );
             // Polished surfaces show more reflection.
             let env_intensity = sample_environment(refl)
