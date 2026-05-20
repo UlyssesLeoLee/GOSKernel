@@ -101,12 +101,15 @@ pub fn process(
                 }
                 _ => {}
             }
-            // Phase I.5 — mirror control keys (Backspace / Esc /
-            // arrows) into the UI ring as well, so the command bar
-            // can edit / cancel without going through the shell.
+            // Phase I.5 + I.8 — mirror control keys (Backspace / Esc
+            // / arrows) into the UI ring as well, so the command bar
+            // can edit / cancel / scroll history without going
+            // through the shell.
             let mirror = match k {
                 pc_keyboard::KeyCode::Backspace => Some(0x08u8),
                 pc_keyboard::KeyCode::Escape => Some(0x1Bu8),
+                pc_keyboard::KeyCode::ArrowUp => Some(INPUT_KEY_UP),
+                pc_keyboard::KeyCode::ArrowDown => Some(INPUT_KEY_DOWN),
                 _ => None,
             };
             if let Some(b) = mirror {

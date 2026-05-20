@@ -371,6 +371,15 @@ pub static UI_MODE: core::sync::atomic::AtomicU8 =
 
 pub static UI_SCROLLBACK_EXPANDED: AtomicBool = AtomicBool::new(false);
 
+/// Phase I.8 — last-clicked node's `VectorAddress` packed into a
+/// u64.  Set by the 3D-view click handler when the user picks a
+/// ball; consumed by the command-bar's Tab handler which expands
+/// it into the literal `'<l4>.<l3>.<l2>.<offset>'` form at the
+/// cursor.  0 means "no node has been clicked yet" — Tab is a
+/// no-op in that state.
+pub static UI_LAST_CLICK_VECTOR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Fixed-capacity SPSC byte ring for keystrokes flowing from the
 /// PS/2 driver into the boot UI loop.  Capacity 64 is plenty: the
 /// painter drains every frame (~50 Hz) and the keyboard tops out

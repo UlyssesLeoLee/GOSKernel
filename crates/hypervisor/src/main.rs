@@ -481,6 +481,13 @@ fn paint_3d_view(frame: u64) {
         // I.6.4 — click flash: bump the per-node specular boost so
         // the sphere reads a tactile "ping" on the next ~14 frames.
         physics_flash(hover_slot as usize);
+        // I.8 — stash the clicked node's vector address so the
+        // command-bar's Tab handler can expand it into a literal
+        // at the cursor, letting the user compose Cypher mutations
+        // (LINK / CREATE USE / ...) by clicking + Tab instead of
+        // typing four-component vector addresses by hand.
+        let clicked_vec = nodes[hover_slot as usize].vector;
+        k_fb::UI_LAST_CLICK_VECTOR.store(clicked_vec.as_u64(), Ordering::Relaxed);
     } else if left_edge && hover_slot < 0 {
         // Clicking empty space clears selection.
         SELECTED_NODE_SLOT.store(-1, Ordering::Relaxed);
@@ -1505,6 +1512,7 @@ impl<const N: usize> TextBuf<N> {
 const CMD_LINE_CAP: usize = 56;     // typed input chars
 const SCROLLBACK_LINES: usize = 10; // scrollback ring depth
 const SCROLLBACK_LINE_CAP: usize = 44; // chars per line at 8 px width
+const HISTORY_LINES: usize = 12;    // command history ring depth
 
 struct UiState {
     /// Current input line being edited; bytes[..len] is valid ASCII.
@@ -1517,6 +1525,17 @@ struct UiState {
     line_lens: [usize; SCROLLBACK_LINES],
     head: usize,
     count: usize,
+    /// Phase I.8 — command history ring.  Each submitted non-empty
+    /// line is pushed here; ArrowUp/Down recall through these.
+    /// `hist_cursor` is the offset back from newest:
+    ///   None      = current edit (no history navigation in progress)
+    ///   Some(0)   = newest history entry
+    ///   Some(N-1) = oldest
+    hist: [[u8; CMD_LINE_CAP]; HISTORY_LINES],
+    hist_lens: [usize; HISTORY_LINES],
+    hist_head: usize,
+    hist_count: usize,
+    hist_cursor: Option<usize>,
 }
 
 impl UiState {
@@ -1528,6 +1547,11 @@ impl UiState {
             line_lens: [0; SCROLLBACK_LINES],
             head: 0,
             count: 0,
+            hist: [[0; CMD_LINE_CAP]; HISTORY_LINES],
+            hist_lens: [0; HISTORY_LINES],
+            hist_head: 0,
+            hist_count: 0,
+            hist_cursor: None,
         }
     }
 
@@ -1536,16 +1560,79 @@ impl UiState {
             self.line[self.line_len] = b;
             self.line_len += 1;
         }
+        // Any edit cancels history navigation.
+        self.hist_cursor = None;
+    }
+
+    fn append_str(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            if self.line_len >= CMD_LINE_CAP {
+                break;
+            }
+            self.line[self.line_len] = b;
+            self.line_len += 1;
+        }
+        self.hist_cursor = None;
     }
 
     fn backspace(&mut self) {
         if self.line_len > 0 {
             self.line_len -= 1;
         }
+        self.hist_cursor = None;
     }
 
     fn clear_line(&mut self) {
         self.line_len = 0;
+        self.hist_cursor = None;
+    }
+
+    /// Push the current input line into the history ring before
+    /// clearing it.  Caller invokes this on Enter, before clearing.
+    fn push_history(&mut self) {
+        if self.line_len == 0 {
+            return;
+        }
+        let slot = self.hist_head;
+        self.hist[slot][..self.line_len].copy_from_slice(&self.line[..self.line_len]);
+        self.hist_lens[slot] = self.line_len;
+        self.hist_head = (self.hist_head + 1) % HISTORY_LINES;
+        if self.hist_count < HISTORY_LINES {
+            self.hist_count += 1;
+        }
+    }
+
+    /// Navigate history by ±1 step.  `delta = -1` moves toward older
+    /// entries (ArrowUp), `+1` toward newer (ArrowDown).  Replaces
+    /// the current edit line in-place; setting cursor to None when
+    /// we walk past the newest entry restores an empty line.
+    fn history_step(&mut self, delta: i32) {
+        if self.hist_count == 0 {
+            return;
+        }
+        let new_cursor: Option<usize> = match (self.hist_cursor, delta) {
+            (None, d) if d < 0 => Some(0),
+            (None, _) => None,
+            (Some(c), d) if d < 0 => Some((c + 1).min(self.hist_count - 1)),
+            (Some(c), _) => {
+                if c == 0 {
+                    None
+                } else {
+                    Some(c - 1)
+                }
+            }
+        };
+        self.hist_cursor = new_cursor;
+        match new_cursor {
+            None => self.line_len = 0,
+            Some(c) => {
+                // newest is at hist_head - 1; offset back by c.
+                let idx = (self.hist_head + HISTORY_LINES - 1 - c) % HISTORY_LINES;
+                let n = self.hist_lens[idx];
+                self.line[..n].copy_from_slice(&self.hist[idx][..n]);
+                self.line_len = n;
+            }
+        }
     }
 
     fn current_line(&self) -> &str {
@@ -1588,25 +1675,47 @@ static UI_STATE: spin::Mutex<UiState> = spin::Mutex::new(UiState::new());
 /// them to the input line.  Enter submits the line through
 /// `interpret_command`; Esc toggles mode; Backspace edits.
 fn drain_ui_input() {
+    use gos_protocol::{INPUT_KEY_DOWN, INPUT_KEY_UP};
     while let Some(b) = k_fb::pop_typed_char() {
         match b {
             b'\r' | b'\n' => {
-                // Snapshot the line, clear it, then interpret.  We
-                // copy out so `interpret_command` can hold the lock
-                // again to append to the scrollback.
+                // Snapshot the line, push to history, clear, then
+                // interpret.  Copying out so `interpret_command` can
+                // re-acquire the lock to append to the scrollback.
                 let mut buf = [0u8; CMD_LINE_CAP];
                 let len;
                 {
                     let mut ui = UI_STATE.lock();
                     len = ui.line_len;
                     buf[..len].copy_from_slice(&ui.line[..len]);
+                    ui.push_history();
                     ui.clear_line();
                 }
-                // SAFETY: only printable ASCII written via append_char.
                 let line = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
                 interpret_command(line);
             }
             0x08 => UI_STATE.lock().backspace(),
+            0x09 => {
+                // Phase I.8 — Tab inserts the last-clicked node's
+                // vector address as a quoted literal at the cursor.
+                // No-op if no node has been clicked yet.
+                use core::sync::atomic::Ordering;
+                let packed = k_fb::UI_LAST_CLICK_VECTOR.load(Ordering::Relaxed);
+                if packed != 0 {
+                    let vec = gos_protocol::VectorAddress::from_u64(packed);
+                    let mut lit = TextBuf::<24>::new();
+                    lit.push_str("'");
+                    lit.push_dec(vec.l4 as u64);
+                    lit.push_str(".");
+                    lit.push_dec(vec.l3 as u64);
+                    lit.push_str(".");
+                    lit.push_dec(vec.l2 as u64);
+                    lit.push_str(".");
+                    lit.push_dec(vec.offset as u64);
+                    lit.push_str("' ");
+                    UI_STATE.lock().append_str(lit.as_str());
+                }
+            }
             0x1B => {
                 // Esc — toggle mode.
                 use core::sync::atomic::Ordering;
@@ -1618,6 +1727,8 @@ fn drain_ui_input() {
                 };
                 k_fb::UI_MODE.store(next, Ordering::Relaxed);
             }
+            INPUT_KEY_UP => UI_STATE.lock().history_step(-1),
+            INPUT_KEY_DOWN => UI_STATE.lock().history_step(1),
             0x20..=0x7E => UI_STATE.lock().append_char(b),
             _ => {} // ignore other control codes
         }
@@ -1731,6 +1842,9 @@ fn interpret_command(raw: &str) {
             ui.log("  LINK 'F' -> 'T'");
             ui.log("  REBIND USE 'F' -> 'T'");
             ui.log("  DELETE EDGE 'e:V'");
+            ui.log("repl ergonomics:");
+            ui.log("  Tab    insert last-clicked node's vector");
+            ui.log("  Up/Dn  recall previous commands");
         }
         "nodes" => {
             let mut buf = [GraphNodeSummary::EMPTY; MAX_NODES];
