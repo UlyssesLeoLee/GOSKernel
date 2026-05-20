@@ -1644,6 +1644,56 @@ fn interpret_command(raw: &str) {
         return;
     }
 
+    // ── Phase I.7 — Cypher dispatch in the command bar ──
+    //
+    // Before falling through to the built-in commands, try the line
+    // as a Cypher mutation (CREATE MOUNT / CREATE USE / LINK /
+    // DELETE EDGE / REBIND USE).  k-cypher's sink-free parser
+    // returns `NotCypher` when the line isn't a Cypher verb so we
+    // can keep the existing command set as a fallback.
+    //
+    // Source attribution: "K_HYPERVISOR" 16-byte ASCII null-padded.
+    // Distinct from k-cypher's K_CYPHER source so the audit log can
+    // tell command-bar mutations from in-VM cypher> shell ones.
+    const HYPERVISOR_AUDIT_SOURCE: [u8; 16] = *b"K_HYPERVISOR\0\0\0\0";
+    let cypher_outcome = k_cypher::dispatch_cypher_text(line, HYPERVISOR_AUDIT_SOURCE);
+    if !matches!(cypher_outcome, k_cypher::CypherDispatchOutcome::NotCypher) {
+        // Render a one-line result into the scrollback.
+        let mut row = TextBuf::<60>::new();
+        match cypher_outcome {
+            k_cypher::CypherDispatchOutcome::Applied(verb) => {
+                row.push_str("cypher> ");
+                row.push_str(verb);
+                row.push_str(" ok");
+            }
+            k_cypher::CypherDispatchOutcome::BadSyntax(msg) => {
+                row.push_str("cypher> syntax: ");
+                row.push_str(msg);
+            }
+            k_cypher::CypherDispatchOutcome::EndpointNotFound(msg) => {
+                row.push_str("cypher> ");
+                row.push_str(msg);
+            }
+            k_cypher::CypherDispatchOutcome::DispatchFailed(err) => {
+                row.push_str("cypher> gate rejected: ");
+                use gos_cypher_mut::MutationError;
+                match err {
+                    MutationError::UnsupportedMutation => row.push_str("unsupported"),
+                    MutationError::UnknownEndpoint(_) => row.push_str("unknown endpoint"),
+                    MutationError::InvalidMountTarget(_) => row.push_str("invalid mount target"),
+                    MutationError::DispatcherRejected(tag) => {
+                        row.push_str("gate(");
+                        row.push_dec(tag as u64);
+                        row.push_str(")");
+                    }
+                }
+            }
+            k_cypher::CypherDispatchOutcome::NotCypher => unreachable!(),
+        }
+        UI_STATE.lock().log(row.as_str());
+        return;
+    }
+
     // Lower-case first token compare (manual since we're no_std).
     let token_end = line.find(' ').unwrap_or(line.len());
     let cmd = &line[..token_end];
@@ -1675,6 +1725,12 @@ fn interpret_command(raw: &str) {
             ui.log("  log               toggle scrollback (F9)");
             ui.log("  clear             wipe scrollback");
             ui.log("  Esc               toggle mode");
+            ui.log("cypher mutations (live graph):");
+            ui.log("  CREATE MOUNT 'F' -> 'T'");
+            ui.log("  CREATE USE   'F' -> 'T'");
+            ui.log("  LINK 'F' -> 'T'");
+            ui.log("  REBIND USE 'F' -> 'T'");
+            ui.log("  DELETE EDGE 'e:V'");
         }
         "nodes" => {
             let mut buf = [GraphNodeSummary::EMPTY; MAX_NODES];

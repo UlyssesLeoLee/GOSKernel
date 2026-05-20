@@ -676,6 +676,149 @@ fn print_mutation_error(sink: &ConsoleSink, err: gos_cypher_mut::MutationError) 
     }
 }
 
+// ── Phase I.7 — sink-free Cypher dispatch for the boot UI command bar ─
+//
+// The hypervisor's I.5 command bar wants to forward typed Cypher
+// statements directly into the runtime without dragging the
+// ConsoleSink / CypherState machinery the in-VM `cypher>` shell uses.
+// `dispatch_cypher_text` is a sink-free public entry that performs
+// the same parse + endpoint lookup + supervisor gate, returning a
+// flat `CypherDispatchOutcome` the caller can rewrite as one line in
+// its own scrollback.
+//
+// Parsing rules mirror the internal `try_run_mutation` exactly so the
+// command bar and the in-VM shell accept the same syntax.
+
+/// Outcome of a public Cypher text dispatch.
+#[derive(Debug, Clone, Copy)]
+pub enum CypherDispatchOutcome {
+    /// Query didn't start with a recognised Cypher verb.
+    NotCypher,
+    /// Recognised but the literal arguments were malformed (bad
+    /// vector address, missing quotes, etc.).  `&'static str` holds
+    /// a short human-readable hint.
+    BadSyntax(&'static str),
+    /// A `'V_from'` / `'V_to'` / `'e:V'` literal didn't resolve to
+    /// an existing runtime node or edge.
+    EndpointNotFound(&'static str),
+    /// Supervisor gate rejected the mutation.
+    DispatchFailed(gos_cypher_mut::MutationError),
+    /// Mutation applied; static label of the verb (matches the
+    /// strings the in-VM `cypher>` shell prints).
+    Applied(&'static str),
+}
+
+/// Parse `query` as a Cypher mutation and forward it to the
+/// supervisor gate using `source` as the audit attribution.  Sink-
+/// free analogue of the internal `try_run_mutation` — returns a flat
+/// outcome the caller renders however it wants.
+///
+/// Recognised verbs (case-insensitive, matches in-VM shell):
+///   * `CREATE MOUNT 'V_from' -> 'V_to'`
+///   * `CREATE USE 'V_from' -> 'V_to'`
+///   * `LINK 'V_node' -> 'V_iface'`
+///   * `DELETE EDGE 'e:V'`
+///   * `REBIND USE 'V_from' -> 'V_to'`
+pub fn dispatch_cypher_text(query: &str, source: [u8; 16]) -> CypherDispatchOutcome {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+
+    let is_create_mount = contains_ci(query, "create mount");
+    let is_create_use = contains_ci(query, "create use");
+    let is_link = starts_with_ci(query, "link ") || starts_with_ci(query, "link\t");
+    let is_delete_edge = contains_ci(query, "delete edge");
+    let is_rebind_use = contains_ci(query, "rebind use");
+
+    if !(is_create_mount || is_create_use || is_link || is_delete_edge || is_rebind_use) {
+        return CypherDispatchOutcome::NotCypher;
+    }
+
+    if is_delete_edge {
+        let Some(literal) = extract_quoted_at(query, 0) else {
+            return CypherDispatchOutcome::BadSyntax("delete edge requires 'e:V' literal");
+        };
+        let trimmed = if starts_with_ci(literal, "e:") {
+            literal.get(2..).unwrap_or(literal)
+        } else {
+            literal
+        };
+        let Some(edge_vector) = EdgeVector::parse(trimmed) else {
+            return CypherDispatchOutcome::BadSyntax("delete edge: bad edge vector");
+        };
+        let Some(edge_id) = gos_runtime::edge_id_for_vector(edge_vector) else {
+            return CypherDispatchOutcome::EndpointNotFound("delete edge: not found");
+        };
+        return match gos_supervisor::apply_cypher_mutation(
+            CypherMutation::RemoveEdge { edge_id },
+            source,
+        ) {
+            Ok(_) => CypherDispatchOutcome::Applied("delete edge"),
+            Err(e) => CypherDispatchOutcome::DispatchFailed(e),
+        };
+    }
+
+    let Some(lit_from) = extract_quoted_at(query, 0) else {
+        return CypherDispatchOutcome::BadSyntax("mutation requires 'V_from' literal");
+    };
+    let Some(lit_to) = extract_quoted_at(query, 1) else {
+        return CypherDispatchOutcome::BadSyntax("mutation requires 'V_to' literal");
+    };
+    let Some(vec_from) = VectorAddress::parse(lit_from) else {
+        return CypherDispatchOutcome::BadSyntax("bad V_from");
+    };
+    let Some(vec_to) = VectorAddress::parse(lit_to) else {
+        return CypherDispatchOutcome::BadSyntax("bad V_to");
+    };
+    let Some(id_from) = gos_runtime::node_id_for_vec(vec_from) else {
+        return CypherDispatchOutcome::EndpointNotFound("V_from node not found");
+    };
+    let Some(id_to) = gos_runtime::node_id_for_vec(vec_to) else {
+        return CypherDispatchOutcome::EndpointNotFound("V_to node not found");
+    };
+
+    let (label, mutation) = if is_create_mount {
+        (
+            "create mount",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Mount,
+            },
+        )
+    } else if is_create_use {
+        (
+            "create use",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Use,
+            },
+        )
+    } else if is_link {
+        (
+            "link",
+            CypherMutation::AddEdge {
+                from: id_from,
+                to: id_to,
+                edge_kind: ReceptiveEdgeKind::Link,
+            },
+        )
+    } else {
+        debug_assert!(is_rebind_use);
+        (
+            "rebind use",
+            CypherMutation::RebindUse {
+                from: id_from,
+                new_target: id_to,
+            },
+        )
+    };
+
+    match gos_supervisor::apply_cypher_mutation(mutation, source) {
+        Ok(_) => CypherDispatchOutcome::Applied(label),
+        Err(e) => CypherDispatchOutcome::DispatchFailed(e),
+    }
+}
+
 fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
     let query = query.trim();
     if query.is_empty() {
