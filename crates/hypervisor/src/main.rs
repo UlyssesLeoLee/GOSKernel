@@ -114,6 +114,26 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     unsafe { ring3::init(); }
     raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
+    // Phase I.12 — seed the chat HUD with a welcome banner so the
+    // first frame the user sees has the "kernel is talking to you"
+    // affordance.  Pulled from the live runtime so the counts in
+    // the welcome are accurate to this boot.
+    {
+        let snap = gos_runtime::snapshot();
+        let mut welcome = UI_STATE.lock();
+        welcome.log("gos> ready.");
+        let mut counts = TextBuf::<48>::new();
+        counts.push_str("gos> ");
+        counts.push_dec(snap.node_count as u64);
+        counts.push_str(" nodes / ");
+        counts.push_dec(snap.edge_count as u64);
+        counts.push_str(" edges / ");
+        counts.push_dec(snap.plugin_count as u64);
+        counts.push_str(" plugins");
+        welcome.log(counts.as_str());
+        welcome.log("gos> click a ball or type 'help'");
+    }
+
     // Phase I.3.8 — first 3D paint before going interactive.  Idle
     // loop below repaints continuously to keep the camera rotation
     // smooth.
@@ -1858,8 +1878,8 @@ fn interpret_command(raw: &str) {
     {
         // Echo the prompt+command into the scrollback first.
         let mut echo = TextBuf::<60>::new();
-        echo.push_str("> ");
-        let take = line.len().min(56);
+        echo.push_str("you> ");
+        let take = line.len().min(52);
         echo.push_str(unsafe { core::str::from_utf8_unchecked(&line.as_bytes()[..take]) });
         UI_STATE.lock().log(echo.as_str());
     }
@@ -2274,10 +2294,57 @@ fn paint_frame(frame: u64) {
 
     if scrollback_open {
         paint_scrollback();
+    } else {
+        // I.12 — ambient chat HUD: the 4 most recent scrollback
+        // lines floating just above the command bar with no box,
+        // no fill — text on top of the scene with a 1-pixel
+        // background-shadow outline for legibility on any
+        // backdrop.  Always visible so the chat conversation
+        // (typed commands + kernel responses) stays on screen
+        // without modal scrollback eclipsing the 3D scene.
+        paint_chat_hud();
     }
     paint_command_bar(frame, mode);
 
     k_fb::present();
+}
+
+/// Phase I.12 — chat HUD overlay.  Renders the last 4 scrollback
+/// lines as outlined text immediately above the command bar.  No
+/// background fill so the 3D scene stays visible beneath.  Skipped
+/// when the full scrollback (`F9`) is open.
+fn paint_chat_hud() {
+    const HUD_LINES: usize = 4;
+    let ui = UI_STATE.lock();
+    let total = ui.count;
+    if total == 0 {
+        return;
+    }
+    let show = total.min(HUD_LINES);
+    // Stack lines bottom-up; bottom line sits 2 px above the cmd bar.
+    let baseline_y = (CMD_BAR_TOP - 2) as usize;
+    let line_h = 9usize;
+    let mut y = baseline_y - show * line_h;
+    let start = total - show;
+    for (i, line) in ui.iter_oldest_first().enumerate() {
+        if i < start {
+            continue;
+        }
+        let take = line.len().min(SCROLLBACK_LINE_CAP);
+        let trimmed = unsafe { core::str::from_utf8_unchecked(&line.as_bytes()[..take]) };
+        // 1-pixel background-tinted shadow on four sides so the
+        // text reads against any colour (sphere, rope, starfield).
+        let x = 4usize;
+        for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+            let sx = x as i32 + dx;
+            let sy = y as i32 + dy;
+            if sx >= 0 && sy >= 0 {
+                k_fb::draw_text(sx as usize, sy as usize, trimmed, k_fb::Color::Background);
+            }
+        }
+        k_fb::draw_text(x, y, trimmed, k_fb::Color::Foreground);
+        y += line_h;
+    }
 }
 
 /// OS-shell body: the entry-point view the user sees by default.
@@ -2386,15 +2453,16 @@ fn paint_command_bar(frame: u64, mode: u8) {
     k_fb::fill_rect(0, bar_y, k_fb::WIDTH, bar_h, k_fb::Color::HeaderBar);
     k_fb::hline(0, bar_y, k_fb::WIDTH, k_fb::Color::DimWhite);
 
-    // Prompt and typed text.
+    // Prompt and typed text.  I.12 polish: chat-style `gos>` prompt
+    // matches the kernel's response prefix in the chat HUD above.
     let prompt_x = 4usize;
     let prompt_y = bar_y + 3;
-    k_fb::draw_text(prompt_x, prompt_y, ">", k_fb::Color::Highlight);
+    k_fb::draw_text(prompt_x, prompt_y, "gos>", k_fb::Color::Highlight);
 
     let ui = UI_STATE.lock();
     let line = ui.current_line();
     let line_len = line.len();
-    let text_x = prompt_x + 2 * 8;
+    let text_x = prompt_x + 5 * 8;
     // Truncate from the head if the user types past the visible width.
     let max_visible_chars = ((k_fb::WIDTH - text_x - 12) / 8).min(CMD_LINE_CAP);
     let visible_start = line_len.saturating_sub(max_visible_chars);
