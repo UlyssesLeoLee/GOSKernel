@@ -366,8 +366,10 @@ pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(3500);
 pub const UI_MODE_OS_SHELL: u8 = 0;
 pub const UI_MODE_KERNEL_VIEW: u8 = 1;
 
+// I.9 — boot default is the rotating 3D metal-ball + rope scene; the
+// user can drop back to the OS shell with `os` / `exit` / Esc.
 pub static UI_MODE: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(UI_MODE_OS_SHELL);
+    core::sync::atomic::AtomicU8::new(UI_MODE_KERNEL_VIEW);
 
 pub static UI_SCROLLBACK_EXPANDED: AtomicBool = AtomicBool::new(false);
 
