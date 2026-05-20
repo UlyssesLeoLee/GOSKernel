@@ -55,7 +55,18 @@ bootloader = { version = "0.9.23", features = ["map_physical_memory", "vga_320x2
 x86_64 = "0.14"
 
 [package.metadata.bootimage]
-run-args = ["-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"]
+# I.11 — display configuration for the boot UI:
+#   -full-screen           open QEMU in full-screen mode so the kernel
+#                          UI fills the host display
+#   -display sdl,gl=on     OpenGL-accelerated SDL so the 320×200
+#                          framebuffer scales smoothly to native
+#                          monitor resolution (effectively turns a
+#                          1080p host display into a full-screen
+#                          "retro HD" view of the kernel scene)
+#   -vga std               Bochs/QEMU graphics card with VBE support
+#                          (forward-compatible with the planned
+#                          bootloader_api migration to native HD)
+run-args = ["-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56", "-full-screen", "-display", "sdl,gl=on", "-vga", "std"]
 test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 300
