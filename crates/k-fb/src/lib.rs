@@ -26,28 +26,76 @@
 //! follow-up slices.  Today the UI is rectangles only — enough to
 //! prove the framebuffer pipeline boots and shows kernel state.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
+// ── Logical canvas size kept at the historic 320×200 ──────────────
+//
+// The kernel's UI code is written in 320×200 coordinates so we
+// preserve that as the LOGICAL surface.  When the in-kernel Bochs
+// DispI mode-set (I.11.B) succeeds, each logical pixel is rendered
+// as a `SCALE × SCALE` block of 32-bpp BGRX pixels in the HD linear
+// framebuffer.  Result: razor-sharp pixel art at native 1280×720
+// (or whatever HD mode succeeded), no fuzzy GL stretch.
 pub const WIDTH: usize = 320;
 pub const HEIGHT: usize = 200;
 pub const PIXELS: usize = WIDTH * HEIGHT;
 
-/// Physical address of the mode 13h framebuffer.  Mapped by the
-/// bootloader's `map_physical_memory` feature into the kernel virtual
-/// address space at `phys_offset() + FB_PHYS`.
+/// Physical address of the legacy mode 13h framebuffer (fallback).
 pub const FB_PHYS: u64 = 0xA0000;
 
-/// VGA DAC ports.  Writes to 0x3C8 select the palette index to load
-/// next; subsequent writes to 0x3C9 take three bytes (R, G, B) each
-/// in the 0..63 range (the legacy 6-bit DAC).
+/// Bochs DispI / QEMU stdvga MMIO ports.
+const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
+const VBE_DISPI_IOPORT_DATA: u16 = 0x01CF;
+const VBE_DISPI_INDEX_ID: u16 = 0x0;
+const VBE_DISPI_INDEX_XRES: u16 = 0x1;
+const VBE_DISPI_INDEX_YRES: u16 = 0x2;
+const VBE_DISPI_INDEX_BPP: u16 = 0x3;
+const VBE_DISPI_INDEX_ENABLE: u16 = 0x4;
+const VBE_DISPI_INDEX_VIRT_WIDTH: u16 = 0x6;
+const VBE_DISPI_INDEX_VIRT_HEIGHT: u16 = 0x7;
+const VBE_DISPI_DISABLED: u16 = 0x00;
+const VBE_DISPI_ENABLED: u16 = 0x01;
+const VBE_DISPI_LFB_ENABLED: u16 = 0x40;
+
+/// QEMU stdvga linear framebuffer physical address (PCI BAR0 of
+/// 00:02.0 device — QEMU's default placement).  Mapped to virtual
+/// memory by bootloader 0.9's `map_physical_memory` feature at
+/// `phys_offset() + HD_LFB_PHYS`.
+const HD_LFB_PHYS: u64 = 0xfd00_0000;
+
+/// Target HD mode dimensions and integer upscale factor.  At
+/// SCALE=4, the 320×200 logical canvas covers 1280×800 of the
+/// native framebuffer — perfect 4× nearest-neighbor upscale.
+const HD_WIDTH: u32 = 1280;
+const HD_HEIGHT: u32 = 800; // logical 200 × scale 4 = 800
+const HD_SCALE: u32 = 4;
+
+/// VGA DAC ports for the legacy mode 13h palette (fallback path).
 const DAC_INDEX: u16 = 0x3C8;
 const DAC_DATA: u16 = 0x3C9;
 
 /// Cached framebuffer virtual address.  Zero before `init`.
 static FB_VIRT: AtomicU64 = AtomicU64::new(0);
+
+/// Active framebuffer format:
+///   1 = legacy mode 13h, 8-bpp palette at 0xA0000
+///   4 = HD VBE mode, 32-bpp BGRX linear framebuffer
+static FB_BPP: AtomicU8 = AtomicU8::new(1);
+
+/// Native framebuffer width in pixels (320 for mode 13h, 1280 for HD).
+static FB_NATIVE_W: AtomicU32 = AtomicU32::new(WIDTH as u32);
+/// Native framebuffer height in pixels (200 for mode 13h, 800 for HD).
+static FB_NATIVE_H: AtomicU32 = AtomicU32::new(HEIGHT as u32);
+/// Integer upscale: logical → native pixel ratio (1 for mode 13h, 4 for HD).
+static FB_SCALE: AtomicU32 = AtomicU32::new(1);
+
+/// 256-entry palette → BGRX lookup table.  Populated at init for the
+/// HD path so per-pixel writes don't go through the named-Color
+/// match.  Mode 13h ignores this and writes raw 8-bit indices.
+static PALETTE_BGRX: Mutex<[u32; 256]> = Mutex::new([0; 256]);
 
 /// Coarse-grained lock around the framebuffer.  Per-pixel locking
 /// would tank throughput; per-frame locking is more than enough for
@@ -134,38 +182,151 @@ const HUE_PEAKS: &[(u8, u8, u8)] = &[
 /// the physical memory at 0xA0000 is mapped into the kernel virtual
 /// address space.
 pub unsafe fn init(phys_offset: u64) {
-    FB_VIRT.store(phys_offset + FB_PHYS, Ordering::SeqCst);
+    // ── Phase I.11.B — attempt the Bochs DispI mode-set to HD ─────
+    //
+    // The boot environment dropped us in mode 13h (320×200 × 8 bpp
+    // at 0xA0000).  If a Bochs DispI / QEMU stdvga device is
+    // present (port 0x01CE returns a recognisable VBE ID), switch
+    // to 1280×800 × 32 bpp linear framebuffer at 0xfd00_0000.  The
+    // 1280×800 dimensions are an integer 4× upscale of the kernel's
+    // 320×200 logical canvas so every pixel write maps to a clean
+    // 4×4 block — pixel-perfect HD output, no fuzzy interpolation.
+    //
+    // If the probe fails (real hardware without the QEMU stdvga
+    // device), we fall through to the legacy mode 13h init below.
+    //
+    // SAFETY: probe writes to ports 0x1CE/0x1CF (Bochs DispI MMIO).
+    // These are no-ops on hardware that doesn't claim them.
+    let hd_succeeded = unsafe { try_set_hd_mode(phys_offset) };
 
-    // Program the 12 named palette slots (0..11).
-    let mut idx_port: Port<u8> = Port::new(DAC_INDEX);
-    let mut data_port: Port<u8> = Port::new(DAC_DATA);
-    for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
-        unsafe {
-            idx_port.write(i as u8);
-            data_port.write(r);
-            data_port.write(g);
-            data_port.write(b);
+    if !hd_succeeded {
+        // ── Legacy mode 13h fallback ──
+        FB_VIRT.store(phys_offset + FB_PHYS, Ordering::SeqCst);
+        FB_BPP.store(1, Ordering::SeqCst);
+        FB_NATIVE_W.store(WIDTH as u32, Ordering::SeqCst);
+        FB_NATIVE_H.store(HEIGHT as u32, Ordering::SeqCst);
+        FB_SCALE.store(1, Ordering::SeqCst);
+
+        // Program the 12 named palette slots (0..11).
+        let mut idx_port: Port<u8> = Port::new(DAC_INDEX);
+        let mut data_port: Port<u8> = Port::new(DAC_DATA);
+        for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
+            unsafe {
+                idx_port.write(i as u8);
+                data_port.write(r);
+                data_port.write(g);
+                data_port.write(b);
+            }
+        }
+        for (hue_idx, &peak) in HUE_PEAKS.iter().enumerate() {
+            let base_slot = 16 + (hue_idx as u8) * 8;
+            for shade in 0..8u8 {
+                let scale = (1u32 + shade as u32).min(8);
+                let scaled = |c: u8| {
+                    let v = (c as u32 * scale) / 8;
+                    v.min(63) as u8
+                };
+                unsafe {
+                    idx_port.write(base_slot + shade);
+                    data_port.write(scaled(peak.0));
+                    data_port.write(scaled(peak.1));
+                    data_port.write(scaled(peak.2));
+                }
+            }
         }
     }
-    // Generate the five Lambertian shading ramps starting at slot 16.
-    // Each ramp interpolates from a 12.5%-of-peak shadow (shade 0) up
-    // to the full peak (shade 7) linearly per channel.
+
+    // Build the 256-entry palette → BGRX lookup table.  Used by the
+    // HD path on every per-pixel write to avoid re-deriving the BGR
+    // colour each time.  Mode 13h ignores this (writes raw indices).
+    build_palette_lookup();
+}
+
+/// Attempt a Bochs DispI / QEMU stdvga mode-set to HD.  Returns true
+/// when the mode-set succeeds and the global framebuffer state has
+/// been updated to point at the HD linear framebuffer; returns false
+/// when no Bochs DispI device is present (caller falls back to mode
+/// 13h).
+///
+/// SAFETY: writes to ports 0x1CE/0x1CF and reads back the version
+/// register to detect device presence.  Reads are no-ops on hardware
+/// that doesn't claim those ports.
+unsafe fn try_set_hd_mode(phys_offset: u64) -> bool {
+    let mut idx: Port<u16> = Port::new(VBE_DISPI_IOPORT_INDEX);
+    let mut data: Port<u16> = Port::new(VBE_DISPI_IOPORT_DATA);
+
+    // Probe the VBE_DISPI version register.  QEMU stdvga returns
+    // 0xB0C0..=0xB0CF; anything outside that range = no Bochs DispI.
+    unsafe {
+        idx.write(VBE_DISPI_INDEX_ID);
+    }
+    let version = unsafe { data.read() };
+    if !(0xB0C0..=0xB0CF).contains(&version) {
+        return false;
+    }
+
+    // Disable the device, configure the new mode, then re-enable
+    // with the LFB flag (linear framebuffer) set.
+    unsafe {
+        idx.write(VBE_DISPI_INDEX_ENABLE);
+        data.write(VBE_DISPI_DISABLED);
+
+        idx.write(VBE_DISPI_INDEX_XRES);
+        data.write(HD_WIDTH as u16);
+        idx.write(VBE_DISPI_INDEX_YRES);
+        data.write(HD_HEIGHT as u16);
+        idx.write(VBE_DISPI_INDEX_BPP);
+        data.write(32);
+        idx.write(VBE_DISPI_INDEX_VIRT_WIDTH);
+        data.write(HD_WIDTH as u16);
+        idx.write(VBE_DISPI_INDEX_VIRT_HEIGHT);
+        data.write(HD_HEIGHT as u16);
+
+        idx.write(VBE_DISPI_INDEX_ENABLE);
+        data.write(VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    }
+
+    // The LFB is at physical 0xfd00_0000 on QEMU's default PCI
+    // topology.  bootloader 0.9's `map_physical_memory` feature
+    // mapped *all* physical memory at `phys_offset()`, so the LFB
+    // virtual address is just `phys_offset + HD_LFB_PHYS` — no new
+    // page-table work needed.
+    FB_VIRT.store(phys_offset + HD_LFB_PHYS, Ordering::SeqCst);
+    FB_BPP.store(4, Ordering::SeqCst);
+    FB_NATIVE_W.store(HD_WIDTH, Ordering::SeqCst);
+    FB_NATIVE_H.store(HD_HEIGHT, Ordering::SeqCst);
+    FB_SCALE.store(HD_SCALE, Ordering::SeqCst);
+    true
+}
+
+/// Build the 256-entry palette → BGRX lookup table at init.  Each
+/// entry packs as `0x00_RR_GG_BB` in little-endian memory so a single
+/// `*u32` write paints one HD pixel.  6-bit channels from the
+/// historic palette are stretched to 8-bit via `v*4 + v/16` which
+/// distributes the missing low-bit signal cleanly.
+fn build_palette_lookup() {
+    let mut lut = PALETTE_BGRX.lock();
+    let conv6 = |v: u8| -> u32 {
+        let v8 = (v as u32) * 4 + (v as u32) / 16;
+        v8.min(255)
+    };
+    let pack_bgrx = |r: u8, g: u8, b: u8| -> u32 {
+        (conv6(r) << 16) | (conv6(g) << 8) | conv6(b)
+    };
+
+    // Named palette slots 0..11.
+    for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
+        lut[i] = pack_bgrx(r, g, b);
+    }
+    // Generate the five Lambertian ramps starting at slot 16.
     for (hue_idx, &peak) in HUE_PEAKS.iter().enumerate() {
-        let base_slot = 16 + (hue_idx as u8) * 8;
+        let base_slot = (16 + (hue_idx as u8) * 8) as usize;
         for shade in 0..8u8 {
-            // Brightness scale: (1 + shade) / 8 — i.e. shade 0 = 1/8,
-            // shade 7 = 8/8.  Channel = peak * scale (saturated at 63).
             let scale = (1u32 + shade as u32).min(8);
-            let scaled = |c: u8| {
-                let v = (c as u32 * scale) / 8;
-                v.min(63) as u8
-            };
-            unsafe {
-                idx_port.write(base_slot + shade);
-                data_port.write(scaled(peak.0));
-                data_port.write(scaled(peak.1));
-                data_port.write(scaled(peak.2));
-            }
+            let r = ((peak.0 as u32 * scale) / 8).min(63) as u8;
+            let g = ((peak.1 as u32 * scale) / 8).min(63) as u8;
+            let b = ((peak.2 as u32 * scale) / 8).min(63) as u8;
+            lut[base_slot + shade as usize] = pack_bgrx(r, g, b);
         }
     }
 }
@@ -177,6 +338,22 @@ pub fn ready() -> bool {
     FB_VIRT.load(Ordering::Acquire) != 0
 }
 
+/// Native framebuffer width in pixels (320 for mode 13h, 1280 for HD).
+pub fn native_width() -> u32 {
+    FB_NATIVE_W.load(Ordering::Relaxed)
+}
+
+/// Native framebuffer height in pixels.
+pub fn native_height() -> u32 {
+    FB_NATIVE_H.load(Ordering::Relaxed)
+}
+
+/// True when the in-kernel Bochs DispI mode-set succeeded and the
+/// framebuffer is the 32-bpp HD linear surface.
+pub fn is_hd() -> bool {
+    FB_BPP.load(Ordering::Relaxed) == 4
+}
+
 fn fb_ptr() -> Option<*mut u8> {
     let v = FB_VIRT.load(Ordering::Acquire);
     if v == 0 {
@@ -186,42 +363,76 @@ fn fb_ptr() -> Option<*mut u8> {
     }
 }
 
+// ── Pixel-write primitives — dual-format dispatch ─────────────────
+//
+// Every drawing helper now checks `FB_BPP`:
+//   * 1 (mode 13h)      — write 1 byte palette index at logical
+//                         pixel position.
+//   * 4 (HD VBE)        — write a SCALE×SCALE block of 32-bit BGRX
+//                         pixels into the native framebuffer.
+//
+// The logical (x, y) coordinates stay 320×200 throughout — only the
+// final memory store changes — so all callers (k-rast, hypervisor)
+// keep working unchanged.
+
+fn paint_logical_pixel(fb: *mut u8, x: usize, y: usize, palette_idx: u8) {
+    if x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        unsafe { fb.add(y * WIDTH + x).write(palette_idx); }
+        return;
+    }
+    // 32-bpp HD path.  Look up the BGRX colour once and stamp a
+    // SCALE×SCALE block into the LFB.
+    let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
+    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let bgrx = PALETTE_BGRX.lock()[palette_idx as usize];
+    let base_x = x * scale;
+    let base_y = y * scale;
+    let fb32 = fb as *mut u32;
+    for dy in 0..scale {
+        let row_off = (base_y + dy) * native_w + base_x;
+        for dx in 0..scale {
+            unsafe { fb32.add(row_off + dx).write(bgrx); }
+        }
+    }
+}
+
 /// Paint the whole framebuffer with a single colour.
 pub fn clear(color: Color) {
     let Some(fb) = fb_ptr() else { return };
     let _guard = LOCK.lock();
-    unsafe {
-        core::ptr::write_bytes(fb, color.idx(), PIXELS);
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        unsafe { core::ptr::write_bytes(fb, color.idx(), PIXELS); }
+        return;
+    }
+    // HD path: solid BGRX flood across the entire native framebuffer.
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let native_h = FB_NATIVE_H.load(Ordering::Relaxed) as usize;
+    let fb32 = fb as *mut u32;
+    for i in 0..(native_w * native_h) {
+        unsafe { fb32.add(i).write(bgrx); }
     }
 }
 
-/// Set a single pixel.  Out-of-bounds coordinates silently no-op;
-/// the boot UI is statically sized so we never see this in practice,
-/// but the bounds check keeps a stray future draw from clobbering
-/// memory past the framebuffer.
+/// Set a single pixel by Color enum.  Logical 320×200 coordinates;
+/// the back-end stamps a SCALE×SCALE block in HD mode.
 pub fn put_pixel(x: usize, y: usize, color: Color) {
-    if x >= WIDTH || y >= HEIGHT {
-        return;
-    }
     let Some(fb) = fb_ptr() else { return };
     let _guard = LOCK.lock();
-    unsafe {
-        fb.add(y * WIDTH + x).write(color.idx());
-    }
+    paint_logical_pixel(fb, x, y, color.idx());
 }
 
-/// Set a single pixel by raw 8-bit palette index.  Used by the 3D
-/// scene painter to pick from the Lambertian shading ramps (slots
-/// 16..55) without enumerating each shade in the `Color` enum.
+/// Set a single pixel by raw palette index.  Used by the 3D scene
+/// painter to write per-shade ramp colours.
 pub fn put_pixel_raw(x: usize, y: usize, palette_idx: u8) {
-    if x >= WIDTH || y >= HEIGHT {
-        return;
-    }
     let Some(fb) = fb_ptr() else { return };
     let _guard = LOCK.lock();
-    unsafe {
-        fb.add(y * WIDTH + x).write(palette_idx);
-    }
+    paint_logical_pixel(fb, x, y, palette_idx);
 }
 
 /// Solid filled rectangle, clipped against the screen.
@@ -232,12 +443,30 @@ pub fn fill_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
     }
     let x_end = (x + w).min(WIDTH);
     let y_end = (y + h).min(HEIGHT);
-    let row_len = x_end - x;
     let _guard = LOCK.lock();
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        let row_len = x_end - x;
+        for py in y..y_end {
+            let row_start = unsafe { fb.add(py * WIDTH + x) };
+            unsafe { core::ptr::write_bytes(row_start, color.idx(), row_len); }
+        }
+        return;
+    }
+    // HD path: stamp blocks for each logical pixel.
+    let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
+    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    let fb32 = fb as *mut u32;
+    let base_x_native = x * scale;
+    let w_native = (x_end - x) * scale;
     for py in y..y_end {
-        let row_start = unsafe { fb.add(py * WIDTH + x) };
-        unsafe {
-            core::ptr::write_bytes(row_start, color.idx(), row_len);
+        let base_y_native = py * scale;
+        for dy in 0..scale {
+            let row_off = (base_y_native + dy) * native_w + base_x_native;
+            for dx in 0..w_native {
+                unsafe { fb32.add(row_off + dx).write(bgrx); }
+            }
         }
     }
 }
@@ -296,8 +525,17 @@ pub fn present() {}
 
 pub unsafe fn force_clear(color: Color) {
     let Some(fb) = fb_ptr() else { return };
-    unsafe {
-        core::ptr::write_bytes(fb, color.idx(), PIXELS);
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        unsafe { core::ptr::write_bytes(fb, color.idx(), PIXELS); }
+        return;
+    }
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let native_h = FB_NATIVE_H.load(Ordering::Relaxed) as usize;
+    let fb32 = fb as *mut u32;
+    for i in 0..(native_w * native_h) {
+        unsafe { fb32.add(i).write(bgrx); }
     }
 }
 
@@ -308,11 +546,28 @@ pub unsafe fn force_fill_rect(x: usize, y: usize, w: usize, h: usize, color: Col
     }
     let x_end = (x + w).min(WIDTH);
     let y_end = (y + h).min(HEIGHT);
-    let row_len = x_end - x;
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        let row_len = x_end - x;
+        for py in y..y_end {
+            let row_start = unsafe { fb.add(py * WIDTH + x) };
+            unsafe { core::ptr::write_bytes(row_start, color.idx(), row_len); }
+        }
+        return;
+    }
+    let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
+    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    let fb32 = fb as *mut u32;
+    let base_x_native = x * scale;
+    let w_native = (x_end - x) * scale;
     for py in y..y_end {
-        let row_start = unsafe { fb.add(py * WIDTH + x) };
-        unsafe {
-            core::ptr::write_bytes(row_start, color.idx(), row_len);
+        let base_y_native = py * scale;
+        for dy in 0..scale {
+            let row_off = (base_y_native + dy) * native_w + base_x_native;
+            for dx in 0..w_native {
+                unsafe { fb32.add(row_off + dx).write(bgrx); }
+            }
         }
     }
 }
@@ -458,18 +713,14 @@ pub fn draw_glyph(x: usize, y: usize, ch: char, color: Color) {
     let glyph = if (ch as u32) < 128 {
         &font8x8::legacy::BASIC_LEGACY[ch as usize]
     } else {
-        // Unsupported codepoint sentinel — draw a 4×4 dot so it stands
-        // out without consuming the whole 8×8 cell.
+        // Unsupported codepoint sentinel — draw a 4×4 dot so it
+        // stands out without consuming the whole 8×8 cell.
         let _guard = LOCK.lock();
         for py in 0..4 {
             for px in 0..4 {
                 let sx = x + 2 + px;
                 let sy = y + 2 + py;
-                if sx < WIDTH && sy < HEIGHT {
-                    unsafe {
-                        fb.add(sy * WIDTH + sx).write(color.idx());
-                    }
-                }
+                paint_logical_pixel(fb, sx, sy, color.idx());
             }
         }
         return;
@@ -484,12 +735,7 @@ pub fn draw_glyph(x: usize, y: usize, ch: char, color: Color) {
         for col in 0..GLYPH_W {
             if bits & (1 << col) != 0 {
                 let px = x + col;
-                if px >= WIDTH {
-                    continue;
-                }
-                unsafe {
-                    fb.add(py * WIDTH + px).write(color.idx());
-                }
+                paint_logical_pixel(fb, px, py, color.idx());
             }
         }
     }

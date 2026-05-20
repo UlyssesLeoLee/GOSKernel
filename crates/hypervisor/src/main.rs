@@ -49,7 +49,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Header bar serves as the boot-progress indicator: dim teal
     // throughout init, becomes solid at "entering steady-state".
     k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
-    raw_serial_println(format_args!("boot: framebuffer up (mode 13h, 320x200)"));
+    if k_fb::is_hd() {
+        raw_serial_println(format_args!(
+            "boot: framebuffer up (HD VBE LFB {}x{} @ 32bpp, logical 320x200 @ 4x upscale)",
+            k_fb::native_width(),
+            k_fb::native_height(),
+        ));
+    } else {
+        raw_serial_println(format_args!("boot: framebuffer up (mode 13h fallback, 320x200)"));
+    }
 
     raw_serial_println(format_args!("boot: staging supervisor domains"));
     gos_supervisor::bootstrap(boot_info as *const _ as u64);

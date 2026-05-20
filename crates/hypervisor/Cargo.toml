@@ -66,7 +66,7 @@ x86_64 = "0.14"
 #   -vga std               Bochs/QEMU graphics card with VBE support
 #                          (forward-compatible with the planned
 #                          bootloader_api migration to native HD)
-run-args = ["-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56", "-full-screen", "-display", "sdl,gl=on", "-vga", "std"]
+run-args = ["-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56", "-full-screen"]
 test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1
 test-timeout = 300
