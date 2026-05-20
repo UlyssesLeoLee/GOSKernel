@@ -195,22 +195,23 @@ const HUE_PEAKS: &[(u8, u8, u8)] = &[
 /// the physical memory at 0xA0000 is mapped into the kernel virtual
 /// address space.
 pub unsafe fn init(phys_offset: u64) {
-    // ── Phase I.11.B — attempt the Bochs DispI mode-set to HD ─────
+    // ── Phase I.13.c — HD path is opt-in, NOT default ─────────────
     //
-    // The boot environment dropped us in mode 13h (320×200 × 8 bpp
-    // at 0xA0000).  If a Bochs DispI / QEMU stdvga device is
-    // present (port 0x01CE returns a recognisable VBE ID), switch
-    // to 1280×800 × 32 bpp linear framebuffer at 0xfd00_0000.  The
-    // 1280×800 dimensions are an integer 4× upscale of the kernel's
-    // 320×200 logical canvas so every pixel write maps to a clean
-    // 4×4 block — pixel-perfect HD output, no fuzzy interpolation.
+    // The Bochs DispI HD mode-set works correctly (320×200 logical
+    // → 1280×800 native via 4× upscale, palette → BGRX LUT, PCI BAR
+    // discovery), but each per-pixel u32 write goes through QEMU's
+    // softmmu callback which is ~1000× slower than RAM in TCG mode.
+    // Each frame requires ~2M MMIO writes → ~2-3 seconds per frame
+    // → user sees a frozen "header only" state because the body
+    // paint hasn't completed.
     //
-    // If the probe fails (real hardware without the QEMU stdvga
-    // device), we fall through to the legacy mode 13h init below.
-    //
-    // SAFETY: probe writes to ports 0x1CE/0x1CF (Bochs DispI MMIO).
-    // These are no-ops on hardware that doesn't claim them.
-    let hd_succeeded = unsafe { try_set_hd_mode(phys_offset) };
+    // The proper fix is a RAM back-buffer rendered into at logical
+    // 320×200 + one bulk REP MOVSD blit per frame to the LFB.  That
+    // architecture is the I.14 follow-up; for now we keep mode 13h
+    // as the default so the metal-ball view reliably displays.  The
+    // HD code stays in place but disabled.
+    #[allow(unused_unsafe)]
+    let hd_succeeded = false;
 
     if !hd_succeeded {
         // ── Legacy mode 13h fallback ──
@@ -264,6 +265,10 @@ pub unsafe fn init(phys_offset: u64) {
 /// SAFETY: writes to ports 0x1CE/0x1CF and reads back the version
 /// register to detect device presence.  Reads are no-ops on hardware
 /// that doesn't claim those ports.
+///
+/// Currently dead code — kept in place for the I.14 back-buffer
+/// re-enablement.  See `init` for context.
+#[allow(dead_code)]
 unsafe fn try_set_hd_mode(phys_offset: u64) -> bool {
     let mut idx: Port<u16> = Port::new(VBE_DISPI_IOPORT_INDEX);
     let mut data: Port<u16> = Port::new(VBE_DISPI_IOPORT_DATA);
