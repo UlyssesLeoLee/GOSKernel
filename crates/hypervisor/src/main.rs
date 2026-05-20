@@ -51,9 +51,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
     if k_fb::is_hd() {
         raw_serial_println(format_args!(
-            "boot: framebuffer up (HD VBE LFB {}x{} @ 32bpp, logical 320x200 @ 4x upscale)",
+            "boot: framebuffer up (HD VBE LFB {}x{} @ 32bpp, phys=0x{:x}, logical 320x200 @ 4x upscale)",
             k_fb::native_width(),
             k_fb::native_height(),
+            k_fb::lfb_physical_address(),
         ));
     } else {
         raw_serial_println(format_args!("boot: framebuffer up (mode 13h fallback, 320x200)"));
@@ -1850,15 +1851,13 @@ fn drain_ui_input() {
                 }
             }
             0x1B => {
-                // Esc — toggle mode.
-                use core::sync::atomic::Ordering;
-                let cur = k_fb::UI_MODE.load(Ordering::Relaxed);
-                let next = if cur == k_fb::UI_MODE_KERNEL_VIEW {
-                    k_fb::UI_MODE_OS_SHELL
-                } else {
-                    k_fb::UI_MODE_KERNEL_VIEW
-                };
-                k_fb::UI_MODE.store(next, Ordering::Relaxed);
+                // Esc — clear the current input line (was: toggle
+                // mode, but that was a UX trap because Esc is a
+                // common reflex to exit full-screen; users would
+                // accidentally swap to the OS shell and lose the
+                // metal-ball view).  Mode switching is now explicit
+                // via the `os` / `kernel` commands.
+                UI_STATE.lock().clear_line();
             }
             INPUT_KEY_UP => UI_STATE.lock().history_step(-1),
             INPUT_KEY_DOWN => UI_STATE.lock().history_step(1),
@@ -1969,7 +1968,7 @@ fn interpret_command(raw: &str) {
             ui.log("  nodes / edges     graph stats");
             ui.log("  uptime / gen      runtime info");
             ui.log("  log / clear       scrollback control (F9)");
-            ui.log("  Esc               toggle mode");
+            ui.log("  Esc               clear input line");
             ui.log("cypher mutations (live graph):");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
             ui.log("  CREATE USE   'F' -> 'T'");

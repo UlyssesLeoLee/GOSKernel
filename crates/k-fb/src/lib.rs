@@ -60,11 +60,21 @@ const VBE_DISPI_DISABLED: u16 = 0x00;
 const VBE_DISPI_ENABLED: u16 = 0x01;
 const VBE_DISPI_LFB_ENABLED: u16 = 0x40;
 
-/// QEMU stdvga linear framebuffer physical address (PCI BAR0 of
-/// 00:02.0 device — QEMU's default placement).  Mapped to virtual
-/// memory by bootloader 0.9's `map_physical_memory` feature at
-/// `phys_offset() + HD_LFB_PHYS`.
-const HD_LFB_PHYS: u64 = 0xfd00_0000;
+/// Fallback LFB physical address used when PCI enumeration fails.
+/// 0xfd00_0000 is QEMU's default placement on the i440FX chipset
+/// for the stdvga BAR0; q35 and newer setups may place it elsewhere
+/// (the PCI enumerator in `discover_stdvga_lfb` walks the bus and
+/// reads the actual BAR0, falling back to this constant only when
+/// no device matching vendor 0x1234 / device 0x1111 is found).
+const HD_LFB_PHYS_FALLBACK: u64 = 0xfd00_0000;
+
+/// PCI configuration mechanism #1 ports (chipset-independent on x86).
+const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
+const PCI_CONFIG_DATA: u16 = 0xCFC;
+
+/// QEMU std-vga PCI identifiers (Bochs Graphics Adapter clone).
+const STDVGA_VENDOR_ID: u16 = 0x1234;
+const STDVGA_DEVICE_ID: u16 = 0x1111;
 
 /// Target HD mode dimensions and integer upscale factor.  At
 /// SCALE=4, the 320×200 logical canvas covers 1280×800 of the
@@ -91,6 +101,9 @@ static FB_NATIVE_W: AtomicU32 = AtomicU32::new(WIDTH as u32);
 static FB_NATIVE_H: AtomicU32 = AtomicU32::new(HEIGHT as u32);
 /// Integer upscale: logical → native pixel ratio (1 for mode 13h, 4 for HD).
 static FB_SCALE: AtomicU32 = AtomicU32::new(1);
+
+/// Discovered LFB physical address (HD path only).  0 means mode 13h.
+static FB_LFB_PHYS: AtomicU64 = AtomicU64::new(0);
 
 /// 256-entry palette → BGRX lookup table.  Populated at init for the
 /// HD path so per-pixel writes don't go through the named-Color
@@ -286,17 +299,71 @@ unsafe fn try_set_hd_mode(phys_offset: u64) -> bool {
         data.write(VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
     }
 
-    // The LFB is at physical 0xfd00_0000 on QEMU's default PCI
-    // topology.  bootloader 0.9's `map_physical_memory` feature
-    // mapped *all* physical memory at `phys_offset()`, so the LFB
-    // virtual address is just `phys_offset + HD_LFB_PHYS` — no new
-    // page-table work needed.
-    FB_VIRT.store(phys_offset + HD_LFB_PHYS, Ordering::SeqCst);
+    // Locate the LFB physical address by enumerating PCI for the
+    // QEMU stdvga (vendor 0x1234 / device 0x1111) and reading its
+    // BAR0.  Without this discovery the hardcoded 0xfd00_0000 only
+    // works on QEMU's older i440FX chipset — q35 and pc-q35 place
+    // the BAR elsewhere, producing a blank screen because writes
+    // land in mapped-but-unused RAM rather than the framebuffer.
+    let lfb_phys = unsafe { discover_stdvga_lfb() }.unwrap_or(HD_LFB_PHYS_FALLBACK);
+
+    // bootloader 0.9's `map_physical_memory` feature mapped *all*
+    // physical memory at `phys_offset()`, so the LFB virtual
+    // address is just `phys_offset + lfb_phys` — no new page-table
+    // work needed.
+    FB_VIRT.store(phys_offset + lfb_phys, Ordering::SeqCst);
+    FB_LFB_PHYS.store(lfb_phys, Ordering::SeqCst);
     FB_BPP.store(4, Ordering::SeqCst);
     FB_NATIVE_W.store(HD_WIDTH, Ordering::SeqCst);
     FB_NATIVE_H.store(HD_HEIGHT, Ordering::SeqCst);
     FB_SCALE.store(HD_SCALE, Ordering::SeqCst);
     true
+}
+
+/// Walk PCI bus 0 (and a couple of common bridged buses) looking
+/// for the QEMU stdvga device.  Returns the LFB physical address
+/// from its BAR0 if found, else None.  Bus scan is cheap enough
+/// (256 slots × 32-bit reads) that we don't bother with the formal
+/// "secondary bus" walk that a full PCI driver would do.
+///
+/// SAFETY: reads the chipset PCI config ports (0xCF8 / 0xCFC).
+/// These are no-ops on hardware that doesn't claim them.
+unsafe fn discover_stdvga_lfb() -> Option<u64> {
+    for bus in 0..=0u8 {
+        for slot in 0..32u8 {
+            let id = unsafe { pci_read_u32(bus, slot, 0, 0x00) };
+            let vendor = (id & 0xFFFF) as u16;
+            if vendor == 0xFFFF {
+                continue; // no device at this slot
+            }
+            let device = ((id >> 16) & 0xFFFF) as u16;
+            if vendor == STDVGA_VENDOR_ID && device == STDVGA_DEVICE_ID {
+                // BAR0 lives at config offset 0x10.  For QEMU stdvga
+                // this is a 32-bit memory BAR; mask off the low 4
+                // bits (type/prefetch flags) to get the address.
+                let bar0 = unsafe { pci_read_u32(bus, slot, 0, 0x10) };
+                let addr = (bar0 & 0xFFFF_FFF0) as u64;
+                if addr != 0 {
+                    return Some(addr);
+                }
+            }
+        }
+    }
+    None
+}
+
+unsafe fn pci_read_u32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
+    let addr: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | (((slot as u32) & 0x1F) << 11)
+        | (((func as u32) & 0x07) << 8)
+        | ((offset as u32) & 0xFC);
+    let mut addr_port: Port<u32> = Port::new(PCI_CONFIG_ADDRESS);
+    let mut data_port: Port<u32> = Port::new(PCI_CONFIG_DATA);
+    unsafe {
+        addr_port.write(addr);
+        data_port.read()
+    }
 }
 
 /// Build the 256-entry palette → BGRX lookup table at init.  Each
@@ -352,6 +419,12 @@ pub fn native_height() -> u32 {
 /// framebuffer is the 32-bpp HD linear surface.
 pub fn is_hd() -> bool {
     FB_BPP.load(Ordering::Relaxed) == 4
+}
+
+/// Discovered LFB physical address (HD path only).  Returns 0 when
+/// the kernel is in mode 13h fallback.
+pub fn lfb_physical_address() -> u64 {
+    FB_LFB_PHYS.load(Ordering::Relaxed)
 }
 
 fn fb_ptr() -> Option<*mut u8> {
