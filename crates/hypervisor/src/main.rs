@@ -384,7 +384,12 @@ fn paint_3d_view(frame: u64) {
         // glints, decaying over ~14 frames.
         let flash = physics_flash_value(i) as f32;
         let specular_boost = flash * 0.045;
-        draw_node_sphere(sx, sy, r_px, hue_base, fog, specular_boost);
+        // I.14 — PBR material driven by the node's sub-domain class
+        // (Hardware=polished chrome, Service=satin, etc.).  Each ball
+        // gets a distinct metallic/roughness/rim profile so the eye
+        // reads the partition without needing the halo ring.
+        let material = material_for_sub_domain(nodes[i].sub_domain);
+        draw_node_sphere(sx, sy, r_px, hue_base, fog, specular_boost, material);
     }
 
     // Edges: lines between projected centres, styled by edge type
@@ -1154,10 +1159,81 @@ const NODE_HALF: f32 = 0.13;
 
 const LIGHT_DIR: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
 const AMBIENT: f32 = 0.10;
-const SPECULAR_EXP: f32 = 32.0;
-const SPECULAR_STRENGTH: f32 = 0.75;
 
-fn draw_node_sphere(sx: i32, sy: i32, r_px: i32, hue_base: u8, fog: f32, specular_boost: f32) {
+/// PBR material — drives the sphere shader's GGX response per node.
+/// Different sub-domains map to different material profiles so the
+/// scene reads as a mix of polished chrome (driver), satin (service),
+/// matte (vector) etc. — the eye picks up the architectural partition
+/// even before reading labels.
+#[derive(Debug, Clone, Copy)]
+struct PbrMaterial {
+    /// 0 = dielectric, 1 = pure metal.  Drives base-reflectance F0
+    /// and how much diffuse contribution survives.
+    metallic: f32,
+    /// 0 = mirror, 1 = matte.  Drives GGX lobe width.
+    roughness: f32,
+    /// Schlick rim strength multiplier.  Higher = more pronounced
+    /// silhouette glow.
+    rim: f32,
+}
+
+fn material_for_sub_domain(sub: gos_protocol::NodeSubDomain) -> PbrMaterial {
+    use gos_protocol::NodeSubDomain;
+    match sub {
+        NodeSubDomain::Hardware => PbrMaterial { metallic: 0.95, roughness: 0.18, rim: 1.2 },     // polished cyan steel
+        NodeSubDomain::KernelDriver => PbrMaterial { metallic: 0.92, roughness: 0.25, rim: 1.0 }, // chrome amber
+        NodeSubDomain::Service => PbrMaterial { metallic: 0.80, roughness: 0.38, rim: 0.85 },     // satin mint
+        NodeSubDomain::Compute => PbrMaterial { metallic: 0.88, roughness: 0.30, rim: 1.05 },     // brushed magenta
+        NodeSubDomain::Routing => PbrMaterial { metallic: 0.70, roughness: 0.45, rim: 0.90 },     // anodized rose
+        NodeSubDomain::Vector => PbrMaterial { metallic: 0.40, roughness: 0.65, rim: 0.70 },      // matte
+    }
+}
+
+/// Cheap procedural environment sampler — returns a normalized
+/// intensity in [0, 1] for a given reflection direction.  Approximates
+/// a "kernel nebula" sky: bright at top (cyan), dim toward bottom,
+/// with a hot "sun" lobe in the LIGHT_DIR direction so polished
+/// spheres pick up the highlight reflected from the key light.  This
+/// stands in for a real cubemap until I.14.F bakes one from Blender.
+fn sample_environment(reflection: Vec3) -> f32 {
+    // Sun lobe: tight bright spot near LIGHT_DIR.
+    let r_dot_l = reflection.dot(LIGHT_DIR).max(0.0);
+    let sun = pow_approx(r_dot_l, 24.0);
+    // Sky gradient: brighter when reflection points up.
+    let sky = (reflection.y * 0.5 + 0.5).clamp(0.0, 1.0) * 0.55;
+    // Horizon glow at the equator (subtle ring).
+    let horizon = (1.0 - reflection.y.abs()).max(0.0) * 0.15;
+    (sun * 0.95 + sky + horizon).clamp(0.0, 1.5)
+}
+
+/// GGX/Trowbridge-Reitz normal-distribution function.  Standard PBR
+/// microfacet model — produces the characteristic tight-hot-spot of
+/// real reflective materials with smooth falloff (vs Phong's hard
+/// edge).  alpha = roughness² is the canonical mapping.
+fn ggx_d(n_dot_h: f32, roughness: f32) -> f32 {
+    let alpha = roughness * roughness;
+    let alpha2 = alpha * alpha;
+    let denom = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+    alpha2 / (denom * denom + 0.001)
+}
+
+/// Schlick fresnel approximation.  F0 is the base reflectance at
+/// normal incidence; cos_theta is the angle between view and half-
+/// vector.  Drives both specular boost at glancing angles and the
+/// signature "fresnel rim" silhouette glow of PBR materials.
+fn schlick_fresnel(f0: f32, cos_theta: f32) -> f32 {
+    f0 + (1.0 - f0) * pow_approx(1.0 - cos_theta, 5.0)
+}
+
+fn draw_node_sphere(
+    sx: i32,
+    sy: i32,
+    r_px: i32,
+    hue_base: u8,
+    fog: f32,
+    specular_boost: f32,
+    material: PbrMaterial,
+) {
     if r_px < 1 {
         return;
     }
@@ -1179,26 +1255,28 @@ fn draw_node_sphere(sx: i32, sy: i32, r_px: i32, hue_base: u8, fog: f32, specula
         return;
     }
 
-    // ── LOD_MID and LOD_HIGH share the same per-pixel loop; the
-    //    specular pass is gated by `r_px >= 6`. ──
+    // ── LOD_MID and LOD_HIGH: full PBR shader ──
     let do_specular = r_px >= 6;
     let r_f = r_px as f32;
     let r2 = r_f * r_f;
 
-    // View direction in screen space is essentially (0, 0, -1)
-    // (camera looks down -Z after the view transform); the Phong
-    // reflect vector for a sphere normal is straightforward in
-    // tangent space.  We approximate the half-vector by mixing the
-    // light direction with the view direction (0, 0, -1) before
-    // dotting with the per-pixel normal.
-    let half = Vec3::new(LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z - 1.0).normalize();
+    // PBR setup.  View direction = (0, 0, -1) (camera looks down -Z).
+    let view = Vec3::new(0.0, 0.0, -1.0);
+    let half = Vec3::new(LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z + view.z).normalize();
+
+    // Base reflectance F0: dielectrics ≈ 0.04, metals tint with hue.
+    // For colored metals we still drive a single scalar here and rely
+    // on the per-hue palette ramp to tint the result.
+    let f0 = 0.04 * (1.0 - material.metallic) + 0.95 * material.metallic;
+
+    // Sun colour energy — calibrated to make the highlight punchy.
+    let sun_energy = 1.85;
 
     for dy in -r_px..=r_px {
         let py = sy + dy;
         if py < HEADER_H || py >= FOOTER_Y {
             continue;
         }
-        // Half-width of the sphere at this row (Pythagoras).
         let dy_f = dy as f32;
         let row_inside = r2 - dy_f * dy_f;
         if row_inside <= 0.0 {
@@ -1210,8 +1288,6 @@ fn draw_node_sphere(sx: i32, sy: i32, r_px: i32, hue_base: u8, fog: f32, specula
             if px < 0 || px >= SCENE_WIDTH {
                 continue;
             }
-            // Sphere-space normal.  Z is the "out of screen"
-            // component derived from the screen disc constraint.
             let dx_f = dx as f32;
             let z2 = row_inside - dx_f * dx_f;
             if z2 <= 0.0 {
@@ -1223,20 +1299,75 @@ fn draw_node_sphere(sx: i32, sy: i32, r_px: i32, hue_base: u8, fog: f32, specula
             // Y is screen-down → flip so up-light reads correctly.
             let normal = Vec3::new(nx, -ny, nz);
 
-            // Diffuse + ambient.
             let n_dot_l = normal.dot(LIGHT_DIR).max(0.0);
-            let diffuse = n_dot_l * (1.0 - AMBIENT) + AMBIENT;
-            // Specular (Blinn-Phong half-vector).
-            let mut intensity = diffuse;
+            let n_dot_v = normal.dot(view).max(0.001);
+
+            // Diffuse (Lambertian) — reduced by metallic factor since
+            // pure metals have no diffuse contribution.
+            let diffuse = n_dot_l * (1.0 - material.metallic);
+
+            // PBR specular (GGX × Schlick fresnel) — pump the
+            // brightness so the highlight reads visibly even after
+            // 8-shade palette quantization.
+            let mut spec = 0.0_f32;
             if do_specular {
-                let n_dot_h = normal.dot(half).max(0.0);
-                let spec_pow = pow_approx(n_dot_h, SPECULAR_EXP);
-                intensity += spec_pow * (SPECULAR_STRENGTH + specular_boost);
+                let n_dot_h = normal.dot(half).max(0.001);
+                let v_dot_h = view.dot(half).max(0.001);
+                let d = ggx_d(n_dot_h, material.roughness);
+                let f = schlick_fresnel(f0, v_dot_h);
+                // Simplified geometry term + denominator absorbed
+                // into the constant to keep this fast.
+                spec = d * f * 0.30 * (1.0 + specular_boost);
             }
-            intensity = intensity.clamp(0.0, 1.0);
+
+            // Environment reflection (cheap procedural sampler).
+            // Reflection direction = reflect(-V, N) = 2(N·V)N - V
+            //                       = 2(N·V)N + (0,0,1)
+            //                  → (2 N·V × N.x, 2 N·V × N.y, 2 N·V × N.z + 1)
+            let two_ndotv = 2.0 * normal.dot(view);
+            let refl = Vec3::new(
+                two_ndotv * normal.x,
+                two_ndotv * normal.y,
+                two_ndotv * normal.z + 1.0,
+            );
+            // Polished surfaces show more reflection.
+            let env_intensity = sample_environment(refl)
+                * (1.0 - material.roughness * 0.6)
+                * (0.25 + 0.5 * material.metallic);
+
+            // Fresnel rim glow — Schlick on N·V drives an emissive-
+            // looking ring around silhouettes.  The signature visual
+            // tell of a PBR material.
+            let rim = schlick_fresnel(f0 * 0.2, n_dot_v) * material.rim * 0.65;
+
+            // Final composite.  Ambient sets the floor; diffuse +
+            // specular + env + rim layer on top.  Sun_energy pumps
+            // the specular for visible "wow" highlights.
+            let intensity = (AMBIENT
+                + diffuse
+                + spec * sun_energy
+                + env_intensity
+                + rim)
+                .clamp(0.0, 1.0);
+
             let shade_raw = (intensity * 7.999) as u8;
             let shade = shade_raw.saturating_sub(fog_bias).min(7);
             k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
+
+            // I.14 — bloom approximation: when a pixel hits the
+            // brightest shade (the specular hot spot), paint a soft
+            // halo of one-step-dimmer pixels at its 4 cardinal
+            // neighbours.  Cheap stand-in for a real Gaussian bloom
+            // pass; cost is bounded since shade 7 only fires inside
+            // the specular lobe.
+            if shade >= 7 {
+                let glow = hue_base + 5;
+                for (gx, gy) in [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)] {
+                    if gx >= 0 && gx < SCENE_WIDTH && gy >= HEADER_H && gy < FOOTER_Y {
+                        k_fb::put_pixel_raw(gx as usize, gy as usize, glow);
+                    }
+                }
+            }
         }
     }
 }
