@@ -260,6 +260,14 @@ fn paint_3d_view(frame: u64) {
     // Background + header band painted by `paint_frame` (I.5).
     // This function now only owns the kernel-view body.
 
+    // ── I.10.1 — animated starfield ───────────────────────────────
+    // Procedural stars drifting horizontally with parallax-by-layer.
+    // 96 stars in 3 depth layers (slow / medium / fast).  Brightness
+    // pulses on a sin curve so the field feels alive without any
+    // per-pixel jitter cost.  Seeded by index → deterministic so
+    // the pattern is stable across boots / save-states.
+    paint_starfield(frame);
+
     // Project node centres + classify colour.  We need both screen
     // coordinates (for edges + I.3.10 labels) and view-space depth
     // (for painter's sort).
@@ -704,22 +712,20 @@ fn paint_3d_view(frame: u64) {
     //
     // 8 px font × 40 chars = 320 px exactly; the layout caps at 38
     // chars to leave a 2-char right margin.
+    // I.10 — compacter header that yields the right edge to the
+    // I.10.2 uptime + heartbeat widget.  Three fixed-width chips,
+    // no generation number (use `gen` command for that).
     k_fb::draw_text(4, 3, "GOS-KRN", k_fb::Color::Highlight);
     k_fb::draw_text(4 + 7 * 8, 3, "|", k_fb::Color::DimWhite);
     let mut count_a = TextBuf::<10>::new();
     count_a.push_dec(returned_n as u64);
-    count_a.push_str(" NOD");
+    count_a.push_str("N");
     k_fb::draw_text(4 + 9 * 8, 3, count_a.as_str(), k_fb::Color::Foreground);
-    k_fb::draw_text(4 + 16 * 8, 3, "|", k_fb::Color::DimWhite);
+    k_fb::draw_text(4 + 13 * 8, 3, "|", k_fb::Color::DimWhite);
     let mut count_b = TextBuf::<10>::new();
     count_b.push_dec(snapshot.edge_count as u64);
-    count_b.push_str(" EDG");
-    k_fb::draw_text(4 + 18 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
-    k_fb::draw_text(4 + 25 * 8, 3, "|", k_fb::Color::DimWhite);
-    let mut count_c = TextBuf::<10>::new();
-    count_c.push_str("G");
-    count_c.push_dec(gos_runtime::graph_generation());
-    k_fb::draw_text(4 + 27 * 8, 3, count_c.as_str(), k_fb::Color::Foreground);
+    count_b.push_str("E");
+    k_fb::draw_text(4 + 15 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
 
     // ── I.4.5 — edge-style legend strip ──────────────────────────────
     // Bottom-left of the scene area, just above the footer hairline.
@@ -1353,6 +1359,97 @@ fn draw_rope_edge(
     }
 }
 
+// ── Phase I.10.1 — animated starfield ─────────────────────────────
+//
+// Procedural deep-space starfield painted before the spheres so the
+// nodes appear to float in a living void rather than a flat blue
+// background.  96 stars in 3 parallax layers: the back layer drifts
+// slowly (1 px per few frames), the middle a bit faster, the front
+// the fastest.  Brightness modulated by sin(time + index*phi) so
+// each star "twinkles" independently.
+//
+// Position generator: a tiny LCG seeded from the star index keeps
+// the X / Y / brightness phases stable boot-to-boot.  Cost is
+// 96 single-pixel writes per frame — negligible.
+
+const STAR_COUNT: usize = 96;
+
+fn paint_starfield(frame: u64) {
+    let frame_f = frame as f32;
+    for i in 0..STAR_COUNT {
+        // LCG-derived properties: X seed, Y seed, layer, phase.
+        let seed = (i as u32).wrapping_mul(2654435761);
+        let x_seed = seed;
+        let y_seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let layer = (i % 3) as u32; // 0 = back, 1 = mid, 2 = front
+        let phase = (seed >> 8) as f32 * 0.0001;
+
+        let base_x = (x_seed % SCENE_WIDTH as u32) as i32;
+        let base_y =
+            HEADER_H + ((y_seed % (FOOTER_Y - HEADER_H) as u32) as i32);
+
+        // Drift speed by layer.  Back = slow, front = fast.  Modulo
+        // wraps so stars loop horizontally without visible seams.
+        let speed = match layer {
+            0 => 0.06,
+            1 => 0.18,
+            _ => 0.45,
+        };
+        let drift = (frame_f * speed) as i32;
+        let x = (base_x + drift) % SCENE_WIDTH;
+        let x = if x < 0 { x + SCENE_WIDTH } else { x };
+        let y = base_y;
+
+        if x < 0 || x >= SCENE_WIDTH || y < HEADER_H || y >= FOOTER_Y {
+            continue;
+        }
+
+        // Twinkle: brightness oscillates on a sin curve with
+        // per-star phase offset so the field doesn't pulse in unison.
+        let twinkle = libm::sinf(frame_f * 0.08 + phase);
+        // Layer determines base brightness band.
+        let color = match layer {
+            0 => {
+                // Back layer — dim cyan from the kernel hue ramp.
+                let shade = if twinkle > 0.4 { 1 } else { 0 };
+                k_fb::HUE_CYAN_BASE + shade
+            }
+            1 => {
+                // Mid layer — soft mint dust.
+                let shade = if twinkle > 0.5 { 2 } else { 1 };
+                k_fb::HUE_MINT_BASE + shade
+            }
+            _ => {
+                // Front layer — bright white-ish twinkles using the
+                // foreground palette index plus a sin window.
+                if twinkle > 0.7 {
+                    // Bright moment — paint a 1-pixel cross.
+                    k_fb::put_pixel(x as usize, y as usize, k_fb::Color::Foreground);
+                    if x + 1 < SCENE_WIDTH {
+                        k_fb::put_pixel((x + 1) as usize, y as usize, k_fb::Color::DimWhite);
+                    }
+                    if x > 0 {
+                        k_fb::put_pixel((x - 1) as usize, y as usize, k_fb::Color::DimWhite);
+                    }
+                    if y + 1 < FOOTER_Y {
+                        k_fb::put_pixel(x as usize, (y + 1) as usize, k_fb::Color::DimWhite);
+                    }
+                    if y > HEADER_H {
+                        k_fb::put_pixel(x as usize, (y - 1) as usize, k_fb::Color::DimWhite);
+                    }
+                    continue;
+                } else if twinkle > 0.2 {
+                    // Mid-brightness — single foreground pixel.
+                    k_fb::Color::Foreground.idx()
+                } else {
+                    k_fb::Color::DimWhite.idx()
+                }
+            }
+        };
+        k_fb::put_pixel_raw(x as usize, y as usize, color);
+    }
+}
+
 /// Cheap pow approximation good enough for specular falloff in
 /// 256-colour space.  Uses 5 squarings → exponent up to 32.
 /// libm::powf would be the proper call but pulls a chunkier path;
@@ -1671,6 +1768,14 @@ impl UiState {
 
 static UI_STATE: spin::Mutex<UiState> = spin::Mutex::new(UiState::new());
 
+/// I.10.5 — global frame counter exposed for the `uptime` command +
+/// any future tooling that wants wall-clock-ish time without
+/// threading the local `frame_counter` through every call.  Updated
+/// by `paint_frame` once per frame; readers see the value of the
+/// last completed frame.
+static FRAME_COUNTER: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Drain queued keystrokes from `k_fb::pop_typed_char`, applying
 /// them to the input line.  Enter submits the line through
 /// `interpret_command`; Esc toggles mode; Backspace edits.
@@ -1831,10 +1936,11 @@ fn interpret_command(raw: &str) {
             ui.log("commands:");
             ui.log("  kernel | k        enter 3D graph view");
             ui.log("  os | exit         return to OS shell");
+            ui.log("  ps                list plugins by class");
+            ui.log("  inspect <vec>     deep-dive on a node");
             ui.log("  nodes / edges     graph stats");
-            ui.log("  gen               graph generation");
-            ui.log("  log               toggle scrollback (F9)");
-            ui.log("  clear             wipe scrollback");
+            ui.log("  uptime / gen      runtime info");
+            ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               toggle mode");
             ui.log("cypher mutations (live graph):");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
@@ -1903,6 +2009,175 @@ fn interpret_command(raw: &str) {
             row.push_dec(gos_runtime::graph_generation());
             ui.log(row.as_str());
         }
+        "uptime" => {
+            let frame = FRAME_COUNTER.load(Ordering::Relaxed);
+            let secs = frame / 50;
+            let hh = secs / 3600;
+            let mm = (secs / 60) % 60;
+            let ss = secs % 60;
+            let mut row = TextBuf::<48>::new();
+            row.push_str("uptime ");
+            if hh < 10 { row.push_str("0"); }
+            row.push_dec(hh);
+            row.push_str(":");
+            if mm < 10 { row.push_str("0"); }
+            row.push_dec(mm);
+            row.push_str(":");
+            if ss < 10 { row.push_str("0"); }
+            row.push_dec(ss);
+            row.push_str("  frames=");
+            row.push_dec(frame);
+            ui.log(row.as_str());
+        }
+        "ps" => {
+            // I.10.3 — plugin list with state.  Walks the node page
+            // and prints one row per unique plugin: PID  COUNT  CLASS
+            // where COUNT is the number of nodes the plugin owns and
+            // CLASS is its primary node's sub-domain abbreviation.
+            let mut buf = [GraphNodeSummary::EMPTY; MAX_NODES];
+            let (_total, returned) = gos_runtime::node_page(0, &mut buf);
+            // Group by plugin_id (assume small N — fine to do N²).
+            let mut seen_ids: [Option<gos_protocol::PluginId>; MAX_NODES] = [None; MAX_NODES];
+            let mut seen_counts: [usize; MAX_NODES] = [0; MAX_NODES];
+            let mut seen_classes: [u8; MAX_NODES] = [0; MAX_NODES];
+            let mut seen_names: [&'static str; MAX_NODES] = [""; MAX_NODES];
+            let mut seen_n = 0usize;
+            for n in &buf[..returned] {
+                let mut idx = None;
+                for s in 0..seen_n {
+                    if seen_ids[s] == Some(n.plugin_id) {
+                        idx = Some(s);
+                        break;
+                    }
+                }
+                match idx {
+                    Some(s) => seen_counts[s] += 1,
+                    None => {
+                        seen_ids[seen_n] = Some(n.plugin_id);
+                        seen_counts[seen_n] = 1;
+                        seen_classes[seen_n] = n.sub_domain as u8;
+                        seen_names[seen_n] = n.plugin_name;
+                        seen_n += 1;
+                    }
+                }
+            }
+            let mut header = TextBuf::<48>::new();
+            header.push_str("ps  ");
+            header.push_dec(seen_n as u64);
+            header.push_str(" plugins / ");
+            header.push_dec(returned as u64);
+            header.push_str(" nodes");
+            ui.log(header.as_str());
+            for s in 0..seen_n {
+                use gos_protocol::NodeSubDomain;
+                let class_label = match seen_classes[s] {
+                    x if x == NodeSubDomain::Hardware as u8 => "HW",
+                    x if x == NodeSubDomain::KernelDriver as u8 => "DRV",
+                    x if x == NodeSubDomain::Service as u8 => "SVC",
+                    x if x == NodeSubDomain::Compute as u8 => "CPU",
+                    x if x == NodeSubDomain::Routing as u8 => "RTR",
+                    _ => "VEC",
+                };
+                let mut row = TextBuf::<48>::new();
+                row.push_str("  ");
+                // Trim K_ prefix for readability.
+                let raw = seen_names[s];
+                let trimmed = raw.strip_prefix("K_").unwrap_or(raw);
+                let take = trimmed.len().min(14);
+                row.push_str(unsafe {
+                    core::str::from_utf8_unchecked(&trimmed.as_bytes()[..take])
+                });
+                // Pad to ~14 cols.
+                for _ in take..14 {
+                    row.push_str(" ");
+                }
+                row.push_str(class_label);
+                row.push_str(" x");
+                row.push_dec(seen_counts[s] as u64);
+                ui.log(row.as_str());
+            }
+        }
+        "inspect" => {
+            // I.10.4 — deep-dive on a single node by vector address.
+            // Usage: `inspect 6.6.0.0`  (or any V_l4.V_l3.V_l2.V_off)
+            let after = line.get(token_end..).unwrap_or("");
+            let arg = after.trim_start_matches(|c: char| c == ' ' || c == '\t');
+            // Strip optional surrounding quotes.
+            let arg = arg
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .trim_end_matches(|c: char| c == ' ' || c == '\t');
+            let Some(vec) = gos_protocol::VectorAddress::parse(arg) else {
+                ui.log("inspect: bad vector (try 6.6.0.0)");
+                return;
+            };
+            // Walk node_page to find a matching summary.
+            let mut buf = [GraphNodeSummary::EMPTY; MAX_NODES];
+            let (_, returned) = gos_runtime::node_page(0, &mut buf);
+            let found = buf[..returned].iter().find(|n| n.vector == vec);
+            match found {
+                None => {
+                    let mut row = TextBuf::<48>::new();
+                    row.push_str("inspect: no node at ");
+                    let take = arg.len().min(24);
+                    row.push_str(unsafe { core::str::from_utf8_unchecked(&arg.as_bytes()[..take]) });
+                    ui.log(row.as_str());
+                }
+                Some(n) => {
+                    let mut h = TextBuf::<48>::new();
+                    h.push_str("inspect ");
+                    h.push_dec(n.vector.l4 as u64);
+                    h.push_str(".");
+                    h.push_dec(n.vector.l3 as u64);
+                    h.push_str(".");
+                    h.push_dec(n.vector.l2 as u64);
+                    h.push_str(".");
+                    h.push_dec(n.vector.offset as u64);
+                    ui.log(h.as_str());
+                    let mut r1 = TextBuf::<48>::new();
+                    r1.push_str("  plugin: ");
+                    let nm = n.plugin_name;
+                    let take = nm.len().min(28);
+                    r1.push_str(unsafe { core::str::from_utf8_unchecked(&nm.as_bytes()[..take]) });
+                    ui.log(r1.as_str());
+                    let mut r2 = TextBuf::<48>::new();
+                    r2.push_str("  key:    ");
+                    let k = n.local_node_key;
+                    let take2 = k.len().min(28);
+                    r2.push_str(unsafe { core::str::from_utf8_unchecked(&k.as_bytes()[..take2]) });
+                    ui.log(r2.as_str());
+                    use gos_protocol::{NodeSubDomain, RuntimeNodeType};
+                    let type_label = match n.node_type {
+                        RuntimeNodeType::Hardware => "HW",
+                        RuntimeNodeType::Driver => "DRV",
+                        RuntimeNodeType::Service => "SVC",
+                        RuntimeNodeType::PluginEntry => "PE",
+                        RuntimeNodeType::Compute => "CPU",
+                        RuntimeNodeType::Router => "RTR",
+                        RuntimeNodeType::Aggregator => "AGG",
+                        RuntimeNodeType::Vector => "VEC",
+                    };
+                    let sub_label = match n.sub_domain {
+                        NodeSubDomain::Hardware => "Hardware",
+                        NodeSubDomain::KernelDriver => "KernelDriver",
+                        NodeSubDomain::Service => "Service",
+                        NodeSubDomain::Compute => "Compute",
+                        NodeSubDomain::Routing => "Routing",
+                        NodeSubDomain::Vector => "Vector",
+                    };
+                    let mut r3 = TextBuf::<48>::new();
+                    r3.push_str("  type:   ");
+                    r3.push_str(type_label);
+                    r3.push_str(" / ");
+                    r3.push_str(sub_label);
+                    ui.log(r3.as_str());
+                    let mut r4 = TextBuf::<48>::new();
+                    r4.push_str("  exports=");
+                    r4.push_dec(n.export_count as u64);
+                    ui.log(r4.as_str());
+                }
+            }
+        }
         _ => {
             let mut row = TextBuf::<48>::new();
             row.push_str("unknown: ");
@@ -1914,6 +2189,55 @@ fn interpret_command(raw: &str) {
     }
 }
 
+// ── Phase I.10.2 — uptime / heartbeat widget ──────────────────────
+//
+// Always-visible corner widget above the command bar showing the
+// kernel's wall-clock uptime + a 1-pixel pulsing heartbeat dot that
+// confirms the paint loop is alive at a glance.  Painted by
+// `paint_frame` in BOTH modes (kernel view and OS shell) so the
+// user always has a "this kernel is running" affordance.
+
+fn paint_status_widget(frame: u64) {
+    // Approximate uptime in seconds: paint loop runs at ~50 fps
+    // (PIT 100 Hz / REPAINT_TICKS 2).
+    let total_secs = frame / 50;
+    let hh = total_secs / 3600;
+    let mm = (total_secs / 60) % 60;
+    let ss = total_secs % 60;
+
+    let mut buf = TextBuf::<16>::new();
+    buf.push_str("UP ");
+    if hh < 10 { buf.push_str("0"); }
+    buf.push_dec(hh);
+    buf.push_str(":");
+    if mm < 10 { buf.push_str("0"); }
+    buf.push_dec(mm);
+    buf.push_str(":");
+    if ss < 10 { buf.push_str("0"); }
+    buf.push_dec(ss);
+
+    // Place in the top-right of the header band, before the cmd bar
+    // mode pill (which lives on the bar's right side, not the
+    // header).  Header band is 14 px tall; text rows on y=3 already.
+    // Replace the rightmost header section with this widget.
+    let text = buf.as_str();
+    let tx = k_fb::WIDTH - text.len() * 8 - 14;
+    k_fb::draw_text(tx, 3, text, k_fb::Color::Foreground);
+
+    // Heartbeat dot — pulses bright cyan once per second (frame
+    // counter mod 50 < 6 = ~120 ms on).  Sits two pixels right of
+    // the uptime text.
+    let dot_x = k_fb::WIDTH - 8;
+    let dot_y = 5usize;
+    let pulsing = (frame % 50) < 6;
+    let dot_color = if pulsing {
+        k_fb::Color::Highlight
+    } else {
+        k_fb::Color::DimWhite
+    };
+    k_fb::fill_rect(dot_x, dot_y, 4, 4, dot_color);
+}
+
 /// Top-level paint coordinator.  Drains input, paints the header
 /// + body (mode-dependent) + scrollback (when expanded) + command
 /// bar.  Replaces the direct `paint_3d_view` call from boot.
@@ -1921,6 +2245,8 @@ fn paint_frame(frame: u64) {
     if !k_fb::ready() {
         return;
     }
+    // I.10.5 — publish the current frame so commands can read uptime.
+    FRAME_COUNTER.store(frame, core::sync::atomic::Ordering::Relaxed);
     drain_ui_input();
 
     use core::sync::atomic::Ordering;
@@ -1934,6 +2260,9 @@ fn paint_frame(frame: u64) {
         k_fb::UI_MODE_KERNEL_VIEW => paint_3d_view(frame),
         _ => paint_os_shell_body(frame),
     }
+
+    // I.10.2 — persistent uptime + heartbeat widget (mode-independent).
+    paint_status_widget(frame);
 
     if scrollback_open {
         paint_scrollback();
@@ -1958,19 +2287,19 @@ fn paint_os_shell_body(frame: u64) {
     let (total_n, returned_n) = gos_runtime::node_page(0, &mut nodes_buf);
     let _ = total_n;
 
+    // I.10 — match the kernel-view header layout; uptime widget
+    // owns the right edge.
     k_fb::draw_text(4, 3, "GOS-OS", k_fb::Color::Highlight);
     k_fb::draw_text(4 + 6 * 8, 3, "|", k_fb::Color::DimWhite);
-    let mut count_a = TextBuf::<14>::new();
+    let mut count_a = TextBuf::<10>::new();
     count_a.push_dec(returned_n as u64);
-    count_a.push_str(" NOD");
+    count_a.push_str("N");
     k_fb::draw_text(4 + 8 * 8, 3, count_a.as_str(), k_fb::Color::Foreground);
-    k_fb::draw_text(4 + 15 * 8, 3, "|", k_fb::Color::DimWhite);
-    let mut count_b = TextBuf::<14>::new();
+    k_fb::draw_text(4 + 12 * 8, 3, "|", k_fb::Color::DimWhite);
+    let mut count_b = TextBuf::<10>::new();
     count_b.push_dec(snap.edge_count as u64);
-    count_b.push_str(" EDG");
-    k_fb::draw_text(4 + 17 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
-    k_fb::draw_text(4 + 24 * 8, 3, "|", k_fb::Color::DimWhite);
-    k_fb::draw_text(4 + 26 * 8, 3, "shell", k_fb::Color::NodeService);
+    count_b.push_str("E");
+    k_fb::draw_text(4 + 14 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
 
     // Big brand title centred at ~y=40.
     let title = "GOS  /  GRAPH OS";
