@@ -2022,6 +2022,45 @@ fn interpret_command(raw: &str) {
         return;
     }
 
+    // ── Phase J.1 — read-side Cypher (queries) ──
+    //
+    // Try the line first as a SHOW/MATCH query.  If recognised,
+    // each row is logged into the chat HUD via the emitter; if
+    // NotQuery, fall through to the I.7 mutation path.
+    struct HudEmitter;
+    impl k_cypher::QueryEmitter for HudEmitter {
+        fn emit_row(&mut self, row: &str) {
+            UI_STATE.lock().log(row);
+        }
+    }
+    let mut hud = HudEmitter;
+    let query_outcome = k_cypher::dispatch_cypher_query(line, &mut hud);
+    match query_outcome {
+        k_cypher::CypherQueryOutcome::NotQuery => { /* fall through */ }
+        k_cypher::CypherQueryOutcome::BadSyntax(msg) => {
+            let mut row = TextBuf::<60>::new();
+            row.push_str("cypher> syntax: ");
+            row.push_str(msg);
+            UI_STATE.lock().log(row.as_str());
+            return;
+        }
+        k_cypher::CypherQueryOutcome::EndpointNotFound(msg) => {
+            let mut row = TextBuf::<60>::new();
+            row.push_str("cypher> ");
+            row.push_str(msg);
+            UI_STATE.lock().log(row.as_str());
+            return;
+        }
+        k_cypher::CypherQueryOutcome::Rows { count } => {
+            let mut row = TextBuf::<60>::new();
+            row.push_str("cypher> ");
+            row.push_dec(count as u64);
+            row.push_str(" row(s)");
+            UI_STATE.lock().log(row.as_str());
+            return;
+        }
+    }
+
     // ── Phase I.7 — Cypher dispatch in the command bar ──
     //
     // Before falling through to the built-in commands, try the line
@@ -2104,7 +2143,11 @@ fn interpret_command(raw: &str) {
             ui.log("  uptime / gen      runtime info");
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
-            ui.log("cypher mutations (live graph):");
+            ui.log("cypher reads (live graph):");
+            ui.log("  SHOW NODES [OF CLASS X]");
+            ui.log("  SHOW EDGES [OF KIND X]");
+            ui.log("  SHOW EDGES FROM 'V'  / TO 'V'");
+            ui.log("cypher mutations:");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
             ui.log("  CREATE USE   'F' -> 'T'");
             ui.log("  LINK 'F' -> 'T'");

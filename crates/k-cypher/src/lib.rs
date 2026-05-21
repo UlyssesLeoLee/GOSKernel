@@ -819,6 +819,427 @@ pub fn dispatch_cypher_text(query: &str, source: [u8; 16]) -> CypherDispatchOutc
     }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Phase J.1 — read-side Cypher
+// ══════════════════════════════════════════════════════════════════
+//
+// `dispatch_cypher_text` covered the WRITE half (CREATE / LINK /
+// DELETE / REBIND).  J.1 adds the READ half so introspection is
+// symmetric with mutation — every other kernel feature can query the
+// live graph through one canonical surface.
+//
+// Recognised verbs (case-insensitive, both `SHOW` and `MATCH`
+// accepted because users coming from real Cypher expect `MATCH`):
+//
+//   SHOW NODES                                — every node, one per row
+//   SHOW NODES OF CLASS Driver                — filtered by sub-domain
+//   SHOW NODES WHERE class=Service            — same, alternate syntax
+//   SHOW EDGES                                — every edge, one per row
+//   SHOW EDGES OF KIND Use                    — filtered by edge type
+//   SHOW EDGES WHERE kind=Mount               — same, alternate syntax
+//   SHOW EDGES FROM 'V'                       — outgoing edges from V
+//   SHOW EDGES TO 'V'                         — incoming edges to V
+//   MATCH NODES … / MATCH EDGES …             — aliases for SHOW
+//
+// Sink-free design mirrors `dispatch_cypher_text`: callers pass a
+// `QueryEmitter` and we push one formatted row per match.  The
+// hypervisor's `interpret_command` emitter writes into the chat HUD;
+// harness tests collect into a Vec for assertion.
+
+/// One outcome of a public Cypher query dispatch.
+#[derive(Debug, Clone, Copy)]
+pub enum CypherQueryOutcome {
+    /// Query didn't start with a recognised read verb.
+    NotQuery,
+    /// Recognised but the argument was malformed (bad class name,
+    /// bad vector, etc.).
+    BadSyntax(&'static str),
+    /// A `'V'` literal didn't resolve to an existing runtime node.
+    EndpointNotFound(&'static str),
+    /// Query executed; `count` is the number of rows emitted via the
+    /// caller's `QueryEmitter`.  Zero is a legitimate empty result.
+    Rows { count: usize },
+}
+
+/// Caller-supplied sink for query rows.  Each call to `emit_row`
+/// receives one formatted line of ASCII text.  Implementation can
+/// log into a scrollback, push into a Vec, or do anything else.
+pub trait QueryEmitter {
+    fn emit_row(&mut self, row: &str);
+}
+
+/// Parse + execute a Cypher read query against the live runtime.
+/// See the verb table above for accepted forms.
+pub fn dispatch_cypher_query<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let is_show_nodes = starts_with_ci(query, "show nodes") || starts_with_ci(query, "match nodes");
+    let is_show_edges = starts_with_ci(query, "show edges") || starts_with_ci(query, "match edges");
+
+    if !(is_show_nodes || is_show_edges) {
+        return CypherQueryOutcome::NotQuery;
+    }
+
+    if is_show_nodes {
+        let class_filter = match parse_class_filter(query) {
+            Ok(opt) => opt,
+            Err(msg) => return CypherQueryOutcome::BadSyntax(msg),
+        };
+        return show_nodes(emitter, class_filter);
+    }
+
+    debug_assert!(is_show_edges);
+    // EDGES support three optional filters: kind, FROM 'V', TO 'V'.
+    let kind_filter = match parse_kind_filter(query) {
+        Ok(opt) => opt,
+        Err(msg) => return CypherQueryOutcome::BadSyntax(msg),
+    };
+    let from_filter = match parse_endpoint_filter(query, "from") {
+        Ok(opt) => opt,
+        Err(out) => return out,
+    };
+    let to_filter = match parse_endpoint_filter(query, "to") {
+        Ok(opt) => opt,
+        Err(out) => return out,
+    };
+    show_edges(emitter, kind_filter, from_filter, to_filter)
+}
+
+fn show_nodes<E: QueryEmitter>(
+    emitter: &mut E,
+    class_filter: Option<gos_protocol::NodeSubDomain>,
+) -> CypherQueryOutcome {
+    let mut buf = [GraphNodeSummary::EMPTY; 64];
+    let (_total, returned) = gos_runtime::node_page(0, &mut buf);
+    let mut count = 0usize;
+    for n in &buf[..returned] {
+        if let Some(cls) = class_filter {
+            if n.sub_domain != cls {
+                continue;
+            }
+        }
+        let mut row = RowBuf::<80>::new();
+        push_vec(&mut row, n.vector);
+        row.push_str("  ");
+        // Pad plugin name to 14 chars.
+        let nm = trim_k_prefix(n.plugin_name);
+        let take = nm.len().min(14);
+        row.push_str(&nm[..take]);
+        for _ in take..14 {
+            row.push_str(" ");
+        }
+        row.push_str(node_type_label(n.node_type));
+        row.push_str(" / ");
+        row.push_str(sub_domain_label(n.sub_domain));
+        emitter.emit_row(row.as_str());
+        count += 1;
+    }
+    CypherQueryOutcome::Rows { count }
+}
+
+fn show_edges<E: QueryEmitter>(
+    emitter: &mut E,
+    kind_filter: Option<RuntimeEdgeType>,
+    from_filter: Option<VectorAddress>,
+    to_filter: Option<VectorAddress>,
+) -> CypherQueryOutcome {
+    let mut buf = [GraphEdgeSummary::EMPTY; 128];
+    let (_total, returned) = gos_runtime::edge_page(0, &mut buf);
+    let mut count = 0usize;
+    for e in &buf[..returned] {
+        if let Some(kind) = kind_filter {
+            if e.edge_type != kind {
+                continue;
+            }
+        }
+        if let Some(from) = from_filter {
+            if e.from_vector != from {
+                continue;
+            }
+        }
+        if let Some(to) = to_filter {
+            if e.to_vector != to {
+                continue;
+            }
+        }
+        let mut row = RowBuf::<80>::new();
+        push_vec(&mut row, e.from_vector);
+        row.push_str(" -> ");
+        push_vec(&mut row, e.to_vector);
+        row.push_str("  ");
+        row.push_str(edge_type_label(e.edge_type));
+        if let Some(ns) = e.capability_namespace {
+            row.push_str("  [");
+            let take = ns.len().min(20);
+            row.push_str(&ns[..take]);
+            if let Some(cap) = e.capability_binding {
+                row.push_str("/");
+                let take2 = cap.len().min(20);
+                row.push_str(&cap[..take2]);
+            }
+            row.push_str("]");
+        }
+        emitter.emit_row(row.as_str());
+        count += 1;
+    }
+    CypherQueryOutcome::Rows { count }
+}
+
+fn parse_class_filter(query: &str) -> Result<Option<gos_protocol::NodeSubDomain>, &'static str> {
+    let key = if let Some(idx) = find_ci(query, "of class") {
+        idx + "of class".len()
+    } else if let Some(idx) = find_ci(query, "where class") {
+        let after = idx + "where class".len();
+        // Skip optional '=' or ':'
+        skip_eq_colon_ws(query, after)
+    } else {
+        return Ok(None);
+    };
+    let token = next_token(&query[key..]).ok_or("class filter missing argument")?;
+    Ok(Some(match_class_token(token).ok_or("unknown class (try Hardware/Driver/Service/Compute/Routing/Vector)")?))
+}
+
+fn parse_kind_filter(query: &str) -> Result<Option<RuntimeEdgeType>, &'static str> {
+    let key = if let Some(idx) = find_ci(query, "of kind") {
+        idx + "of kind".len()
+    } else if let Some(idx) = find_ci(query, "where kind") {
+        let after = idx + "where kind".len();
+        skip_eq_colon_ws(query, after)
+    } else {
+        return Ok(None);
+    };
+    let token = next_token(&query[key..]).ok_or("kind filter missing argument")?;
+    Ok(Some(match_kind_token(token).ok_or("unknown kind (try Mount/Use/Signal/Call/Spawn/Link/Depend)")?))
+}
+
+fn parse_endpoint_filter(
+    query: &str,
+    key: &str,
+) -> Result<Option<VectorAddress>, CypherQueryOutcome> {
+    let Some(literal) = extract_quoted_value_word(query, key) else {
+        return Ok(None);
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return Err(CypherQueryOutcome::BadSyntax("bad vector literal for FROM/TO filter"));
+    };
+    if gos_runtime::node_id_for_vec(vec).is_none() {
+        return Err(CypherQueryOutcome::EndpointNotFound("FROM/TO endpoint not found"));
+    }
+    Ok(Some(vec))
+}
+
+fn skip_eq_colon_ws(query: &str, mut idx: usize) -> usize {
+    let bytes = query.as_bytes();
+    while idx < bytes.len() && (bytes[idx] == b'=' || bytes[idx] == b':' || bytes[idx].is_ascii_whitespace()) {
+        idx += 1;
+    }
+    idx
+}
+
+fn next_token(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = start;
+    while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b',' && bytes[end] != b';' {
+        end += 1;
+    }
+    if start == end {
+        None
+    } else {
+        s.get(start..end)
+    }
+}
+
+fn match_class_token(tok: &str) -> Option<gos_protocol::NodeSubDomain> {
+    use gos_protocol::NodeSubDomain;
+    let lower_match = |needle: &str| eq_ci(tok, needle);
+    if lower_match("hw") || lower_match("hardware") {
+        Some(NodeSubDomain::Hardware)
+    } else if lower_match("drv") || lower_match("driver") || lower_match("kerneldriver") {
+        Some(NodeSubDomain::KernelDriver)
+    } else if lower_match("svc") || lower_match("service") {
+        Some(NodeSubDomain::Service)
+    } else if lower_match("cpu") || lower_match("compute") {
+        Some(NodeSubDomain::Compute)
+    } else if lower_match("rtr") || lower_match("routing") || lower_match("router") {
+        Some(NodeSubDomain::Routing)
+    } else if lower_match("vec") || lower_match("vector") {
+        Some(NodeSubDomain::Vector)
+    } else {
+        None
+    }
+}
+
+fn match_kind_token(tok: &str) -> Option<RuntimeEdgeType> {
+    let lower_match = |needle: &str| eq_ci(tok, needle);
+    if lower_match("call") {
+        Some(RuntimeEdgeType::Call)
+    } else if lower_match("spawn") {
+        Some(RuntimeEdgeType::Spawn)
+    } else if lower_match("depend") {
+        Some(RuntimeEdgeType::Depend)
+    } else if lower_match("signal") {
+        Some(RuntimeEdgeType::Signal)
+    } else if lower_match("return") {
+        Some(RuntimeEdgeType::Return)
+    } else if lower_match("mount") {
+        Some(RuntimeEdgeType::Mount)
+    } else if lower_match("sync") {
+        Some(RuntimeEdgeType::Sync)
+    } else if lower_match("stream") {
+        Some(RuntimeEdgeType::Stream)
+    } else if lower_match("use") {
+        Some(RuntimeEdgeType::Use)
+    } else if lower_match("link") {
+        Some(RuntimeEdgeType::Link)
+    } else {
+        None
+    }
+}
+
+fn eq_ci(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if ascii_lower(a[i]) != ascii_lower(b[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+fn extract_quoted_value_word<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    // Look for `key 'V'` (no = required, FROM/TO style).
+    let idx = find_ci(query, key)?;
+    let after = idx + key.len();
+    let bytes = query.as_bytes();
+    let mut cursor = after;
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b'=' || bytes[cursor] == b':') {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() {
+        return None;
+    }
+    let q = bytes[cursor];
+    if q != b'\'' && q != b'"' {
+        return None;
+    }
+    let start = cursor + 1;
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != q {
+        end += 1;
+    }
+    query.get(start..end)
+}
+
+fn trim_k_prefix(s: &str) -> &str {
+    s.strip_prefix("K_").unwrap_or(s)
+}
+
+fn node_type_label(t: gos_protocol::RuntimeNodeType) -> &'static str {
+    use gos_protocol::RuntimeNodeType;
+    match t {
+        RuntimeNodeType::Hardware => "HW",
+        RuntimeNodeType::Driver => "DRV",
+        RuntimeNodeType::Service => "SVC",
+        RuntimeNodeType::PluginEntry => "PE",
+        RuntimeNodeType::Compute => "CPU",
+        RuntimeNodeType::Router => "RTR",
+        RuntimeNodeType::Aggregator => "AGG",
+        RuntimeNodeType::Vector => "VEC",
+    }
+}
+
+fn sub_domain_label(s: gos_protocol::NodeSubDomain) -> &'static str {
+    use gos_protocol::NodeSubDomain;
+    match s {
+        NodeSubDomain::Hardware => "Hardware",
+        NodeSubDomain::KernelDriver => "Driver",
+        NodeSubDomain::Service => "Service",
+        NodeSubDomain::Compute => "Compute",
+        NodeSubDomain::Routing => "Routing",
+        NodeSubDomain::Vector => "Vector",
+    }
+}
+
+fn edge_type_label(e: RuntimeEdgeType) -> &'static str {
+    match e {
+        RuntimeEdgeType::Call => "Call",
+        RuntimeEdgeType::Spawn => "Spawn",
+        RuntimeEdgeType::Depend => "Depend",
+        RuntimeEdgeType::Signal => "Signal",
+        RuntimeEdgeType::Return => "Return",
+        RuntimeEdgeType::Mount => "Mount",
+        RuntimeEdgeType::Sync => "Sync",
+        RuntimeEdgeType::Stream => "Stream",
+        RuntimeEdgeType::Use => "Use",
+        RuntimeEdgeType::Link => "Link",
+    }
+}
+
+fn push_vec<const N: usize>(row: &mut RowBuf<N>, v: VectorAddress) {
+    row.push_dec(v.l4 as u64);
+    row.push_str(".");
+    row.push_dec(v.l3 as u64);
+    row.push_str(".");
+    row.push_dec(v.l2 as u64);
+    row.push_str(".");
+    row.push_dec(v.offset as u64);
+}
+
+/// Tiny stack-only string builder for query rows.  Truncates silently
+/// past `N` bytes; caller's emitter sees the truncated &str.
+pub struct RowBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> RowBuf<N> {
+    pub fn new() -> Self {
+        Self { buf: [0; N], len: 0 }
+    }
+
+    pub fn push_str(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            if self.len >= N {
+                return;
+            }
+            self.buf[self.len] = b;
+            self.len += 1;
+        }
+    }
+
+    pub fn push_dec(&mut self, n: u64) {
+        let mut buf = [0u8; 20];
+        let mut i = buf.len();
+        let mut v = n;
+        if v == 0 {
+            self.push_str("0");
+            return;
+        }
+        while v > 0 && i > 0 {
+            i -= 1;
+            buf[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        // SAFETY: ASCII digits.
+        let s = unsafe { core::str::from_utf8_unchecked(&buf[i..]) };
+        self.push_str(s);
+    }
+
+    pub fn as_str(&self) -> &str {
+        // SAFETY: only ASCII written via push_str / push_dec.
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
 fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
     let query = query.trim();
     if query.is_empty() {
