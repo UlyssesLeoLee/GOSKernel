@@ -2141,6 +2141,7 @@ fn interpret_command(raw: &str) {
             ui.log("  inspect <vec>     deep-dive on a node");
             ui.log("  nodes / edges     graph stats");
             ui.log("  uptime / gen      runtime info");
+            ui.log("  journal           audit log tail + counts");
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
             ui.log("cypher reads (live graph):");
@@ -2213,6 +2214,42 @@ fn interpret_command(raw: &str) {
             row.push_str("graph_generation=");
             row.push_dec(gos_runtime::graph_generation());
             ui.log(row.as_str());
+        }
+        "journal" => {
+            // J.2 — show journal stats and the most recent entries.
+            let stored = gos_runtime::journal_len();
+            let lifetime = gos_runtime::journal_lifetime();
+            let mut row = TextBuf::<48>::new();
+            row.push_str("journal stored=");
+            row.push_dec(stored as u64);
+            row.push_str(" lifetime=");
+            row.push_dec(lifetime);
+            ui.log(row.as_str());
+            // Tail: last 6 envelopes (newest at the bottom).
+            let tail_start = stored.saturating_sub(6);
+            for i in tail_start..stored {
+                if let Some(env) = gos_runtime::journal_envelope_at(i) {
+                    let mut r = TextBuf::<48>::new();
+                    r.push_str("  ");
+                    r.push_dec(i as u64);
+                    r.push_str(": ");
+                    use gos_protocol::ControlPlaneMessageKind::*;
+                    r.push_str(match env.kind {
+                        Hello => "Hello",
+                        PluginDiscovered => "PluginDiscovered",
+                        NodeUpsert => "NodeUpsert",
+                        EdgeUpsert => "EdgeUpsert",
+                        StateDelta => "StateDelta",
+                        SnapshotChunk => "SnapshotChunk",
+                        Fault => "Fault",
+                        Metric => "Metric",
+                        CypherMutationAudited => "CypherMutationAudited",
+                    });
+                    r.push_str(" arg0=");
+                    r.push_dec(env.arg0);
+                    ui.log(r.as_str());
+                }
+            }
         }
         "uptime" => {
             let frame = FRAME_COUNTER.load(Ordering::Relaxed);

@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-cypher-mut = { path = "../gos-cypher-mut" }
+gos-journal = { path = "../gos-journal" }
 spin = "0.9"

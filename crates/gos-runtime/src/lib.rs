@@ -376,6 +376,14 @@ pub struct GraphRuntime {
     wait_sets: [Option<WaitSet>; MAX_WAITSETS],
     barriers: [Option<Barrier>; MAX_BARRIERS],
     control_plane: RingQueue<ControlPlaneEnvelope, MAX_CONTROL_PLANE_MESSAGES>,
+    /// Phase J.2 — durability primitive.  Every control-plane envelope
+    /// also lands here so the kernel maintains a continuous audit log
+    /// of its own graph mutations.  Capacity 512 = 20 KB; oldest
+    /// entries roll off the front of the ring when full.  Visible via
+    /// `journal_count`, `journal_envelope_at`, `journal_snapshot_into`
+    /// (for future VFS-backed persistence in J.2.B) and via the
+    /// `journal` command in the boot UI.
+    journal: gos_journal::JournalRing<512>,
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
     tick: u64,
@@ -394,6 +402,7 @@ impl GraphRuntime {
             wait_sets: [None; MAX_WAITSETS],
             barriers: [None; MAX_BARRIERS],
             control_plane: RingQueue::new(),
+            journal: gos_journal::JournalRing::new(),
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             tick: 0,
@@ -407,13 +416,40 @@ impl GraphRuntime {
         arg0: u64,
         arg1: u64,
     ) {
-        let _ = self.control_plane.push_control_plane(ControlPlaneEnvelope {
+        let env = ControlPlaneEnvelope {
             version: CONTROL_PLANE_PROTOCOL_VERSION,
             kind,
             subject,
             arg0,
             arg1,
-        });
+        };
+        let _ = self.control_plane.push_control_plane(env);
+        // Phase J.2 — continuous audit log via the journal ring.
+        // Ring overwrites oldest when full so the kernel maintains a
+        // bounded recent-history window without ever blocking.
+        self.journal.push(&env);
+    }
+
+    /// Phase J.2 — number of journal entries currently stored.
+    pub fn journal_len(&self) -> usize {
+        self.journal.len()
+    }
+
+    /// Phase J.2 — lifetime envelope count (across overwrites).
+    pub fn journal_lifetime(&self) -> u64 {
+        self.journal.lifetime_pushed()
+    }
+
+    /// Phase J.2 — read the i-th OLDEST stored envelope.
+    pub fn journal_envelope_at(&self, i: usize) -> Option<ControlPlaneEnvelope> {
+        self.journal.envelope_at(i)
+    }
+
+    /// Phase J.2 — serialize the journal (header + records) into the
+    /// caller's buffer.  Used by the J.2.B follow-up that writes the
+    /// blob through VFS for true cross-reboot persistence.
+    pub fn journal_snapshot_into(&self, out: &mut [u8]) -> Result<usize, gos_journal::JournalError> {
+        self.journal.flush_into(out)
     }
 
     fn plugin_slot(&self, plugin_id: PluginId) -> Option<usize> {
@@ -2208,6 +2244,31 @@ pub fn is_stable() -> bool {
 
 pub fn drain_control_plane() -> Option<ControlPlaneEnvelope> {
     RUNTIME.lock().drain_control_plane()
+}
+
+/// Phase J.2 — number of journal entries currently stored.  Stays
+/// at the ring capacity (512) once it fills; lifetime_pushed gives
+/// the unbounded total.
+pub fn journal_len() -> usize {
+    RUNTIME.lock().journal_len()
+}
+
+/// Phase J.2 — total envelopes the runtime has ever emitted, across
+/// ring overwrites.  Useful for diagnostics and for the kernel's
+/// `journal` shell command.
+pub fn journal_lifetime() -> u64 {
+    RUNTIME.lock().journal_lifetime()
+}
+
+/// Phase J.2 — read the i-th OLDEST currently-stored journal entry.
+pub fn journal_envelope_at(i: usize) -> Option<ControlPlaneEnvelope> {
+    RUNTIME.lock().journal_envelope_at(i)
+}
+
+/// Phase J.2 — serialize the journal (header + records) into the
+/// caller's buffer.  Required size = HEADER_BYTES + len() * ENVELOPE_RECORD_BYTES.
+pub fn journal_snapshot_into(out: &mut [u8]) -> Result<usize, gos_journal::JournalError> {
+    RUNTIME.lock().journal_snapshot_into(out)
 }
 
 pub fn push_envelope(envelope: ControlPlaneEnvelope) {

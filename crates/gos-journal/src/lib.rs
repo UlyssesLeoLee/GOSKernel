@@ -150,6 +150,7 @@ fn decode_kind(raw: u8) -> Result<ControlPlaneMessageKind, JournalError> {
         0x06 => SnapshotChunk,
         0x07 => Fault,
         0x08 => Metric,
+        0x09 => CypherMutationAudited,
         other => return Err(JournalError::UnknownKind(other)),
     })
 }
@@ -187,14 +188,26 @@ where
 /// not bytes — total buffer size is N * 40.
 pub struct JournalRing<const N: usize> {
     records: [[u8; ENVELOPE_RECORD_BYTES]; N],
+    /// `head` = oldest stored entry's index when `len > 0`.  When
+    /// `wrapped == false`, `head` is always 0 (linear append mode).
+    /// When the ring fills and starts overwriting (J.2), `head`
+    /// advances so the oldest entry rolls off.
+    head: usize,
     len: usize,
+    /// Total envelopes ever pushed (across overwrites).  Useful for
+    /// "how many mutations has this kernel processed" stats.
+    lifetime: u64,
+    wrapped: bool,
 }
 
 impl<const N: usize> JournalRing<N> {
     pub const fn new() -> Self {
         Self {
             records: [[0u8; ENVELOPE_RECORD_BYTES]; N],
+            head: 0,
             len: 0,
+            lifetime: 0,
+            wrapped: false,
         }
     }
 
@@ -210,18 +223,60 @@ impl<const N: usize> JournalRing<N> {
         self.len == 0
     }
 
+    /// Total envelopes pushed over the lifetime of this ring (even
+    /// ones that have been overwritten by `push`).
+    pub fn lifetime_pushed(&self) -> u64 {
+        self.lifetime
+    }
+
+    /// True once the ring has wrapped at least once — oldest entries
+    /// from boot have been overwritten.
+    pub fn has_wrapped(&self) -> bool {
+        self.wrapped
+    }
+
     pub fn append(&mut self, env: &ControlPlaneEnvelope) -> Result<(), JournalError> {
         if self.is_full() {
             return Err(JournalError::TrailingBytes); // re-using the variant for "no room"
         }
-        serialize_envelope(env, &mut self.records[self.len]);
+        let slot = (self.head + self.len) % N;
+        serialize_envelope(env, &mut self.records[slot]);
         self.len += 1;
+        self.lifetime += 1;
         Ok(())
     }
 
-    /// Write header + all buffered records into `out`.  Returns the
-    /// number of bytes written.  If `out` is too small, returns
-    /// `Err(JournalError::BadHeader)` (re-using for "no buffer").
+    /// Phase J.2 — ring-style push: overwrites the oldest entry when
+    /// full.  Always succeeds; suitable for in-kernel continuous
+    /// audit logging.  Returns `true` if an existing entry was
+    /// overwritten.
+    pub fn push(&mut self, env: &ControlPlaneEnvelope) -> bool {
+        let slot = (self.head + self.len) % N;
+        serialize_envelope(env, &mut self.records[slot]);
+        self.lifetime += 1;
+        if self.len < N {
+            self.len += 1;
+            false
+        } else {
+            self.head = (self.head + 1) % N;
+            self.wrapped = true;
+            true
+        }
+    }
+
+    /// Return the i-th OLDEST envelope (0 = oldest still stored).
+    pub fn envelope_at(&self, i: usize) -> Option<ControlPlaneEnvelope> {
+        if i >= self.len {
+            return None;
+        }
+        let slot = (self.head + i) % N;
+        deserialize_envelope(&self.records[slot]).ok()
+    }
+
+    /// Write header + all buffered records into `out`, OLDEST FIRST.
+    /// Honors ring semantics (head/len) so wrapped buffers serialize
+    /// correctly.  Returns the number of bytes written.  If `out` is
+    /// too small, returns `Err(JournalError::BadHeader)`.
     pub fn flush_into(&self, out: &mut [u8]) -> Result<usize, JournalError> {
         let total = HEADER_BYTES + self.len * ENVELOPE_RECORD_BYTES;
         if out.len() < total {
@@ -230,15 +285,18 @@ impl<const N: usize> JournalRing<N> {
         let mut header = [0u8; HEADER_BYTES];
         JournalHeader::current().write_into(&mut header);
         out[..HEADER_BYTES].copy_from_slice(&header);
-        for (i, record) in self.records[..self.len].iter().enumerate() {
+        for i in 0..self.len {
+            let slot = (self.head + i) % N;
             let off = HEADER_BYTES + i * ENVELOPE_RECORD_BYTES;
-            out[off..off + ENVELOPE_RECORD_BYTES].copy_from_slice(record);
+            out[off..off + ENVELOPE_RECORD_BYTES].copy_from_slice(&self.records[slot]);
         }
         Ok(total)
     }
 
     pub fn reset(&mut self) {
+        self.head = 0;
         self.len = 0;
+        self.wrapped = false;
     }
 }
 
