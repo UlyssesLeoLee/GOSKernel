@@ -758,6 +758,14 @@ impl GraphRuntime {
         self.node_summary_from_slot(slot)
     }
 
+    /// J.6 — look up a node by NodeId.  Symmetric with `node_summary`
+    /// (which keys on VectorAddress).  Used by the supervisor's ACL
+    /// gate which sees mutations by node_id (Cypher's natural form).
+    pub fn node_summary_by_id(&self, node_id: NodeId) -> Option<GraphNodeSummary> {
+        let slot = self.node_slot_by_id(node_id)?;
+        self.node_summary_from_slot(slot)
+    }
+
     /// Query a node's telemetry via its executor vtable callback.
     pub fn node_telemetry(&self, vector: VectorAddress) -> Option<NodeTelemetry> {
         let slot = self.node_slot_by_vec(vector)?;
@@ -1862,6 +1870,10 @@ pub fn edge_vector_for_id(edge_id: EdgeId) -> Option<EdgeVector> {
 
 pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
     RUNTIME.lock().edge_id_for_vector(edge_vector)
+}
+
+pub fn node_summary_by_id(node_id: NodeId) -> Option<GraphNodeSummary> {
+    RUNTIME.lock().node_summary_by_id(node_id)
 }
 
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {

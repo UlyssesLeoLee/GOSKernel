@@ -743,6 +743,46 @@ pub enum NodeSubDomain {
     Vector = 0x06,
 }
 
+// ── Phase J.6 — class-based ACL ───────────────────────────────────
+//
+// Constrain which NodeSubDomain classes are allowed to be on the
+// source end of which edge type pointing at which target class.
+// Today the policy is intentionally narrow — just one rule that
+// keeps Hardware nodes accessible only through their owning
+// KernelDriver — but the framework is in place so additional rules
+// can land without touching every callsite.
+//
+// The rule space is (source, edge_kind, target).  Mount/Use/Link
+// are the receptive (user-mutable) edge kinds; the others are
+// runtime-internal and not gated here.  An edge_kind not listed
+// in the policy table is always allowed.
+//
+// Wired into `gos_supervisor::apply_cypher_mutation` so any Cypher
+// CREATE / LINK / REBIND that violates the ACL is rejected with
+// `MutationError::DispatcherRejected(ACL_VIOLATION)`.
+
+/// Returns true if a graph mutation creating an edge of kind
+/// `edge_kind` from a node in `source_class` to a node in
+/// `target_class` is permitted by the runtime ACL.  See module
+/// docs for the rule set.
+pub const fn sub_domain_allows_edge(
+    source_class: NodeSubDomain,
+    target_class: NodeSubDomain,
+    edge_kind: u8,
+) -> bool {
+    // Rule J.6.A — only KernelDriver may Mount Hardware.  This is
+    // the bedrock isolation: user-class code (Service / Compute /
+    // Routing / Vector) cannot directly mount a hardware node into
+    // its namespace; it must go through the driver.  Use and Link
+    // remain unrestricted in this round.
+    if matches!(target_class, NodeSubDomain::Hardware)
+        && edge_kind == 1 // ReceptiveEdgeKind::Mount as u8
+    {
+        return matches!(source_class, NodeSubDomain::KernelDriver);
+    }
+    true
+}
+
 impl RuntimeNodeType {
     pub const fn sub_domain(self) -> NodeSubDomain {
         match self {
