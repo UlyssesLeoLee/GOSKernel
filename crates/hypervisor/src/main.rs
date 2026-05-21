@@ -1803,6 +1803,10 @@ struct UiState {
     /// from the last drain so we know which entries are new.
     watch_journal: bool,
     watch_journal_last_lifetime: u64,
+    /// L.9 — optional filter: when Some(kind_u8), tick_journal_watcher
+    /// only emits envelopes whose `kind as u8 == filter`.  Unset
+    /// → emit all (the L.6 default behaviour).
+    watch_filter: Option<u8>,
 }
 
 impl UiState {
@@ -1821,6 +1825,7 @@ impl UiState {
             hist_cursor: None,
             watch_journal: false,
             watch_journal_last_lifetime: 0,
+            watch_filter: None,
         }
     }
 
@@ -1956,9 +1961,9 @@ static FRAME_COUNTER: core::sync::atomic::AtomicU64 =
 /// every new envelope, format a one-line summary and push into the
 /// scrollback so it flows through the chat HUD.
 fn tick_journal_watcher() {
-    let (enabled, last_lifetime) = {
+    let (enabled, last_lifetime, filter) = {
         let ui = UI_STATE.lock();
-        (ui.watch_journal, ui.watch_journal_last_lifetime)
+        (ui.watch_journal, ui.watch_journal_last_lifetime, ui.watch_filter)
     };
     if !enabled {
         return;
@@ -1967,15 +1972,18 @@ fn tick_journal_watcher() {
     if now_lifetime <= last_lifetime {
         return;
     }
-    // New entries arrived.  Compute how many of them are still
-    // resident in the ring (cap at stored length so we don't try to
-    // read beyond what's available after wrap).
     let new_count = (now_lifetime - last_lifetime).min(64) as usize;
     let stored = gos_runtime::journal_len();
     let start = stored.saturating_sub(new_count);
     use gos_protocol::ControlPlaneMessageKind::*;
     for i in start..stored {
         if let Some(env) = gos_runtime::journal_envelope_at(i) {
+            // L.9 — apply optional filter.
+            if let Some(want) = filter {
+                if (env.kind as u8) != want {
+                    continue;
+                }
+            }
             let mut row = TextBuf::<48>::new();
             row.push_str("J ");
             row.push_dec(i as u64);
@@ -2196,7 +2204,8 @@ fn interpret_command(raw: &str) {
             ui.log("  nodes / edges     graph stats");
             ui.log("  uptime / gen      runtime info");
             ui.log("  journal           audit log tail + counts");
-            ui.log("  watch / unwatch   live-tail journal events");
+            ui.log("  watch [filter]    live-tail (filters: fault/mutation/node/edge/state)");
+            ui.log("  unwatch           stop tailing");
             ui.log("  bench [rpc] [N]   RDTSC measure RPC echo latency");
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
@@ -2280,17 +2289,62 @@ fn interpret_command(raw: &str) {
             ui.log(row.as_str());
         }
         "watch" => {
-            // K.6 — start tailing new journal envelopes.  Each
-            // paint_frame tick will append any newly-arrived entries
-            // to the scrollback.  Cap the last-seen lifetime at the
-            // current value so we only print FUTURE arrivals, not
-            // backlog.
+            // K.6 + L.9 — tail new journal envelopes, optionally
+            // filtered by kind.  Syntax:
+            //   watch                show all kinds (default)
+            //   watch fault          only Fault envelopes
+            //   watch mutation       only CypherMutationAudited
+            //   watch node           only NodeUpsert
+            //   watch edge           only EdgeUpsert
+            //   watch state          only StateDelta
+            let after = line.get(token_end..).unwrap_or("");
+            let arg = after.trim_start_matches(|c: char| c == ' ' || c == '\t');
+            use gos_protocol::ControlPlaneMessageKind as K;
+            ui.watch_filter = if arg.is_empty() || arg.eq_ignore_ascii_case("all") {
+                None
+            } else if arg.eq_ignore_ascii_case("fault") {
+                Some(K::Fault as u8)
+            } else if arg.eq_ignore_ascii_case("mutation") || arg.eq_ignore_ascii_case("audit") {
+                Some(K::CypherMutationAudited as u8)
+            } else if arg.eq_ignore_ascii_case("node") {
+                Some(K::NodeUpsert as u8)
+            } else if arg.eq_ignore_ascii_case("edge") {
+                Some(K::EdgeUpsert as u8)
+            } else if arg.eq_ignore_ascii_case("state") {
+                Some(K::StateDelta as u8)
+            } else if arg.eq_ignore_ascii_case("metric") {
+                Some(K::Metric as u8)
+            } else if arg.eq_ignore_ascii_case("plugin") {
+                Some(K::PluginDiscovered as u8)
+            } else {
+                let mut r = TextBuf::<60>::new();
+                r.push_str("unknown watch filter: ");
+                let take = arg.len().min(32);
+                r.push_str(unsafe { core::str::from_utf8_unchecked(&arg.as_bytes()[..take]) });
+                ui.log(r.as_str());
+                ui.log("  filters: all fault mutation node edge state metric plugin");
+                return;
+            };
             ui.watch_journal = true;
             ui.watch_journal_last_lifetime = gos_runtime::journal_lifetime();
-            ui.log("watch journal: ON (any new envelope will appear above)");
+            let mut r = TextBuf::<60>::new();
+            r.push_str("watch journal: ON  filter=");
+            r.push_str(match ui.watch_filter {
+                None => "all",
+                Some(x) if x == K::Fault as u8 => "fault",
+                Some(x) if x == K::CypherMutationAudited as u8 => "mutation",
+                Some(x) if x == K::NodeUpsert as u8 => "node",
+                Some(x) if x == K::EdgeUpsert as u8 => "edge",
+                Some(x) if x == K::StateDelta as u8 => "state",
+                Some(x) if x == K::Metric as u8 => "metric",
+                Some(x) if x == K::PluginDiscovered as u8 => "plugin",
+                _ => "?",
+            });
+            ui.log(r.as_str());
         }
         "unwatch" => {
             ui.watch_journal = false;
+            ui.watch_filter = None;
             ui.log("watch journal: OFF");
         }
         "bench" => {
