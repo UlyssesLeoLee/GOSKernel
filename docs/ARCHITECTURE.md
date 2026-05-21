@@ -142,10 +142,10 @@ runtime 图：metallic spheres (nodes) + ropes (edges) + Verlet 物理 +
 PBR 着色 (I.14)。
 
 命令栏接受三种语句：
-1. **Cypher reads**: `SHOW STATS / NODES / EDGES / PLUGINS / JOURNAL`
+1. **Cypher reads**: `SHOW STATS / NODES / EDGES / PLUGINS / JOURNAL / PRIORITY`
 2. **Cypher mutations**: `CREATE MOUNT / USE`, `LINK`, `REBIND USE`, `DELETE EDGE`
-3. **Cypher actions**: `SET PRIORITY`, `INVOKE`
-4. **Built-in commands**: `kernel`, `os`, `help`, `clear`, `log`, `nodes`, `edges`, `ps`, `gen`, `uptime`, `journal`, `inspect <vec>`
+3. **Cypher actions**: `SET PRIORITY 'V' = N`, `RESET PRIORITY 'V'`, `INVOKE 'V' WITH N`
+4. **Built-in commands**: `kernel`, `os`, `help`, `clear`, `log`, `nodes`, `edges`, `ps`, `gen`, `uptime`, `journal`, `watch` / `unwatch`, `inspect <vec>`
 
 每次输入产生 `you> ...` echo + `cypher> ...` 或 `gos> ...` reply，写
 入 scrollback ring，前 4 条作为 chat HUD overlay 浮在 3D scene 上。
@@ -163,20 +163,27 @@ PBR 着色 (I.14)。
 - **Phase A-H** — 早期 bootstrap，capability lookup，Cypher writes
 - **Phase I** — 3D UI (octahedral → metal balls + ropes), Cypher in command bar, PBR shader, chat HUD
 - **Phase J** — Kernel native mechanism completion (J.1-J.8)
-- **Phase K** — Cypher as full control plane (K.1-K.3 done, K.4 = this doc)
+- **Phase K** — Cypher as full control plane
+   - K.1 `SHOW STATS` — 综合运行时状态
+   - K.2 `SET PRIORITY 'V' = N` — Cypher 写 J.7 priority
+   - K.3 `INVOKE 'V' [WITH N]` — Cypher 发起 J.3 RPC
+   - K.4 `ARCHITECTURE.md` (本文档)
+   - K.6 `watch` / `unwatch` — 实时 tail journal envelope 流
+   - K.8 `SHOW PRIORITY 'V'` + `RESET PRIORITY 'V'` — priority 子系统闭环
 
-## 11. Phase K+ candidates
+## 11. Phase L+ candidates (待定)
 
 | 候选 | 说明 |
 |---|---|
 | J.3.B | 指针 payload RPC（payload + length 编码到 u64） |
 | J.2.B | VFS-backed journal — 真正跨重启持久化 |
-| K.5   | `SET <node> <property> = <value>` — 通用属性变更 |
-| K.6   | `WATCH JOURNAL` — 持续监视新事件流，类似 tail -f |
-| K.7   | Plugin hot-reload — 通过 J.4 版本号原子替换 implementation |
-| K.8   | Schema enforcement — `state_schema_hash` 升级为完整 schema descriptor |
-| K.9   | Deadline-aware scheduling — 每节点微秒预算 + 超时 fault |
-| K.10  | Ring-3 ELF loader — 用户进程，capability 作为 protection model |
+| K.7   | NodeSpec.default_priority — 节点 manifest 声明默认优先级 (58 个 literal 需要迁移) |
+| L.1   | `SET <node> <property> = <value>` — 通用属性变更框架 |
+| L.2   | Plugin hot-reload — 通过 J.4 版本号原子替换 implementation |
+| L.3   | Schema enforcement — `state_schema_hash` 升级为完整 schema descriptor |
+| L.4   | Deadline-aware scheduling — 每节点微秒预算 + 超时 fault |
+| L.5   | Ring-3 ELF loader — 用户进程，capability 作为 protection model |
+| L.6   | RPC-capable echo plugin — 让 INVOKE 有真实 target，可做 ping/bench |
 
 ## 12. 测试覆盖
 
