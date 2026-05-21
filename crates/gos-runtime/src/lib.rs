@@ -2127,6 +2127,23 @@ struct RpcSlot {
 
 static RPC_SLOT: Mutex<Option<RpcSlot>> = Mutex::new(None);
 
+/// Phase J.3.B — pointer-payload RPC slot.  Parallel to RPC_SLOT
+/// (word path), but carries `(&[u8], &mut [u8])` for arbitrary-
+/// sized byte-stream calls.  Pointers are stored as usize so the
+/// struct is `Copy`; lifetime is bounded by the caller's stack
+/// frame which holds the original buffers alive until rpc_invoke_buf
+/// returns.
+#[derive(Debug, Clone, Copy)]
+struct RpcBufSlot {
+    request_ptr: usize,
+    request_len: usize,
+    response_ptr: usize,
+    response_cap: usize,
+    response_len: Option<usize>,
+}
+
+static RPC_BUF_SLOT: Mutex<Option<RpcBufSlot>> = Mutex::new(None);
+
 /// Phase L.6 — internal RPC debug target.  Vector `0.0.0.0` is
 /// reserved as a runtime-handled "echo" service: `rpc_invoke`
 /// against it bypasses dispatch entirely and returns the request
@@ -2185,6 +2202,119 @@ pub fn rpc_reply(value: u64) {
 /// dispatch.
 pub fn rpc_request() -> Option<u64> {
     RPC_SLOT.lock().as_ref().map(|s| s.request)
+}
+
+// ── Phase J.3.B — pointer-payload RPC ─────────────────────────────
+//
+// Word-sized rpc_invoke is the simplest possible primitive but
+// limits payloads to 8 bytes.  J.3.B adds an arbitrary-byte-stream
+// variant that carries a request slice in and writes the response
+// into a caller-provided output buffer.
+//
+// Surface:
+//   pub fn rpc_invoke_buf(target, payload: &[u8], response: &mut [u8])
+//        -> Result<usize, RpcError>;
+//
+//   // Inside the target's executor:
+//   pub fn rpc_payload_copy(out: &mut [u8]) -> usize;
+//   pub fn rpc_payload_len() -> usize;
+//   pub fn rpc_reply_buf(data: &[u8]) -> usize;  // returns bytes written
+//
+// Echo short-circuit: RPC_ECHO_VECTOR (0.0.0.0) copies the payload
+// into the response buffer without going through dispatch.
+
+pub fn rpc_invoke_buf(
+    target: VectorAddress,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, RpcError> {
+    if target == RPC_ECHO_VECTOR {
+        let n = payload.len().min(response.len());
+        response[..n].copy_from_slice(&payload[..n]);
+        return Ok(n);
+    }
+
+    // Save outer slots so nested rpc_invoke_buf works.
+    let prev_buf = RPC_BUF_SLOT.lock().take();
+    let prev_word = RPC_SLOT.lock().take();
+    *RPC_BUF_SLOT.lock() = Some(RpcBufSlot {
+        request_ptr: payload.as_ptr() as usize,
+        request_len: payload.len(),
+        response_ptr: response.as_mut_ptr() as usize,
+        response_cap: response.len(),
+        response_len: None,
+    });
+    // Also stash the request length as the word so executors that
+    // mix both paths can read either side.
+    *RPC_SLOT.lock() = Some(RpcSlot { request: payload.len() as u64, response: None });
+
+    let dispatch_result = route_signal(target, Signal::Call { from: payload.len() as u64 });
+
+    let our_buf = RPC_BUF_SLOT.lock().take();
+    *RPC_BUF_SLOT.lock() = prev_buf;
+    let _ = RPC_SLOT.lock().take();
+    *RPC_SLOT.lock() = prev_word;
+
+    let status = match dispatch_result {
+        Ok(CellResult::Done) | Ok(CellResult::Yield) => Ok(()),
+        Ok(_) => Err(RpcError::BadStatus),
+        Err(e) => Err(RpcError::Runtime(e)),
+    };
+    status?;
+
+    our_buf
+        .and_then(|s| s.response_len)
+        .ok_or(RpcError::NoReply)
+}
+
+/// Called from inside a target executor during a buf-path RPC.
+/// Copies the incoming payload into `out` and returns the number of
+/// bytes copied (`min(payload_len, out.len())`).  Returns 0 when
+/// not inside a buf-path RPC.
+pub fn rpc_payload_copy(out: &mut [u8]) -> usize {
+    let guard = RPC_BUF_SLOT.lock();
+    let Some(slot) = guard.as_ref() else { return 0; };
+    if slot.request_ptr == 0 {
+        return 0;
+    }
+    let n = slot.request_len.min(out.len());
+    // SAFETY: caller of rpc_invoke_buf holds the source buffer
+    // alive until we return from route_signal.
+    let src = unsafe {
+        core::slice::from_raw_parts(slot.request_ptr as *const u8, slot.request_len)
+    };
+    out[..n].copy_from_slice(&src[..n]);
+    n
+}
+
+/// Length of the incoming buf-path RPC payload.  Returns 0 outside
+/// a buf-path RPC dispatch.
+pub fn rpc_payload_len() -> usize {
+    RPC_BUF_SLOT
+        .lock()
+        .as_ref()
+        .map(|s| if s.request_ptr == 0 { 0 } else { s.request_len })
+        .unwrap_or(0)
+}
+
+/// Write a response payload from inside a target executor.  Caps
+/// at the caller-provided response_cap; returns the number of bytes
+/// actually written.  No-op outside a buf-path RPC dispatch.
+pub fn rpc_reply_buf(data: &[u8]) -> usize {
+    let mut guard = RPC_BUF_SLOT.lock();
+    let Some(slot) = guard.as_mut() else { return 0; };
+    if slot.response_ptr == 0 {
+        return 0;
+    }
+    let n = data.len().min(slot.response_cap);
+    // SAFETY: caller of rpc_invoke_buf holds the response buffer
+    // alive until we return.
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(slot.response_ptr as *mut u8, slot.response_cap)
+    };
+    dst[..n].copy_from_slice(&data[..n]);
+    slot.response_len = Some(n);
+    n
 }
 
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {

@@ -2575,6 +2575,99 @@ fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
     assert_eq!(summary.sub_domain, NodeSubDomain::Service);
 }
 
+// Phase J.3.B — pointer-payload RPC.  rpc_invoke_buf carries an
+// arbitrary-length byte slice in and writes the target's response
+// into a caller-provided output buffer.  Tests:
+//   1. echo path: 0.0.0.0 copies payload → response verbatim
+//   2. round-trip through a real executor that uses rpc_payload_copy
+//      + rpc_reply_buf to transform input → uppercase output
+#[test]
+fn rpc_invoke_buf_echo_short_circuit_copies_payload_to_response() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+    let payload = b"hello echo";
+    let mut response = [0u8; 32];
+    let n = gos_runtime::rpc_invoke_buf(gos_runtime::RPC_ECHO_VECTOR, payload, &mut response)
+        .expect("echo buf must succeed");
+    assert_eq!(n, payload.len());
+    assert_eq!(&response[..n], payload);
+}
+
+#[test]
+fn rpc_invoke_buf_round_trip_through_target_uppercase() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
+        NodeExecutorVTable, NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress,
+        GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("BUFRPC");
+    const KEY: &str = "buf.upper";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.bufup");
+    const VEC: VectorAddress = VectorAddress::new(13, 0, 0, 7);
+
+    unsafe extern "C" fn upper(_c: *mut ExecutorContext, _e: *const NodeEvent) -> ExecStatus {
+        let mut buf = [0u8; 64];
+        let n = gos_runtime::rpc_payload_copy(&mut buf);
+        for b in buf[..n].iter_mut() {
+            if *b >= b'a' && *b <= b'z' {
+                *b -= 32;
+            }
+        }
+        gos_runtime::rpc_reply_buf(&buf[..n]);
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vt = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(upper),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "BUFRPC",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vt).expect("bind");
+
+    let payload = b"graph os kernel";
+    let mut response = [0u8; 64];
+    let n = gos_runtime::rpc_invoke_buf(VEC, payload, &mut response)
+        .expect("buf round trip ok");
+    assert_eq!(n, payload.len());
+    assert_eq!(&response[..n], b"GRAPH OS KERNEL");
+}
+
 // Phase L.6 — runtime-internal RPC echo target at vector 0.0.0.0.
 // Calling rpc_invoke on RPC_ECHO_VECTOR returns the request word
 // unchanged WITHOUT going through executor dispatch.  Useful as a
