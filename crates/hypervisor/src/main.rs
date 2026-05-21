@@ -2197,6 +2197,7 @@ fn interpret_command(raw: &str) {
             ui.log("  uptime / gen      runtime info");
             ui.log("  journal           audit log tail + counts");
             ui.log("  watch / unwatch   live-tail journal events");
+            ui.log("  bench [rpc] [N]   RDTSC measure RPC echo latency");
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
             ui.log("cypher reads (live graph):");
@@ -2291,6 +2292,60 @@ fn interpret_command(raw: &str) {
         "unwatch" => {
             ui.watch_journal = false;
             ui.log("watch journal: OFF");
+        }
+        "bench" => {
+            // L.7 — bench RPC echo: BENCH RPC [N]
+            // Times N consecutive rpc_invoke(0.0.0.0, i) calls
+            // using RDTSC, reports total / avg / min / max.
+            let after = line.get(token_end..).unwrap_or("");
+            let arg = after.trim_start_matches(|c: char| c == ' ' || c == '\t');
+            // Optional "RPC" subcommand prefix.
+            let arg = if arg.len() >= 3 && arg.as_bytes()[..3].eq_ignore_ascii_case(b"rpc") {
+                arg[3..].trim_start()
+            } else {
+                arg
+            };
+            let count: u64 = arg.parse().unwrap_or(1000);
+            let count = count.clamp(1, 100_000);
+
+            let mut total: u64 = 0;
+            let mut min: u64 = u64::MAX;
+            let mut max: u64 = 0;
+            for i in 0..count {
+                let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+                let _ = gos_runtime::rpc_invoke(
+                    gos_runtime::RPC_ECHO_VECTOR,
+                    i,
+                );
+                let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+                let dt = t1.wrapping_sub(t0);
+                total = total.wrapping_add(dt);
+                if dt < min { min = dt; }
+                if dt > max { max = dt; }
+            }
+            let avg = total / count;
+
+            let mut r = TextBuf::<60>::new();
+            r.push_str("bench rpc echo n=");
+            r.push_dec(count);
+            ui.log(r.as_str());
+
+            let mut r2 = TextBuf::<60>::new();
+            r2.push_str("  total cycles: ");
+            r2.push_dec(total);
+            ui.log(r2.as_str());
+
+            let mut r3 = TextBuf::<60>::new();
+            r3.push_str("  avg/call: ");
+            r3.push_dec(avg);
+            ui.log(r3.as_str());
+
+            let mut r4 = TextBuf::<60>::new();
+            r4.push_str("  min: ");
+            r4.push_dec(min);
+            r4.push_str("  max: ");
+            r4.push_dec(max);
+            ui.log(r4.as_str());
         }
         "journal" => {
             // J.2 — show journal stats and the most recent entries.
