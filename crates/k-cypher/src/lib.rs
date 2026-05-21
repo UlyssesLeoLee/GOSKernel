@@ -880,9 +880,11 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     let is_show_plugins = starts_with_ci(query, "show plugins") || starts_with_ci(query, "match plugins");
     let is_show_stats = starts_with_ci(query, "show stats") || starts_with_ci(query, "stats");
     let is_set_priority = starts_with_ci(query, "set priority");
+    let is_show_priority = starts_with_ci(query, "show priority");
+    let is_reset_priority = starts_with_ci(query, "reset priority");
     let is_invoke = starts_with_ci(query, "invoke ") || starts_with_ci(query, "invoke\t");
 
-    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_set_priority || is_invoke) {
+    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_set_priority || is_show_priority || is_reset_priority || is_invoke) {
         return CypherQueryOutcome::NotQuery;
     }
 
@@ -891,6 +893,12 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     }
     if is_set_priority {
         return set_priority_action(query, emitter);
+    }
+    if is_show_priority {
+        return show_priority_action(query, emitter);
+    }
+    if is_reset_priority {
+        return reset_priority_action(query, emitter);
     }
     if is_invoke {
         return invoke_action(query, emitter);
@@ -1011,6 +1019,58 @@ fn set_priority_action<E: QueryEmitter>(
     row.push_str(literal);
     row.push_str("' = ");
     row.push_dec(n as u64);
+    emitter.emit_row(row.as_str());
+    CypherQueryOutcome::Rows { count: 1 }
+}
+
+// ── K.8 — read / reset a node's priority ─────────────────────────
+fn show_priority_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("show priority requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    let Some(p) = gos_runtime::node_priority(vec) else {
+        return CypherQueryOutcome::EndpointNotFound("show priority: node not found");
+    };
+    let mut row = RowBuf::<80>::new();
+    row.push_str("'");
+    row.push_str(literal);
+    row.push_str("' priority = ");
+    row.push_dec(p as u64);
+    // Add a human-readable tier label.
+    let tier = if p >= 192 { "HIGH" } else if p >= 128 { "DEFAULT" } else if p >= 64 { "BACKGROUND" } else { "IDLE" };
+    row.push_str(" (");
+    row.push_str(tier);
+    row.push_str(")");
+    emitter.emit_row(row.as_str());
+    CypherQueryOutcome::Rows { count: 1 }
+}
+
+fn reset_priority_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("reset priority requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    if gos_runtime::node_id_for_vec(vec).is_none() {
+        return CypherQueryOutcome::EndpointNotFound("reset priority: node not found");
+    }
+    if gos_runtime::set_node_priority(vec, gos_runtime::NODE_PRIORITY_DEFAULT).is_err() {
+        return CypherQueryOutcome::EndpointNotFound("reset priority: runtime rejected");
+    }
+    let mut row = RowBuf::<80>::new();
+    row.push_str("reset priority '");
+    row.push_str(literal);
+    row.push_str("' = 128 (DEFAULT)");
     emitter.emit_row(row.as_str());
     CypherQueryOutcome::Rows { count: 1 }
 }

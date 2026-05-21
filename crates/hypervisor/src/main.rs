@@ -2208,6 +2208,8 @@ fn interpret_command(raw: &str) {
             ui.log("  SHOW JOURNAL [LIMIT N]");
             ui.log("cypher actions:");
             ui.log("  SET PRIORITY 'V' = N      (N in 0..255)");
+            ui.log("  SHOW PRIORITY 'V'");
+            ui.log("  RESET PRIORITY 'V'        (back to 128)");
             ui.log("  INVOKE 'V' [WITH N]       (RPC, returns u64)");
             ui.log("cypher mutations:");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
