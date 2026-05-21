@@ -876,9 +876,18 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
 ) -> CypherQueryOutcome {
     let is_show_nodes = starts_with_ci(query, "show nodes") || starts_with_ci(query, "match nodes");
     let is_show_edges = starts_with_ci(query, "show edges") || starts_with_ci(query, "match edges");
+    let is_show_journal = starts_with_ci(query, "show journal") || starts_with_ci(query, "match journal");
+    let is_show_plugins = starts_with_ci(query, "show plugins") || starts_with_ci(query, "match plugins");
 
-    if !(is_show_nodes || is_show_edges) {
+    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins) {
         return CypherQueryOutcome::NotQuery;
+    }
+
+    if is_show_journal {
+        return show_journal(emitter, parse_query_limit(query));
+    }
+    if is_show_plugins {
+        return show_plugins(emitter);
     }
 
     if is_show_nodes {
@@ -904,6 +913,112 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
         Err(out) => return out,
     };
     show_edges(emitter, kind_filter, from_filter, to_filter)
+}
+
+fn show_journal<E: QueryEmitter>(
+    emitter: &mut E,
+    limit: usize,
+) -> CypherQueryOutcome {
+    let stored = gos_runtime::journal_len();
+    let lifetime = gos_runtime::journal_lifetime();
+    let mut header = RowBuf::<80>::new();
+    header.push_str("journal stored=");
+    header.push_dec(stored as u64);
+    header.push_str(" lifetime=");
+    header.push_dec(lifetime);
+    emitter.emit_row(header.as_str());
+
+    // Show the most recent `limit` entries (newest at bottom).
+    let take = limit.min(stored);
+    let start = stored - take;
+    let mut count = 1usize; // 1 for the header
+    for i in start..stored {
+        if let Some(env) = gos_runtime::journal_envelope_at(i) {
+            let mut row = RowBuf::<80>::new();
+            row.push_str("  ");
+            row.push_dec(i as u64);
+            row.push_str(": ");
+            row.push_str(envelope_kind_label(env.kind));
+            row.push_str(" arg0=");
+            row.push_dec(env.arg0);
+            row.push_str(" arg1=");
+            row.push_dec(env.arg1);
+            emitter.emit_row(row.as_str());
+            count += 1;
+        }
+    }
+    CypherQueryOutcome::Rows { count }
+}
+
+fn show_plugins<E: QueryEmitter>(emitter: &mut E) -> CypherQueryOutcome {
+    // Walk node_page and tally plugin distinct ids.  Same approach
+    // as the hypervisor's `ps` command, but emitted via the Cypher
+    // sink so any caller can consume it.
+    let mut buf = [GraphNodeSummary::EMPTY; 64];
+    let (_total, returned) = gos_runtime::node_page(0, &mut buf);
+    let mut seen_ids: [Option<gos_protocol::PluginId>; 64] = [None; 64];
+    let mut seen_count: [usize; 64] = [0; 64];
+    let mut seen_name: [&'static str; 64] = [""; 64];
+    let mut n_seen = 0usize;
+    for node in &buf[..returned] {
+        let mut idx = None;
+        for s in 0..n_seen {
+            if seen_ids[s] == Some(node.plugin_id) {
+                idx = Some(s);
+                break;
+            }
+        }
+        match idx {
+            Some(s) => seen_count[s] += 1,
+            None => {
+                seen_ids[n_seen] = Some(node.plugin_id);
+                seen_count[n_seen] = 1;
+                seen_name[n_seen] = node.plugin_name;
+                n_seen += 1;
+            }
+        }
+    }
+    for s in 0..n_seen {
+        let mut row = RowBuf::<80>::new();
+        let nm = trim_k_prefix(seen_name[s]);
+        let take = nm.len().min(14);
+        row.push_str(&nm[..take]);
+        for _ in take..14 {
+            row.push_str(" ");
+        }
+        row.push_str("x");
+        row.push_dec(seen_count[s] as u64);
+        emitter.emit_row(row.as_str());
+    }
+    CypherQueryOutcome::Rows { count: n_seen }
+}
+
+fn envelope_kind_label(kind: gos_protocol::ControlPlaneMessageKind) -> &'static str {
+    use gos_protocol::ControlPlaneMessageKind::*;
+    match kind {
+        Hello => "Hello",
+        PluginDiscovered => "PluginDiscovered",
+        NodeUpsert => "NodeUpsert",
+        EdgeUpsert => "EdgeUpsert",
+        StateDelta => "StateDelta",
+        SnapshotChunk => "SnapshotChunk",
+        Fault => "Fault",
+        Metric => "Metric",
+        CypherMutationAudited => "CypherMutationAudited",
+    }
+}
+
+fn parse_query_limit(query: &str) -> usize {
+    // Look for "limit N" or just default to 10.
+    if let Some(idx) = find_ci(query, "limit") {
+        let rest = &query[idx + "limit".len()..];
+        if let Some(tok) = next_token(rest) {
+            if let Ok(n) = tok.parse::<usize>() {
+                return n;
+            }
+        }
+    }
+    10
 }
 
 fn show_nodes<E: QueryEmitter>(

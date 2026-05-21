@@ -2148,6 +2148,8 @@ fn interpret_command(raw: &str) {
             ui.log("  SHOW NODES [OF CLASS X]");
             ui.log("  SHOW EDGES [OF KIND X]");
             ui.log("  SHOW EDGES FROM 'V'  / TO 'V'");
+            ui.log("  SHOW PLUGINS");
+            ui.log("  SHOW JOURNAL [LIMIT N]");
             ui.log("cypher mutations:");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
             ui.log("  CREATE USE   'F' -> 'T'");
