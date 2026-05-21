@@ -7,14 +7,14 @@ use gos_cypher_mut::{
     CypherMutation, MutationDispatcher, MutationError, ReceptiveEdgeKind,
 };
 use gos_protocol::{
-    derive_edge_id, packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
-    ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
-    EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
-    GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
-    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId,
-    NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
-    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
-    CONTROL_PLANE_PROTOCOL_VERSION,
+    derive_edge_id, packet_to_signal, signal_to_packet, BootContext, CapabilitySpec,
+    CellDeclaration, CellResult, ConditionalRoute, ControlPlaneEnvelope,
+    ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
+    GOS_ABI_VERSION, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot,
+    KernelAbi, KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent,
+    NodeExecutorVTable, NodeId, NodeInstanceId, NodeLifecycle, NodeSpec, NodeState,
+    NodeTelemetry, PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta,
+    VectorAddress, derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
 
@@ -1350,6 +1350,24 @@ impl GraphRuntime {
     pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
         self.node_slot_by_vec(vector)
             .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
+    }
+
+    /// L.12 — invoke `f` for every exported capability across all
+    /// loaded plugins.  Callback receives:
+    ///   (plugin_id, plugin_name, capability)
+    ///
+    /// Order matches the plugin slot order (boot order in practice).
+    /// Used by k-cypher's SHOW CAPABILITIES verb.
+    pub fn for_each_exported_capability<F>(&self, mut f: F)
+    where
+        F: FnMut(PluginId, &'static str, &CapabilitySpec),
+    {
+        for slot in self.plugins.iter() {
+            let Some(record) = slot else { continue };
+            for cap in record.manifest.exports {
+                f(record.manifest.plugin_id, record.manifest.name, cap);
+            }
+        }
     }
 
     pub fn plugin_id_for_node(&self, node_id: NodeId) -> Option<PluginId> {
@@ -2717,6 +2735,15 @@ pub fn plugin_id_for_node(node_id: NodeId) -> Option<PluginId> {
 
 pub fn edge_from_node(edge_id: EdgeId) -> Option<NodeId> {
     RUNTIME.lock().edge_from_node(edge_id)
+}
+
+/// L.12 — iterate every exported capability across all loaded
+/// plugins; callback is `fn(plugin_id, plugin_name, &CapabilitySpec)`.
+pub fn for_each_exported_capability<F>(f: F)
+where
+    F: FnMut(PluginId, &'static str, &CapabilitySpec),
+{
+    RUNTIME.lock().for_each_exported_capability(f)
 }
 
 pub fn plugin_id_for_vec(vector: VectorAddress) -> Option<PluginId> {

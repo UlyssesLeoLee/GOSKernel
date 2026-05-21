@@ -879,17 +879,22 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     let is_show_journal = starts_with_ci(query, "show journal") || starts_with_ci(query, "match journal");
     let is_show_plugins = starts_with_ci(query, "show plugins") || starts_with_ci(query, "match plugins");
     let is_show_stats = starts_with_ci(query, "show stats") || starts_with_ci(query, "stats");
+    let is_show_capabilities = starts_with_ci(query, "show capabilities")
+        || starts_with_ci(query, "show caps");
     let is_set_priority = starts_with_ci(query, "set priority");
     let is_show_priority = starts_with_ci(query, "show priority");
     let is_reset_priority = starts_with_ci(query, "reset priority");
     let is_invoke = starts_with_ci(query, "invoke ") || starts_with_ci(query, "invoke\t");
 
-    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_set_priority || is_show_priority || is_reset_priority || is_invoke) {
+    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_show_capabilities || is_set_priority || is_show_priority || is_reset_priority || is_invoke) {
         return CypherQueryOutcome::NotQuery;
     }
 
     if is_show_stats {
         return show_stats(emitter);
+    }
+    if is_show_capabilities {
+        return show_capabilities(emitter);
     }
     if is_set_priority {
         return set_priority_action(query, emitter);
@@ -933,6 +938,53 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
         Err(out) => return out,
     };
     show_edges(emitter, kind_filter, from_filter, to_filter)
+}
+
+// ── Phase L.12 — list all exported capabilities ─────────────────
+fn show_capabilities<E: QueryEmitter>(emitter: &mut E) -> CypherQueryOutcome {
+    use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    COUNT.store(0, AtomicOrd::Relaxed);
+
+    // We need to emit through the trait while iterating gos_runtime;
+    // the closure captures &mut E.  Iterate the runtime which calls
+    // back into our closure.  Use the emitter inside.
+    let mut closure_count = 0usize;
+    gos_runtime::for_each_exported_capability(|_pid, plugin_name, cap| {
+        let mut row = RowBuf::<80>::new();
+        row.push_str(cap.namespace);
+        row.push_str("/");
+        row.push_str(cap.name);
+        row.push_str("@v");
+        row.push_dec(cap.version as u64);
+        // Pad to ~28 cols before the provider name.
+        let used = cap.namespace.len() + cap.name.len() + 4 + decimal_width(cap.version as u64);
+        let pad = 32usize.saturating_sub(used);
+        for _ in 0..pad {
+            row.push_str(" ");
+        }
+        row.push_str("← ");
+        let nm = trim_k_prefix(plugin_name);
+        let take = nm.len().min(16);
+        row.push_str(&nm[..take]);
+        emitter.emit_row(row.as_str());
+        closure_count += 1;
+    });
+
+    CypherQueryOutcome::Rows { count: closure_count }
+}
+
+fn decimal_width(n: u64) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let mut w = 0;
+    let mut v = n;
+    while v > 0 {
+        w += 1;
+        v /= 10;
+    }
+    w
 }
 
 // ── Phase K.1 — comprehensive runtime statistics view ────────────
