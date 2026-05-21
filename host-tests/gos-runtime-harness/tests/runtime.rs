@@ -2574,6 +2574,157 @@ fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
     assert_eq!(summary.sub_domain, NodeSubDomain::Service);
 }
 
+// Phase J.3 — request-response RPC primitive.  Calling
+// `rpc_invoke(target, request)` synchronously runs the target's
+// executor and returns its `rpc_reply(value)` call as the response.
+// One u64 in, one u64 out — the primitive on which all higher-level
+// RPC schemes compose.
+#[test]
+fn rpc_invoke_round_trip_through_target_executor() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("RPC_RT");
+    const KEY: &str = "rpc.target";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.rpc");
+    const VEC: VectorAddress = VectorAddress::new(11, 0, 0, 1);
+
+    // Target executor: read the RPC request, double it, reply.
+    unsafe extern "C" fn rpc_double(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+        let req = gos_runtime::rpc_request().expect("rpc_request inside dispatch");
+        gos_runtime::rpc_reply(req.wrapping_mul(2));
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vtable = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(rpc_double),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "RPC_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vtable).expect("bind");
+
+    // Outside any RPC dispatch: rpc_request returns None, rpc_reply is no-op.
+    assert!(gos_runtime::rpc_request().is_none());
+    gos_runtime::rpc_reply(99); // should be silently dropped
+
+    // Round-trip.
+    let response = gos_runtime::rpc_invoke(VEC, 21).expect("rpc_invoke ok");
+    assert_eq!(response, 42);
+
+    // Another round-trip with a different value to confirm the slot
+    // properly resets between calls.
+    let response2 = gos_runtime::rpc_invoke(VEC, 100).expect("rpc_invoke ok 2");
+    assert_eq!(response2, 200);
+
+    // Calling an unregistered target errors via Runtime variant.
+    let unknown = VectorAddress::new(99, 99, 99, 99);
+    let result = gos_runtime::rpc_invoke(unknown, 0);
+    assert!(matches!(result, Err(gos_runtime::RpcError::Runtime(_))));
+}
+
+// Phase J.3 — when the target's executor does NOT call rpc_reply,
+// the round trip surfaces `RpcError::NoReply` so the caller can
+// distinguish "remote ran but said nothing" from a runtime error.
+#[test]
+fn rpc_invoke_returns_no_reply_when_target_silent() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("RPC_QUIET");
+    const KEY: &str = "rpc.silent";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.quiet");
+    const VEC: VectorAddress = VectorAddress::new(11, 0, 0, 9);
+
+    unsafe extern "C" fn rpc_silent(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+        // Deliberately don't call rpc_reply.
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vtable = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(rpc_silent),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "RPC_QUIET",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vtable).expect("bind");
+
+    let result = gos_runtime::rpc_invoke(VEC, 42);
+    assert!(matches!(result, Err(gos_runtime::RpcError::NoReply)));
+}
+
 // Audit P2 #5 — `manifest_edges_well_formed` accepts well-formed
 // self-rooted edges and rejects:
 //   * zero edge_id / from_node / to_node

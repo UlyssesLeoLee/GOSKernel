@@ -1938,6 +1938,92 @@ pub fn post_signal(target: VectorAddress, signal: Signal) -> Result<(), RuntimeE
     RUNTIME.lock().post_signal(target, signal)
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Phase J.3 — request-response RPC primitive
+// ══════════════════════════════════════════════════════════════════
+//
+// Synchronous call-into-another-node, kernel-internal.  The caller
+// invokes `rpc_invoke(target, request)`; the kernel dispatches the
+// target's executor with a `Signal::Call { from: request }`; the
+// target reads `rpc_request()` and writes its answer via
+// `rpc_reply(value)`; after dispatch returns, the caller receives
+// the response.
+//
+// One u64 in, one u64 out — the simplest complete primitive.
+// Higher-level RPC schemes (pointer + length payloads, multi-word
+// requests, async pipelines) all compose on top of this; the
+// architectural commitment is just "synchronous bidirectional call
+// between two graph nodes" which is the missing communication
+// primitive in the H/I era.
+//
+// Nested RPCs are supported via save/restore of the slot — if a
+// target node calls `rpc_invoke` to delegate to a deeper target,
+// the outer slot is preserved.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcError {
+    /// The target executor returned without calling `rpc_reply`.
+    NoReply,
+    /// Target lookup / dispatch errored — see RuntimeError variant.
+    Runtime(RuntimeError),
+    /// The target's dispatch ended in fault / terminate / other
+    /// non-OK status.
+    BadStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RpcSlot {
+    request: u64,
+    response: Option<u64>,
+}
+
+static RPC_SLOT: Mutex<Option<RpcSlot>> = Mutex::new(None);
+
+/// Synchronously dispatch a u64 request to `target` and return its
+/// u64 reply.  The target's executor must call `rpc_reply` from
+/// within its `on_event` handler before returning, otherwise this
+/// returns `Err(RpcError::NoReply)`.
+pub fn rpc_invoke(target: VectorAddress, request: u64) -> Result<u64, RpcError> {
+    // Save the outer slot so a nested rpc_invoke from inside the
+    // target's executor doesn't clobber this call's reply.
+    let prev = RPC_SLOT.lock().take();
+    *RPC_SLOT.lock() = Some(RpcSlot { request, response: None });
+
+    let dispatch_result = route_signal(target, Signal::Call { from: request });
+
+    let our_slot = RPC_SLOT.lock().take();
+    // Restore the outer slot (if any) so the caller's reply can
+    // continue to be written by an upstream executor.
+    *RPC_SLOT.lock() = prev;
+
+    let status = match dispatch_result {
+        Ok(CellResult::Done) | Ok(CellResult::Yield) => Ok(()),
+        Ok(_) => Err(RpcError::BadStatus),
+        Err(e) => Err(RpcError::Runtime(e)),
+    };
+    status?;
+
+    our_slot
+        .and_then(|s| s.response)
+        .ok_or(RpcError::NoReply)
+}
+
+/// Called from inside a target node's executor while servicing an
+/// RPC.  Stores the reply word in the active RPC slot.  No-op when
+/// not inside an RPC dispatch (so safe to call defensively).
+pub fn rpc_reply(value: u64) {
+    if let Some(slot) = RPC_SLOT.lock().as_mut() {
+        slot.response = Some(value);
+    }
+}
+
+/// Called from inside a target node's executor to retrieve the
+/// incoming RPC request word.  Returns None when not inside an RPC
+/// dispatch.
+pub fn rpc_request() -> Option<u64> {
+    RPC_SLOT.lock().as_ref().map(|s| s.request)
+}
+
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {
     let dispatch = {
         let mut runtime = RUNTIME.lock();
