@@ -186,6 +186,58 @@ impl<T: Copy, const N: usize> RingQueue<T, N> {
         Ok(())
     }
 
+    /// J.7 — return entries oldest-first as a Vec-like collection
+    /// (caller copies out).  Used by the priority-aware ready
+    /// queue scanner; could become an Iterator but we collect for
+    /// simpler logic.
+    fn snapshot_oldest_first(&self) -> [Option<T>; N] {
+        let mut out = [None; N];
+        let mut cursor = self.tail;
+        let mut i = 0usize;
+        while cursor != self.head {
+            out[i] = self.buffer[cursor];
+            i += 1;
+            cursor = (cursor + 1) % N;
+        }
+        out
+    }
+
+    /// J.7 — remove the i-th entry from the oldest-first snapshot
+    /// order, sliding subsequent entries forward.  Used to extract
+    /// a chosen non-head entry without destroying queue order.
+    fn remove_at_index(&mut self, target: usize) -> Option<T> {
+        if self.head == self.tail {
+            return None;
+        }
+        // Build a fresh sequence excluding the target.
+        let snap = self.snapshot_oldest_first();
+        let mut got = None;
+        let mut new_tail_seq: [Option<T>; N] = [None; N];
+        let mut write = 0;
+        let mut read = 0;
+        while let Some(item) = snap[read] {
+            if read == target {
+                got = Some(item);
+            } else {
+                new_tail_seq[write] = Some(item);
+                write += 1;
+            }
+            read += 1;
+            if read >= N { break; }
+        }
+        // Reset and re-push.
+        self.tail = 0;
+        self.head = 0;
+        self.buffer = [None; N];
+        for i in 0..write {
+            if let Some(v) = new_tail_seq[i] {
+                self.buffer[self.head] = Some(v);
+                self.head = (self.head + 1) % N;
+            }
+        }
+        got
+    }
+
     fn pop(&mut self) -> Option<T> {
         if self.head == self.tail {
             return None;
@@ -253,7 +305,24 @@ struct NodeRecord {
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
     route_count: u8,
+    /// Phase J.7 — scheduling priority hint.  128 = normal (default);
+    /// >128 = high priority (jumps the ready queue); <128 = background.
+    /// `next_work_item` scans the ready queue and pops the highest-
+    /// priority entry; FIFO order is preserved among entries of equal
+    /// priority.  Public API: `set_node_priority` / `node_priority`.
+    priority: u8,
 }
+
+/// Default scheduling priority for newly-registered nodes.  See
+/// `NodeRecord::priority`.
+pub const NODE_PRIORITY_DEFAULT: u8 = 128;
+/// Helper constant for plugins that want their handlers to run
+/// ahead of the default-priority cohort (e.g., latency-critical
+/// IRQ servicers).
+pub const NODE_PRIORITY_HIGH: u8 = 192;
+/// Background priority — runs only when nothing more urgent is
+/// ready.  Useful for telemetry collectors, idle workers.
+pub const NODE_PRIORITY_BACKGROUND: u8 = 64;
 
 #[derive(Clone, Copy)]
 struct EdgeRecord {
@@ -603,6 +672,7 @@ impl GraphRuntime {
             instance_id: NodeInstanceId::ZERO,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
+            priority: NODE_PRIORITY_DEFAULT,
         });
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
@@ -1296,7 +1366,13 @@ impl GraphRuntime {
     }
 
     fn next_work_item(&mut self) -> Option<WorkItem> {
-        if let Some(node_id) = self.ready_queue.pop() {
+        // Phase J.7 — priority-aware ready queue.  Scan the ring
+        // for the highest-priority node id, rotating it to the
+        // front for pop.  Stable: FIFO order is preserved among
+        // entries of equal priority.  O(N) per pop where N is the
+        // current ready-queue depth (≤ MAX_READY_QUEUE = 256), so
+        // negligible vs the dispatch cost itself.
+        if let Some(node_id) = self.pop_highest_priority_ready() {
             return Some(WorkItem::Ready(node_id));
         }
 
@@ -1305,6 +1381,56 @@ impl GraphRuntime {
         }
 
         None
+    }
+
+    /// J.7 helper — pop the highest-priority node from the ready
+    /// ring.  Stable in FIFO order for equal-priority entries.
+    fn pop_highest_priority_ready(&mut self) -> Option<NodeId> {
+        let snapshot = self.ready_queue.snapshot_oldest_first();
+        // Find the first non-None entry; that's the FIFO head.
+        let mut best_idx: Option<usize> = None;
+        let mut best_prio: u8 = 0;
+        for (i, slot) in snapshot.iter().enumerate() {
+            let Some(node_id) = slot else { break; }; // contiguous from front
+            let p = self.priority_for(*node_id);
+            match best_idx {
+                None => {
+                    best_idx = Some(i);
+                    best_prio = p;
+                }
+                Some(_) => {
+                    if p > best_prio {
+                        best_idx = Some(i);
+                        best_prio = p;
+                    }
+                }
+            }
+        }
+        self.ready_queue.remove_at_index(best_idx?)
+    }
+
+    fn priority_for(&self, node_id: NodeId) -> u8 {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|r| r.priority))
+            .unwrap_or(NODE_PRIORITY_DEFAULT)
+    }
+
+    /// J.7 — set a node's scheduling priority.  Takes effect at
+    /// the next ready-queue pop.
+    pub fn set_node_priority(&mut self, vector: VectorAddress, priority: u8) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        if let Some(mut record) = self.nodes[slot] {
+            record.priority = priority;
+            self.nodes[slot] = Some(record);
+            Ok(())
+        } else {
+            Err(RuntimeError::NodeNotFound)
+        }
+    }
+
+    pub fn node_priority(&self, vector: VectorAddress) -> Option<u8> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|r| r.priority))
     }
 
     fn bump_tick(&mut self) {
@@ -1874,6 +2000,16 @@ pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
 
 pub fn node_summary_by_id(node_id: NodeId) -> Option<GraphNodeSummary> {
     RUNTIME.lock().node_summary_by_id(node_id)
+}
+
+/// J.7 — set a node's scheduling priority.  Higher = run sooner.
+pub fn set_node_priority(vector: VectorAddress, priority: u8) -> Result<(), RuntimeError> {
+    RUNTIME.lock().set_node_priority(vector, priority)
+}
+
+/// J.7 — read a node's current scheduling priority.
+pub fn node_priority(vector: VectorAddress) -> Option<u8> {
+    RUNTIME.lock().node_priority(vector)
 }
 
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {

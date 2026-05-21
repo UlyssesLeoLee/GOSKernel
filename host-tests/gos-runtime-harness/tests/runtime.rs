@@ -2575,6 +2575,136 @@ fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
     assert_eq!(summary.sub_domain, NodeSubDomain::Service);
 }
 
+// Phase J.7 — priority-aware ready queue.  Three nodes enqueued in
+// FIFO order with priorities Low, High, Default.  After two pumps
+// the High-priority node must have run first, then Default, then
+// Low.  Verifies the architectural commitment that priority
+// scheduling is supported, not just declared.
+#[test]
+fn ready_queue_pops_highest_priority_first() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("PRIO_RT");
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.prio");
+    const VLOW: VectorAddress = VectorAddress::new(12, 0, 0, 1);
+    const VHIGH: VectorAddress = VectorAddress::new(12, 0, 0, 2);
+    const VDEF: VectorAddress = VectorAddress::new(12, 0, 0, 3);
+
+    // Each executor pushes its vector into a shared order log so we
+    // can assert dispatch order.
+    static ORDER: Mutex<[u32; 4]> = Mutex::new([0; 4]);
+    static IDX: AtomicUsize = AtomicUsize::new(0);
+
+    // pump() routes ready-queue entries through `activate` which
+    // invokes on_resume (NOT on_event).  Use on_resume so the
+    // priority-ordered ready-queue scheduling is exercised.
+    unsafe extern "C" fn record_low(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 1;
+        ExecStatus::Done
+    }
+    unsafe extern "C" fn record_high(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 2;
+        ExecStatus::Done
+    }
+    unsafe extern "C" fn record_def(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 3;
+        ExecStatus::Done
+    }
+
+    let make_spec = |key: &'static str| NodeSpec {
+        node_id: derive_node_id(PID, key),
+        local_node_key: key,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let make_vt = |f: unsafe extern "C" fn(*mut ExecutorContext) -> ExecStatus| NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: None,
+        on_suspend: None,
+        on_resume: Some(f),
+        on_teardown: None,
+        on_telemetry: None,
+    };
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "PRIO_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VLOW, make_spec("prio.low")).expect("low");
+    gos_runtime::register_node(PID, VHIGH, make_spec("prio.high")).expect("high");
+    gos_runtime::register_node(PID, VDEF, make_spec("prio.def")).expect("def");
+    gos_runtime::bind_native_executor(VLOW, make_vt(record_low)).expect("bind low");
+    gos_runtime::bind_native_executor(VHIGH, make_vt(record_high)).expect("bind high");
+    gos_runtime::bind_native_executor(VDEF, make_vt(record_def)).expect("bind def");
+
+    gos_runtime::set_node_priority(VLOW, gos_runtime::NODE_PRIORITY_BACKGROUND)
+        .expect("set low priority");
+    gos_runtime::set_node_priority(VHIGH, gos_runtime::NODE_PRIORITY_HIGH)
+        .expect("set high priority");
+    // VDEF stays at NODE_PRIORITY_DEFAULT (128).
+
+    assert_eq!(
+        gos_runtime::node_priority(VHIGH),
+        Some(gos_runtime::NODE_PRIORITY_HIGH)
+    );
+    assert_eq!(
+        gos_runtime::node_priority(VLOW),
+        Some(gos_runtime::NODE_PRIORITY_BACKGROUND)
+    );
+    assert_eq!(
+        gos_runtime::node_priority(VDEF),
+        Some(gos_runtime::NODE_PRIORITY_DEFAULT)
+    );
+
+    // Enqueue in deliberately-bad FIFO order: low first, default second, high third.
+    let low_id = gos_protocol::derive_node_id(PID, "prio.low");
+    let def_id = gos_protocol::derive_node_id(PID, "prio.def");
+    let high_id = gos_protocol::derive_node_id(PID, "prio.high");
+    gos_runtime::enqueue_ready(low_id).expect("enq low");
+    gos_runtime::enqueue_ready(def_id).expect("enq def");
+    gos_runtime::enqueue_ready(high_id).expect("enq high");
+
+    // Three pumps to drain the ready queue.
+    gos_runtime::pump();
+    gos_runtime::pump();
+    gos_runtime::pump();
+
+    let order = ORDER.lock().unwrap();
+    // First out: high (2), then default (3), then low (1).
+    assert_eq!(order[0], 2, "high priority node ran first");
+    assert_eq!(order[1], 3, "default-priority ran second");
+    assert_eq!(order[2], 1, "background ran last");
+}
+
 // Phase J.3 — request-response RPC primitive.  Calling
 // `rpc_invoke(target, request)` synchronously runs the target's
 // executor and returns its `rpc_reply(value)` call as the response.
