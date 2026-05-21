@@ -2575,6 +2575,30 @@ fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
     assert_eq!(summary.sub_domain, NodeSubDomain::Service);
 }
 
+// Phase L.6 — runtime-internal RPC echo target at vector 0.0.0.0.
+// Calling rpc_invoke on RPC_ECHO_VECTOR returns the request word
+// unchanged WITHOUT going through executor dispatch.  Useful as a
+// debugging primitive and for benchmarking the RPC plumbing.
+#[test]
+fn rpc_echo_vector_returns_request_verbatim() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    // No need to register any node — the echo handler bypasses
+    // dispatch entirely.
+    let response = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, 42)
+        .expect("echo should always succeed");
+    assert_eq!(response, 42);
+
+    let response2 = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, u64::MAX)
+        .expect("echo should always succeed for max");
+    assert_eq!(response2, u64::MAX);
+
+    let response3 = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, 0)
+        .expect("echo zero");
+    assert_eq!(response3, 0);
+}
+
 // Phase J.7 — priority-aware ready queue.  Three nodes enqueued in
 // FIFO order with priorities Low, High, Default.  After two pumps
 // the High-priority node must have run first, then Default, then

@@ -2127,11 +2127,26 @@ struct RpcSlot {
 
 static RPC_SLOT: Mutex<Option<RpcSlot>> = Mutex::new(None);
 
+/// Phase L.6 — internal RPC debug target.  Vector `0.0.0.0` is
+/// reserved as a runtime-handled "echo" service: `rpc_invoke`
+/// against it bypasses dispatch entirely and returns the request
+/// word unchanged.  Useful for benchmarking the RPC plumbing,
+/// validating end-to-end wiring from Cypher, and writing harness
+/// tests without needing a target plugin.
+pub const RPC_ECHO_VECTOR: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
 /// Synchronously dispatch a u64 request to `target` and return its
 /// u64 reply.  The target's executor must call `rpc_reply` from
 /// within its `on_event` handler before returning, otherwise this
 /// returns `Err(RpcError::NoReply)`.
+///
+/// Special case: `RPC_ECHO_VECTOR` (0.0.0.0) is a runtime-internal
+/// echo — request is returned verbatim without going through
+/// dispatch.  Useful for testing RPC plumbing.
 pub fn rpc_invoke(target: VectorAddress, request: u64) -> Result<u64, RpcError> {
+    if target == RPC_ECHO_VECTOR {
+        return Ok(request);
+    }
     // Save the outer slot so a nested rpc_invoke from inside the
     // target's executor doesn't clobber this call's reply.
     let prev = RPC_SLOT.lock().take();
