@@ -2144,6 +2144,21 @@ struct RpcBufSlot {
 
 static RPC_BUF_SLOT: Mutex<Option<RpcBufSlot>> = Mutex::new(None);
 
+/// Phase L.8 — RPC counters.  Incremented on every rpc_invoke /
+/// rpc_invoke_buf call regardless of success.  Read via
+/// `rpc_call_count_word` / `rpc_call_count_buf`.  Useful for
+/// SHOW STATS, BENCH validation, and ad-hoc load measurement.
+static RPC_CALL_COUNT_WORD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RPC_CALL_COUNT_BUF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn rpc_call_count_word() -> u64 {
+    RPC_CALL_COUNT_WORD.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn rpc_call_count_buf() -> u64 {
+    RPC_CALL_COUNT_BUF.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Phase L.6 — internal RPC debug target.  Vector `0.0.0.0` is
 /// reserved as a runtime-handled "echo" service: `rpc_invoke`
 /// against it bypasses dispatch entirely and returns the request
@@ -2161,6 +2176,7 @@ pub const RPC_ECHO_VECTOR: VectorAddress = VectorAddress::new(0, 0, 0, 0);
 /// echo — request is returned verbatim without going through
 /// dispatch.  Useful for testing RPC plumbing.
 pub fn rpc_invoke(target: VectorAddress, request: u64) -> Result<u64, RpcError> {
+    RPC_CALL_COUNT_WORD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if target == RPC_ECHO_VECTOR {
         return Ok(request);
     }
@@ -2228,6 +2244,7 @@ pub fn rpc_invoke_buf(
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, RpcError> {
+    RPC_CALL_COUNT_BUF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if target == RPC_ECHO_VECTOR {
         let n = payload.len().min(response.len());
         response[..n].copy_from_slice(&payload[..n]);

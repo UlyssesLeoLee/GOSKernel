@@ -989,7 +989,17 @@ fn show_stats<E: QueryEmitter>(emitter: &mut E) -> CypherQueryOutcome {
     row.push_str(if stable { "yes" } else { "no" });
     emitter.emit_row(row.as_str());
 
-    CypherQueryOutcome::Rows { count: 7 }
+    // L.8 — RPC call counters
+    let rpc_word = gos_runtime::rpc_call_count_word();
+    let rpc_buf = gos_runtime::rpc_call_count_buf();
+    let mut row = RowBuf::<80>::new();
+    row.push_str("rpc       word=");
+    row.push_dec(rpc_word);
+    row.push_str(" buf=");
+    row.push_dec(rpc_buf);
+    emitter.emit_row(row.as_str());
+
+    CypherQueryOutcome::Rows { count: 8 }
 }
 
 // ── Phase K.2 — set node priority via Cypher ─────────────────────
