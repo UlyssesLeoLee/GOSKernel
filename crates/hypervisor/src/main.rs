@@ -1797,6 +1797,12 @@ struct UiState {
     hist_head: usize,
     hist_count: usize,
     hist_cursor: Option<usize>,
+    /// K.6 — WATCH JOURNAL: when true, paint_frame tails the journal
+    /// and prints any newly-arrived envelopes into the scrollback.
+    /// `watch_journal_last_lifetime` records the lifetime counter
+    /// from the last drain so we know which entries are new.
+    watch_journal: bool,
+    watch_journal_last_lifetime: u64,
 }
 
 impl UiState {
@@ -1813,6 +1819,8 @@ impl UiState {
             hist_head: 0,
             hist_count: 0,
             hist_cursor: None,
+            watch_journal: false,
+            watch_journal_last_lifetime: 0,
         }
     }
 
@@ -1943,6 +1951,52 @@ static FRAME_COUNTER: core::sync::atomic::AtomicU64 =
 /// Drain queued keystrokes from `k_fb::pop_typed_char`, applying
 /// them to the input line.  Enter submits the line through
 /// `interpret_command`; Esc toggles mode; Backspace edits.
+/// K.6 — WATCH JOURNAL tick.  If the user has enabled watching,
+/// compare the runtime's journal lifetime to what we last saw; for
+/// every new envelope, format a one-line summary and push into the
+/// scrollback so it flows through the chat HUD.
+fn tick_journal_watcher() {
+    let (enabled, last_lifetime) = {
+        let ui = UI_STATE.lock();
+        (ui.watch_journal, ui.watch_journal_last_lifetime)
+    };
+    if !enabled {
+        return;
+    }
+    let now_lifetime = gos_runtime::journal_lifetime();
+    if now_lifetime <= last_lifetime {
+        return;
+    }
+    // New entries arrived.  Compute how many of them are still
+    // resident in the ring (cap at stored length so we don't try to
+    // read beyond what's available after wrap).
+    let new_count = (now_lifetime - last_lifetime).min(64) as usize;
+    let stored = gos_runtime::journal_len();
+    let start = stored.saturating_sub(new_count);
+    use gos_protocol::ControlPlaneMessageKind::*;
+    for i in start..stored {
+        if let Some(env) = gos_runtime::journal_envelope_at(i) {
+            let mut row = TextBuf::<48>::new();
+            row.push_str("J ");
+            row.push_dec(i as u64);
+            row.push_str(": ");
+            row.push_str(match env.kind {
+                Hello => "Hello",
+                PluginDiscovered => "PluginDiscovered",
+                NodeUpsert => "NodeUpsert",
+                EdgeUpsert => "EdgeUpsert",
+                StateDelta => "StateDelta",
+                SnapshotChunk => "SnapshotChunk",
+                Fault => "Fault",
+                Metric => "Metric",
+                CypherMutationAudited => "CypherMutationAudited",
+            });
+            UI_STATE.lock().log(row.as_str());
+        }
+    }
+    UI_STATE.lock().watch_journal_last_lifetime = now_lifetime;
+}
+
 fn drain_ui_input() {
     use gos_protocol::{INPUT_KEY_DOWN, INPUT_KEY_UP};
     while let Some(b) = k_fb::pop_typed_char() {
@@ -2142,6 +2196,7 @@ fn interpret_command(raw: &str) {
             ui.log("  nodes / edges     graph stats");
             ui.log("  uptime / gen      runtime info");
             ui.log("  journal           audit log tail + counts");
+            ui.log("  watch / unwatch   live-tail journal events");
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
             ui.log("cypher reads (live graph):");
@@ -2220,6 +2275,20 @@ fn interpret_command(raw: &str) {
             row.push_str("graph_generation=");
             row.push_dec(gos_runtime::graph_generation());
             ui.log(row.as_str());
+        }
+        "watch" => {
+            // K.6 — start tailing new journal envelopes.  Each
+            // paint_frame tick will append any newly-arrived entries
+            // to the scrollback.  Cap the last-seen lifetime at the
+            // current value so we only print FUTURE arrivals, not
+            // backlog.
+            ui.watch_journal = true;
+            ui.watch_journal_last_lifetime = gos_runtime::journal_lifetime();
+            ui.log("watch journal: ON (any new envelope will appear above)");
+        }
+        "unwatch" => {
+            ui.watch_journal = false;
+            ui.log("watch journal: OFF");
         }
         "journal" => {
             // J.2 — show journal stats and the most recent entries.
@@ -2496,6 +2565,8 @@ fn paint_frame(frame: u64) {
     // I.10.5 — publish the current frame so commands can read uptime.
     FRAME_COUNTER.store(frame, core::sync::atomic::Ordering::Relaxed);
     drain_ui_input();
+    // K.6 — WATCH JOURNAL: tail new envelopes into the scrollback.
+    tick_journal_watcher();
 
     use core::sync::atomic::Ordering;
     let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
