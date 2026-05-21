@@ -2145,11 +2145,15 @@ fn interpret_command(raw: &str) {
             ui.log("  log / clear       scrollback control (F9)");
             ui.log("  Esc               clear input line");
             ui.log("cypher reads (live graph):");
+            ui.log("  SHOW STATS");
             ui.log("  SHOW NODES [OF CLASS X]");
             ui.log("  SHOW EDGES [OF KIND X]");
             ui.log("  SHOW EDGES FROM 'V'  / TO 'V'");
             ui.log("  SHOW PLUGINS");
             ui.log("  SHOW JOURNAL [LIMIT N]");
+            ui.log("cypher actions:");
+            ui.log("  SET PRIORITY 'V' = N      (N in 0..255)");
+            ui.log("  INVOKE 'V' [WITH N]       (RPC, returns u64)");
             ui.log("cypher mutations:");
             ui.log("  CREATE MOUNT 'F' -> 'T'");
             ui.log("  CREATE USE   'F' -> 'T'");

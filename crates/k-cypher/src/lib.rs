@@ -878,11 +878,23 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     let is_show_edges = starts_with_ci(query, "show edges") || starts_with_ci(query, "match edges");
     let is_show_journal = starts_with_ci(query, "show journal") || starts_with_ci(query, "match journal");
     let is_show_plugins = starts_with_ci(query, "show plugins") || starts_with_ci(query, "match plugins");
+    let is_show_stats = starts_with_ci(query, "show stats") || starts_with_ci(query, "stats");
+    let is_set_priority = starts_with_ci(query, "set priority");
+    let is_invoke = starts_with_ci(query, "invoke ") || starts_with_ci(query, "invoke\t");
 
-    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins) {
+    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_set_priority || is_invoke) {
         return CypherQueryOutcome::NotQuery;
     }
 
+    if is_show_stats {
+        return show_stats(emitter);
+    }
+    if is_set_priority {
+        return set_priority_action(query, emitter);
+    }
+    if is_invoke {
+        return invoke_action(query, emitter);
+    }
     if is_show_journal {
         return show_journal(emitter, parse_query_limit(query));
     }
@@ -913,6 +925,156 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
         Err(out) => return out,
     };
     show_edges(emitter, kind_filter, from_filter, to_filter)
+}
+
+// ── Phase K.1 — comprehensive runtime statistics view ────────────
+fn show_stats<E: QueryEmitter>(emitter: &mut E) -> CypherQueryOutcome {
+    let snap = gos_runtime::snapshot();
+    let journal_len = gos_runtime::journal_len();
+    let journal_lifetime = gos_runtime::journal_lifetime();
+    let generation = gos_runtime::graph_generation();
+    let tick = gos_runtime::current_tick();
+    let stable = gos_runtime::is_stable();
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("plugins   ");
+    row.push_dec(snap.plugin_count as u64);
+    row.push_str(" / 32");
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("nodes     ");
+    row.push_dec(snap.node_count as u64);
+    row.push_str(" / 128");
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("edges     ");
+    row.push_dec(snap.edge_count as u64);
+    row.push_str(" / 512");
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("ready=");
+    row.push_dec(snap.ready_queue_len as u64);
+    row.push_str("  signals=");
+    row.push_dec(snap.signal_queue_len as u64);
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("journal   ");
+    row.push_dec(journal_len as u64);
+    row.push_str(" stored / ");
+    row.push_dec(journal_lifetime);
+    row.push_str(" lifetime");
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("generation G");
+    row.push_dec(generation);
+    row.push_str("  tick=");
+    row.push_dec(tick);
+    emitter.emit_row(row.as_str());
+
+    let mut row = RowBuf::<80>::new();
+    row.push_str("stable    ");
+    row.push_str(if stable { "yes" } else { "no" });
+    emitter.emit_row(row.as_str());
+
+    CypherQueryOutcome::Rows { count: 7 }
+}
+
+// ── Phase K.2 — set node priority via Cypher ─────────────────────
+fn set_priority_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("set priority requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    if gos_runtime::node_id_for_vec(vec).is_none() {
+        return CypherQueryOutcome::EndpointNotFound("set priority: node not found");
+    }
+    // Find the value token after '=' or after the literal.
+    let n_value = parse_priority_value(query);
+    let Some(n) = n_value else {
+        return CypherQueryOutcome::BadSyntax("set priority requires '= N' with N in 0..=255");
+    };
+    if let Err(_) = gos_runtime::set_node_priority(vec, n) {
+        return CypherQueryOutcome::EndpointNotFound("set priority: runtime rejected");
+    }
+    let mut row = RowBuf::<80>::new();
+    row.push_str("set priority '");
+    row.push_str(literal);
+    row.push_str("' = ");
+    row.push_dec(n as u64);
+    emitter.emit_row(row.as_str());
+    CypherQueryOutcome::Rows { count: 1 }
+}
+
+fn parse_priority_value(query: &str) -> Option<u8> {
+    // Strategy: find the '=' character, take the next token, parse as decimal.
+    let eq_pos = query.as_bytes().iter().position(|&b| b == b'=')?;
+    let rest = &query[eq_pos + 1..];
+    let token = next_token(rest)?;
+    token.parse::<u8>().ok()
+}
+
+// ── Phase K.3 — RPC invoke via Cypher ────────────────────────────
+fn invoke_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("invoke requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    // Parse `WITH N` value (defaults to 0).
+    let request_word = parse_with_value(query).unwrap_or(0);
+    match gos_runtime::rpc_invoke(vec, request_word) {
+        Ok(response) => {
+            let mut row = RowBuf::<80>::new();
+            row.push_str("invoke '");
+            row.push_str(literal);
+            row.push_str("' with ");
+            row.push_dec(request_word);
+            row.push_str(" -> ");
+            row.push_dec(response);
+            emitter.emit_row(row.as_str());
+            CypherQueryOutcome::Rows { count: 1 }
+        }
+        Err(gos_runtime::RpcError::NoReply) => {
+            let mut row = RowBuf::<80>::new();
+            row.push_str("invoke '");
+            row.push_str(literal);
+            row.push_str("': target ran but no rpc_reply");
+            emitter.emit_row(row.as_str());
+            CypherQueryOutcome::Rows { count: 0 }
+        }
+        Err(gos_runtime::RpcError::BadStatus) => {
+            let mut row = RowBuf::<80>::new();
+            row.push_str("invoke '");
+            row.push_str(literal);
+            row.push_str("': target dispatch returned non-OK");
+            emitter.emit_row(row.as_str());
+            CypherQueryOutcome::Rows { count: 0 }
+        }
+        Err(gos_runtime::RpcError::Runtime(_)) => CypherQueryOutcome::EndpointNotFound(
+            "invoke: target node not found or runtime error",
+        ),
+    }
+}
+
+fn parse_with_value(query: &str) -> Option<u64> {
+    let idx = find_ci(query, "with")?;
+    let rest = &query[idx + "with".len()..];
+    let token = next_token(rest)?;
+    token.parse::<u64>().ok()
 }
 
 fn show_journal<E: QueryEmitter>(
