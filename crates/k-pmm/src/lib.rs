@@ -428,7 +428,7 @@ const PMM_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
 ];
 const PMM_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "frame_alloc" },
+    CapabilitySpec { namespace: "memory", name: "frame_alloc", version: 1 },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {

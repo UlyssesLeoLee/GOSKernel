@@ -117,7 +117,7 @@ const SERIAL_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x3F8, arg1: 8 },
 ];
 const SERIAL_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "serial", name: "write" },
+    CapabilitySpec { namespace: "serial", name: "write", version: 1 },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {

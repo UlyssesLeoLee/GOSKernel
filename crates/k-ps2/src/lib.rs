@@ -156,7 +156,7 @@ const PS2_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::IrqBind, arg0: 1, arg1: 0 },
 ];
 const PS2_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "shell", capability: "input", required: true },
+    ImportSpec { namespace: "shell", capability: "input", required: true, min_version: 1, max_version: u32::MAX },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {

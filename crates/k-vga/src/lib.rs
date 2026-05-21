@@ -500,8 +500,8 @@ const VGA_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x3C8, arg1: 0x3C9 },
 ];
 const VGA_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "console", name: "write" },
-    CapabilitySpec { namespace: "display", name: "pointer" },
+    CapabilitySpec { namespace: "console", name: "write", version: 1 },
+    CapabilitySpec { namespace: "display", name: "pointer", version: 1 },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {

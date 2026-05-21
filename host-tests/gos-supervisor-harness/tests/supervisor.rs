@@ -28,6 +28,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 const TEST_EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
     namespace: "demo",
     name: "echo",
+    version: 1,
 }];
 
 const TEST_SEGMENTS: &[ModuleImageSegment] = &[ModuleImageSegment {

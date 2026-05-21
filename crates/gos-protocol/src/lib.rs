@@ -875,6 +875,18 @@ pub struct PermissionSpec {
 pub struct CapabilitySpec {
     pub name: &'static str,
     pub namespace: &'static str,
+    /// Phase J.4 — semantic version of this exported capability.
+    /// Resolver picks the highest version that falls inside any
+    /// caller's `[min_version, max_version]` window so providers
+    /// can evolve without breaking older consumers.  Default for
+    /// legacy exports is `CAPABILITY_VERSION_DEFAULT = 1`.
+    pub version: u32,
+}
+
+impl CapabilitySpec {
+    /// Default version stamp for capabilities that haven't been
+    /// re-versioned since J.4.  Equals 1.
+    pub const DEFAULT_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,6 +894,21 @@ pub struct ImportSpec {
     pub capability: &'static str,
     pub namespace: &'static str,
     pub required: bool,
+    /// Phase J.4 — inclusive lower bound on the provider's version.
+    /// Default for legacy imports is `1`.
+    pub min_version: u32,
+    /// Phase J.4 — inclusive upper bound on the provider's version.
+    /// Default for legacy imports is `u32::MAX` (accept anything).
+    pub max_version: u32,
+}
+
+impl ImportSpec {
+    /// Construct a version-agnostic import accepting any provider
+    /// version (1..=u32::MAX).  Convenience constructor used by
+    /// legacy plugins; new plugins should specify min/max explicitly.
+    pub const fn any_version(namespace: &'static str, capability: &'static str, required: bool) -> Self {
+        Self { capability, namespace, required, min_version: 1, max_version: u32::MAX }
+    }
 }
 
 // MODULE_ABI_VERSION uses the same packed-semver layout as GOS_ABI_VERSION.

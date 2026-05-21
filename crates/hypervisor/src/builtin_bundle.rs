@@ -172,88 +172,88 @@ const MOUSE_PERMS: &[PermissionSpec] = &[
 ];
 
 const VGA_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "console", name: "write" },
-    CapabilitySpec { namespace: "display", name: "pointer" },
+    CapabilitySpec { namespace: "console", name: "write", version: 1 },
+    CapabilitySpec { namespace: "display", name: "pointer", version: 1 },
 ];
 const SERIAL_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "serial", name: "write" },
+    CapabilitySpec { namespace: "serial", name: "write", version: 1 },
 ];
 const PMM_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "frame_alloc" },
+    CapabilitySpec { namespace: "memory", name: "frame_alloc", version: 1 },
 ];
 const VMM_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "map_page" },
+    CapabilitySpec { namespace: "memory", name: "map_page", version: 1 },
 ];
 const HEAP_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "alloc" },
+    CapabilitySpec { namespace: "memory", name: "alloc", version: 1 },
 ];
 const SHELL_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "shell", name: "input" },
+    CapabilitySpec { namespace: "shell", name: "input", version: 1 },
 ];
 const CLIPBOARD_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "clipboard", name: "buffer" },
+    CapabilitySpec { namespace: "clipboard", name: "buffer", version: 1 },
 ];
 const CHAT_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "chat", name: "bridge" },
+    CapabilitySpec { namespace: "chat", name: "bridge", version: 1 },
 ];
 const NIM_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "nim", name: "inference" },
+    CapabilitySpec { namespace: "nim", name: "inference", version: 1 },
 ];
 const AI_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "ai", name: "supervisor" },
-    CapabilitySpec { namespace: "graph", name: "orchestrate" },
+    CapabilitySpec { namespace: "ai", name: "supervisor", version: 1 },
+    CapabilitySpec { namespace: "graph", name: "orchestrate", version: 1 },
 ];
 const CUDA_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "cuda", name: "bridge" },
+    CapabilitySpec { namespace: "cuda", name: "bridge", version: 1 },
 ];
 const CYPHER_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "cypher", name: "query" },
+    CapabilitySpec { namespace: "cypher", name: "query", version: 1 },
 ];
 const IME_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "ime", name: "control" },
+    CapabilitySpec { namespace: "ime", name: "control", version: 1 },
 ];
 const NET_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "net", name: "uplink" },
+    CapabilitySpec { namespace: "net", name: "uplink", version: 1 },
 ];
 
 const SHELL_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
-    ImportSpec { namespace: "ime", capability: "control", required: true },
-    ImportSpec { namespace: "ai", capability: "supervisor", required: true },
-    ImportSpec { namespace: "cypher", capability: "query", required: true },
-    ImportSpec { namespace: "net", capability: "uplink", required: true },
-    ImportSpec { namespace: "cuda", capability: "bridge", required: true },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "ime", capability: "control", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "ai", capability: "supervisor", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "cypher", capability: "query", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "net", capability: "uplink", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "cuda", capability: "bridge", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const CYPHER_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const CUDA_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
-    ImportSpec { namespace: "serial", capability: "write", required: true },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "serial", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const CHAT_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
-    ImportSpec { namespace: "net",     capability: "uplink", required: false },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "net",     capability: "uplink", required: false, min_version: 1, max_version: u32::MAX },
 ];
 const NIM_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
-    ImportSpec { namespace: "net",     capability: "uplink", required: false },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "net",     capability: "uplink", required: false, min_version: 1, max_version: u32::MAX },
 ];
 const AI_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
-    ImportSpec { namespace: "shell", capability: "input", required: true },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+    ImportSpec { namespace: "shell", capability: "input", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const IME_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "shell", capability: "input", required: true },
+    ImportSpec { namespace: "shell", capability: "input", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const NET_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "console", capability: "write", required: true },
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const MOUSE_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "display", capability: "pointer", required: true },
+    ImportSpec { namespace: "display", capability: "pointer", required: true, min_version: 1, max_version: u32::MAX },
 ];
 const PS2_IMPORTS: &[ImportSpec] = &[
-    ImportSpec { namespace: "shell", capability: "input", required: true },
+    ImportSpec { namespace: "shell", capability: "input", required: true, min_version: 1, max_version: u32::MAX },
 ];
 
 const DEP_PIT: &[PluginId] = &[K_PIC_ID];
@@ -1511,12 +1511,19 @@ fn validate_imports(modules: &[BuiltinModule]) -> Result<(), BuiltinBootError> {
 }
 
 fn capability_is_exported(import: &ImportSpec, modules: &[BuiltinModule]) -> bool {
+    // Phase J.4 — version negotiation.  A provider satisfies an
+    // import only if its export's `version` falls inside the
+    // import's [min_version, max_version] window.  For legacy
+    // plugins that don't yet specify versions, the default is
+    // version=1 (export) and [1, u32::MAX] (import) → backward
+    // compatible.
     modules.iter().any(|module| {
-        module
-            .manifest()
-            .exports
-            .iter()
-            .any(|export| export.namespace == import.namespace && export.name == import.capability)
+        module.manifest().exports.iter().any(|export| {
+            export.namespace == import.namespace
+                && export.name == import.capability
+                && export.version >= import.min_version
+                && export.version <= import.max_version
+        })
     })
 }
 

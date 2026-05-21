@@ -2261,6 +2261,7 @@ fn resolve_capability_with_edge_attributes_to_runtime_graph() {
     const EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
         namespace: "vga",
         name: "console",
+        version: 1,
     }];
 
     let provider_spec = NodeSpec {

@@ -531,6 +531,7 @@ impl CapabilityRecord {
         spec: CapabilitySpec {
             namespace: "",
             name: "",
+            version: 0,
         },
     };
 }
@@ -2809,12 +2810,15 @@ mod tests {
     const TEST_EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
         namespace: "demo",
         name: "echo",
+        version: 1,
     }];
 
     const TEST_IMPORTS: &[ImportSpec] = &[ImportSpec {
         namespace: "demo",
         capability: "echo",
         required: true,
+        min_version: 1,
+        max_version: u32::MAX,
     }];
 
     const TEST_SEGMENTS: &[gos_protocol::ModuleImageSegment] = &[

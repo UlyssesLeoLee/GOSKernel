@@ -123,7 +123,7 @@ const HEAP_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
 ];
 const HEAP_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "alloc" },
+    CapabilitySpec { namespace: "memory", name: "alloc", version: 1 },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
