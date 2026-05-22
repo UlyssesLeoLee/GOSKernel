@@ -884,9 +884,11 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     let is_set_priority = starts_with_ci(query, "set priority");
     let is_show_priority = starts_with_ci(query, "show priority");
     let is_reset_priority = starts_with_ci(query, "reset priority");
+    let is_set_deadline = starts_with_ci(query, "set deadline");
+    let is_show_deadline = starts_with_ci(query, "show deadline");
     let is_invoke = starts_with_ci(query, "invoke ") || starts_with_ci(query, "invoke\t");
 
-    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_show_capabilities || is_set_priority || is_show_priority || is_reset_priority || is_invoke) {
+    if !(is_show_nodes || is_show_edges || is_show_journal || is_show_plugins || is_show_stats || is_show_capabilities || is_set_priority || is_show_priority || is_reset_priority || is_set_deadline || is_show_deadline || is_invoke) {
         return CypherQueryOutcome::NotQuery;
     }
 
@@ -904,6 +906,12 @@ pub fn dispatch_cypher_query<E: QueryEmitter>(
     }
     if is_reset_priority {
         return reset_priority_action(query, emitter);
+    }
+    if is_set_deadline {
+        return set_deadline_action(query, emitter);
+    }
+    if is_show_deadline {
+        return show_deadline_action(query, emitter);
     }
     if is_invoke {
         return invoke_action(query, emitter);
@@ -1051,7 +1059,14 @@ fn show_stats<E: QueryEmitter>(emitter: &mut E) -> CypherQueryOutcome {
     row.push_dec(rpc_buf);
     emitter.emit_row(row.as_str());
 
-    CypherQueryOutcome::Rows { count: 8 }
+    // L.4 — deadline overrun counter
+    let overruns = gos_runtime::deadline_overrun_count();
+    let mut row = RowBuf::<80>::new();
+    row.push_str("deadlines overruns=");
+    row.push_dec(overruns);
+    emitter.emit_row(row.as_str());
+
+    CypherQueryOutcome::Rows { count: 9 }
 }
 
 // ── Phase K.2 — set node priority via Cypher ─────────────────────
@@ -1135,6 +1150,73 @@ fn reset_priority_action<E: QueryEmitter>(
     row.push_str("' = 128 (DEFAULT)");
     emitter.emit_row(row.as_str());
     CypherQueryOutcome::Rows { count: 1 }
+}
+
+// ── L.4 — Cypher deadline operations ─────────────────────────────
+fn set_deadline_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("set deadline requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    if gos_runtime::node_id_for_vec(vec).is_none() {
+        return CypherQueryOutcome::EndpointNotFound("set deadline: node not found");
+    }
+    let Some(n) = parse_deadline_value(query) else {
+        return CypherQueryOutcome::BadSyntax("set deadline requires '= N' (cycles, 0 disables)");
+    };
+    if gos_runtime::set_node_deadline(vec, n).is_err() {
+        return CypherQueryOutcome::EndpointNotFound("set deadline: runtime rejected");
+    }
+    let mut row = RowBuf::<80>::new();
+    row.push_str("set deadline '");
+    row.push_str(literal);
+    row.push_str("' = ");
+    row.push_dec(n);
+    row.push_str(" cycles");
+    if n == 0 {
+        row.push_str(" (disabled)");
+    }
+    emitter.emit_row(row.as_str());
+    CypherQueryOutcome::Rows { count: 1 }
+}
+
+fn show_deadline_action<E: QueryEmitter>(
+    query: &str,
+    emitter: &mut E,
+) -> CypherQueryOutcome {
+    let Some(literal) = extract_quoted_at(query, 0) else {
+        return CypherQueryOutcome::BadSyntax("show deadline requires 'V' literal");
+    };
+    let Some(vec) = VectorAddress::parse(literal) else {
+        return CypherQueryOutcome::BadSyntax("bad vector literal");
+    };
+    let Some(cycles) = gos_runtime::node_deadline(vec) else {
+        return CypherQueryOutcome::EndpointNotFound("show deadline: node not found");
+    };
+    let mut row = RowBuf::<80>::new();
+    row.push_str("'");
+    row.push_str(literal);
+    row.push_str("' deadline = ");
+    if cycles == 0 {
+        row.push_str("(disabled)");
+    } else {
+        row.push_dec(cycles);
+        row.push_str(" cycles");
+    }
+    emitter.emit_row(row.as_str());
+    CypherQueryOutcome::Rows { count: 1 }
+}
+
+fn parse_deadline_value(query: &str) -> Option<u64> {
+    let eq_pos = query.as_bytes().iter().position(|&b| b == b'=')?;
+    let rest = &query[eq_pos + 1..];
+    let token = next_token(rest)?;
+    token.parse::<u64>().ok()
 }
 
 fn parse_priority_value(query: &str) -> Option<u8> {

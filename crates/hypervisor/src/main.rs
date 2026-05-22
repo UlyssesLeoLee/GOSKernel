@@ -2220,6 +2220,8 @@ fn interpret_command(raw: &str) {
             ui.log("  SET PRIORITY 'V' = N      (N in 0..255)");
             ui.log("  SHOW PRIORITY 'V'");
             ui.log("  RESET PRIORITY 'V'        (back to 128)");
+            ui.log("  SET DEADLINE 'V' = N      (RDTSC cycles, 0 disables)");
+            ui.log("  SHOW DEADLINE 'V'");
             ui.log("  INVOKE 'V' [WITH N]       (RPC, returns u64)");
             ui.log("cypher mutations:");
             ui.log("  CREATE MOUNT 'F' -> 'T'");

@@ -2668,6 +2668,104 @@ fn rpc_invoke_buf_round_trip_through_target_uppercase() {
     assert_eq!(&response[..n], b"GRAPH OS KERNEL");
 }
 
+// Phase L.4 — deadline-aware scheduling.  When a node's executor
+// dispatch exceeds its declared RDTSC budget, the runtime increments
+// `deadline_overrun_count` and emits a Fault envelope.  This test:
+//   1. registers a node whose executor deliberately wastes cycles
+//   2. sets a tiny deadline (10 cycles) so the call always overruns
+//   3. dispatches it once
+//   4. asserts overrun counter incremented
+#[test]
+fn deadline_overrun_increments_counter_when_executor_exceeds_budget() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
+        NodeExecutorVTable, NodeSpec, PluginId, PluginManifest, RuntimeNodeType, Signal,
+        VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("DEADLN");
+    const KEY: &str = "dl.slow";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.slow");
+    const VEC: VectorAddress = VectorAddress::new(14, 0, 0, 1);
+
+    unsafe extern "C" fn slow(_c: *mut ExecutorContext, _e: *const NodeEvent) -> ExecStatus {
+        // Burn a noticeable number of cycles so any sensible deadline
+        // is blown past.  Inline asm pause is portable and observable.
+        for _ in 0..10_000 {
+            unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+        }
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vt = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(slow),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "DEADLN",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vt).expect("bind");
+
+    // No deadline set yet — dispatch shouldn't count as overrun.
+    let before = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert_eq!(gos_runtime::deadline_overrun_count(), before,
+        "no overrun expected when deadline=0");
+
+    // Now set an absurdly tight deadline (10 cycles) and re-dispatch.
+    gos_runtime::set_node_deadline(VEC, 10).expect("set deadline");
+    assert_eq!(gos_runtime::node_deadline(VEC), Some(10));
+    let before2 = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert!(
+        gos_runtime::deadline_overrun_count() > before2,
+        "overrun counter must increment after 10 000 pause cycles vs 10-cycle deadline"
+    );
+
+    // Resetting to 0 disables enforcement again.
+    gos_runtime::set_node_deadline(VEC, 0).expect("clear deadline");
+    let before3 = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert_eq!(
+        gos_runtime::deadline_overrun_count(),
+        before3,
+        "deadline=0 must suppress overrun tracking"
+    );
+}
+
 // Phase L.6 — runtime-internal RPC echo target at vector 0.0.0.0.
 // Calling rpc_invoke on RPC_ECHO_VECTOR returns the request word
 // unchanged WITHOUT going through executor dispatch.  Useful as a

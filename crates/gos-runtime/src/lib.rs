@@ -311,6 +311,14 @@ struct NodeRecord {
     /// priority entry; FIFO order is preserved among entries of equal
     /// priority.  Public API: `set_node_priority` / `node_priority`.
     priority: u8,
+    /// Phase L.4 — soft deadline in RDTSC cycles.  0 means "no
+    /// deadline".  The dispatch wrapper measures cycle delta around
+    /// each executor invocation; when delta > deadline_cycles the
+    /// runtime emits a Fault control-plane envelope (NON-fatal — the
+    /// kernel can't preempt a single dispatch in-flight, but the
+    /// audit trail flags the overrun).  Public API:
+    /// `set_node_deadline` / `node_deadline` / `deadline_overrun_count`.
+    deadline_cycles: u64,
 }
 
 /// Default scheduling priority for newly-registered nodes.  See
@@ -673,6 +681,7 @@ impl GraphRuntime {
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
             priority: NODE_PRIORITY_DEFAULT,
+            deadline_cycles: 0,
         });
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
@@ -1451,6 +1460,33 @@ impl GraphRuntime {
             .and_then(|slot| self.nodes[slot].map(|r| r.priority))
     }
 
+    /// L.4 — set a node's soft RDTSC deadline.  0 = no deadline.
+    pub fn set_node_deadline(&mut self, vector: VectorAddress, cycles: u64) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        if let Some(mut record) = self.nodes[slot] {
+            record.deadline_cycles = cycles;
+            self.nodes[slot] = Some(record);
+            Ok(())
+        } else {
+            Err(RuntimeError::NodeNotFound)
+        }
+    }
+
+    /// L.4 — read a node's soft RDTSC deadline.  Returns None if the
+    /// vector doesn't resolve; Some(0) means "no deadline configured".
+    pub fn node_deadline(&self, vector: VectorAddress) -> Option<u64> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|r| r.deadline_cycles))
+    }
+
+    /// L.4 helper — look up deadline by NodeId for the dispatch wrapper.
+    /// 0 = no deadline configured for this node.
+    fn deadline_for(&self, node_id: NodeId) -> u64 {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|r| r.deadline_cycles))
+            .unwrap_or(0)
+    }
+
     fn bump_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
     }
@@ -2030,6 +2066,44 @@ pub fn node_priority(vector: VectorAddress) -> Option<u8> {
     RUNTIME.lock().node_priority(vector)
 }
 
+/// L.4 — set a node's soft RDTSC deadline.  When the dispatch
+/// wrapper measures > deadline_cycles between executor enter/exit,
+/// `deadline_overrun_count` increments and a Fault control-plane
+/// envelope is emitted (the kernel can't preempt an in-flight
+/// dispatch; this is observability + restart input).  0 = no deadline.
+pub fn set_node_deadline(vector: VectorAddress, cycles: u64) -> Result<(), RuntimeError> {
+    RUNTIME.lock().set_node_deadline(vector, cycles)
+}
+
+/// L.4 — read a node's deadline (cycles).  None if vector unknown;
+/// Some(0) if no deadline.
+pub fn node_deadline(vector: VectorAddress) -> Option<u64> {
+    RUNTIME.lock().node_deadline(vector)
+}
+
+/// L.4 — total lifetime count of deadline overruns observed by the
+/// dispatch wrapper.  Used by SHOW STATS and external monitoring.
+pub fn deadline_overrun_count() -> u64 {
+    DEADLINE_OVERRUN_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// L.4 helper exposed for the dispatch wrapper sites.  Records an
+/// overrun + emits a Fault envelope so it lands in the journal ring.
+fn record_deadline_overrun(node_id: NodeId, observed_cycles: u64, budget_cycles: u64) {
+    DEADLINE_OVERRUN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Emit a Fault envelope through the runtime so journal/scrollback
+    // observers (J.2/L.9) see the overrun in real time.
+    RUNTIME.lock().emit_control_plane(
+        ControlPlaneMessageKind::Fault,
+        node_id.0,
+        observed_cycles,
+        budget_cycles,
+    );
+}
+
+static DEADLINE_OVERRUN_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {
     RUNTIME.lock().node_summary(vector)
 }
@@ -2418,6 +2492,9 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             }
 
             if status != ExecStatus::Fault {
+                // L.4 — measure executor dispatch in RDTSC cycles.
+                let deadline = RUNTIME.lock().deadline_for(dispatch.node_id);
+                let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                 status = if terminated {
                     if let Some(on_teardown) = binding.vtable.on_teardown {
                         unsafe { on_teardown(&mut ctx) }
@@ -2434,6 +2511,13 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 } else {
                     ExecStatus::Done
                 };
+                let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+                if deadline > 0 {
+                    let observed = t1.wrapping_sub(t0);
+                    if observed > deadline {
+                        record_deadline_overrun(dispatch.node_id, observed, deadline);
+                    }
+                }
             }
 
             drop(_domain_guard);
@@ -2558,11 +2642,21 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             }
 
             if status != ExecStatus::Fault {
+                // L.4 — measure on_resume dispatch in RDTSC cycles.
+                let deadline = RUNTIME.lock().deadline_for(dispatch.node_id);
+                let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                 status = if let Some(on_resume) = binding.vtable.on_resume {
                     unsafe { on_resume(&mut ctx) }
                 } else {
                     ExecStatus::Done
                 };
+                let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+                if deadline > 0 {
+                    let observed = t1.wrapping_sub(t0);
+                    if observed > deadline {
+                        record_deadline_overrun(dispatch.node_id, observed, deadline);
+                    }
+                }
             }
 
             drop(_domain_guard);
