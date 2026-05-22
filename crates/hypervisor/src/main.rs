@@ -1225,6 +1225,13 @@ struct PbrMaterial {
     /// M.2 — frequency of the micro_bump perturbation.  Higher = finer
     /// pattern (brushed steel); lower = larger pebbled feel.
     micro_bump_freq: f32,
+    /// M.4 — anisotropic specular stretch.  0 = isotropic (default
+    /// circular highlight); +1 = highlight stretched horizontally
+    /// (sphere's world-X axis); −1 = stretched vertically.  Mimics
+    /// brushed metal where the highlight runs perpendicular to the
+    /// brushing direction.  Most natural at moderate amplitudes
+    /// (±0.4..0.7).
+    anisotropy: f32,
 }
 
 fn material_for_sub_domain(sub: gos_protocol::NodeSubDomain) -> PbrMaterial {
@@ -1233,32 +1240,38 @@ fn material_for_sub_domain(sub: gos_protocol::NodeSubDomain) -> PbrMaterial {
         NodeSubDomain::Hardware =>
             PbrMaterial {
                 metallic: 0.95, roughness: 0.18, rim: 1.2,
-                micro_bump_amp: 0.00, micro_bump_freq:  0.0,   // polished — mirror smooth
+                micro_bump_amp: 0.00, micro_bump_freq:  0.0,
+                anisotropy:  0.00,                              // polished mirror — isotropic
             },
         NodeSubDomain::KernelDriver =>
             PbrMaterial {
                 metallic: 0.92, roughness: 0.25, rim: 1.0,
-                micro_bump_amp: 0.025, micro_bump_freq: 32.0,  // brushed chrome — fine streaks
+                micro_bump_amp: 0.025, micro_bump_freq: 32.0,
+                anisotropy:  0.65,                              // brushed chrome — horizontal streak
             },
         NodeSubDomain::Service =>
             PbrMaterial {
                 metallic: 0.80, roughness: 0.38, rim: 0.85,
-                micro_bump_amp: 0.018, micro_bump_freq: 22.0,  // satin — medium grain
+                micro_bump_amp: 0.018, micro_bump_freq: 22.0,
+                anisotropy:  0.30,                              // satin — mild stretch
             },
         NodeSubDomain::Compute =>
             PbrMaterial {
                 metallic: 0.88, roughness: 0.30, rim: 1.05,
-                micro_bump_amp: 0.030, micro_bump_freq: 28.0,  // brushed deeper
+                micro_bump_amp: 0.030, micro_bump_freq: 28.0,
+                anisotropy: -0.55,                              // brushed deeper — vertical streak
             },
         NodeSubDomain::Routing =>
             PbrMaterial {
                 metallic: 0.70, roughness: 0.45, rim: 0.90,
-                micro_bump_amp: 0.022, micro_bump_freq: 18.0,  // anodized — slightly pebbled
+                micro_bump_amp: 0.022, micro_bump_freq: 18.0,
+                anisotropy:  0.20,                              // anodized — soft horizontal
             },
         NodeSubDomain::Vector =>
             PbrMaterial {
                 metallic: 0.40, roughness: 0.65, rim: 0.70,
-                micro_bump_amp: 0.055, micro_bump_freq: 14.0,  // matte rock — coarse pebble
+                micro_bump_amp: 0.055, micro_bump_freq: 14.0,
+                anisotropy:  0.00,                              // matte — no directional sheen
             },
     }
 }
@@ -1406,13 +1419,34 @@ fn draw_node_sphere(
 
             // Specular only from the key light (fill/sky are too soft
             // to make a coherent highlight).  PBR specular (GGX × Schlick).
+            // M.4 — anisotropic stretch modulates the lobe by a factor
+            // that depends on the half-vector's alignment with the
+            // material's "brushing axis" (X for positive anisotropy,
+            // Y for negative).  Highlight gets compressed along the
+            // brushing direction → reads as a streak.
             let mut spec = 0.0_f32;
             if do_specular {
                 let n_dot_h = normal.dot(half).max(0.001);
                 let v_dot_h = view.dot(half).max(0.001);
                 let d = ggx_d(n_dot_h, material.roughness);
                 let f = schlick_fresnel(f0, v_dot_h);
-                spec = d * f * 0.30 * (1.0 + specular_boost);
+                let aniso_factor = if material.anisotropy.abs() < 0.01 {
+                    1.0
+                } else {
+                    // h.x (or h.y) ≈ 1 along the brushing axis; we
+                    // attenuate the lobe by 1 - |comp|·|aniso|, so
+                    // the streak runs perpendicular to it.
+                    let comp = if material.anisotropy >= 0.0 {
+                        half.x
+                    } else {
+                        half.y
+                    };
+                    let mag = material.anisotropy.abs();
+                    let mut a = 1.0 - (comp.abs()) * mag;
+                    if a < 0.15 { a = 0.15; } // clamp so streak doesn't kill specular entirely
+                    a
+                };
+                spec = d * f * 0.30 * aniso_factor * (1.0 + specular_boost);
             }
 
             // Environment reflection (cheap procedural sampler).
