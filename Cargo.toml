@@ -42,4 +42,5 @@ members = [
     "crates/k-scene",
     "crates/k-fb",
     "crates/k-rast",
+    "crates/k-assets",
 ]
