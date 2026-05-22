@@ -1157,7 +1157,46 @@ const NODE_HALF: f32 = 0.13;
 // `fog`: 0.0 near, 1.0 far — biases the shade index down so distant
 //   balls recede into the nebula background.
 
+// Phase M — multi-light setup for AAA-equivalent shading on the
+// 256-color framebuffer.  Three lights composite per pixel:
+//   * KEY    主光 — 标准 PBR specular + diffuse, high intensity
+//   * FILL   补光 — opposite-side soft diffuse, fills shadows
+//   * SKY    天光 — upward bounce, prevents bottom darkening
 const LIGHT_DIR: Vec3 = Vec3 { x: 0.55, y: 0.72, z: -0.42 };
+const FILL_LIGHT_DIR: Vec3 = Vec3 { x: -0.40, y: 0.20, z: 0.30 };
+const SKY_LIGHT_DIR: Vec3 = Vec3 { x: 0.00, y: 1.00, z: 0.00 };
+const KEY_INTENSITY: f32 = 1.0;
+const FILL_INTENSITY: f32 = 0.32;
+const SKY_INTENSITY: f32 = 0.18;
+
+/// Phase M.1 — Bayer 4×4 ordered dither matrix.  Each cell is in
+/// [0..16); when added to a per-pixel intensity-fraction, decides
+/// whether to round up or down to the nearest palette ramp slot.
+/// Eliminates banding on smooth sphere gradients without needing an
+/// HDR backbuffer.
+const BAYER_4X4: [[u8; 4]; 4] = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+];
+
+/// Pick a shade slot 0..=7 from a continuous intensity in [0, 1] using
+/// the Bayer dither matrix at the given pixel position.  This is the
+/// single point where the AAA-style continuous shading meets the
+/// 256-color palette quantization.
+#[inline]
+fn dither_shade(intensity: f32, x: i32, y: i32) -> u8 {
+    let scaled = (intensity.clamp(0.0, 1.0) * 7.999_99) as f32;
+    let base = libm::floorf(scaled);
+    let frac = scaled - base;
+    // Bayer cell in [0, 1).
+    let bx = (x.rem_euclid(4)) as usize;
+    let by = (y.rem_euclid(4)) as usize;
+    let threshold = (BAYER_4X4[by][bx] as f32 + 0.5) / 16.0;
+    let shade = if frac >= threshold { base as u8 + 1 } else { base as u8 };
+    shade.min(7)
+}
 const AMBIENT: f32 = 0.10;
 
 /// PBR material — drives the sphere shader's GGX response per node.
@@ -1302,24 +1341,29 @@ fn draw_node_sphere(
             // Y is screen-down → flip so up-light reads correctly.
             let normal = Vec3::new(nx, -ny, nz);
 
-            let n_dot_l = normal.dot(LIGHT_DIR).max(0.0);
+            // ── M.1 — three-light Lambertian + GGX setup ──
+            let n_dot_l_key  = normal.dot(LIGHT_DIR).max(0.0);
+            let n_dot_l_fill = normal.dot(FILL_LIGHT_DIR).max(0.0);
+            let n_dot_l_sky  = normal.dot(SKY_LIGHT_DIR).max(0.0);
             let n_dot_v = normal.dot(view).max(0.001);
 
-            // Diffuse (Lambertian) — reduced by metallic factor since
-            // pure metals have no diffuse contribution.
-            let diffuse = n_dot_l * (1.0 - material.metallic);
+            // Diffuse — sum of three lights, each scaled by intensity
+            // and metallic damping.  Multi-light fills shadows naturally,
+            // killing the "single-direction lit" look of single-light
+            // PBR demos.
+            let diffuse = (n_dot_l_key * KEY_INTENSITY
+                        + n_dot_l_fill * FILL_INTENSITY
+                        + n_dot_l_sky * SKY_INTENSITY)
+                        * (1.0 - material.metallic);
 
-            // PBR specular (GGX × Schlick fresnel) — pump the
-            // brightness so the highlight reads visibly even after
-            // 8-shade palette quantization.
+            // Specular only from the key light (fill/sky are too soft
+            // to make a coherent highlight).  PBR specular (GGX × Schlick).
             let mut spec = 0.0_f32;
             if do_specular {
                 let n_dot_h = normal.dot(half).max(0.001);
                 let v_dot_h = view.dot(half).max(0.001);
                 let d = ggx_d(n_dot_h, material.roughness);
                 let f = schlick_fresnel(f0, v_dot_h);
-                // Simplified geometry term + denominator absorbed
-                // into the constant to keep this fast.
                 spec = d * f * 0.30 * (1.0 + specular_boost);
             }
 
@@ -1354,7 +1398,12 @@ fn draw_node_sphere(
                 + rim)
                 .clamp(0.0, 1.0);
 
-            let shade_raw = (intensity * 7.999) as u8;
+            // ── M.1 — Bayer 4×4 dither instead of nearest-shade ──
+            // Eliminates banding on smooth gradients; each pixel's
+            // round-up vs round-down decision is driven by a fixed
+            // pattern, breaking palette quantization steps into
+            // visually-noisy transitions the eye reads as continuous.
+            let shade_raw = dither_shade(intensity, px, py);
             let shade = shade_raw.saturating_sub(fog_bias).min(7);
             k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
 
