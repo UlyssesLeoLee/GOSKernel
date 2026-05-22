@@ -1455,19 +1455,45 @@ fn draw_node_sphere(
             let shade = shade_raw.saturating_sub(fog_bias).min(7);
             k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
 
-            // I.14 — bloom approximation: when a pixel hits the
-            // brightest shade (the specular hot spot), paint a soft
-            // halo of one-step-dimmer pixels at its 4 cardinal
-            // neighbours.  Cheap stand-in for a real Gaussian bloom
-            // pass; cost is bounded since shade 7 only fires inside
-            // the specular lobe.
-            if shade >= 7 {
-                let glow = hue_base + 5;
-                for (gx, gy) in [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)] {
-                    if gx >= 0 && gx < SCENE_WIDTH && gy >= HEADER_H && gy < FOOTER_Y {
-                        k_fb::put_pixel_raw(gx as usize, gy as usize, glow);
+            // ── M.3 — 8-neighbour Gaussian-weighted bloom ──
+            //
+            // Real AAA bloom is a multi-tap separable Gaussian on an
+            // HDR buffer; we approximate it on the 256-color
+            // framebuffer with a single per-pixel spread when the hot
+            // spot fires.  Cardinal neighbours get shade-1; diagonal
+            // neighbours get shade-2 (sqrt(2) falloff approximation).
+            // Threshold lowered from 7 to 6 so the bloom halo starts
+            // before the hot spot itself rather than at the apex —
+            // gives a soft "glow ring" effect instead of a sharp
+            // 4-cross.  Uses max-compositing so distant lit areas
+            // dominate over dark surroundings without overwriting
+            // bright pixels.
+            if shade >= 6 {
+                let near = hue_base + shade.saturating_sub(1);
+                let diag = hue_base + shade.saturating_sub(2);
+                let composite = |gx: i32, gy: i32, candidate: u8| {
+                    if gx < 0 || gx >= SCENE_WIDTH || gy < HEADER_H || gy >= FOOTER_Y {
+                        return;
                     }
-                }
+                    // Read-modify-write: keep the brighter of the
+                    // existing pixel and the bloom candidate.  This
+                    // avoids painting our halo *darker* than another
+                    // sphere's already-bright pixel.
+                    let existing = k_fb::get_pixel_raw(gx as usize, gy as usize);
+                    if candidate > existing {
+                        k_fb::put_pixel_raw(gx as usize, gy as usize, candidate);
+                    }
+                };
+                // Cardinal (distance 1)
+                composite(px - 1, py,     near);
+                composite(px + 1, py,     near);
+                composite(px,     py - 1, near);
+                composite(px,     py + 1, near);
+                // Diagonal (distance √2)
+                composite(px - 1, py - 1, diag);
+                composite(px + 1, py - 1, diag);
+                composite(px - 1, py + 1, diag);
+                composite(px + 1, py + 1, diag);
             }
         }
     }

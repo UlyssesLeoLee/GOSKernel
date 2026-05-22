@@ -505,6 +505,40 @@ pub fn put_pixel(x: usize, y: usize, color: Color) {
     paint_logical_pixel(fb, x, y, color.idx());
 }
 
+/// Read a single pixel's raw palette index.  Used by the M.3 bloom
+/// post-pass to do max-composite read-modify-write so neighbouring
+/// spheres' hot spots don't paint each other dark.
+///
+/// Returns 0 (Background palette index) on out-of-range or when the
+/// framebuffer hasn't been initialized yet.
+pub fn get_pixel_raw(x: usize, y: usize) -> u8 {
+    if x >= WIDTH || y >= HEIGHT {
+        return 0;
+    }
+    let Some(fb) = fb_ptr() else { return 0 };
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    if bpp == 1 {
+        // SAFETY: bounds-checked above, fb_ptr is valid after init.
+        unsafe { *fb.add(y * WIDTH + x) }
+    } else {
+        // HD path: read the upper-left of the scaled block.
+        let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
+        let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+        let fb32 = fb as *const u32;
+        let native_x = x * scale;
+        let native_y = y * scale;
+        let bgrx = unsafe { *fb32.add(native_y * native_w + native_x) };
+        // Reverse-lookup BGRX → palette idx is expensive; for the
+        // bloom post-pass we only need a rough brightness, so return
+        // a luminance-derived approximation: 0 if dark, 7 if bright.
+        let b = (bgrx & 0xFF) as u32;
+        let g = ((bgrx >> 8) & 0xFF) as u32;
+        let r = ((bgrx >> 16) & 0xFF) as u32;
+        let lum = (r * 30 + g * 59 + b * 11) / 100;
+        ((lum / 32).min(7) as u8)
+    }
+}
+
 /// Set a single pixel by raw palette index.  Used by the 3D scene
 /// painter to write per-shade ramp colours.
 pub fn put_pixel_raw(x: usize, y: usize, palette_idx: u8) {
