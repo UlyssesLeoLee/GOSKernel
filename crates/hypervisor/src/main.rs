@@ -1393,7 +1393,15 @@ fn draw_node_sphere(
             // Effect: brushed metals show stripey reflections; matte
             // surfaces have a pebbled diffusion; polished stays
             // mirror-smooth.
-            let normal = if material.micro_bump_amp > 0.0 {
+            //
+            // LOD gate: 4 trig calls per pixel × ~2000 pixels per
+            // sphere × ~25 spheres = 200000 trig/frame.  Under TCG
+            // that's ~2 seconds per frame, which leaves the user
+            // staring at the `clear()` background between paints.
+            // For r_px < 8 the texture is sub-pixel anyway so skip
+            // the perturbation — only the "hero" foreground spheres
+            // get the brushed/satin/matte feel.
+            let normal = if material.micro_bump_amp > 0.0 && r_px >= 8 {
                 let f = material.micro_bump_freq;
                 let bx = libm::sinf(nx * f) * libm::cosf(ny * f * 0.7) * material.micro_bump_amp;
                 let by = libm::cosf(nx * f * 0.6) * libm::sinf(ny * f) * material.micro_bump_amp;
@@ -1489,45 +1497,33 @@ fn draw_node_sphere(
             let shade = shade_raw.saturating_sub(fog_bias).min(7);
             k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
 
-            // ── M.3 — 8-neighbour Gaussian-weighted bloom ──
+            // ── M.3 — 4-cardinal bloom (perf-recovered) ──
             //
             // Real AAA bloom is a multi-tap separable Gaussian on an
-            // HDR buffer; we approximate it on the 256-color
-            // framebuffer with a single per-pixel spread when the hot
-            // spot fires.  Cardinal neighbours get shade-1; diagonal
-            // neighbours get shade-2 (sqrt(2) falloff approximation).
-            // Threshold lowered from 7 to 6 so the bloom halo starts
-            // before the hot spot itself rather than at the apex —
-            // gives a soft "glow ring" effect instead of a sharp
-            // 4-cross.  Uses max-compositing so distant lit areas
-            // dominate over dark surroundings without overwriting
-            // bright pixels.
-            if shade >= 6 {
+            // HDR buffer; on the 256-color framebuffer we approximate
+            // it with a single per-pixel spread when the hot spot
+            // fires.  After M.3.b we reverted from 8-neighbour
+            // read-modify-write to a 4-cardinal unconditional write
+            // because: (1) under TCG, `get_pixel_raw` + `put_pixel_raw`
+            // each take the framebuffer LOCK and cost ~8× more than a
+            // raw write — multiplying that by 8 per bright pixel
+            // dropped frame rate to <1 FPS, leaving the user staring
+            // at the `clear()` background between paints; (2) max-
+            // compositing across different hue ramps is semantically
+            // meaningless (cyan-5 = 21 vs mint-0 = 40 has no
+            // brightness ordering).  Threshold restored to shade ≥ 7
+            // so the halo only fires at the apex of the specular lobe,
+            // matching the original I.14 cardinal-cross behaviour but
+            // now layered on top of M.1's dithered base — gives a
+            // visible "punch" without dragging the whole pipeline
+            // under.
+            if shade >= 7 {
                 let near = hue_base + shade.saturating_sub(1);
-                let diag = hue_base + shade.saturating_sub(2);
-                let composite = |gx: i32, gy: i32, candidate: u8| {
-                    if gx < 0 || gx >= SCENE_WIDTH || gy < HEADER_H || gy >= FOOTER_Y {
-                        return;
+                for (gx, gy) in [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)] {
+                    if gx >= 0 && gx < SCENE_WIDTH && gy >= HEADER_H && gy < FOOTER_Y {
+                        k_fb::put_pixel_raw(gx as usize, gy as usize, near);
                     }
-                    // Read-modify-write: keep the brighter of the
-                    // existing pixel and the bloom candidate.  This
-                    // avoids painting our halo *darker* than another
-                    // sphere's already-bright pixel.
-                    let existing = k_fb::get_pixel_raw(gx as usize, gy as usize);
-                    if candidate > existing {
-                        k_fb::put_pixel_raw(gx as usize, gy as usize, candidate);
-                    }
-                };
-                // Cardinal (distance 1)
-                composite(px - 1, py,     near);
-                composite(px + 1, py,     near);
-                composite(px,     py - 1, near);
-                composite(px,     py + 1, near);
-                // Diagonal (distance √2)
-                composite(px - 1, py - 1, diag);
-                composite(px + 1, py - 1, diag);
-                composite(px - 1, py + 1, diag);
-                composite(px + 1, py + 1, diag);
+                }
             }
         }
     }

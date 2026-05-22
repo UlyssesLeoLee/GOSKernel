@@ -535,7 +535,7 @@ pub fn get_pixel_raw(x: usize, y: usize) -> u8 {
         let g = ((bgrx >> 8) & 0xFF) as u32;
         let r = ((bgrx >> 16) & 0xFF) as u32;
         let lum = (r * 30 + g * 59 + b * 11) / 100;
-        ((lum / 32).min(7) as u8)
+        (lum / 32).min(7) as u8
     }
 }
 
