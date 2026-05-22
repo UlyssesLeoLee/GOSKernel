@@ -179,6 +179,11 @@ PBR 着色 (I.14)。
    - L.12 `SHOW CAPABILITIES`
    - J.3.B 指针 RPC (`rpc_invoke_buf`)
    - 工具：`tools/rpa/` Windows PowerShell 自动化 + `interfaces/` YAML 接口契约 + `xtask check-interfaces` lint
+- **Phase M** — 详见 `PHASE_M_ROADMAP.md` — AAA 级 sphere shader 极限
+   - M.1 Bayer 4×4 dither + 三光源 PBR
+   - M.2 微表面法线扰动 (per-material brushed/satin/matte)
+   - M.3 8-邻居 Gaussian bloom + max-composite
+   - M.4 Anisotropic specular (拉伸高光)
 
 ## 11. Phase L+ candidates (待定)
 
