@@ -170,6 +170,15 @@ PBR 着色 (I.14)。
    - K.4 `ARCHITECTURE.md` (本文档)
    - K.6 `watch` / `unwatch` — 实时 tail journal envelope 流
    - K.8 `SHOW PRIORITY 'V'` + `RESET PRIORITY 'V'` — priority 子系统闭环
+- **Phase L** — 详见 `PHASE_L_ROADMAP.md`
+   - L.4 deadline-aware scheduling (RDTSC-measured)
+   - L.6 内置 RPC echo target (0.0.0.0)
+   - L.7 `BENCH RPC <N>` — RDTSC cycle 测量
+   - L.8 RPC counters → SHOW STATS
+   - L.9 `WATCH [filter]` — 按 envelope kind 过滤
+   - L.12 `SHOW CAPABILITIES`
+   - J.3.B 指针 RPC (`rpc_invoke_buf`)
+   - 工具：`tools/rpa/` Windows PowerShell 自动化 + `interfaces/` YAML 接口契约 + `xtask check-interfaces` lint
 
 ## 11. Phase L+ candidates (待定)
 
