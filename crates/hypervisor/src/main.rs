@@ -1214,17 +1214,52 @@ struct PbrMaterial {
     /// Schlick rim strength multiplier.  Higher = more pronounced
     /// silhouette glow.
     rim: f32,
+    /// M.2 — micro-surface normal perturbation amplitude.  0 = polished
+    /// (no perturbation, mirror-smooth gradient), higher values
+    /// modulate the per-pixel normal via `sin(nx*K) * cos(ny*K) * amp`
+    /// to fake brushed / satin / matte textures.  Combined with the
+    /// `roughness` GGX widening this gives each material class a
+    /// distinct surface "feel" instead of every ball looking like the
+    /// same plastic.
+    micro_bump_amp: f32,
+    /// M.2 — frequency of the micro_bump perturbation.  Higher = finer
+    /// pattern (brushed steel); lower = larger pebbled feel.
+    micro_bump_freq: f32,
 }
 
 fn material_for_sub_domain(sub: gos_protocol::NodeSubDomain) -> PbrMaterial {
     use gos_protocol::NodeSubDomain;
     match sub {
-        NodeSubDomain::Hardware => PbrMaterial { metallic: 0.95, roughness: 0.18, rim: 1.2 },     // polished cyan steel
-        NodeSubDomain::KernelDriver => PbrMaterial { metallic: 0.92, roughness: 0.25, rim: 1.0 }, // chrome amber
-        NodeSubDomain::Service => PbrMaterial { metallic: 0.80, roughness: 0.38, rim: 0.85 },     // satin mint
-        NodeSubDomain::Compute => PbrMaterial { metallic: 0.88, roughness: 0.30, rim: 1.05 },     // brushed magenta
-        NodeSubDomain::Routing => PbrMaterial { metallic: 0.70, roughness: 0.45, rim: 0.90 },     // anodized rose
-        NodeSubDomain::Vector => PbrMaterial { metallic: 0.40, roughness: 0.65, rim: 0.70 },      // matte
+        NodeSubDomain::Hardware =>
+            PbrMaterial {
+                metallic: 0.95, roughness: 0.18, rim: 1.2,
+                micro_bump_amp: 0.00, micro_bump_freq:  0.0,   // polished — mirror smooth
+            },
+        NodeSubDomain::KernelDriver =>
+            PbrMaterial {
+                metallic: 0.92, roughness: 0.25, rim: 1.0,
+                micro_bump_amp: 0.025, micro_bump_freq: 32.0,  // brushed chrome — fine streaks
+            },
+        NodeSubDomain::Service =>
+            PbrMaterial {
+                metallic: 0.80, roughness: 0.38, rim: 0.85,
+                micro_bump_amp: 0.018, micro_bump_freq: 22.0,  // satin — medium grain
+            },
+        NodeSubDomain::Compute =>
+            PbrMaterial {
+                metallic: 0.88, roughness: 0.30, rim: 1.05,
+                micro_bump_amp: 0.030, micro_bump_freq: 28.0,  // brushed deeper
+            },
+        NodeSubDomain::Routing =>
+            PbrMaterial {
+                metallic: 0.70, roughness: 0.45, rim: 0.90,
+                micro_bump_amp: 0.022, micro_bump_freq: 18.0,  // anodized — slightly pebbled
+            },
+        NodeSubDomain::Vector =>
+            PbrMaterial {
+                metallic: 0.40, roughness: 0.65, rim: 0.70,
+                micro_bump_amp: 0.055, micro_bump_freq: 14.0,  // matte rock — coarse pebble
+            },
     }
 }
 
@@ -1339,7 +1374,20 @@ fn draw_node_sphere(
             let ny = dy_f / r_f;
             let nz = libm::sqrtf(z2) / r_f;
             // Y is screen-down → flip so up-light reads correctly.
-            let normal = Vec3::new(nx, -ny, nz);
+            // M.2 — micro-surface normal perturbation.  Each material
+            // declares amp + freq; we modulate the X/Y components of
+            // the normal by a 2-axis sin/cos product, then renormalise.
+            // Effect: brushed metals show stripey reflections; matte
+            // surfaces have a pebbled diffusion; polished stays
+            // mirror-smooth.
+            let normal = if material.micro_bump_amp > 0.0 {
+                let f = material.micro_bump_freq;
+                let bx = libm::sinf(nx * f) * libm::cosf(ny * f * 0.7) * material.micro_bump_amp;
+                let by = libm::cosf(nx * f * 0.6) * libm::sinf(ny * f) * material.micro_bump_amp;
+                Vec3::new(nx + bx, -ny + by, nz).normalize()
+            } else {
+                Vec3::new(nx, -ny, nz)
+            };
 
             // ── M.1 — three-light Lambertian + GGX setup ──
             let n_dot_l_key  = normal.dot(LIGHT_DIR).max(0.0);
