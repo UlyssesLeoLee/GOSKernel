@@ -1093,7 +1093,11 @@ fn isqrt_ceil(n: usize) -> usize {
 // Octahedron half-extent slightly larger than the old cube's so the
 // projected on-screen footprint is comparable.
 
-const NODE_HALF: f32 = 0.13;
+// N.8.b — bumped from 0.13 to 0.17 so spheres render at hero size
+// in HD (~35-50 px radius after 4× upscale) and the PBR shader
+// detail (micro-bump streaks, anisotropic highlight, fresnel rim,
+// cubemap reflection) becomes legible.
+const NODE_HALF: f32 = 0.17;
 
 // (Octahedron facet arrays removed in I.6.1 — sphere LOD replaces them.)
 

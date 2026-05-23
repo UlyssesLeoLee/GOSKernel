@@ -748,11 +748,11 @@ pub static CAMERA_AUTO_ROTATE: AtomicBool = AtomicBool::new(true);
 pub static CAMERA_YAW_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 pub static CAMERA_PITCH_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 
-/// Camera orbit radius in millimetre-equivalent fixed-point.  Start
-/// pulled back at 6.5 units so the 25-node 1.8×1.8-world-unit
-/// grid fits comfortably with margin — was 3500 which made nodes
-/// fill the whole screen.  F6 resets, F7/F8 zoom.
-pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(6500);
+/// Camera orbit radius in millimetre-equivalent fixed-point.  Default
+/// 4.8 units: spheres render at hero size (~30-50 px radius in HD,
+/// big enough to show PBR detail) while the full 25-node grid still
+/// fits inside the scene body with margin.  F6 resets, F7/F8 zoom.
+pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(4800);
 
 // ── Phase I.5 — kernel-UI command bar + mode switch ───────────────
 //
