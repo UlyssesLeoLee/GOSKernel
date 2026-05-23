@@ -838,10 +838,12 @@ fn paint_3d_view(frame: u64) {
         // Glass: blur background, then tint with elevated surface.
         k_fb::box_blur_region(px, py, PANEL_W, PANEL_H);
         k_fb::fill_round_rect_alpha(px, py, PANEL_W, PANEL_H, RADIUS_MD, SURFACE_1_TOP, 200);
-        // Left-edge cyan accent bar (vertical).
+        // Left-edge cyan accent bar (vertical) — keeps the panel's
+        // "selected" emphasis anchored, complements the vapor halo.
         k_fb::fill_rect_alpha(px, py + SP_SM, 3, PANEL_H - 2 * SP_SM, ACCENT_PRIMARY, 255);
-        // 1-px hairline border in dim accent.
-        k_fb::stroke_rect_rgb(px, py, PANEL_W, PANEL_H, ACCENT_PRIMARY_DIM);
+        // N.16 chromatic-vapor perimeter (different phase from chip).
+        let vp = frame as f32 * 0.0018 + 0.67;
+        k_fb::vapor_rect_border(px, py, PANEL_W, PANEL_H, vp);
 
         // Row 1 — eyebrow label (small, dim).
         k_fb::draw_text_aa_rgb(px + SP_LG, py + SP_SM, "SELECTED NODE", TEXT_TERTIARY, &k_assets::FONT_UI_14);
@@ -3141,19 +3143,22 @@ fn paint_status_widget(frame: u64) {
     }
 }
 
-/// N.12 — floating stats chip at top-right of the viewport.  Frosted
-/// glass card with two rows: node count + edge count.
+/// N.12/16 — floating stats chip at top-right of the viewport.
+/// Frosted glass card with N.16 chromatic-vapor border.
 fn paint_stats_chip(node_n: usize, edge_n: usize) {
     use design::*;
     let chip_w: usize = 96;
     let chip_h: usize = 44;
     let x = k_fb::WIDTH - chip_w - SP_MD;
     let y = HEADER_H as usize + SP_MD;
-    // Frosted backdrop: box-blur the underlying scene, then tint.
+    // Frosted backdrop.
     k_fb::box_blur_region(x, y, chip_w, chip_h);
     k_fb::fill_round_rect_alpha(x, y, chip_w, chip_h, RADIUS_MD, SURFACE_1_TOP, 180);
-    // 1-px hairline border in dim accent.
-    k_fb::stroke_rect_rgb(x, y, chip_w, chip_h, ACCENT_PRIMARY_DIM);
+    // N.16 vapor border (drifts at a different phase so all chrome
+    // pieces don't pulse in unison — feels alive, not synchronised).
+    let frame_now = FRAME_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
+    let vapor_phase = frame_now as f32 * 0.0018 + 0.33;
+    k_fb::vapor_rect_border(x, y, chip_w, chip_h, vapor_phase);
     // Two rows.
     let row_pad: usize = 8;
     let v_pad: usize = 4;
@@ -3194,8 +3199,7 @@ fn paint_frame(frame: u64) {
     let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
     let scrollback_open = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
 
-    // N.12 — design-token chrome.  Tighter colour discipline, real
-    // spacing grid, hero header with the brand at proper hierarchy.
+    // N.12/16 — design-token chrome with N.16 chromatic-vapor borders.
     use design::*;
     k_fb::clear_gradient_vertical(SURFACE_0_TOP, SURFACE_0_BOTTOM);
 
@@ -3203,26 +3207,23 @@ fn paint_frame(frame: u64) {
     let header_h = HEADER_H as usize;
     k_fb::fill_rect_gradient(0, 0, k_fb::WIDTH, header_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
 
-    // 3-px vertical cyan accent at the very left, glowing inward —
-    // brand gesture, identical to the "track inset" used by Edge/VS Code.
+    // 3-px vertical accent at the very left — also vapor-cycled so the
+    // brand inset shimmers slowly through the chromatic palette.
+    let vapor_phase = frame as f32 * 0.0015; // ~11 s for one wheel cycle
+    let brand_hue = (vapor_phase * 0.5) % 1.0; // brand cycles half-speed
+    let brand_bgrx = k_fb::hsv_to_bgrx(brand_hue, 0.85, 0.95);
     for y in 0..header_h {
-        k_fb::put_pixel_rgb(0, y, ACCENT_PRIMARY);
-        k_fb::put_pixel_rgb(1, y, ACCENT_PRIMARY);
-        // Soft glow falling off into the surface.
-        k_fb::blend_pixel_rgb(2, y, ACCENT_PRIMARY, 160);
-        k_fb::blend_pixel_rgb(3, y, ACCENT_PRIMARY, 96);
-        k_fb::blend_pixel_rgb(4, y, ACCENT_PRIMARY, 48);
+        k_fb::put_pixel_rgb(0, y, brand_bgrx);
+        k_fb::put_pixel_rgb(1, y, brand_bgrx);
+        k_fb::blend_pixel_rgb(2, y, brand_bgrx, 160);
+        k_fb::blend_pixel_rgb(3, y, brand_bgrx, 96);
+        k_fb::blend_pixel_rgb(4, y, brand_bgrx, 48);
     }
 
-    // 1-px accent rim along the bottom of the header — "glass shelf"
-    // depth cue, separating chrome from body.
-    for x in 0..k_fb::WIDTH {
-        k_fb::put_pixel_rgb(x, header_h - 1, ACCENT_PRIMARY);
-    }
-    // Optional second-row 1-px dim line for "shelf shadow" feel.
-    for x in 0..k_fb::WIDTH {
-        k_fb::blend_pixel_rgb(x, header_h, ACCENT_PRIMARY, 64);
-    }
+    // N.16 — chromatic vapor along the header bottom edge.  Replaces
+    // the old static cyan accent line.  Hue cycles spatially along
+    // the width + drifts with `vapor_phase`, glow halo above + below.
+    k_fb::vapor_h_line(header_h - 1, 0, k_fb::WIDTH, vapor_phase, 0.006);
 
     match mode {
         k_fb::UI_MODE_KERNEL_VIEW => paint_3d_view(frame),
@@ -3382,43 +3383,55 @@ fn paint_os_shell_body(frame: u64) {
 /// ~2.5 Hz so the user has a clear "I can type here" affordance.
 fn paint_command_bar(frame: u64, mode: u8) {
     use design::*;
-    let bar_y = CMD_BAR_TOP as usize;
-    let bar_h = CMD_BAR_H as usize;
-    // Inverted Fluent dock — slightly brighter at the top so it reads
-    // as "elevated above the body".
-    k_fb::fill_rect_gradient(0, bar_y, k_fb::WIDTH, bar_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
-    // 1-px accent rim along the top — matches header bottom rim.
-    for x in 0..k_fb::WIDTH {
-        k_fb::put_pixel_rgb(x, bar_y, ACCENT_PRIMARY);
-    }
-    for x in 0..k_fb::WIDTH {
-        k_fb::blend_pixel_rgb(x, bar_y + 1, ACCENT_PRIMARY, 64);
-    }
+    // ── N.16 — Windows-Start-Menu-style centred floating command box ──
+    //
+    // Per user feedback ("输入栏像 Windows 开始菜单默认那么宽就足够"
+    // + "彩色蒸汽边框" + "大师风范 + 未来感"):
+    //   * Bar is a centred ~200-px-wide glass-tinted rounded card,
+    //     not a full-width strip — matches Win11 Start centroid.
+    //   * Vapor border (HSV-cycling rainbow) flows continuously around
+    //     the perimeter, ~11 s for one wheel.
+    //   * Frosted backdrop: blur a strip behind the box first.
+    //   * Right-edge mode pill stays floating outside the box at the
+    //     same vertical centre.
+    let box_w: usize = 196;          // ≈ Win11 Start centroid proportion
+    let box_h: usize = CMD_BAR_H as usize; // fits inside the 24-px chrome zone
+    let box_x = (k_fb::WIDTH - box_w) / 2;
+    let box_y = CMD_BAR_TOP as usize;
+
+    // Frosted glass: blur the underlying scene, then tint.
+    k_fb::box_blur_region(box_x, box_y, box_w, box_h);
+    k_fb::fill_round_rect_alpha(box_x, box_y, box_w, box_h, RADIUS_MD, SURFACE_1_TOP, 215);
+
+    // N.16 vapor border around the perimeter.
+    let vapor_phase = frame as f32 * 0.0018; // slightly faster than header
+    k_fb::vapor_rect_border(box_x, box_y, box_w, box_h, vapor_phase);
 
     // Prompt + typed text in Cascadia 13.  Cell_w = 10, cell_h = 18.
-    // Centre vertically inside the 24-px bar.
-    let text_y = bar_y + (bar_h - 18) / 2;
-    let prompt_x = SP_LG;
-    // Cyan glyph + space + light grey separator chevron.
+    let mono_w = 10;
+    let text_y = box_y + (box_h - 18) / 2;
+    let prompt_x = box_x + SP_MD;
     k_fb::draw_text_aa_rgb(prompt_x, text_y, "›", ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
-    let body_x = prompt_x + 10 + SP_MD;
+    let body_x = prompt_x + mono_w + SP_SM;
 
     let ui = UI_STATE.lock();
     let line = ui.current_line();
     let line_len = line.len();
-    let mono_w = 10;
-    let max_visible_chars = (k_fb::WIDTH.saturating_sub(body_x + 80) / mono_w).min(CMD_LINE_CAP);
+    let max_visible_chars =
+        ((box_x + box_w).saturating_sub(body_x + SP_MD) / mono_w).min(CMD_LINE_CAP);
     let visible_start = line_len.saturating_sub(max_visible_chars);
     let visible = unsafe {
         core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
     };
     k_fb::draw_text_aa_rgb(body_x, text_y, visible, TEXT_PRIMARY, &k_assets::FONT_MONO_13);
 
-    // Sleek 2-px vertical cursor bar (instead of block) — modern terminal feel.
+    // 2-px vertical cursor bar — same accent colour as the vapor's
+    // current "active" hue at that point would be too noisy; keep
+    // cursor as a steady ACCENT_PRIMARY anchor.
     let cursor_on = (frame / 16) & 1 == 0;
     if cursor_on {
         let cursor_x = body_x + (line_len - visible_start) * mono_w;
-        if cursor_x + 2 < k_fb::WIDTH {
+        if cursor_x + 2 < box_x + box_w - SP_SM {
             for cy in 0..16 {
                 let py = text_y + 1 + cy;
                 if py >= k_fb::HEIGHT { break; }
@@ -3428,17 +3441,20 @@ fn paint_command_bar(frame: u64, mode: u8) {
         }
     }
 
-    // Right-side mode pill — proper rounded chip with accent stroke.
+    // Mode pill floats to the right of the command box, outside its
+    // chrome — keeps the input area uncluttered.
     let pill = match mode {
         k_fb::UI_MODE_KERNEL_VIEW => "KERNEL",
         _ => "SHELL",
     };
     let pill_text_w = pill.len() * mono_w;
     let pill_w = pill_text_w + 2 * SP_MD;
-    let pill_x = k_fb::WIDTH - pill_w - SP_MD;
-    let pill_y = bar_y + (bar_h - CHIP_H) / 2;
-    k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, CHIP_H, RADIUS_SM, ACCENT_PRIMARY_DIM, 130);
-    k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y + 1, pill, ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    let pill_y = box_y + (box_h - CHIP_H) / 2;
+    let pill_x = box_x + box_w + SP_MD;
+    if pill_x + pill_w + SP_MD <= k_fb::WIDTH {
+        k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, CHIP_H, RADIUS_SM, ACCENT_PRIMARY_DIM, 150);
+        k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y + 1, pill, ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    }
 }
 
 /// Paint the collapsible scrollback panel.  Stacks the N most recent

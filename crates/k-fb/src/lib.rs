@@ -559,6 +559,132 @@ pub fn scale_bgrx(bgrx: u32, intensity: f32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// HSV → BGRX (24-bit).  Standard 6-segment conversion.  Used by the
+/// N.16 chromatic-vapor border effect to cycle along the full hue
+/// wheel.  `h` should be in [0, 1).
+#[inline]
+pub fn hsv_to_bgrx(h: f32, s: f32, v: f32) -> u32 {
+    let mut h = h - libm::floorf(h); // wrap to [0,1)
+    if h < 0.0 { h += 1.0; }
+    let h6 = h * 6.0;
+    let i = h6 as i32 % 6;
+    let f = h6 - libm::floorf(h6);
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let r = (r * 255.0).min(255.0) as u32;
+    let g = (g * 255.0).min(255.0) as u32;
+    let b = (b * 255.0).min(255.0) as u32;
+    (r << 16) | (g << 8) | b
+}
+
+/// N.16 — chromatic vapor: paint a 1-pixel line whose hue cycles
+/// along its length + drifts on `phase` per frame, with a soft 2-px
+/// alpha-blended glow halo on both sides.  Reads as "neon mist
+/// flowing along an edge" — high-impact chrome accent without
+/// disturbing the 3D scene.
+///
+/// `freq`  = hue cycles per pixel (use ~0.01 for one wheel per 100 px).
+/// `phase` = frame-driven offset (just `frame_f * 0.002` is enough
+///           for a subtle ~10 s cycle).
+pub fn vapor_h_line(y: usize, x0: usize, x1: usize, phase: f32, freq: f32) {
+    if y >= HEIGHT { return; }
+    let x_end = x1.min(WIDTH);
+    if x0 >= x_end { return; }
+    let mut bb = BACKBUFFER.lock();
+    for x in x0..x_end {
+        let hue = x as f32 * freq + phase;
+        let bgrx = hsv_to_bgrx(hue, 0.85, 0.95);
+        // Centre pixel — opaque.
+        bb[y * WIDTH + x] = bgrx;
+        // Inner halo (1 px above + below at 60% alpha).
+        if y > 0 {
+            let off = (y - 1) * WIDTH + x;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 160);
+        }
+        if y + 1 < HEIGHT {
+            let off = (y + 1) * WIDTH + x;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 160);
+        }
+        // Outer halo (2 px out at 30% alpha).
+        if y >= 2 {
+            let off = (y - 2) * WIDTH + x;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 80);
+        }
+        if y + 2 < HEIGHT {
+            let off = (y + 2) * WIDTH + x;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 80);
+        }
+    }
+}
+
+/// Vertical companion to `vapor_h_line` — 1-px column with side glow.
+pub fn vapor_v_line(x: usize, y0: usize, y1: usize, phase: f32, freq: f32) {
+    if x >= WIDTH { return; }
+    let y_end = y1.min(HEIGHT);
+    if y0 >= y_end { return; }
+    let mut bb = BACKBUFFER.lock();
+    for y in y0..y_end {
+        let hue = y as f32 * freq + phase;
+        let bgrx = hsv_to_bgrx(hue, 0.85, 0.95);
+        bb[y * WIDTH + x] = bgrx;
+        if x > 0 {
+            let off = y * WIDTH + x - 1;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 160);
+        }
+        if x + 1 < WIDTH {
+            let off = y * WIDTH + x + 1;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 160);
+        }
+        if x >= 2 {
+            let off = y * WIDTH + x - 2;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 80);
+        }
+        if x + 2 < WIDTH {
+            let off = y * WIDTH + x + 2;
+            bb[off] = lerp_bgrx(bb[off], bgrx, 80);
+        }
+    }
+}
+
+/// N.16 — vapor border around a rectangle.  Walks the four edges
+/// continuously with a single phase parameter so the hue rolls
+/// around the perimeter like neon piping.  Useful for floating
+/// panel chrome (the new centred command box).
+pub fn vapor_rect_border(x: usize, y: usize, w: usize, h: usize, phase: f32) {
+    if w < 2 || h < 2 { return; }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    // Use a single freq that gives ~1 full wheel around the perimeter.
+    let perimeter = (2 * w + 2 * h) as f32;
+    let freq = 1.0 / perimeter;
+
+    // Top edge (left → right): hue index 0..w
+    vapor_h_line(y, x, x_end, phase, freq);
+    // Right edge (top → bottom): hue index w..w+h
+    if x_end > 0 {
+        let phase_r = phase + (w as f32) * freq;
+        vapor_v_line(x_end - 1, y, y_end, phase_r, freq);
+    }
+    // Bottom edge (right → left): hue index w+h..2w+h
+    if y_end > 0 {
+        let phase_b = phase + (w + h) as f32 * freq;
+        // Render right-to-left by reversing the freq sign.
+        vapor_h_line(y_end - 1, x, x_end, phase_b, -freq);
+    }
+    // Left edge (bottom → top)
+    let phase_l = phase + (2 * w + h) as f32 * freq;
+    vapor_v_line(x, y, y_end, phase_l, -freq);
+}
+
 // ── N.12 — alpha-blended primitives for next-gen UI ────────────────
 
 /// Alpha-blend a pixel onto the back-buffer.  `alpha` is 0..=255
