@@ -1155,6 +1155,10 @@ const SKY_INTENSITY: f32 = 0.18;
 /// whether to round up or down to the nearest palette ramp slot.
 /// Eliminates banding on smooth sphere gradients without needing an
 /// HDR backbuffer.
+// N.9 — superseded by direct 24-bit RGB output in the sphere shader,
+// but retained because future 2-D UI shading (dithered gradients,
+// stylised text effects) will want the matrix back.
+#[allow(dead_code)]
 const BAYER_4X4: [[u8; 4]; 4] = [
     [ 0,  8,  2, 10],
     [12,  4, 14,  6],
@@ -1167,6 +1171,7 @@ const BAYER_4X4: [[u8; 4]; 4] = [
 /// single point where the AAA-style continuous shading meets the
 /// 256-color palette quantization.
 #[inline]
+#[allow(dead_code)]
 fn dither_shade(intensity: f32, x: i32, y: i32) -> u8 {
     let scaled = (intensity.clamp(0.0, 1.0) * 7.999_99) as f32;
     let base = libm::floorf(scaled);
@@ -1488,45 +1493,55 @@ fn draw_node_sphere(
                 + rim;
             let intensity = aces_tonemap(hdr);
 
-            // ── M.1 — Bayer 4×4 dither instead of nearest-shade ──
-            // Eliminates banding on smooth gradients; each pixel's
-            // round-up vs round-down decision is driven by a fixed
-            // pattern, breaking palette quantization steps into
-            // visually-noisy transitions the eye reads as continuous.
-            let shade_raw = dither_shade(intensity, px, py);
-            let shade = shade_raw.saturating_sub(fog_bias).min(7);
-            k_fb::put_pixel_raw(px as usize, py as usize, hue_base + shade);
+            // ── N.9 — direct 24-bit RGB write ──
+            // No more 8-shade quantisation or Bayer dither: we pack
+            // the ACES-tonemapped intensity straight into BGRX via
+            // the hue's peak colour, with depth-fog attenuation.
+            // Banding is gone; sphere gradients are smooth to the
+            // limit of the LFB's 24-bit precision.
+            let fog_atten = 1.0 - fog.clamp(0.0, 1.0) * 0.55;
+            let bgrx = pack_hue_intensity(hue_base, intensity * fog_atten);
+            k_fb::put_pixel_rgb(px as usize, py as usize, bgrx);
 
-            // ── M.3 — 4-cardinal bloom (perf-recovered) ──
+            // ── N.9 — additive bloom in 24-bit colour ──
             //
-            // Real AAA bloom is a multi-tap separable Gaussian on an
-            // HDR buffer; on the 256-color framebuffer we approximate
-            // it with a single per-pixel spread when the hot spot
-            // fires.  After M.3.b we reverted from 8-neighbour
-            // read-modify-write to a 4-cardinal unconditional write
-            // because: (1) under TCG, `get_pixel_raw` + `put_pixel_raw`
-            // each take the framebuffer LOCK and cost ~8× more than a
-            // raw write — multiplying that by 8 per bright pixel
-            // dropped frame rate to <1 FPS, leaving the user staring
-            // at the `clear()` background between paints; (2) max-
-            // compositing across different hue ramps is semantically
-            // meaningless (cyan-5 = 21 vs mint-0 = 40 has no
-            // brightness ordering).  Threshold restored to shade ≥ 7
-            // so the halo only fires at the apex of the specular lobe,
-            // matching the original I.14 cardinal-cross behaviour but
-            // now layered on top of M.1's dithered base — gives a
-            // visible "punch" without dragging the whole pipeline
-            // under.
-            if shade >= 7 {
-                let near = hue_base + shade.saturating_sub(1);
+            // When the linear HDR composite exceeds 1.0 (i.e. ACES
+            // started rolling off the highlight), add a tinted glow
+            // to the 4 cardinal neighbours.  Real Gaussian bloom
+            // is multi-tap on a separate HDR buffer; this is a
+            // single-pass approximation cheap enough for TCG.
+            if hdr > 1.05 {
+                let glow = (hdr - 1.0).min(0.6); // 0..0.6
+                let add = pack_hue_intensity(hue_base, glow * 0.55);
                 for (gx, gy) in [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)] {
                     if gx >= 0 && gx < SCENE_WIDTH && gy >= HEADER_H && gy < FOOTER_Y {
-                        k_fb::put_pixel_raw(gx as usize, gy as usize, near);
+                        k_fb::add_pixel_rgb(gx as usize, gy as usize, add);
                     }
                 }
             }
         }
     }
+}
+
+/// N.9 — pack a 0..1 intensity scalar into a 24-bit BGRX colour
+/// using the hue ramp's peak as base.  Replaces the 8-shade ramp
+/// quantisation with full 256-level per-channel output.
+fn pack_hue_intensity(hue_base: u8, intensity: f32) -> u32 {
+    // Peak BGRX for each hue ramp — match k-fb HUE_PEAKS but in
+    // already-converted 8-bit form so we skip the 6→8 stretch.
+    // (16, 48, 60) ×4.05 = (65, 194, 243) etc.
+    let (r0, g0, b0) = match hue_base {
+        k_fb::HUE_CYAN_BASE    => (65u32, 194u32, 243u32),  // hardware
+        k_fb::HUE_MAGENTA_BASE => (243, 65, 203),           // driver
+        k_fb::HUE_YELLOW_BASE  => (243, 203, 49),           // service
+        k_fb::HUE_MINT_BASE    => (81, 234, 170),           // app
+        _                      => (234, 113, 154),          // rose
+    };
+    let t = intensity.clamp(0.0, 1.0);
+    let r = (r0 as f32 * t).min(255.0) as u32;
+    let g = (g0 as f32 * t).min(255.0) as u32;
+    let b = (b0 as f32 * t).min(255.0) as u32;
+    (r << 16) | (g << 8) | b
 }
 
 // ── Phase I.6.2 — rope edge renderer ─────────────────────────────

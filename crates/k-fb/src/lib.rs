@@ -115,21 +115,22 @@ static PALETTE_BGRX: Mutex<[u32; 256]> = Mutex::new([0; 256]);
 /// the Gen-1 UI which redraws on demand only.
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// Phase N.x — RAM back-buffer.  All paint primitives now write here
-/// instead of stamping the LFB pixel-by-pixel.  `present()` blits the
-/// buffer to the actual framebuffer in a single bulk pass per frame.
+/// Phase N.9 — true-colour RAM back-buffer.  Stores BGRX (0x00_RR_GG_BB)
+/// at 320×200 logical resolution; `present()` blits to LFB with the
+/// per-mode upscale.  N.7 was a palette-indexed (u8) backbuffer,
+/// which capped the sphere shader at 8 quantised shades per hue
+/// ramp — visible banding.  N.9 promotes it to 32-bpp so the shader
+/// writes the ACES-tonemapped 24-bit colour directly: smooth gradients,
+/// no banding, real photographic look.
 ///
-/// Why this matters in HD mode: QEMU's softmmu wraps every LFB write
-/// in a callback that is ~1000× slower than RAM in TCG mode.  Pre-N.x,
-/// a 1280×800×32-bpp HD frame took ~2–3 sec because each of ~2M
-/// per-pixel u32 writes hit MMIO individually.  Routing through a
-/// palette-indexed RAM buffer + a single REP MOVSD blit per scanline
-/// in `present()` brings that down to one cache-warm copy per frame.
+/// 256 KiB of kernel BSS — well below the 4 MiB k-heap.
 ///
-/// Why this also helps mode 13h: the back-buffer lets future
-/// post-processing passes (tone-mapping, FXAA, vignette) read the
-/// fully-painted scene without re-MMIO'ing the VGA framebuffer.
-static BACKBUFFER: Mutex<[u8; PIXELS]> = Mutex::new([0; PIXELS]);
+/// Compatibility layer: legacy palette-indexed callers (text, rects,
+/// edges, UI chrome) continue to work via the in-init PALETTE_BGRX
+/// LUT — `paint_logical_pixel(idx)` resolves to the BGRX and stores
+/// it.  Sphere shader uses the new `put_pixel_rgb(bgrx)` for direct
+/// 24-bit writes.
+static BACKBUFFER: Mutex<[u32; PIXELS]> = Mutex::new([0; PIXELS]);
 
 /// Named palette slots.  The numeric value is the VGA palette index
 /// programmed in `init`.  Callers only ever pass a `Color` so we can
@@ -489,25 +490,52 @@ fn fb_ptr() -> Option<*mut u8> {
 // final memory store changes — so all callers (k-rast, hypervisor)
 // keep working unchanged.
 
-/// Write a single pixel into the RAM back-buffer.  No LFB access
-/// happens here; `present()` is the only thing that touches the
-/// real framebuffer.  The legacy `fb: *mut u8` parameter is kept
-/// for ABI continuity with the few internal callers but is ignored.
+/// Write a single palette-indexed pixel into the RAM back-buffer.
+/// The palette index is resolved to BGRX via PALETTE_BGRX so the
+/// back-buffer always stores true colour.  `present()` is the only
+/// thing that touches the real framebuffer.
 fn paint_logical_pixel(_fb: *mut u8, x: usize, y: usize, palette_idx: u8) {
     if x >= WIDTH || y >= HEIGHT {
         return;
     }
-    BACKBUFFER.lock()[y * WIDTH + x] = palette_idx;
+    let bgrx = PALETTE_BGRX.lock()[palette_idx as usize];
+    BACKBUFFER.lock()[y * WIDTH + x] = bgrx;
 }
 
-/// Paint the whole back-buffer with a single colour.  Bulk memset
-/// into RAM; no MMIO.
+/// Paint the whole back-buffer with a single colour.  Bulk fill in RAM.
 pub fn clear(color: Color) {
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    BACKBUFFER.lock().fill(bgrx);
+}
+
+/// N.10 — paint with a vertical gradient between two colors.  The top
+/// row uses `top`, bottom row uses `bottom`, intermediate rows linearly
+/// interpolate per-channel.  Used for the modern UI chrome (header,
+/// status bar) instead of the old flat-colour rectangle.
+pub fn clear_gradient_vertical(top: u32, bottom: u32) {
     let mut bb = BACKBUFFER.lock();
-    let idx = color.idx();
-    // write_bytes is a single instruction in release; faster than
-    // `bb.fill(idx)` for sub-cache-line types.
-    unsafe { core::ptr::write_bytes(bb.as_mut_ptr(), idx, PIXELS); }
+    for y in 0..HEIGHT {
+        let t = y as u32 * 256 / HEIGHT as u32; // 0..256
+        let bgrx = lerp_bgrx(top, bottom, t as u8);
+        let row = y * WIDTH;
+        for x in 0..WIDTH {
+            bb[row + x] = bgrx;
+        }
+    }
+}
+
+/// Linear interpolation between two BGRX colours.  `t` is a 0..=255
+/// blend factor (0 = a, 255 = b).
+#[inline]
+pub fn lerp_bgrx(a: u32, b: u32, t: u8) -> u32 {
+    let t = t as u32;
+    let it = 255 - t;
+    let blend = |ch_shift: u32| -> u32 {
+        let av = (a >> ch_shift) & 0xFF;
+        let bv = (b >> ch_shift) & 0xFF;
+        ((av * it + bv * t) / 255) & 0xFF
+    };
+    (blend(16) << 16) | (blend(8) << 8) | blend(0)
 }
 
 /// Set a single pixel by Color enum.  Writes the back-buffer; the
@@ -516,48 +544,98 @@ pub fn put_pixel(x: usize, y: usize, color: Color) {
     if x >= WIDTH || y >= HEIGHT {
         return;
     }
-    BACKBUFFER.lock()[y * WIDTH + x] = color.idx();
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    BACKBUFFER.lock()[y * WIDTH + x] = bgrx;
 }
 
-/// Read a single pixel's raw palette index from the back-buffer.
-/// Used by the M.3 bloom post-pass to do max-composite read-modify-
-/// write so neighbouring spheres' hot spots don't paint each other
-/// dark.  Now a fast RAM read regardless of HD/mode-13h.
-///
-/// Returns 0 (Background palette index) on out-of-range.
-pub fn get_pixel_raw(x: usize, y: usize) -> u8 {
+/// Read a single pixel's BGRX value from the back-buffer.  N.9 — the
+/// M.3 bloom post-pass now operates in 24-bit colour space.
+pub fn get_pixel_rgb(x: usize, y: usize) -> u32 {
     if x >= WIDTH || y >= HEIGHT {
         return 0;
     }
     BACKBUFFER.lock()[y * WIDTH + x]
 }
 
-/// Set a single pixel by raw palette index.  Used by the 3D scene
-/// painter to write per-shade ramp colours.
+/// Legacy luminance-approximation accessor.  Kept for callers that
+/// only need a "rough brightness" probe; returns a 0..=7 bucket.
+pub fn get_pixel_raw(x: usize, y: usize) -> u8 {
+    let bgrx = get_pixel_rgb(x, y);
+    let r = (bgrx >> 16) & 0xFF;
+    let g = (bgrx >> 8) & 0xFF;
+    let b = bgrx & 0xFF;
+    let lum = (r * 30 + g * 59 + b * 11) / 100;
+    (lum / 32).min(7) as u8
+}
+
+/// Set a single pixel by raw palette index.  Internal lookup goes
+/// through PALETTE_BGRX so output is true colour.
 pub fn put_pixel_raw(x: usize, y: usize, palette_idx: u8) {
     if x >= WIDTH || y >= HEIGHT {
         return;
     }
-    BACKBUFFER.lock()[y * WIDTH + x] = palette_idx;
+    let bgrx = PALETTE_BGRX.lock()[palette_idx as usize];
+    BACKBUFFER.lock()[y * WIDTH + x] = bgrx;
 }
 
-/// Solid filled rectangle, clipped against the screen.  Writes the
-/// back-buffer; the LFB is flushed in `present()`.
+/// N.9 — direct 24-bit RGB write.  Used by the sphere shader so the
+/// ACES-tonemapped HDR output isn't quantised through the 8-shade
+/// palette ramp.  `bgrx` packs as `0x00_RR_GG_BB` (matches LFB).
+pub fn put_pixel_rgb(x: usize, y: usize, bgrx: u32) {
+    if x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    BACKBUFFER.lock()[y * WIDTH + x] = bgrx;
+}
+
+/// N.9 — per-channel saturating add.  Used for additive bloom blending.
+#[inline]
+pub fn add_pixel_rgb(x: usize, y: usize, add_bgrx: u32) {
+    if x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    let mut bb = BACKBUFFER.lock();
+    let cur = bb[y * WIDTH + x];
+    let sat = |sh: u32| -> u32 {
+        let a = (cur >> sh) & 0xFF;
+        let b = (add_bgrx >> sh) & 0xFF;
+        (a + b).min(255)
+    };
+    bb[y * WIDTH + x] = (sat(16) << 16) | (sat(8) << 8) | sat(0);
+}
+
+/// Solid filled rectangle, clipped against the screen.
 pub fn fill_rect(x: usize, y: usize, w: usize, h: usize, color: Color) {
     if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 {
         return;
     }
     let x_end = (x + w).min(WIDTH);
     let y_end = (y + h).min(HEIGHT);
-    let idx = color.idx();
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
     let row_len = x_end - x;
     let mut bb = BACKBUFFER.lock();
     for py in y..y_end {
         let row_start = py * WIDTH + x;
-        // SAFETY: row bounds clamped above; row_len > 0.
-        unsafe {
-            core::ptr::write_bytes(bb.as_mut_ptr().add(row_start), idx, row_len);
-        }
+        let row_slice = &mut bb[row_start..row_start + row_len];
+        row_slice.fill(bgrx);
+    }
+}
+
+/// N.10 — vertical-gradient filled rectangle for modern UI chrome.
+pub fn fill_rect_gradient(x: usize, y: usize, w: usize, h: usize, top: u32, bottom: u32) {
+    if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 {
+        return;
+    }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let h_active = y_end - y;
+    let mut bb = BACKBUFFER.lock();
+    for py in y..y_end {
+        let t = (py - y) as u32 * 255 / h_active.max(1) as u32;
+        let bgrx = lerp_bgrx(top, bottom, t as u8);
+        let row_start = py * WIDTH + x;
+        let row_slice = &mut bb[row_start..row_start + (x_end - x)];
+        row_slice.fill(bgrx);
     }
 }
 
@@ -612,41 +690,56 @@ pub fn present() {
     let bb = BACKBUFFER.lock();
 
     if bpp == 1 {
-        // Mode 13h: 1-byte-per-pixel direct copy.
-        // SAFETY: backbuffer is PIXELS bytes; mode 13h LFB at 0xA0000
-        // is exactly PIXELS bytes of palette indices.
-        unsafe { core::ptr::copy_nonoverlapping(bb.as_ptr(), fb, PIXELS); }
+        // Mode 13h: pal-quantise each BGRX to the closest palette
+        // index (BT.601 luminance bucket) and 1-byte-copy to VGA.
+        // Lossy fallback; the shader has full 24-bit on HD path.
+        let lum_table = PALETTE_LUM.lock();
+        // Tiny inline kNN: pick the palette index whose stored
+        // luminance is closest to ours.  Good enough for the legacy
+        // fallback path; HD is the canonical output now.
+        let mut row = [0u8; WIDTH];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let bgrx = bb[y * WIDTH + x];
+                let r = (bgrx >> 16) & 0xFF;
+                let g = (bgrx >> 8) & 0xFF;
+                let b = bgrx & 0xFF;
+                let lum = ((r * 30 + g * 59 + b * 11) / 100) as u8;
+                // 8-shade ramp: just luminance/32, biased to slot 16
+                // (cyan ramp).  Crude but workable for mode-13h fallback.
+                row[x] = if lum < 4 { 0 } else { 16 + (lum / 32).min(7) };
+                let _ = lum_table; // silence unused; future smarter match goes here
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    row.as_ptr(),
+                    fb.add(y * WIDTH),
+                    WIDTH,
+                );
+            }
+        }
         return;
     }
 
-    // HD path: per-scanline expand + bulk-copy.
+    // HD path: scanline expand BGRX → BGRX (no palette indirection now)
+    // + bulk REP MOVSD per native row.
     let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
     let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
-    let palette = PALETTE_BGRX.lock();
     let fb32 = fb as *mut u32;
 
-    // Stack buffer big enough for one expanded scanline at any
-    // supported scale.  HD_SCALE=4, WIDTH=320 → 1280 u32 = 5 KiB.
     let mut line_buf = [0u32; WIDTH * HD_SCALE as usize];
     let line_len = WIDTH * scale;
 
     for y in 0..HEIGHT {
-        // Build the BGRX scanline in RAM.
         let bb_row = y * WIDTH;
         for x in 0..WIDTH {
-            let bgrx = palette[bb[bb_row + x] as usize];
+            let bgrx = bb[bb_row + x];
             let base = x * scale;
-            // Unrolled for scale 1..=4 — clamps to SCALE bounds via
-            // the `min(..)` so this stays bounds-safe at any scale.
             let lim = (base + scale).min(line_buf.len());
             for slot in &mut line_buf[base..lim] {
                 *slot = bgrx;
             }
         }
-
-        // Stamp the scanline `scale` times into the native LFB.
-        // SAFETY: line_buf and fb32 disjoint; line_len matches both
-        // src capacity and the native row stride span we write.
         let src = line_buf.as_ptr();
         for dy in 0..scale {
             let row_off = (y * scale + dy) * native_w;
@@ -739,7 +832,9 @@ pub unsafe fn force_fill_rect(x: usize, y: usize, w: usize, h: usize, color: Col
 use core::sync::atomic::{AtomicBool, AtomicI32};
 
 /// True when auto-rotate yaw advance should run.  F1 toggles.
-pub static CAMERA_AUTO_ROTATE: AtomicBool = AtomicBool::new(true);
+/// Default OFF — N.9: a 2026 OS should stay still when the user
+/// isn't touching it.  Press F1 to start the orbit demo.
+pub static CAMERA_AUTO_ROTATE: AtomicBool = AtomicBool::new(false);
 
 /// Cumulative camera bias in fixed-point milli-radians.
 /// `i32::MAX ≈ 2.1×10⁶ rad` — comfortably more headroom than the
