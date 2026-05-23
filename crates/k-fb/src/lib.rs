@@ -538,6 +538,25 @@ pub fn lerp_bgrx(a: u32, b: u32, t: u8) -> u32 {
     (blend(16) << 16) | (blend(8) << 8) | blend(0)
 }
 
+/// Look up the BGRX value for a Color enum slot.  Convenience for
+/// callers that need direct RGB math (the rope shader scales the
+/// hue by per-pixel intensity).
+#[inline]
+pub fn color_bgrx(c: Color) -> u32 {
+    PALETTE_BGRX.lock()[c.idx() as usize]
+}
+
+/// Scale a BGRX colour by an intensity in [0, 1].  Per-channel
+/// multiply, clamped to 255.  Used by the rope cross-section shader.
+#[inline]
+pub fn scale_bgrx(bgrx: u32, intensity: f32) -> u32 {
+    let t = intensity.clamp(0.0, 1.5);
+    let r = ((((bgrx >> 16) & 0xFF) as f32) * t).min(255.0) as u32;
+    let g = ((((bgrx >> 8) & 0xFF) as f32) * t).min(255.0) as u32;
+    let b = (((bgrx & 0xFF) as f32) * t).min(255.0) as u32;
+    (r << 16) | (g << 8) | b
+}
+
 /// Set a single pixel by Color enum.  Writes the back-buffer; the
 /// real LFB is updated when `present()` runs.
 pub fn put_pixel(x: usize, y: usize, color: Color) {
@@ -1054,6 +1073,97 @@ pub fn draw_text_2x(x: usize, y: usize, text: &str, color: Color) {
         draw_glyph_2x(cx, y, ch, color);
         cx += 2 * GLYPH_W;
     }
+}
+
+// ── N.11 — anti-aliased TTF-baked text rendering ──────────────────
+//
+// Replaces the 8×8 pixel font with Noto Sans SC / Cascadia Code
+// alpha-blended into the 24-bit back-buffer.  Per-pixel alpha →
+// sub-pixel-quality edges, no jaggies, no "BIOS POST" retro feel.
+//
+// One look-up per character, one alpha-blend per glyph pixel.  At
+// 14 px and 80 cols × 25 rows of text this is ~30 000 blends per
+// frame — negligible vs the sphere shader's ~200 000 pixels.
+
+/// Draw an ASCII string with full per-pixel alpha blending, using
+/// the requested font atlas.  Out-of-range codepoints advance the
+/// cursor by `cell_w` without rendering — caller pre-checks for
+/// codepoints beyond `char_first..char_first + char_count` if it
+/// cares about CJK fallback.
+///
+/// The colour is the foreground; the background is read from the
+/// back-buffer in-place so the text composites cleanly over the
+/// underlying gradient / scene without needing a pre-filled box.
+pub fn draw_text_aa(
+    x: usize,
+    y: usize,
+    text: &str,
+    color: Color,
+    font: &k_assets::FontAtlas,
+) {
+    let fg = PALETTE_BGRX.lock()[color.idx() as usize];
+    draw_text_aa_rgb(x, y, text, fg, font);
+}
+
+/// 24-bit RGB variant — caller supplies the BGRX directly so they
+/// can use accent colours outside the palette (e.g. the cyan rim
+/// `#4ad0ff` used by the N.10 chrome).
+pub fn draw_text_aa_rgb(
+    x: usize,
+    y: usize,
+    text: &str,
+    fg_bgrx: u32,
+    font: &k_assets::FontAtlas,
+) {
+    if y >= HEIGHT { return; }
+    let cell_w = font.cell_w as usize;
+    let cell_h = font.cell_h as usize;
+    let atlas_w = font.atlas_w as usize;
+    let mut cx = x;
+    let mut bb = BACKBUFFER.lock();
+    for ch in text.chars() {
+        // Map char to glyph rect; non-ASCII codepoints get a blank cell
+        // for now (CJK extension is a follow-up phase).
+        let cp = if (ch as u32) <= 0x7F { ch as u8 } else { b'?' };
+        let Some(rect) = font.glyph(cp) else { cx += cell_w; continue; };
+        if cx + cell_w > WIDTH { break; }
+
+        for py in 0..cell_h {
+            let target_y = y + py;
+            if target_y >= HEIGHT { break; }
+            let row_base = target_y * WIDTH + cx;
+            let atlas_row = (rect.atlas_y as usize + py) * atlas_w + rect.atlas_x as usize;
+            for px in 0..cell_w {
+                let alpha = font.alpha[atlas_row + px];
+                if alpha == 0 { continue; }
+                let dst = row_base + px;
+                let bg = bb[dst];
+                bb[dst] = lerp_bgrx(bg, fg_bgrx, alpha);
+            }
+        }
+        cx += cell_w;
+    }
+}
+
+/// Convenience — UI default (Noto Sans SC 14 px) into a Color.
+pub fn draw_text_ui(x: usize, y: usize, text: &str, color: Color) {
+    draw_text_aa(x, y, text, color, &k_assets::FONT_UI_14);
+}
+
+/// Convenience — header / brand text (Noto Sans SC 18 px).
+pub fn draw_text_ui_lg(x: usize, y: usize, text: &str, color: Color) {
+    draw_text_aa(x, y, text, color, &k_assets::FONT_UI_18);
+}
+
+/// Convenience — monospace (Cascadia Code 13 px) for command line.
+pub fn draw_text_mono(x: usize, y: usize, text: &str, color: Color) {
+    draw_text_aa(x, y, text, color, &k_assets::FONT_MONO_13);
+}
+
+/// String pixel width helper — caller uses this to centre / right-align
+/// text in the new variable-width font.
+pub fn text_width(text: &str, font: &k_assets::FontAtlas) -> usize {
+    text.chars().count() * font.cell_w as usize
 }
 
 /// N.10 — 1-pixel offset drop-shadow text.  Renders the background-

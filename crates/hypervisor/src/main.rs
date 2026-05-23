@@ -203,16 +203,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
 const SCENE_WIDTH: i32 = k_fb::WIDTH as i32;
 const SCENE_HEIGHT: i32 = k_fb::HEIGHT as i32;
-const HEADER_H: i32 = 14;
+// N.11 — header now hosts 14-px AA Noto Sans SC text (cell_h = 20),
+// so bumped from 14 to 22 with 1 px of breathing room around the
+// glyph baseline.  Scene body shrinks by 8 px (164 → 156 px tall).
+const HEADER_H: i32 = 22;
 /// Bottom edge of the scene-body clipping window.  All node/edge
 /// paint stays above this Y; the command bar + scrollback overlay
 /// (I.5) own everything below.
-const FOOTER_Y: i32 = 178;
-/// Command-input bar geometry (I.5).  Always visible at the bottom
-/// of the screen.  Slim 14 px row that holds `> <typed>_` with a
-/// blinking cursor.
-const CMD_BAR_TOP: i32 = 184;
-const CMD_BAR_H: i32 = 14;
+const FOOTER_Y: i32 = 176;
+/// Command-input bar geometry (I.5).  Slim 18 px row that holds
+/// `> <typed>_` rendered in Cascadia Code 13 px with a blinking cursor.
+const CMD_BAR_TOP: i32 = 182;
+const CMD_BAR_H: i32 = 18;
 /// Height of the scrollback panel when F9 has expanded it.  Sits
 /// just above the command bar, overlapping the lower portion of
 /// the scene area as a translucent-feeling deck.
@@ -482,30 +484,21 @@ fn paint_3d_view(frame: u64) {
             continue;
         }
         let name = nodes[i].plugin_name;
-        // Drop the K_ prefix (every kernel module is K_FOO) for legibility.
         let trimmed = name.strip_prefix("K_").unwrap_or(name);
         let bytes = trimmed.as_bytes();
-        let label_len = bytes.len().min(6);
+        let label_len = bytes.len().min(10);
         let label = unsafe { core::str::from_utf8_unchecked(&bytes[..label_len]) };
-        // Position: a few pixels above the cube top, centred-ish.
-        // 6 chars × 8 px = 48 px wide; cube screen height varies with
-        // distance, so use a fixed 14 px offset.
-        let text_w = (label_len * 8) as i32;
-        let lx = (sx - text_w / 2).max(0) as usize;
-        let ly = (sy - 16).max(HEADER_H + 1) as usize;
-        if lx + (label_len * 8) > k_fb::WIDTH || ly + 8 >= FOOTER_Y as usize {
+        // N.11 — AA Noto Sans SC 14 px label.  cell_w = 14, so
+        // centre on cell width × char count.
+        let text_w = (label_len * 14) as i32;
+        let lx = (sx - text_w / 2).max(4) as usize;
+        let ly = (sy - 28).max(HEADER_H + 2) as usize;
+        if lx + label_len * 14 > k_fb::WIDTH || ly + 20 >= FOOTER_Y as usize {
             continue;
         }
-        // Two-pass shadow so the label reads on any cube colour: a
-        // 1-pixel offset Background outline behind the Foreground.
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let bx = lx as i32 + dx;
-            let by = ly as i32 + dy;
-            if bx >= 0 && by >= 0 {
-                k_fb::draw_text(bx as usize, by as usize, label, k_fb::Color::Background);
-            }
-        }
-        k_fb::draw_text(lx, ly, label, k_fb::Color::Foreground);
+        // 1-px drop shadow + 1-px soft glow for hover-ready labels.
+        k_fb::draw_text_ui(lx + 1, ly + 1, label, k_fb::Color::Background);
+        k_fb::draw_text_ui(lx, ly, label, k_fb::Color::Foreground);
     }
 
     // ── I.3.11 / I.3.12 — mouse cursor + click-to-select + drag-orbit ──
@@ -637,78 +630,153 @@ fn paint_3d_view(frame: u64) {
         }
     }
 
-    // ── Gizmo: 3-axis orientation indicator ──────────────────────
-    // Upper-right corner widget.  Projects the three world-space
-    // axes through the camera's view (no translation, no perspective
-    // — just the rotation effect) so the user always sees which
-    // direction is X / Y / Z.  Reads as "orbit handle" even though
-    // it isn't actually clickable; the whole empty-space area now
-    // serves that role via the drag handler above.
-    const GIZMO_CX: i32 = SCENE_WIDTH - 24;
-    const GIZMO_CY: i32 = HEADER_H + 18;
-    const GIZMO_LEN: f32 = 12.0;
-    // Camera basis: the same three vectors look_at builds from
-    // (eye, target=origin, up).  We don't need the full matrix —
-    // the dot of each world axis with right / true_up / forward
-    // gives its screen projection directly.
+    // ── N.11 — Unity-style ViewCube gizmo ──────────────────────────
+    //
+    // Upper-right corner widget.  Renders 6 axis-end caps (±X ±Y ±Z),
+    // each clickable: a left-mouse click on a cap snaps the camera to
+    // look down that axis (resets yaw/pitch atomics accordingly).  Cap
+    // colours follow Unity's convention: red = X, green = Y, blue = Z.
+    // The corresponding negative cap is the same hue at 40 % intensity
+    // so the user can tell "+X bright, -X faded" at a glance.
+    //
+    // Layout (12-px arm length):
+    //         +Y
+    //          |
+    //   -X --(o)-- +X
+    //          |
+    //         -Y
+    // (+Z and −Z render as filled / hollow centre dots respectively.)
+    const GIZMO_CX: i32 = SCENE_WIDTH - 26;
+    const GIZMO_CY: i32 = HEADER_H + 22;
+    const GIZMO_LEN: f32 = 14.0;
+    const GIZMO_CAP_R: i32 = 4;
+    const GIZMO_HIT_R: i32 = 6;
     let forward = Vec3::new(-eye.x, -eye.y, -eye.z).normalize();
     let world_up = Vec3::new(0.0, 1.0, 0.0);
     let right = forward.cross(world_up).normalize();
     let true_up = right.cross(forward);
-    // Helper: project a world axis to gizmo-local screen coords.
-    // Screen X = world_axis · right; screen Y flipped because image
-    // space Y is down.
     let project_axis = |axis: Vec3| -> (i32, i32) {
         let sx = (axis.dot(right) * GIZMO_LEN) as i32;
         let sy = -(axis.dot(true_up) * GIZMO_LEN) as i32;
         (sx, sy)
     };
-    let (ax_x, ay_x) = project_axis(Vec3::new(1.0, 0.0, 0.0));
-    let (ax_y, ay_y) = project_axis(Vec3::new(0.0, 1.0, 0.0));
-    let (ax_z, ay_z) = project_axis(Vec3::new(0.0, 0.0, 1.0));
-    // Three colored Bresenham lines from gizmo centre.  R = X, G = Y,
-    // B = Z (standard convention).  Brightness encodes whether axis
-    // points toward camera (bright) or away (dim) via the forward
-    // dot — gives the gizmo subtle depth cue.
-    let axis_brightness = |axis: Vec3| -> k_fb::Color {
-        let d = axis.dot(forward);
-        if d > 0.3 {
-            k_fb::Color::DimWhite
-        } else {
-            k_fb::Color::Foreground
-        }
-    };
-    let draw_axis = |dx: i32, dy: i32, hue: k_fb::Color, _shade: k_fb::Color| {
-        let put = |x: i32, y: i32| {
-            if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                k_fb::put_pixel(x as usize, y as usize, hue);
+    // 6 caps with their hue.  Negative-axis caps render dim.
+    let caps: [(Vec3, u32, bool); 6] = [
+        (Vec3::new( 1.0, 0.0, 0.0), 0xff4d57, true),  // +X bright red
+        (Vec3::new(-1.0, 0.0, 0.0), 0xff4d57, false), // -X dim red
+        (Vec3::new(0.0,  1.0, 0.0), 0x80ff80, true),  // +Y bright green
+        (Vec3::new(0.0, -1.0, 0.0), 0x80ff80, false), // -Y dim green
+        (Vec3::new(0.0, 0.0,  1.0), 0x4ad0ff, true),  // +Z bright cyan
+        (Vec3::new(0.0, 0.0, -1.0), 0x4ad0ff, false), // -Z dim cyan
+    ];
+    // Draw arms (lines from origin to each +axis cap).  Negative caps
+    // draw at the opposite end of the same arm.
+    for (axis, hue, positive) in &caps[..3] {
+        let (dx, dy) = project_axis(*axis);
+        let pen = k_fb::scale_bgrx(*hue, if *positive { 0.95 } else { 0.4 });
+        // simple Bresenham along the line
+        let n = dx.abs().max(dy.abs()).max(1);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let lx = GIZMO_CX as f32 + dx as f32 * t;
+            let ly = GIZMO_CY as f32 + dy as f32 * t;
+            for j in -1..=1 {
+                let sx = lx as i32 + j;
+                let sy = ly as i32;
+                if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
+                    k_fb::put_pixel_rgb(sx as usize, sy as usize, pen);
+                }
             }
-        };
-        k_rast::draw_line(put, GIZMO_CX, GIZMO_CY, GIZMO_CX + dx, GIZMO_CY + dy);
-    };
-    // X axis — drawn in NodeService (yellow) for warmth, since the
-    // "red" we'd normally use is reserved for Error.
-    draw_axis(
-        ax_x,
-        ay_x,
-        k_fb::Color::NodeService,
-        axis_brightness(Vec3::new(1.0, 0.0, 0.0)),
-    );
-    draw_axis(
-        ax_y,
-        ay_y,
-        k_fb::Color::NodeApp,
-        axis_brightness(Vec3::new(0.0, 1.0, 0.0)),
-    );
-    draw_axis(
-        ax_z,
-        ay_z,
-        k_fb::Color::NodeKernel,
-        axis_brightness(Vec3::new(0.0, 0.0, 1.0)),
-    );
-    // Centre marker pixel so the gizmo origin is visible even when
-    // all three axes point sideways.
-    k_fb::put_pixel(GIZMO_CX as usize, GIZMO_CY as usize, k_fb::Color::Foreground);
+        }
+        // Same axis, negative end — just draw the opposite-direction arm
+        let pen_neg = k_fb::scale_bgrx(*hue, 0.4);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let lx = GIZMO_CX as f32 - dx as f32 * t;
+            let ly = GIZMO_CY as f32 - dy as f32 * t;
+            let sx = lx as i32;
+            let sy = ly as i32;
+            if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
+                k_fb::put_pixel_rgb(sx as usize, sy as usize, pen_neg);
+            }
+        }
+    }
+    // Solid cap discs at each axis end.
+    let mut hovered_axis: Option<(i32, i32, i32)> = None; // (x, y, z) ∈ {-1, 0, 1}
+    for (axis, hue, positive) in &caps {
+        let (dx, dy) = project_axis(*axis);
+        let cap_x = GIZMO_CX + dx;
+        let cap_y = GIZMO_CY + dy;
+        let cap_color = k_fb::scale_bgrx(*hue, if *positive { 1.0 } else { 0.45 });
+        // Filled disc, radius GIZMO_CAP_R
+        for ry in -GIZMO_CAP_R..=GIZMO_CAP_R {
+            for rx in -GIZMO_CAP_R..=GIZMO_CAP_R {
+                if rx * rx + ry * ry > GIZMO_CAP_R * GIZMO_CAP_R { continue; }
+                let sx = cap_x + rx;
+                let sy = cap_y + ry;
+                if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
+                    k_fb::put_pixel_rgb(sx as usize, sy as usize, cap_color);
+                }
+            }
+        }
+        // Hit test against mouse (read from local snapshot below).
+        let dx_m = mouse_x - cap_x;
+        let dy_m = mouse_y - cap_y;
+        if dx_m * dx_m + dy_m * dy_m <= GIZMO_HIT_R * GIZMO_HIT_R {
+            hovered_axis = Some((axis.x as i32, axis.y as i32, axis.z as i32));
+            // Hover ring (white outline)
+            for theta in 0..16 {
+                let ang = theta as f32 * 6.2832 / 16.0;
+                let rx = libm::cosf(ang) * (GIZMO_CAP_R as f32 + 2.0);
+                let ry = libm::sinf(ang) * (GIZMO_CAP_R as f32 + 2.0);
+                let sx = cap_x + rx as i32;
+                let sy = cap_y + ry as i32;
+                if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
+                    k_fb::put_pixel_rgb(sx as usize, sy as usize, 0xffffff);
+                }
+            }
+        }
+    }
+    // Click-to-snap: if the user clicked while hovering a cap, set the
+    // camera bias atomics so the next frame looks straight down that axis.
+    if left_edge {
+        if let Some((ax, ay, az)) = hovered_axis {
+            // Yaw / pitch from cardinal axis vector.  Yaw measures
+            // rotation around world Y; pitch measures elevation.
+            // Matching look_at: eye = R*(cos(p)sin(y), sin(p), cos(p)cos(y))
+            // → +Z view = yaw 0, pitch 0
+            // → +X view = yaw π/2
+            // → +Y view = pitch +π/2 (almost; clamp to 1.4)
+            let (target_yaw, target_pitch) = match (ax, ay, az) {
+                ( 1, 0, 0) => ( core::f32::consts::FRAC_PI_2, 0.0),
+                (-1, 0, 0) => (-core::f32::consts::FRAC_PI_2, 0.0),
+                (0,  1, 0) => (0.0,  1.35),
+                (0, -1, 0) => (0.0, -1.35),
+                (0, 0,  1) => (0.0, 0.0),
+                (0, 0, -1) => (core::f32::consts::PI, 0.0),
+                _ => (0.0, 0.45),
+            };
+            // Convert to mrad atomic units; subtract the default
+            // pitch (0.45 rad) since CAMERA_PITCH_BIAS_MRAD is added on top.
+            k_fb::CAMERA_YAW_BIAS_MRAD.store((target_yaw * 1000.0) as i32, Ordering::Relaxed);
+            k_fb::CAMERA_PITCH_BIAS_MRAD.store(((target_pitch - 0.45) * 1000.0) as i32, Ordering::Relaxed);
+            k_fb::CAMERA_AUTO_ROTATE.store(false, Ordering::Relaxed);
+            // Suppress the empty-space-click-clears-selection branch
+            // below by faking a hit (it's logically a "gizmo click",
+            // not a scene click).
+            SELECTED_NODE_SLOT.store(-2, Ordering::Relaxed);
+        }
+    }
+    // Centre dot — white pip so the gizmo origin is always visible.
+    for ry in -1..=1 {
+        for rx in -1..=1 {
+            let sx = GIZMO_CX + rx;
+            let sy = GIZMO_CY + ry;
+            if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
+                k_fb::put_pixel_rgb(sx as usize, sy as usize, 0xffffff);
+            }
+        }
+    }
 
     // Detail panel: bottom-right corner for the SELECTED node.
     // 132×40 box with 3 text rows (plugin, vector, type).
@@ -766,17 +834,24 @@ fn paint_3d_view(frame: u64) {
     // I.10 — compacter header that yields the right edge to the
     // I.10.2 uptime + heartbeat widget.  Three fixed-width chips,
     // no generation number (use `gen` command for that).
-    k_fb::draw_text(4, 3, "GOS-KRN", k_fb::Color::Highlight);
-    k_fb::draw_text(4 + 7 * 8, 3, "|", k_fb::Color::DimWhite);
+    // N.11 — anti-aliased Noto Sans SC header text.  The cell width
+    // (14 px) is variable, so we walk the cursor manually.
+    let mut hx: usize = 6;
+    k_fb::draw_text_ui(hx, 0, "GOS-KRN", k_fb::Color::Highlight);
+    hx += 7 * 14 + 4;
+    k_fb::draw_text_ui(hx, 0, "·", k_fb::Color::DimWhite);
+    hx += 8;
     let mut count_a = TextBuf::<10>::new();
     count_a.push_dec(returned_n as u64);
-    count_a.push_str("N");
-    k_fb::draw_text(4 + 9 * 8, 3, count_a.as_str(), k_fb::Color::Foreground);
-    k_fb::draw_text(4 + 13 * 8, 3, "|", k_fb::Color::DimWhite);
+    count_a.push_str(" nodes");
+    k_fb::draw_text_ui(hx, 0, count_a.as_str(), k_fb::Color::Foreground);
+    hx += count_a.as_str().len() * 14 + 4;
+    k_fb::draw_text_ui(hx, 0, "·", k_fb::Color::DimWhite);
+    hx += 8;
     let mut count_b = TextBuf::<10>::new();
     count_b.push_dec(snapshot.edge_count as u64);
-    count_b.push_str("E");
-    k_fb::draw_text(4 + 15 * 8, 3, count_b.as_str(), k_fb::Color::Foreground);
+    count_b.push_str(" edges");
+    k_fb::draw_text_ui(hx, 0, count_b.as_str(), k_fb::Color::Foreground);
 
     // ── I.4.5 — edge-style legend strip ──────────────────────────────
     // Bottom-left of the scene area, just above the footer hairline.
@@ -1550,21 +1625,27 @@ fn pack_hue_intensity(hue_base: u8, intensity: f32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-// ── Phase I.6.2 — rope edge renderer ─────────────────────────────
+// ── Phase N.11 — true cable rope edge renderer ───────────────────
 //
-// Renders an edge as a parabolically-sagging rope with thickness
-// shading and per-style pattern overlays.  Sampled in 2..=8 segments
-// based on screen-space length.  The sag vector is screen-down
-// (positive Y), which reads as "gravity pulling the rope" since the
-// camera is upright by convention.
+// Each edge is sampled at sub-pixel resolution (one stamp per screen
+// pixel along the path) and rendered as a 5-pixel-wide profile with:
 //
-// Style mapping:
-//   Solid         → 2-px rope, no pattern
-//   Dashed        → 2-px rope, 2-on/2-off via per-pixel step counter
-//   Dotted        → 2-px rope, 1-on/3-off
-//   SolidPulsed   → 2-px rope, pulse_on toggles color vs DimWhite
-//   GradientEnds  → 3-px rope, bright at first/last quarter
-//   DoubleSolid   → 4-px rigid mount (no sag, heaviest line)
+//   * cos²-falloff cross-section  → round cable look (not flat ribbon)
+//   * per-channel scaled BGRX     → 24-bit smooth shading (no banding)
+//   * sinusoidal braid pattern    → "twisted strands" highlight
+//   * additive 1-px outer halo    → soft glow into the void backdrop
+//   * catenary sag (Solid family) → gravity pull on a non-rigid wire
+//
+// Per-style overrides
+// ───────────────────
+//   Solid          standard 3-px cable
+//   Dashed         period 8: 4 on, 4 off (cleaner than the old 2-on/2-off)
+//   Dotted         period 12: 2 on, 10 off
+//   SolidPulsed    intensity pulse via `pulse_on` (kept for compat,
+//                  but the auto-rotate-gated pulse is now solid-on
+//                  when the user isn't running the demo)
+//   GradientEnds   bright endpoints, dim middle (LNK edges)
+//   DoubleSolid    5-px thick rigid mount, no sag
 fn draw_rope_edge(
     fx: i32,
     fy: i32,
@@ -1577,122 +1658,90 @@ fn draw_rope_edge(
     let dx = (tx - fx) as f32;
     let dy = (ty - fy) as f32;
     let len_f = libm::sqrtf(dx * dx + dy * dy).max(1.0);
+    if len_f < 2.0 { return; }
 
-    // Mount is a rigid structural attachment — render as a 4-px
-    // straight beam, no sag.
-    if matches!(style, EdgeStyle::DoubleSolid) {
-        let nx = libm::roundf(-dy / len_f) as i32;
-        let ny = libm::roundf(dx / len_f) as i32;
-        let put = |x: i32, y: i32| {
-            if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                k_fb::put_pixel(x as usize, y as usize, color);
-            }
-        };
-        for o in -1..=2 {
-            k_rast::draw_line(put, fx + nx * o, fy + ny * o, tx + nx * o, ty + ny * o);
-        }
-        return;
-    }
+    // Style-driven knobs.
+    let rigid = matches!(style, EdgeStyle::DoubleSolid);
+    let thickness: i32 = if rigid { 3 } else { 2 };
+    let halo_radius: i32 = thickness + 1;
+    let sag_px: f32 = if rigid { 0.0 } else { (len_f * 0.10).min(6.0) };
 
-    // Sag amount: proportional to length, capped at 8 px.  A rope of
-    // 64 px sags 8 px in the middle.
-    let sag_px = (len_f * 0.12).min(8.0);
+    // Base colour: pulled from palette → BGRX.  SolidPulsed dims to
+    // ~60 % when its phase is off so the user perceives a heartbeat
+    // without the colour vanishing entirely.
+    let base_bgrx = k_fb::color_bgrx(color);
+    let solid_pulsed = matches!(style, EdgeStyle::SolidPulsed);
+    let pulse_dim = if solid_pulsed && !pulse_on { 0.55 } else { 1.0 };
 
-    // Number of segments — more for long edges so the curve is smooth.
-    let segments = ((len_f / 12.0) as usize).clamp(2, 8);
-
-    // Sample the catenary at `segments + 1` points.  Each point's Y
-    // gets `sag * 4 * t * (1 - t)` added so t=0 and t=1 stay at the
-    // endpoints and t=0.5 sags the full amount.
-    let mut pts: [(i32, i32); 9] = [(0, 0); 9];
-    let n_pts = segments + 1;
-    for i in 0..n_pts {
-        let t = i as f32 / segments as f32;
-        let lin_x = fx as f32 + dx * t;
-        let lin_y = fy as f32 + dy * t;
-        let sag = sag_px * 4.0 * t * (1.0 - t);
-        pts[i] = (lin_x as i32, (lin_y + sag) as i32);
-    }
-
-    // Direction-dependent halo offset.  For more-horizontal lines
-    // the halo is vertical (±1 in Y); for more-vertical lines it's
-    // horizontal (±1 in X).  Cheap heuristic via the original
-    // endpoint delta.
-    let halo_vertical = dx.abs() > dy.abs();
-    let halo_dx = if halo_vertical { 0 } else { 1 };
-    let halo_dy = if halo_vertical { 1 } else { 0 };
-
-    // Style → (period, mask) for the pattern.
-    // 0x00..0xFF mask: 1 bits at periodic positions paint, 0 bits skip.
-    // For "dashed" 2 on / 2 off, the simplest is `(t & 3) < 2`.
-    let (period_mask, period_on): (i32, i32) = match style {
-        EdgeStyle::Dashed => (3, 2),   // (t & 3) < 2
-        EdgeStyle::Dotted => (3, 1),   // (t & 3) < 1
-        _ => (0, 1),                    // always-on
-    };
-
-    // GradientEnds bright window.
-    let total_steps_est = len_f as i32;
-    let q1 = total_steps_est / 4;
-    let q3 = total_steps_est - q1;
     let is_gradient = matches!(style, EdgeStyle::GradientEnds);
+    let bright_bgrx = k_fb::color_bgrx(k_fb::Color::Highlight);
 
-    // SolidPulsed swap to DimWhite on the off phase.
-    let main_color = if matches!(style, EdgeStyle::SolidPulsed) && !pulse_on {
-        k_fb::Color::DimWhite
-    } else {
-        color
-    };
+    // Perpendicular unit vector (rotated +90°).
+    let perp_x = -dy / len_f;
+    let perp_y = dx / len_f;
 
-    use core::cell::Cell;
-    let global_step = Cell::new(0i32);
+    // One stamp per screen pixel of length → smooth, anti-banding.
+    let n_samples = (len_f as usize).max(8);
+    let inv_n = 1.0 / (n_samples - 1) as f32;
+    let braid_freq = len_f * 0.45; // cycles along the rope
 
-    for seg in 0..segments {
-        let (x0, y0) = pts[seg];
-        let (x1, y1) = pts[seg + 1];
+    for i in 0..n_samples {
+        let t = i as f32 * inv_n;
 
-        // Center pixels (bright) — stamped through pattern/gradient.
-        let center_color = main_color;
-        let halo_color = k_fb::Color::DimWhite;
-        k_rast::draw_line(
-            |x, y| {
-                let t = global_step.get();
-                global_step.set(t + 1);
-                // Pattern gate.
-                let pat_on = period_mask == 0 || (t & period_mask) < period_on;
-                if !pat_on {
-                    return;
-                }
-                // GradientEnds bright window.
-                let chosen = if is_gradient && (t >= q1 && t <= q3) {
-                    k_fb::Color::DimWhite
-                } else {
-                    center_color
-                };
-                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                    k_fb::put_pixel(x as usize, y as usize, chosen);
-                }
-                // Halo pixel: always painted (no pattern) so the
-                // rope reads as a continuous 2-px ribbon even when
-                // the centre is dashed.
-                let hx = x + halo_dx;
-                let hy = y + halo_dy;
-                if hx >= 0 && hx < SCENE_WIDTH && hy >= HEADER_H && hy < FOOTER_Y {
-                    k_fb::put_pixel(hx as usize, hy as usize, halo_color);
-                }
-            },
-            x0, y0, x1, y1,
-        );
+        // Pattern gating (Dashed / Dotted gaps).
+        let pat_on = match style {
+            EdgeStyle::Dashed => (i / 4) % 2 == 0,
+            EdgeStyle::Dotted => (i / 12) % 3 == 0,
+            _ => true,
+        };
+        if !pat_on { continue; }
 
-        // GradientEnds gets a 3rd-pixel halo on the OTHER side too
-        // so it reads visually heavier than the standard rope.
-        if is_gradient {
-            let put = |x: i32, y: i32| {
-                if x >= 0 && x < SCENE_WIDTH && y >= HEADER_H && y < FOOTER_Y {
-                    k_fb::put_pixel(x as usize, y as usize, halo_color);
-                }
-            };
-            k_rast::draw_line(put, x0 - halo_dx, y0 - halo_dy, x1 - halo_dx, y1 - halo_dy);
+        // Position along catenary.
+        let lx = fx as f32 + dx * t;
+        let ly = fy as f32 + dy * t;
+        let sag = sag_px * 4.0 * t * (1.0 - t);
+        let cx = lx;
+        let cy = ly + sag;
+
+        // GradientEnds: bright at the first / last quarter, dim middle.
+        let main_bgrx = if is_gradient {
+            if t < 0.25 || t > 0.75 { bright_bgrx } else { base_bgrx }
+        } else {
+            base_bgrx
+        };
+
+        // Braid: highlight ripples along the rope axis, 12 % amplitude
+        // around 0.92 so the rope reads as woven, not painted.
+        let braid = libm::sinf(t * braid_freq) * 0.12 + 0.92;
+
+        // Outer halo first (additive, attenuated) so the bright
+        // centre composites cleanly over it.
+        for d in -halo_radius..=halo_radius {
+            let dist = d.abs();
+            if dist <= thickness { continue; } // skip core; we paint it next
+            let stamp_x = libm::roundf(cx + perp_x * d as f32) as i32;
+            let stamp_y = libm::roundf(cy + perp_y * d as f32) as i32;
+            if stamp_x < 0 || stamp_x >= SCENE_WIDTH
+                || stamp_y < HEADER_H || stamp_y >= FOOTER_Y { continue; }
+            // Halo intensity: 30 % at the inner halo ring, 12 % at the outer.
+            let halo_t = (dist - thickness) as f32 / (halo_radius - thickness) as f32;
+            let halo_i = (0.30 * (1.0 - halo_t)) * pulse_dim;
+            let glow = k_fb::scale_bgrx(main_bgrx, halo_i * braid);
+            k_fb::add_pixel_rgb(stamp_x as usize, stamp_y as usize, glow);
+        }
+
+        // Core profile: cos² cross-section, full intensity at d=0,
+        // tapering smoothly to 0 at |d| > thickness.
+        for d in -thickness..=thickness {
+            let stamp_x = libm::roundf(cx + perp_x * d as f32) as i32;
+            let stamp_y = libm::roundf(cy + perp_y * d as f32) as i32;
+            if stamp_x < 0 || stamp_x >= SCENE_WIDTH
+                || stamp_y < HEADER_H || stamp_y >= FOOTER_Y { continue; }
+            let dist_norm = d.abs() as f32 / (thickness + 1) as f32;
+            let profile = 1.0 - dist_norm * dist_norm;
+            let intensity = profile * braid * pulse_dim;
+            let pixel = k_fb::scale_bgrx(main_bgrx, intensity);
+            k_fb::put_pixel_rgb(stamp_x as usize, stamp_y as usize, pixel);
         }
     }
 }
@@ -2830,13 +2879,11 @@ fn paint_status_widget(frame: u64) {
     if ss < 10 { buf.push_str("0"); }
     buf.push_dec(ss);
 
-    // Place in the top-right of the header band, before the cmd bar
-    // mode pill (which lives on the bar's right side, not the
-    // header).  Header band is 14 px tall; text rows on y=3 already.
-    // Replace the rightmost header section with this widget.
+    // N.11 — uptime widget in the new AA UI font.  Cell_w = 14, so
+    // budget = chars × 14 + 16 for the heartbeat dot.
     let text = buf.as_str();
-    let tx = k_fb::WIDTH - text.len() * 8 - 14;
-    k_fb::draw_text(tx, 3, text, k_fb::Color::Foreground);
+    let tx = k_fb::WIDTH - text.len() * 14 - 18;
+    k_fb::draw_text_ui(tx, 0, text, k_fb::Color::Foreground);
 
     // Heartbeat dot — pulses bright cyan once per second (frame
     // counter mod 50 < 6 = ~120 ms on).  Sits two pixels right of
@@ -2923,9 +2970,9 @@ fn paint_chat_hud() {
         return;
     }
     let show = total.min(HUD_LINES);
-    // Stack lines bottom-up; bottom line sits 2 px above the cmd bar.
-    let baseline_y = (CMD_BAR_TOP - 2) as usize;
-    let line_h = 9usize;
+    // N.11 — AA chat lines in Noto Sans SC 14 (cell_h = 20).
+    let line_h = 20usize;
+    let baseline_y = (CMD_BAR_TOP - 4) as usize;
     let mut y = baseline_y - show * line_h;
     let start = total - show;
     for (i, line) in ui.iter_oldest_first().enumerate() {
@@ -2934,17 +2981,10 @@ fn paint_chat_hud() {
         }
         let take = line.len().min(SCROLLBACK_LINE_CAP);
         let trimmed = unsafe { core::str::from_utf8_unchecked(&line.as_bytes()[..take]) };
-        // 1-pixel background-tinted shadow on four sides so the
-        // text reads against any colour (sphere, rope, starfield).
-        let x = 4usize;
-        for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
-            let sx = x as i32 + dx;
-            let sy = y as i32 + dy;
-            if sx >= 0 && sy >= 0 {
-                k_fb::draw_text(sx as usize, sy as usize, trimmed, k_fb::Color::Background);
-            }
-        }
-        k_fb::draw_text(x, y, trimmed, k_fb::Color::Foreground);
+        // Single 1-px shadow below for legibility on any backdrop.
+        let x = 8usize;
+        k_fb::draw_text_ui(x + 1, y + 1, trimmed, k_fb::Color::Background);
+        k_fb::draw_text_ui(x, y, trimmed, k_fb::Color::Foreground);
         y += line_h;
     }
 }
@@ -3064,41 +3104,38 @@ fn paint_command_bar(frame: u64, mode: u8) {
         k_fb::put_pixel_rgb(x, bar_y, CMD_ACCENT);
     }
 
-    // Prompt and typed text.  I.12 polish: chat-style `gos>` prompt
-    // matches the kernel's response prefix in the chat HUD above.
-    let prompt_x = 4usize;
-    let prompt_y = bar_y + 3;
-    k_fb::draw_text(prompt_x, prompt_y, "gos>", k_fb::Color::Highlight);
+    // N.11 — prompt + typed text now in Cascadia Code 13 px.  Cell_w = 10.
+    let prompt_x = 6usize;
+    let prompt_y = bar_y; // FONT_MONO_13 has cell_h = 18, matches bar_h
+    k_fb::draw_text_mono(prompt_x, prompt_y, "gos›", k_fb::Color::Highlight);
 
     let ui = UI_STATE.lock();
     let line = ui.current_line();
     let line_len = line.len();
-    let text_x = prompt_x + 5 * 8;
-    // Truncate from the head if the user types past the visible width.
-    let max_visible_chars = ((k_fb::WIDTH - text_x - 12) / 8).min(CMD_LINE_CAP);
+    let text_x = prompt_x + 4 * 10 + 4;
+    let max_visible_chars = ((k_fb::WIDTH - text_x - 16) / 10).min(CMD_LINE_CAP);
     let visible_start = line_len.saturating_sub(max_visible_chars);
     let visible = unsafe {
         core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
     };
-    k_fb::draw_text(text_x, prompt_y, visible, k_fb::Color::Foreground);
+    k_fb::draw_text_mono(text_x, prompt_y, visible, k_fb::Color::Foreground);
 
-    // Blinking cursor: 1-px solid line under the insertion point.
+    // Blinking cursor: 2-px solid line under the insertion point.
     let cursor_on = (frame / 16) & 1 == 0;
     if cursor_on {
-        let cursor_x = text_x + (line_len - visible_start) * 8;
+        let cursor_x = text_x + (line_len - visible_start) * 10;
         if cursor_x + 6 < k_fb::WIDTH {
             k_fb::fill_rect(cursor_x, prompt_y, 6, 8, k_fb::Color::Foreground);
         }
     }
 
-    // Right-side mode pill: shows `[KRN]` or `[SHELL]` so the user
-    // always knows which view is current.
+    // Right-side mode pill — shows the active view name.
     let pill = match mode {
-        k_fb::UI_MODE_KERNEL_VIEW => "[KRN]",
-        _ => "[SHELL]",
+        k_fb::UI_MODE_KERNEL_VIEW => "KERNEL",
+        _ => "SHELL",
     };
-    let px = k_fb::WIDTH - pill.len() * 8 - 4;
-    k_fb::draw_text(px, prompt_y, pill, k_fb::Color::NodeService);
+    let px = k_fb::WIDTH - pill.len() * 10 - 8;
+    k_fb::draw_text_mono(px, prompt_y, pill, k_fb::Color::NodeService);
 }
 
 /// Paint the collapsible scrollback panel.  Stacks the N most recent

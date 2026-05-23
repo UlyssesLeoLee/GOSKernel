@@ -10,3 +10,7 @@ spin = "0.9"
 # 1 KiB ASCII bitmap font (public-domain BIOS 8×8) — pulls just the
 # `legacy::BASIC_LEGACY` table, no allocator, no unicode tables.
 font8x8 = { version = "0.3.1", default-features = false }
+# N.11 — anti-aliased TTF-baked glyph atlases (Noto Sans SC + Cascadia
+# Code).  k-fb's `draw_text_aa` reads these via the FontAtlas API to
+# alpha-blend each glyph into the 24-bit back-buffer.
+k-assets = { path = "../k-assets" }

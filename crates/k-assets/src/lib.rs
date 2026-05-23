@@ -92,6 +92,82 @@ pub static ROPE_BRAIDED: PalTexture =
 pub static BRDF_LUT: PalTexture =
     PalTexture::from_blob(include_bytes!("../../../assets/brdf_lut.pal"));
 
+// ── N.11 — anti-aliased font atlases (replacing legacy 8×8 bitmap) ──
+//
+// Pre-rendered offline by `tools/assets/bake_font.py` from
+// system-installed TrueType / OpenType fonts.  Each atlas is an
+// 8-bit grayscale alpha bitmap on a fixed-cell grid indexed by
+// codepoint - `char_first`.  Both base fonts ship under SIL OFL
+// and align baselines so a CJK extension atlas drops in pixel-perfect.
+//
+//   FONT_UI_14    Noto Sans SC 14 px    — body labels / chat
+//   FONT_UI_18    Noto Sans SC 18 px    — header brand / callouts
+//   FONT_MONO_13  Cascadia Code 13 px   — command line / fixed-width
+
+/// A baked TTF-rendered alpha atlas.
+#[derive(Debug, Clone, Copy)]
+pub struct FontAtlas {
+    pub cell_w: u8,
+    pub cell_h: u8,
+    pub char_first: u8,
+    pub char_count: u8,
+    /// Atlas bitmap width in pixels.  cells_per_row = `atlas_w / cell_w`.
+    pub atlas_w: u16,
+    /// Row-major 8-bit alpha; total bytes = `atlas_w * atlas_h`.
+    pub alpha: &'static [u8],
+}
+
+impl FontAtlas {
+    pub const fn from_blob(blob: &'static [u8]) -> Self {
+        debug_assert!(blob.len() >= 8);
+        debug_assert!(blob[0] == b'F' && blob[1] == b'A', "not a .fnt blob");
+        let cell_w = blob[2];
+        let cell_h = blob[3];
+        let char_first = blob[4];
+        let char_count = blob[5];
+        let atlas_w = (blob[6] as u16) | ((blob[7] as u16) << 8);
+        let (_, alpha) = blob.split_at(8);
+        Self { cell_w, cell_h, char_first, char_count, atlas_w, alpha }
+    }
+
+    /// Look up the alpha rect for a single codepoint, or None if outside range.
+    pub const fn glyph(&self, ch: u8) -> Option<GlyphRect> {
+        if ch < self.char_first { return None; }
+        let idx = ch - self.char_first;
+        if idx >= self.char_count { return None; }
+        let cells_per_row = (self.atlas_w / self.cell_w as u16) as u8;
+        let col = idx % cells_per_row;
+        let row = idx / cells_per_row;
+        Some(GlyphRect {
+            atlas_x: col as u16 * self.cell_w as u16,
+            atlas_y: row as u16 * self.cell_h as u16,
+            w: self.cell_w,
+            h: self.cell_h,
+        })
+    }
+
+    /// Read one alpha pixel.  Returns 0 if (x, y) is out of bounds.
+    pub const fn alpha_at(&self, x: u16, y: u16) -> u8 {
+        let idx = (y as usize) * (self.atlas_w as usize) + (x as usize);
+        if idx >= self.alpha.len() { 0 } else { self.alpha[idx] }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphRect {
+    pub atlas_x: u16,
+    pub atlas_y: u16,
+    pub w: u8,
+    pub h: u8,
+}
+
+pub static FONT_UI_14: FontAtlas =
+    FontAtlas::from_blob(include_bytes!("../../../assets/font_ui_14.fnt"));
+pub static FONT_UI_18: FontAtlas =
+    FontAtlas::from_blob(include_bytes!("../../../assets/font_ui_18.fnt"));
+pub static FONT_MONO_13: FontAtlas =
+    FontAtlas::from_blob(include_bytes!("../../../assets/font_mono_13.fnt"));
+
 // ── 按子域索引的 sphere LOD 选择器 ─────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
