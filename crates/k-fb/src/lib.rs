@@ -557,6 +557,208 @@ pub fn scale_bgrx(bgrx: u32, intensity: f32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+// ── N.12 — alpha-blended primitives for next-gen UI ────────────────
+
+/// Alpha-blend a pixel onto the back-buffer.  `alpha` is 0..=255
+/// where 0 = transparent (no change), 255 = opaque (overwrite).
+/// Cornerstone of every AA / glass / shadow primitive.
+#[inline]
+pub fn blend_pixel_rgb(x: usize, y: usize, fg_bgrx: u32, alpha: u8) {
+    if x >= WIDTH || y >= HEIGHT || alpha == 0 {
+        return;
+    }
+    let mut bb = BACKBUFFER.lock();
+    let bg = bb[y * WIDTH + x];
+    bb[y * WIDTH + x] = lerp_bgrx(bg, fg_bgrx, alpha);
+}
+
+/// Fill a rectangle with a translucent colour.  `alpha` is 0..=255.
+/// Each pixel is `lerp(existing, fg, alpha)` — glass / tint / shadow
+/// panel implementation.
+pub fn fill_rect_alpha(x: usize, y: usize, w: usize, h: usize, fg_bgrx: u32, alpha: u8) {
+    if x >= WIDTH || y >= HEIGHT || w == 0 || h == 0 || alpha == 0 {
+        return;
+    }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let mut bb = BACKBUFFER.lock();
+    for py in y..y_end {
+        let row = py * WIDTH;
+        for px in x..x_end {
+            let bg = bb[row + px];
+            bb[row + px] = lerp_bgrx(bg, fg_bgrx, alpha);
+        }
+    }
+}
+
+/// 1-pixel stroke at an explicit BGRX colour (no palette indirection).
+/// Used by the N.12 design language for cyan accent rims.
+pub fn stroke_rect_rgb(x: usize, y: usize, w: usize, h: usize, bgrx: u32) {
+    if w == 0 || h == 0 || x >= WIDTH || y >= HEIGHT {
+        return;
+    }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let mut bb = BACKBUFFER.lock();
+    // Top
+    if y < HEIGHT {
+        let row = y * WIDTH;
+        for px in x..x_end { bb[row + px] = bgrx; }
+    }
+    // Bottom
+    if y_end > 0 && y_end - 1 < HEIGHT && y_end - 1 > y {
+        let row = (y_end - 1) * WIDTH;
+        for px in x..x_end { bb[row + px] = bgrx; }
+    }
+    // Sides
+    for py in (y + 1)..(y_end.saturating_sub(1)) {
+        let row = py * WIDTH;
+        if x < WIDTH { bb[row + x] = bgrx; }
+        if x_end > 0 && x_end - 1 < WIDTH { bb[row + x_end - 1] = bgrx; }
+    }
+}
+
+/// N.12 — rounded-corner translucent rectangle.  Corners are
+/// quarter-circles with per-pixel coverage (Bresenham-style AA),
+/// so the panel reads as a modern Win11 / iOS card.  `radius`
+/// caps at min(w, h) / 2.
+pub fn fill_round_rect_alpha(
+    x: usize, y: usize, w: usize, h: usize,
+    radius: usize, fg_bgrx: u32, alpha: u8,
+) {
+    if w == 0 || h == 0 || alpha == 0 { return; }
+    let r = radius.min(w / 2).min(h / 2);
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let mut bb = BACKBUFFER.lock();
+    for py in y..y_end {
+        if py >= HEIGHT { break; }
+        let row = py * WIDTH;
+        // Compute the per-row x range, with quarter-circle clipping
+        // near the rounded corners.
+        let dy = if py < y + r {
+            (y + r - py) as i32
+        } else if py >= y + h - r {
+            (py + r + 1 - (y + h)) as i32
+        } else {
+            0
+        };
+        // Inscribed circle test: dx² + dy² <= r²
+        // For each x in [x, x+r): allowed iff (r - 1 - dx)² + dy² < r²
+        // Then [x+r .. x_end-r] is fully inside.
+        let mut px = x;
+        while px < x_end {
+            if px >= WIDTH { break; }
+            // Per-pixel corner test + sub-pixel AA at the boundary
+            let in_corner = (px < x + r && dy > 0) || (px >= x + w - r && dy > 0);
+            let alpha_used = if in_corner {
+                let dx_c = if px < x + r { (x + r - 1 - px) as i32 } else { (px + r - (x + w)) as i32 };
+                let r2 = (r as i32 * r as i32) as f32;
+                let d2 = (dx_c * dx_c + dy * dy) as f32;
+                let cover = (r2 - d2) / (2.0 * r as f32);
+                if cover <= 0.0 { px += 1; continue; }
+                let cov_alpha = (alpha as f32 * cover.min(1.0)) as u8;
+                cov_alpha
+            } else {
+                alpha
+            };
+            let bg = bb[row + px];
+            bb[row + px] = lerp_bgrx(bg, fg_bgrx, alpha_used);
+            px += 1;
+        }
+    }
+}
+
+/// N.12 — Wu's anti-aliased line.  Two-pixel-per-step plot with
+/// coverage = (1 - frac) / frac, so diagonals don't stairstep.
+/// Cheap: ~2× the cost of a Bresenham line, no division per step.
+pub fn draw_line_aa_rgb(x0: i32, y0: i32, x1: i32, y1: i32, bgrx: u32) {
+    let dx = (x1 - x0) as f32;
+    let dy = (y1 - y0) as f32;
+    let steep = dy.abs() > dx.abs();
+    let (mut x0, mut y0, mut x1, mut y1, dx, dy) = if steep {
+        (y0 as f32, x0 as f32, y1 as f32, x1 as f32, dy.abs(), dx)
+    } else {
+        (x0 as f32, y0 as f32, x1 as f32, y1 as f32, dx.abs(), dy)
+    };
+    if x0 > x1 {
+        core::mem::swap(&mut x0, &mut x1);
+        core::mem::swap(&mut y0, &mut y1);
+    }
+    let gradient = if dx == 0.0 { 1.0 } else { (y1 - y0) / (x1 - x0) };
+    let mut intery = y0;
+    let mut x = x0 as i32;
+    let x_end = x1 as i32;
+    while x <= x_end {
+        let frac = intery - libm::floorf(intery);
+        let y_int = intery as i32;
+        if steep {
+            blend_pixel_rgb(y_int as usize, x as usize, bgrx, ((1.0 - frac) * 255.0) as u8);
+            blend_pixel_rgb((y_int + 1) as usize, x as usize, bgrx, (frac * 255.0) as u8);
+        } else {
+            blend_pixel_rgb(x as usize, y_int as usize, bgrx, ((1.0 - frac) * 255.0) as u8);
+            blend_pixel_rgb(x as usize, (y_int + 1) as usize, bgrx, (frac * 255.0) as u8);
+        }
+        intery += gradient;
+        x += 1;
+    }
+    let _ = dy;
+}
+
+/// N.12 — 1-iter box-blur of a back-buffer region in-place.
+/// 3×3 kernel; used by glass panels to fake "frosted" backdrop.
+/// Reads the existing scene, blurs into a stack buffer, copies back.
+/// 24-bit per pixel; cost ~9 reads + 1 write per pixel.
+pub fn box_blur_region(x: usize, y: usize, w: usize, h: usize) {
+    if w == 0 || h == 0 || x >= WIDTH || y >= HEIGHT { return; }
+    let x_end = (x + w).min(WIDTH);
+    let y_end = (y + h).min(HEIGHT);
+    let rw = x_end - x;
+    let rh = y_end - y;
+    if rw == 0 || rh == 0 { return; }
+
+    // Stack scratch — caps at 200×60 = 12 KB.  Panels stay well under this.
+    const MAX_W: usize = 200;
+    const MAX_H: usize = 80;
+    if rw > MAX_W || rh > MAX_H { return; }
+    let mut scratch = [[0u32; MAX_W]; MAX_H];
+
+    let bb = BACKBUFFER.lock();
+    // Sample 3×3 around each pixel, average channels.
+    for ry in 0..rh {
+        for rx in 0..rw {
+            let mut acc_r: u32 = 0;
+            let mut acc_g: u32 = 0;
+            let mut acc_b: u32 = 0;
+            let mut n: u32 = 0;
+            for dy in -1i32..=1 {
+                let py = y as i32 + ry as i32 + dy;
+                if py < 0 || py >= HEIGHT as i32 { continue; }
+                for dx in -1i32..=1 {
+                    let px = x as i32 + rx as i32 + dx;
+                    if px < 0 || px >= WIDTH as i32 { continue; }
+                    let v = bb[py as usize * WIDTH + px as usize];
+                    acc_r += (v >> 16) & 0xFF;
+                    acc_g += (v >> 8) & 0xFF;
+                    acc_b += v & 0xFF;
+                    n += 1;
+                }
+            }
+            let r = (acc_r / n) & 0xFF;
+            let g = (acc_g / n) & 0xFF;
+            let b = (acc_b / n) & 0xFF;
+            scratch[ry][rx] = (r << 16) | (g << 8) | b;
+        }
+    }
+    drop(bb);
+    let mut bb = BACKBUFFER.lock();
+    for ry in 0..rh {
+        for rx in 0..rw {
+            bb[(y + ry) * WIDTH + (x + rx)] = scratch[ry][rx];
+        }
+    }
+}
+
 /// Set a single pixel by Color enum.  Writes the back-buffer; the
 /// real LFB is updated when `present()` runs.
 pub fn put_pixel(x: usize, y: usize, color: Color) {

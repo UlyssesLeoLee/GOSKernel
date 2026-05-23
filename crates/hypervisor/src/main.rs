@@ -203,18 +203,61 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
 const SCENE_WIDTH: i32 = k_fb::WIDTH as i32;
 const SCENE_HEIGHT: i32 = k_fb::HEIGHT as i32;
-// N.11 — header now hosts 14-px AA Noto Sans SC text (cell_h = 20),
-// so bumped from 14 to 22 with 1 px of breathing room around the
-// glyph baseline.  Scene body shrinks by 8 px (164 → 156 px tall).
-const HEADER_H: i32 = 22;
-/// Bottom edge of the scene-body clipping window.  All node/edge
-/// paint stays above this Y; the command bar + scrollback overlay
-/// (I.5) own everything below.
-const FOOTER_Y: i32 = 176;
-/// Command-input bar geometry (I.5).  Slim 18 px row that holds
-/// `> <typed>_` rendered in Cascadia Code 13 px with a blinking cursor.
-const CMD_BAR_TOP: i32 = 182;
-const CMD_BAR_H: i32 = 18;
+// N.12 — header bumped 22→28 so the AA Noto 18 brand glyphs (25 px
+// cell) fit with 1 px padding top/bottom.  Footer/cmd bar bumped
+// 18→24 for the same breathing.  Scene body 152 px tall.
+const HEADER_H: i32 = 28;
+const FOOTER_Y: i32 = 172;
+const CMD_BAR_TOP: i32 = 176;
+const CMD_BAR_H: i32 = 24;
+
+// ── N.12 — design tokens ──────────────────────────────────────────
+//
+// Centralised colour & spacing system so the kernel UI reads as one
+// designed product instead of a collage of ad-hoc rectangles.
+// Inspired by Win11 Fluent + Material 3 + Apple HIG: dark "deep
+// space" surface family, cyan-magenta accent dyad, text scale
+// (caption/body/heading) with explicit contrast targets.
+//
+// All colours are 24-bit BGRX so the design tokens compose with the
+// 24-bit shader output without palette quantisation.
+#[allow(dead_code)]
+mod design {
+    // Surface ramp — vertical gradient endpoints for nested elevations.
+    pub const SURFACE_0_TOP:    u32 = 0x0a0f24; // body bg top (deep navy)
+    pub const SURFACE_0_BOTTOM: u32 = 0x05080f; // body bg bottom (near-black)
+    pub const SURFACE_1_TOP:    u32 = 0x12183a; // panel bg top
+    pub const SURFACE_1_BOTTOM: u32 = 0x0a0f24; // panel bg bottom
+    pub const SURFACE_2_TOP:    u32 = 0x1a2348; // elevated (header/dock) top
+    pub const SURFACE_2_BOTTOM: u32 = 0x0a0f24; // elevated bottom
+    pub const SURFACE_3:        u32 = 0x2d3b6e; // interactive hover
+
+    // Accent dyad — primary cyan + secondary hot magenta.
+    pub const ACCENT_PRIMARY:    u32 = 0x4ad0ff; // electric cyan
+    pub const ACCENT_PRIMARY_DIM:u32 = 0x2a7a99;
+    pub const ACCENT_HOT:        u32 = 0xff3d8b; // magenta
+    pub const ACCENT_WARN:       u32 = 0xffa14a; // amber
+    pub const ACCENT_OK:         u32 = 0x4adf95; // mint
+
+    // Text — three-level hierarchy with WCAG-AA contrast on SURFACE_0.
+    pub const TEXT_PRIMARY:   u32 = 0xeef2f8; // off-white headings
+    pub const TEXT_SECONDARY: u32 = 0xa4b0c0; // body
+    pub const TEXT_TERTIARY:  u32 = 0x6878a0; // captions / dim labels
+
+    // Spacing tokens — 4-px grid: xs=4, sm=8, md=12, lg=16, xl=24.
+    pub const SP_XS: usize = 2;
+    pub const SP_SM: usize = 4;
+    pub const SP_MD: usize = 8;
+    pub const SP_LG: usize = 12;
+    pub const SP_XL: usize = 16;
+
+    // Card corner radius — sm for chips, md for panels.
+    pub const RADIUS_SM: usize = 3;
+    pub const RADIUS_MD: usize = 6;
+
+    // Pill / chip metrics.
+    pub const CHIP_H: usize = 18;
+}
 /// Height of the scrollback panel when F9 has expanded it.  Sits
 /// just above the command bar, overlapping the lower portion of
 /// the scene area as a translucent-feeling deck.
@@ -646,7 +689,9 @@ fn paint_3d_view(frame: u64) {
     //          |
     //         -Y
     // (+Z and −Z render as filled / hollow centre dots respectively.)
-    const GIZMO_CX: i32 = SCENE_WIDTH - 26;
+    // N.12 — moved to top-LEFT of viewport (Unity scene view convention).
+    // Floating stats chip lives in top-right so they don't fight.
+    const GIZMO_CX: i32 = 28;
     const GIZMO_CY: i32 = HEADER_H + 22;
     const GIZMO_LEN: f32 = 14.0;
     const GIZMO_CAP_R: i32 = 4;
@@ -669,37 +714,17 @@ fn paint_3d_view(frame: u64) {
         (Vec3::new(0.0, 0.0,  1.0), 0x4ad0ff, true),  // +Z bright cyan
         (Vec3::new(0.0, 0.0, -1.0), 0x4ad0ff, false), // -Z dim cyan
     ];
-    // Draw arms (lines from origin to each +axis cap).  Negative caps
-    // draw at the opposite end of the same arm.
-    for (axis, hue, positive) in &caps[..3] {
+    // N.12 — AA Wu-line arms.  Each axis draws a 2-px-wide bright
+    // segment to the +cap and a thinner dim segment to the -cap.
+    for (axis, hue, _positive) in &caps[..3] {
         let (dx, dy) = project_axis(*axis);
-        let pen = k_fb::scale_bgrx(*hue, if *positive { 0.95 } else { 0.4 });
-        // simple Bresenham along the line
-        let n = dx.abs().max(dy.abs()).max(1);
-        for i in 0..=n {
-            let t = i as f32 / n as f32;
-            let lx = GIZMO_CX as f32 + dx as f32 * t;
-            let ly = GIZMO_CY as f32 + dy as f32 * t;
-            for j in -1..=1 {
-                let sx = lx as i32 + j;
-                let sy = ly as i32;
-                if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
-                    k_fb::put_pixel_rgb(sx as usize, sy as usize, pen);
-                }
-            }
-        }
-        // Same axis, negative end — just draw the opposite-direction arm
-        let pen_neg = k_fb::scale_bgrx(*hue, 0.4);
-        for i in 0..=n {
-            let t = i as f32 / n as f32;
-            let lx = GIZMO_CX as f32 - dx as f32 * t;
-            let ly = GIZMO_CY as f32 - dy as f32 * t;
-            let sx = lx as i32;
-            let sy = ly as i32;
-            if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
-                k_fb::put_pixel_rgb(sx as usize, sy as usize, pen_neg);
-            }
-        }
+        let pen_bright = k_fb::scale_bgrx(*hue, 0.95);
+        let pen_dim    = k_fb::scale_bgrx(*hue, 0.45);
+        // Bright arm to +cap (slightly thicker — two parallel Wu-lines).
+        k_fb::draw_line_aa_rgb(GIZMO_CX,     GIZMO_CY,     GIZMO_CX + dx, GIZMO_CY + dy, pen_bright);
+        k_fb::draw_line_aa_rgb(GIZMO_CX + 1, GIZMO_CY,     GIZMO_CX + dx + 1, GIZMO_CY + dy, pen_bright);
+        // Dim arm to -cap.
+        k_fb::draw_line_aa_rgb(GIZMO_CX,     GIZMO_CY,     GIZMO_CX - dx, GIZMO_CY - dy, pen_dim);
     }
     // Solid cap discs at each axis end.
     let mut hovered_axis: Option<(i32, i32, i32)> = None; // (x, y, z) ∈ {-1, 0, 1}
@@ -779,22 +804,32 @@ fn paint_3d_view(frame: u64) {
     }
 
     // Detail panel: bottom-right corner for the SELECTED node.
-    // 132×40 box with 3 text rows (plugin, vector, type).
     if selected >= 0 && (selected as usize) < returned_n {
         let node = &nodes[selected as usize];
-        const PANEL_W: usize = 132;
-        const PANEL_H: usize = 44;
-        let px = k_fb::WIDTH - PANEL_W - 2;
-        let py = FOOTER_Y as usize - PANEL_H - 2;
-        k_fb::fill_rect(px, py, PANEL_W, PANEL_H, k_fb::Color::HeaderBar);
-        k_fb::stroke_rect(px, py, PANEL_W, PANEL_H, k_fb::Color::DimWhite);
+        // ── N.12 — glass detail card ───────────────────────────────
+        // Frosted glass background (box-blurred underlying scene) +
+        // translucent surface tint + cyan accent stroke + 3 typography
+        // rows: label, value (vector), pill (type).
+        use design::*;
+        const PANEL_W: usize = 158;
+        const PANEL_H: usize = 64;
+        let px = k_fb::WIDTH - PANEL_W - SP_MD;
+        let py = FOOTER_Y as usize - PANEL_H - SP_MD;
+        // Glass: blur background, then tint with elevated surface.
+        k_fb::box_blur_region(px, py, PANEL_W, PANEL_H);
+        k_fb::fill_round_rect_alpha(px, py, PANEL_W, PANEL_H, RADIUS_MD, SURFACE_1_TOP, 200);
+        // Left-edge cyan accent bar (vertical).
+        k_fb::fill_rect_alpha(px, py + SP_SM, 3, PANEL_H - 2 * SP_SM, ACCENT_PRIMARY, 255);
+        // 1-px hairline border in dim accent.
+        k_fb::stroke_rect_rgb(px, py, PANEL_W, PANEL_H, ACCENT_PRIMARY_DIM);
 
-        // Row 1: plugin name (full)
+        // Row 1 — eyebrow label (small, dim).
+        k_fb::draw_text_aa_rgb(px + SP_LG, py + SP_SM, "SELECTED NODE", TEXT_TERTIARY, &k_assets::FONT_UI_14);
+        // Row 2 — plugin name (large, primary).
         let mut row1 = TextBuf::<20>::new();
         row1.push_str(node.plugin_name);
-        k_fb::draw_text(px + 4, py + 4, row1.as_str(), k_fb::Color::Foreground);
-
-        // Row 2: vector address
+        k_fb::draw_text_aa_rgb(px + SP_LG, py + SP_SM + 16, row1.as_str(), TEXT_PRIMARY, &k_assets::FONT_UI_14);
+        // Row 3 — vector address (mono).
         let mut row2 = TextBuf::<24>::new();
         row2.push_dec(node.vector.l4 as u64);
         row2.push_str(".");
@@ -803,9 +838,9 @@ fn paint_3d_view(frame: u64) {
         row2.push_dec(node.vector.l2 as u64);
         row2.push_str(".");
         row2.push_dec(node.vector.offset as u64);
-        k_fb::draw_text(px + 4, py + 16, row2.as_str(), k_fb::Color::Foreground);
+        k_fb::draw_text_aa_rgb(px + SP_LG, py + SP_SM + 36, row2.as_str(), TEXT_SECONDARY, &k_assets::FONT_MONO_13);
 
-        // Row 3: node type
+        // Right side — node-type pill.
         let type_label = match node.node_type {
             RuntimeNodeType::Hardware => "HW",
             RuntimeNodeType::Driver => "DRV",
@@ -816,10 +851,11 @@ fn paint_3d_view(frame: u64) {
             RuntimeNodeType::Aggregator => "AGG",
             RuntimeNodeType::Vector => "VEC",
         };
-        let mut row3 = TextBuf::<24>::new();
-        row3.push_str("TYPE: ");
-        row3.push_str(type_label);
-        k_fb::draw_text(px + 4, py + 28, row3.as_str(), k_fb::Color::Foreground);
+        let pill_w = type_label.len() * 10 + 2 * SP_MD;
+        let pill_x = px + PANEL_W - pill_w - SP_MD;
+        let pill_y = py + SP_SM;
+        k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, CHIP_H, RADIUS_SM, ACCENT_HOT, 110);
+        k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y + 1, type_label, ACCENT_HOT, &k_assets::FONT_MONO_13);
     }
 
     // Header (I.4.4 refresh): brand chip on the left, three count
@@ -834,24 +870,32 @@ fn paint_3d_view(frame: u64) {
     // I.10 — compacter header that yields the right edge to the
     // I.10.2 uptime + heartbeat widget.  Three fixed-width chips,
     // no generation number (use `gen` command for that).
-    // N.11 — anti-aliased Noto Sans SC header text.  The cell width
-    // (14 px) is variable, so we walk the cursor manually.
-    let mut hx: usize = 6;
-    k_fb::draw_text_ui(hx, 0, "GOS-KRN", k_fb::Color::Highlight);
-    hx += 7 * 14 + 4;
-    k_fb::draw_text_ui(hx, 0, "·", k_fb::Color::DimWhite);
-    hx += 8;
-    let mut count_a = TextBuf::<10>::new();
-    count_a.push_dec(returned_n as u64);
-    count_a.push_str(" nodes");
-    k_fb::draw_text_ui(hx, 0, count_a.as_str(), k_fb::Color::Foreground);
-    hx += count_a.as_str().len() * 14 + 4;
-    k_fb::draw_text_ui(hx, 0, "·", k_fb::Color::DimWhite);
-    hx += 8;
-    let mut count_b = TextBuf::<10>::new();
-    count_b.push_dec(snapshot.edge_count as u64);
-    count_b.push_str(" edges");
-    k_fb::draw_text_ui(hx, 0, count_b.as_str(), k_fb::Color::Foreground);
+    // ── N.12 — masthead brand + breadcrumb ──────────────────────────
+    //
+    // Header layout (left-to-right):
+    //   [4 px accent inset already painted by paint_frame]
+    //   [SP_MD pad] [GOS 18px] [SP_SM] [• cyan separator] [SP_SM]
+    //   [Kernel Graph 14px secondary]
+    // Stats counters move out of the header into a floating chip group
+    // anchored to the top-right of the viewport (paint_stats_chip).
+    use design::*;
+    let baseline_y: usize = (HEADER_H as usize - 25) / 2; // centre 25 px brand glyph in 28 px band
+    let body_y: usize = (HEADER_H as usize - 20) / 2;     // centre 20 px secondary glyph
+    let mut hx: usize = 12;
+    k_fb::draw_text_aa_rgb(hx, baseline_y, "GOS", TEXT_PRIMARY, &k_assets::FONT_UI_18);
+    hx += 3 * 18 + SP_SM;
+    // small cyan square as separator dot — sharper than a "·" glyph
+    k_fb::fill_rect_alpha(hx, baseline_y + 11, 3, 3, ACCENT_PRIMARY, 255);
+    hx += 3 + SP_SM;
+    k_fb::draw_text_aa_rgb(hx, body_y, "Kernel Graph", TEXT_SECONDARY, &k_assets::FONT_UI_14);
+
+    // ── N.12 — floating stats chip group, top-right of viewport ─────
+    //
+    // A frosted-glass card holding the node + edge counts.  Sits 8 px
+    // inside the viewport's top-right, never overlapping the gizmo
+    // (gizmo is moved to top-left of viewport in N.12) and never
+    // hovering the header chrome.
+    paint_stats_chip(returned_n, snapshot.edge_count);
 
     // ── I.4.5 — edge-style legend strip ──────────────────────────────
     // Bottom-left of the scene area, just above the footer hairline.
@@ -2861,15 +2905,13 @@ fn interpret_command(raw: &str) {
 // user always has a "this kernel is running" affordance.
 
 fn paint_status_widget(frame: u64) {
-    // Approximate uptime in seconds: paint loop runs at ~50 fps
-    // (PIT 100 Hz / REPAINT_TICKS 2).
+    use design::*;
+    // Uptime in HH:MM:SS, monospace so the digits don't dance.
     let total_secs = frame / 50;
     let hh = total_secs / 3600;
     let mm = (total_secs / 60) % 60;
     let ss = total_secs % 60;
-
     let mut buf = TextBuf::<16>::new();
-    buf.push_str("UP ");
     if hh < 10 { buf.push_str("0"); }
     buf.push_dec(hh);
     buf.push_str(":");
@@ -2879,24 +2921,81 @@ fn paint_status_widget(frame: u64) {
     if ss < 10 { buf.push_str("0"); }
     buf.push_dec(ss);
 
-    // N.11 — uptime widget in the new AA UI font.  Cell_w = 14, so
-    // budget = chars × 14 + 16 for the heartbeat dot.
+    // Right-aligned with cyan heartbeat dot to its right.
     let text = buf.as_str();
-    let tx = k_fb::WIDTH - text.len() * 14 - 18;
-    k_fb::draw_text_ui(tx, 0, text, k_fb::Color::Foreground);
+    let mono_w = 10; // Cascadia cell width
+    let dot_size = 5;
+    let dot_x = k_fb::WIDTH - SP_LG - dot_size;
+    let tx = dot_x - SP_SM - text.len() * mono_w;
+    let ty = (HEADER_H as usize - 18) / 2;
+    k_fb::draw_text_aa_rgb(tx, ty, text, TEXT_SECONDARY, &k_assets::FONT_MONO_13);
 
-    // Heartbeat dot — pulses bright cyan once per second (frame
-    // counter mod 50 < 6 = ~120 ms on).  Sits two pixels right of
-    // the uptime text.
-    let dot_x = k_fb::WIDTH - 8;
-    let dot_y = 5usize;
+    // Heartbeat dot — pulses cyan once per second (~120 ms on).
+    let dot_y = (HEADER_H as usize - dot_size) / 2;
     let pulsing = (frame % 50) < 6;
-    let dot_color = if pulsing {
-        k_fb::Color::Highlight
-    } else {
-        k_fb::Color::DimWhite
-    };
-    k_fb::fill_rect(dot_x, dot_y, 4, 4, dot_color);
+    let dot_bg = if pulsing { ACCENT_PRIMARY } else { 0x1a2348 };
+    // Filled disc with soft halo for the "alive" feel.
+    for ry in 0..dot_size {
+        for rx in 0..dot_size {
+            let cx = dot_x + rx;
+            let cy = dot_y + ry;
+            let dx = rx as i32 * 2 - dot_size as i32;
+            let dy = ry as i32 * 2 - dot_size as i32;
+            let d2 = dx * dx + dy * dy;
+            let r2 = (dot_size as i32) * (dot_size as i32);
+            if d2 <= r2 {
+                k_fb::put_pixel_rgb(cx, cy, dot_bg);
+            }
+        }
+    }
+    if pulsing {
+        // Soft halo ring
+        for theta in 0..16 {
+            let ang = theta as f32 * 6.2832 / 16.0;
+            let r = (dot_size as f32 / 2.0) + 1.5;
+            let rx = libm::cosf(ang) * r;
+            let ry = libm::sinf(ang) * r;
+            let cx = (dot_x as i32 + dot_size as i32 / 2 + rx as i32) as usize;
+            let cy = (dot_y as i32 + dot_size as i32 / 2 + ry as i32) as usize;
+            k_fb::blend_pixel_rgb(cx, cy, ACCENT_PRIMARY, 120);
+        }
+    }
+}
+
+/// N.12 — floating stats chip at top-right of the viewport.  Frosted
+/// glass card with two rows: node count + edge count.
+fn paint_stats_chip(node_n: usize, edge_n: usize) {
+    use design::*;
+    let chip_w: usize = 96;
+    let chip_h: usize = 44;
+    let x = k_fb::WIDTH - chip_w - SP_MD;
+    let y = HEADER_H as usize + SP_MD;
+    // Frosted backdrop: box-blur the underlying scene, then tint.
+    k_fb::box_blur_region(x, y, chip_w, chip_h);
+    k_fb::fill_round_rect_alpha(x, y, chip_w, chip_h, RADIUS_MD, SURFACE_1_TOP, 180);
+    // 1-px hairline border in dim accent.
+    k_fb::stroke_rect_rgb(x, y, chip_w, chip_h, ACCENT_PRIMARY_DIM);
+    // Two rows.
+    let row_pad: usize = 8;
+    let v_pad: usize = 4;
+    // Row 1 — node count
+    let mut buf = TextBuf::<8>::new();
+    buf.push_dec(node_n as u64);
+    let nm = "nodes";
+    let val = buf.as_str();
+    let val_x = x + row_pad;
+    let val_y = y + v_pad;
+    k_fb::draw_text_aa_rgb(val_x, val_y, val, ACCENT_PRIMARY, &k_assets::FONT_UI_14);
+    let val_w = val.len() * 14;
+    k_fb::draw_text_aa_rgb(val_x + val_w + 4, val_y + 4, nm, TEXT_TERTIARY, &k_assets::FONT_UI_14);
+    // Row 2 — edge count
+    let mut buf2 = TextBuf::<8>::new();
+    buf2.push_dec(edge_n as u64);
+    let val2 = buf2.as_str();
+    let val2_y = y + v_pad + 18;
+    k_fb::draw_text_aa_rgb(val_x, val2_y, val2, ACCENT_HOT, &k_assets::FONT_UI_14);
+    let val2_w = val2.len() * 14;
+    k_fb::draw_text_aa_rgb(val_x + val2_w + 4, val2_y + 4, "edges", TEXT_TERTIARY, &k_assets::FONT_UI_14);
 }
 
 /// Top-level paint coordinator.  Drains input, paints the header
@@ -2916,21 +3015,34 @@ fn paint_frame(frame: u64) {
     let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
     let scrollback_open = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
 
-    // N.10 — modern UI chrome.  Replace flat-colour clear + header
-    // with a vertical gradient deep-space backdrop and a top header
-    // bar that fades from a brighter accent at the top to the body
-    // background at its bottom edge (Win11 Mica / Fluent inspiration).
-    // 24-bit RGB → smooth, no banding.
-    const BG_TOP:     u32 = 0x0a0f24; // deep navy at zenith
-    const BG_BOTTOM:  u32 = 0x05080f; // near-black at horizon
-    const HDR_TOP:    u32 = 0x1a2348; // cool blue glass
-    const HDR_BOTTOM: u32 = 0x0a0f24; // matches BG_TOP for seamless blend
-    const HDR_ACCENT: u32 = 0x4ad0ff; // cyan rim line at header bottom
-    k_fb::clear_gradient_vertical(BG_TOP, BG_BOTTOM);
-    k_fb::fill_rect_gradient(0, 0, k_fb::WIDTH, HEADER_H as usize, HDR_TOP, HDR_BOTTOM);
-    // 1-px accent line under the header for "glass shelf" depth cue.
+    // N.12 — design-token chrome.  Tighter colour discipline, real
+    // spacing grid, hero header with the brand at proper hierarchy.
+    use design::*;
+    k_fb::clear_gradient_vertical(SURFACE_0_TOP, SURFACE_0_BOTTOM);
+
+    // Header band — taller (28 px) so the AA 18-px brand text breathes.
+    let header_h = HEADER_H as usize;
+    k_fb::fill_rect_gradient(0, 0, k_fb::WIDTH, header_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
+
+    // 3-px vertical cyan accent at the very left, glowing inward —
+    // brand gesture, identical to the "track inset" used by Edge/VS Code.
+    for y in 0..header_h {
+        k_fb::put_pixel_rgb(0, y, ACCENT_PRIMARY);
+        k_fb::put_pixel_rgb(1, y, ACCENT_PRIMARY);
+        // Soft glow falling off into the surface.
+        k_fb::blend_pixel_rgb(2, y, ACCENT_PRIMARY, 160);
+        k_fb::blend_pixel_rgb(3, y, ACCENT_PRIMARY, 96);
+        k_fb::blend_pixel_rgb(4, y, ACCENT_PRIMARY, 48);
+    }
+
+    // 1-px accent rim along the bottom of the header — "glass shelf"
+    // depth cue, separating chrome from body.
     for x in 0..k_fb::WIDTH {
-        k_fb::put_pixel_rgb(x, HEADER_H as usize - 1, HDR_ACCENT);
+        k_fb::put_pixel_rgb(x, header_h - 1, ACCENT_PRIMARY);
+    }
+    // Optional second-row 1-px dim line for "shelf shadow" feel.
+    for x in 0..k_fb::WIDTH {
+        k_fb::blend_pixel_rgb(x, header_h, ACCENT_PRIMARY, 64);
     }
 
     match mode {
@@ -3090,52 +3202,64 @@ fn paint_os_shell_body(frame: u64) {
 /// the current insertion point.  Frame counter drives the blink at
 /// ~2.5 Hz so the user has a clear "I can type here" affordance.
 fn paint_command_bar(frame: u64, mode: u8) {
+    use design::*;
     let bar_y = CMD_BAR_TOP as usize;
     let bar_h = CMD_BAR_H as usize;
-    // N.10 — gradient command bar.  Matches the inverted Fluent dock:
-    // a darker top edge (separator) easing into a slightly brighter
-    // surface where the prompt sits.
-    const CMD_TOP:    u32 = 0x0a0f24;
-    const CMD_BOT:    u32 = 0x1a2348;
-    const CMD_ACCENT: u32 = 0x4ad0ff;
-    k_fb::fill_rect_gradient(0, bar_y, k_fb::WIDTH, bar_h, CMD_TOP, CMD_BOT);
-    // Cyan accent line on top edge — same as header bottom for symmetry.
+    // Inverted Fluent dock — slightly brighter at the top so it reads
+    // as "elevated above the body".
+    k_fb::fill_rect_gradient(0, bar_y, k_fb::WIDTH, bar_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
+    // 1-px accent rim along the top — matches header bottom rim.
     for x in 0..k_fb::WIDTH {
-        k_fb::put_pixel_rgb(x, bar_y, CMD_ACCENT);
+        k_fb::put_pixel_rgb(x, bar_y, ACCENT_PRIMARY);
+    }
+    for x in 0..k_fb::WIDTH {
+        k_fb::blend_pixel_rgb(x, bar_y + 1, ACCENT_PRIMARY, 64);
     }
 
-    // N.11 — prompt + typed text now in Cascadia Code 13 px.  Cell_w = 10.
-    let prompt_x = 6usize;
-    let prompt_y = bar_y; // FONT_MONO_13 has cell_h = 18, matches bar_h
-    k_fb::draw_text_mono(prompt_x, prompt_y, "gos›", k_fb::Color::Highlight);
+    // Prompt + typed text in Cascadia 13.  Cell_w = 10, cell_h = 18.
+    // Centre vertically inside the 24-px bar.
+    let text_y = bar_y + (bar_h - 18) / 2;
+    let prompt_x = SP_LG;
+    // Cyan glyph + space + light grey separator chevron.
+    k_fb::draw_text_aa_rgb(prompt_x, text_y, "›", ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    let body_x = prompt_x + 10 + SP_MD;
 
     let ui = UI_STATE.lock();
     let line = ui.current_line();
     let line_len = line.len();
-    let text_x = prompt_x + 4 * 10 + 4;
-    let max_visible_chars = ((k_fb::WIDTH - text_x - 16) / 10).min(CMD_LINE_CAP);
+    let mono_w = 10;
+    let max_visible_chars = (k_fb::WIDTH.saturating_sub(body_x + 80) / mono_w).min(CMD_LINE_CAP);
     let visible_start = line_len.saturating_sub(max_visible_chars);
     let visible = unsafe {
         core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
     };
-    k_fb::draw_text_mono(text_x, prompt_y, visible, k_fb::Color::Foreground);
+    k_fb::draw_text_aa_rgb(body_x, text_y, visible, TEXT_PRIMARY, &k_assets::FONT_MONO_13);
 
-    // Blinking cursor: 2-px solid line under the insertion point.
+    // Sleek 2-px vertical cursor bar (instead of block) — modern terminal feel.
     let cursor_on = (frame / 16) & 1 == 0;
     if cursor_on {
-        let cursor_x = text_x + (line_len - visible_start) * 10;
-        if cursor_x + 6 < k_fb::WIDTH {
-            k_fb::fill_rect(cursor_x, prompt_y, 6, 8, k_fb::Color::Foreground);
+        let cursor_x = body_x + (line_len - visible_start) * mono_w;
+        if cursor_x + 2 < k_fb::WIDTH {
+            for cy in 0..16 {
+                let py = text_y + 1 + cy;
+                if py >= k_fb::HEIGHT { break; }
+                k_fb::put_pixel_rgb(cursor_x, py, ACCENT_PRIMARY);
+                k_fb::put_pixel_rgb(cursor_x + 1, py, ACCENT_PRIMARY);
+            }
         }
     }
 
-    // Right-side mode pill — shows the active view name.
+    // Right-side mode pill — proper rounded chip with accent stroke.
     let pill = match mode {
         k_fb::UI_MODE_KERNEL_VIEW => "KERNEL",
         _ => "SHELL",
     };
-    let px = k_fb::WIDTH - pill.len() * 10 - 8;
-    k_fb::draw_text_mono(px, prompt_y, pill, k_fb::Color::NodeService);
+    let pill_text_w = pill.len() * mono_w;
+    let pill_w = pill_text_w + 2 * SP_MD;
+    let pill_x = k_fb::WIDTH - pill_w - SP_MD;
+    let pill_y = bar_y + (bar_h - CHIP_H) / 2;
+    k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, CHIP_H, RADIUS_SM, ACCENT_PRIMARY_DIM, 130);
+    k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y + 1, pill, ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
 }
 
 /// Paint the collapsible scrollback panel.  Stacks the N most recent
