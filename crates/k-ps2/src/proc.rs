@@ -78,11 +78,12 @@ pub fn process(
                     return None;
                 }
                 pc_keyboard::KeyCode::F6 => {
-                    // Reset everything to the boot-time default.
-                    k_fb::CAMERA_YAW_BIAS_MRAD.store(0, Ordering::Relaxed);
-                    k_fb::CAMERA_PITCH_BIAS_MRAD.store(0, Ordering::Relaxed);
-                    k_fb::CAMERA_RADIUS_MM.store(4800, Ordering::Relaxed);
-                    k_fb::CAMERA_AUTO_ROTATE.store(false, Ordering::Relaxed);
+                    // N.13 — Unity-style "F" frame-all.  Asks the
+                    // painter to recompute the orbit radius from the
+                    // current node-set bounding sphere on the next
+                    // frame, then resets yaw/pitch to the canonical
+                    // front quarter view.
+                    k_fb::CAMERA_FRAME_REQUEST.store(true, Ordering::Relaxed);
                     return None;
                 }
                 pc_keyboard::KeyCode::F7 => {

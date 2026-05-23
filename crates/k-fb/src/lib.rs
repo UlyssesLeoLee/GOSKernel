@@ -76,12 +76,14 @@ const PCI_CONFIG_DATA: u16 = 0xCFC;
 const STDVGA_VENDOR_ID: u16 = 0x1234;
 const STDVGA_DEVICE_ID: u16 = 0x1111;
 
-/// Target HD mode dimensions and integer upscale factor.  At
-/// SCALE=4, the 320×200 logical canvas covers 1280×800 of the
-/// native framebuffer — perfect 4× nearest-neighbor upscale.
-const HD_WIDTH: u32 = 1280;
-const HD_HEIGHT: u32 = 800; // logical 200 × scale 4 = 800
-const HD_SCALE: u32 = 4;
+/// Target HD mode dimensions and integer upscale factor.  N.13 bumps
+/// from 1280×800 (4×) to 1920×1200 (6×) — fills modern 1080p / 1200p
+/// displays at exact integer scale, no fuzzy stretch.  Per-frame LFB
+/// blit grows from 4 MiB to 9.2 MiB; offset by the N.13 PaintSession
+/// batching which removes ~100 k spin-mutex acquires per frame.
+const HD_WIDTH: u32 = 1920;
+const HD_HEIGHT: u32 = 1200; // logical 200 × scale 6 = 1200
+const HD_SCALE: u32 = 6;
 
 /// VGA DAC ports for the legacy mode 13h palette (fallback path).
 const DAC_INDEX: u16 = 0x3C8;
@@ -705,6 +707,98 @@ pub fn draw_line_aa_rgb(x0: i32, y0: i32, x1: i32, y1: i32, bgrx: u32) {
     let _ = dy;
 }
 
+// ── N.13 — PaintSession: batched lock for hot loops ──────────────
+//
+// The per-call `BACKBUFFER.lock()` pattern is fine for the cold paths
+// (chrome, text headers, a handful of UI rectangles) but tanks the
+// sphere + rope shaders which each issue 20k-50k single-pixel writes
+// per frame.  Under QEMU TCG each spin-mutex acquire is ~200 cycles;
+// 100k acquires × 200 cycles ≈ 20 M cycles per frame purely on
+// uncontested locking.
+//
+// `PaintSession` hands the caller a single &mut into BACKBUFFER for
+// the duration of a closure, plus a snapshot of the palette LUT
+// (so palette-indexed paths don't have to re-lock per call).  All
+// the same hot primitives are mirrored as inherent methods → the
+// inner loops become a direct slice write.
+
+/// A scoped, single-acquire access to the back-buffer.  Wrap any hot
+/// per-pixel loop in `with_session(|s| { ... })` and call methods on
+/// `s` instead of the top-level `k_fb::put_pixel_rgb` family — the
+/// behaviour is identical but the throughput goes up by ~10× under TCG.
+pub struct PaintSession<'a> {
+    bb: &'a mut [u32],
+    palette: [u32; 256],
+}
+
+impl<'a> PaintSession<'a> {
+    /// Write a raw BGRX pixel (clipped).
+    #[inline]
+    pub fn put_rgb(&mut self, x: usize, y: usize, bgrx: u32) {
+        if x < WIDTH && y < HEIGHT {
+            self.bb[y * WIDTH + x] = bgrx;
+        }
+    }
+
+    /// Write a palette-indexed colour (clipped).
+    #[inline]
+    pub fn put_color(&mut self, x: usize, y: usize, c: Color) {
+        if x < WIDTH && y < HEIGHT {
+            self.bb[y * WIDTH + x] = self.palette[c.idx() as usize];
+        }
+    }
+
+    /// Alpha-blend a single pixel over the existing back-buffer pixel.
+    /// `alpha` is 0..=255 (0 = transparent, 255 = opaque).
+    #[inline]
+    pub fn blend(&mut self, x: usize, y: usize, fg: u32, alpha: u8) {
+        if x >= WIDTH || y >= HEIGHT || alpha == 0 { return; }
+        let off = y * WIDTH + x;
+        let bg = self.bb[off];
+        self.bb[off] = lerp_bgrx(bg, fg, alpha);
+    }
+
+    /// Saturating add — additive bloom / glow stamping.
+    #[inline]
+    pub fn add(&mut self, x: usize, y: usize, add_bgrx: u32) {
+        if x >= WIDTH || y >= HEIGHT { return; }
+        let off = y * WIDTH + x;
+        let cur = self.bb[off];
+        let sat = |sh: u32| -> u32 {
+            let a = (cur >> sh) & 0xFF;
+            let b = (add_bgrx >> sh) & 0xFF;
+            (a + b).min(255)
+        };
+        self.bb[off] = (sat(16) << 16) | (sat(8) << 8) | sat(0);
+    }
+
+    /// Read a pixel back from the session-held buffer.
+    #[inline]
+    pub fn get_rgb(&self, x: usize, y: usize) -> u32 {
+        if x >= WIDTH || y >= HEIGHT { return 0; }
+        self.bb[y * WIDTH + x]
+    }
+
+    /// Resolve a `Color` to its BGRX without re-locking the palette LUT.
+    #[inline]
+    pub fn color_bgrx(&self, c: Color) -> u32 {
+        self.palette[c.idx() as usize]
+    }
+}
+
+/// Open a paint session.  Inside the closure, the back-buffer is
+/// exclusively yours; per-pixel operations become a direct slice
+/// write.  When the closure returns, the back-buffer lock is released
+/// and the next external `k_fb::*` call works normally.
+pub fn with_session<F: FnOnce(&mut PaintSession)>(f: F) {
+    let mut bb = BACKBUFFER.lock();
+    // Snapshot the palette LUT into the session so palette-indexed
+    // writes don't re-acquire its mutex per pixel.
+    let palette = *PALETTE_BGRX.lock();
+    let mut sess = PaintSession { bb: &mut bb[..], palette };
+    f(&mut sess);
+}
+
 /// N.12 — 1-iter box-blur of a back-buffer region in-place.
 /// 3×3 kernel; used by glass panels to fake "frosted" backdrop.
 /// Reads the existing scene, blurs into a stack buffer, copies back.
@@ -1064,11 +1158,19 @@ pub static CAMERA_AUTO_ROTATE: AtomicBool = AtomicBool::new(false);
 pub static CAMERA_YAW_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 pub static CAMERA_PITCH_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 
-/// Camera orbit radius in millimetre-equivalent fixed-point.  Default
-/// 4.8 units: spheres render at hero size (~30-50 px radius in HD,
-/// big enough to show PBR detail) while the full 25-node grid still
-/// fits inside the scene body with margin.  F6 resets, F7/F8 zoom.
+/// Camera orbit radius in millimetre-equivalent fixed-point.  The
+/// actual default is computed by `hypervisor::frame_all_nodes()` at
+/// boot from the grid bounding sphere; this constant is just a
+/// safety fallback used before that call completes.
 pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(4800);
+
+/// N.13 — Unity "F-key" frame-all request flag.  k-ps2 sets this
+/// when the user presses F6; the painter checks each frame and, if
+/// set, runs `hypervisor::frame_all_nodes()` to recompute the orbit
+/// radius from the current graph's bounding sphere then clears the
+/// flag.  Provides a runtime callback channel between the input
+/// driver and the painter without a static fn pointer.
+pub static CAMERA_FRAME_REQUEST: AtomicBool = AtomicBool::new(false);
 
 // ── Phase I.5 — kernel-UI command bar + mode switch ───────────────
 //

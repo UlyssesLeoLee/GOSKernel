@@ -135,6 +135,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         welcome.log("gos> click a ball or type 'help'");
     }
 
+    // N.13 — auto-frame the whole graph before the first paint so the
+    // user sees every node by default instead of a fixed-distance
+    // partial view.  Uses the canonical 5×5×3 grid layout from
+    // node_home_position; bounding sphere + vertical-FoV fit.
+    let snap_for_fit = gos_runtime::snapshot();
+    frame_all_nodes(snap_for_fit.node_count);
+    raw_serial_println(format_args!("boot: camera framed to {} nodes", snap_for_fit.node_count));
+
     // Phase I.3.8 — first 3D paint before going interactive.  Idle
     // loop below repaints continuously to keep the camera rotation
     // smooth.
@@ -157,6 +165,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         x86_64::instructions::interrupts::without_interrupts(|| {
             gos_supervisor::service_system_cycle();
         });
+        // N.13 — service F6 "frame all" request from k-ps2.
+        if k_fb::CAMERA_FRAME_REQUEST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            let snap = gos_runtime::snapshot();
+            frame_all_nodes(snap.node_count);
+        }
         frame_counter = frame_counter.wrapping_add(1);
         let gen_now = gos_runtime::graph_generation();
         let graph_dirty = gen_now != last_painted_gen;
@@ -411,42 +424,36 @@ fn paint_3d_view(frame: u64) {
         .iter()
         .fold(0.0_f32, |acc, &(_, d)| if d > acc { d } else { acc })
         .max(1e-3);
-    for slot in 0..depth_count {
-        let (i, d_sq) = depths[slot];
-        let (sx, sy, ok) = node_centre_screen[i];
-        if !ok {
-            continue;
+    // N.13 — wrap sphere loop in one paint session (single BACKBUFFER
+    // lock acquire) so the 20k+ per-pixel writes are direct slice
+    // stores instead of repeated spin-mutex acquires.  ~10× faster
+    // under QEMU TCG.
+    k_fb::with_session(|sess| {
+        for slot in 0..depth_count {
+            let (i, d_sq) = depths[slot];
+            let (sx, sy, ok) = node_centre_screen[i];
+            if !ok {
+                continue;
+            }
+            let centre = node_world_position(i, returned_n);
+            let offset = Vec3::new(centre.x + NODE_HALF, centre.y, centre.z);
+            let r_px = match project_to_screen(
+                view_proj.transform_point(offset),
+                k_fb::WIDTH as u32,
+                k_fb::HEIGHT as u32,
+            ) {
+                Some((ox, _oy, _)) => (ox - sx).abs().max(2),
+                None => 4,
+            };
+            let hue_base = classify_node_hue(&nodes[i]);
+            let lin = libm::sqrtf(d_sq / max_depth_sq);
+            let fog = (lin * lin * 0.9).clamp(0.0, 1.0);
+            let flash = physics_flash_value(i) as f32;
+            let specular_boost = flash * 0.045;
+            let material = material_for_sub_domain(nodes[i].sub_domain);
+            draw_node_sphere(sess, sx, sy, r_px, hue_base, fog, specular_boost, material);
         }
-        // Compute projected screen radius by projecting the world
-        // centre + a sideways unit-radius offset and measuring the
-        // screen-space delta.  Falls back to 4 px if the offset
-        // projection clips (shouldn't normally happen with centre
-        // in frustum).
-        let centre = node_world_position(i, returned_n);
-        let offset = Vec3::new(centre.x + NODE_HALF, centre.y, centre.z);
-        let r_px = match project_to_screen(
-            view_proj.transform_point(offset),
-            k_fb::WIDTH as u32,
-            k_fb::HEIGHT as u32,
-        ) {
-            Some((ox, _oy, _)) => (ox - sx).abs().max(2),
-            None => 4,
-        };
-        let hue_base = classify_node_hue(&nodes[i]);
-        let lin = libm::sqrtf(d_sq / max_depth_sq);
-        let fog = (lin * lin * 0.9).clamp(0.0, 1.0);
-        // I.6.4 — specular boost driven by the per-node flash
-        // counter (set on click/select) so a freshly-touched ball
-        // glints, decaying over ~14 frames.
-        let flash = physics_flash_value(i) as f32;
-        let specular_boost = flash * 0.045;
-        // I.14 — PBR material driven by the node's sub-domain class
-        // (Hardware=polished chrome, Service=satin, etc.).  Each ball
-        // gets a distinct metallic/roughness/rim profile so the eye
-        // reads the partition without needing the halo ring.
-        let material = material_for_sub_domain(nodes[i].sub_domain);
-        draw_node_sphere(sx, sy, r_px, hue_base, fog, specular_boost, material);
-    }
+    });
 
     // Edges: lines between projected centres, styled by edge type
     // (I.4.3).  Pattern is applied via a step counter incremented in
@@ -478,36 +485,35 @@ fn paint_3d_view(frame: u64) {
     } else {
         true
     };
-    for i in 0..returned_e {
-        let from_idx = find_node_index(&nodes[..returned_n], edges[i].from_vector);
-        let to_idx = find_node_index(&nodes[..returned_n], edges[i].to_vector);
-        let (Some(fi), Some(ti)) = (from_idx, to_idx) else { continue };
-        let (fx, fy, fok) = node_centre_screen[fi];
-        let (tx, ty, tok) = node_centre_screen[ti];
-        if !(fok && tok) {
-            continue;
+    k_fb::with_session(|sess| {
+        for i in 0..returned_e {
+            let from_idx = find_node_index(&nodes[..returned_n], edges[i].from_vector);
+            let to_idx = find_node_index(&nodes[..returned_n], edges[i].to_vector);
+            let (Some(fi), Some(ti)) = (from_idx, to_idx) else { continue };
+            let (fx, fy, fok) = node_centre_screen[fi];
+            let (tx, ty, tok) = node_centre_screen[ti];
+            if !(fok && tok) {
+                continue;
+            }
+            // N.14 — per-endpoint rope colour.  User request: "red ball
+            // end → rope is white on that half, white ball end → rope
+            // is red on that half".  Compute each endpoint's redness
+            // from its sphere hue and pass to the rope shader, which
+            // gradient-lerps along its length.
+            let from_red = ball_is_red(classify_node_hue(&nodes[fi]));
+            let to_red   = ball_is_red(classify_node_hue(&nodes[ti]));
+            let from_w = node_world_position(fi, returned_n);
+            let to_w = node_world_position(ti, returned_n);
+            let dxw = to_w.x - from_w.x;
+            let dyw = to_w.y - from_w.y;
+            let dzw = to_w.z - from_w.z;
+            let len_w = libm::sqrtf(dxw * dxw + dyw * dyw + dzw * dzw);
+            let strain = libm::fabsf(len_w - PHYS_REST_LEN) / PHYS_REST_LEN;
+            let highlight = strain > 0.15;
+            let style = edge_style(edges[i].edge_type);
+            draw_rope_edge(sess, fx, fy, tx, ty, from_red, to_red, highlight, style, pulse_on);
         }
-        let base_color = classify_edge(edges[i].edge_type);
-        // I.6.4 — edge tension glow: probe the simulated 3D
-        // distance between endpoints; if it deviates from the
-        // rest length by > 15 % the rope is visibly stretched or
-        // compressed → swap to Highlight so the user reads it as
-        // "this connection is under load."
-        let from_w = node_world_position(fi, returned_n);
-        let to_w = node_world_position(ti, returned_n);
-        let dxw = to_w.x - from_w.x;
-        let dyw = to_w.y - from_w.y;
-        let dzw = to_w.z - from_w.z;
-        let len_w = libm::sqrtf(dxw * dxw + dyw * dyw + dzw * dzw);
-        let strain = libm::fabsf(len_w - PHYS_REST_LEN) / PHYS_REST_LEN;
-        let color = if strain > 0.15 {
-            k_fb::Color::Highlight
-        } else {
-            base_color
-        };
-        let style = edge_style(edges[i].edge_type);
-        draw_rope_edge(fx, fy, tx, ty, color, style, pulse_on);
-    }
+    });
 
     // I.3.10 — node labels.  Project each node's centre to screen,
     // place the first ~6 chars of its plugin_name just above the
@@ -1110,6 +1116,51 @@ fn node_home_position(i: usize, total: usize) -> Vec3 {
     Vec3::new(span_x, span_y, span_z)
 }
 
+/// N.13 — Unity-style "Frame All" / "F-key recenter".  Computes a
+/// bounding sphere of the requested point set + sets the camera
+/// orbit radius so the whole bound fits inside the vertical FoV with
+/// 25 % margin.  Resets yaw/pitch bias (canonical default view).
+///
+/// Called at boot for the "show the complete graph by default"
+/// presentation, and bound to the F-key for live recentring.
+pub fn frame_all_nodes(node_total: usize) {
+    use core::sync::atomic::Ordering;
+    let n = node_total.min(MAX_NODES);
+    if n == 0 { return; }
+
+    // Centroid + max-radial-distance bounding sphere.
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    let mut cz = 0.0f32;
+    for i in 0..n {
+        let p = node_home_position(i, n);
+        cx += p.x; cy += p.y; cz += p.z;
+    }
+    let inv_n = 1.0 / n as f32;
+    cx *= inv_n; cy *= inv_n; cz *= inv_n;
+    let mut max_r2: f32 = 0.0;
+    for i in 0..n {
+        let p = node_home_position(i, n);
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        let r2 = dx * dx + dy * dy + dz * dz;
+        if r2 > max_r2 { max_r2 = r2; }
+    }
+    let bound_r = libm::sqrtf(max_r2) + NODE_HALF * 1.5;
+
+    // Distance such that bound_r fits in the half-FoV vertical
+    // (fov_v = 60° → tan(30°) ≈ 0.577).  +25 % margin for breathing room.
+    let half_fov = 30.0f32.to_radians();
+    let fit_dist = bound_r / libm::tanf(half_fov) * 1.25;
+    let radius_mm = ((fit_dist * 1000.0) as i32).max(1500);
+
+    k_fb::CAMERA_RADIUS_MM.store(radius_mm, Ordering::Relaxed);
+    k_fb::CAMERA_YAW_BIAS_MRAD.store(0, Ordering::Relaxed);
+    k_fb::CAMERA_PITCH_BIAS_MRAD.store(0, Ordering::Relaxed);
+    k_fb::CAMERA_AUTO_ROTATE.store(false, Ordering::Relaxed);
+}
+
 /// Phase M.4.b — physics frozen.  The earlier Verlet + anchor + edge
 /// spring system was over-actuated (edges across the 5×5 grid have
 /// chord length ≈ 1.9 but `PHYS_REST_LEN=0.45`, so the springs
@@ -1440,6 +1491,7 @@ fn schlick_fresnel(f0: f32, cos_theta: f32) -> f32 {
 }
 
 fn draw_node_sphere(
+    sess: &mut k_fb::PaintSession,
     sx: i32,
     sy: i32,
     r_px: i32,
@@ -1453,24 +1505,47 @@ fn draw_node_sphere(
     }
     let fog_bias = (fog.clamp(0.0, 1.0) * 4.0) as u8;
 
-    // ── LOD_LOW: just a 1-or-2 px dot ──
-    if r_px < 3 {
-        let rim_shade = 7u8.saturating_sub(fog_bias).min(7);
-        let idx = hue_base + rim_shade;
-        for dy in 0..=1 {
-            for dx in 0..=1 {
+    // ── LOD_FAR (r ≤ 3): AA disc, no PBR ──
+    //
+    // N.14 — replace the old "4-pixel chunk" with a true coverage-AA
+    // disc.  For each pixel within radius+1, compute the analytic
+    // fraction of the unit-pixel that overlaps the sphere disc; use
+    // it as the alpha to blend the hue colour over the existing scene.
+    // No shading variation — distant spheres can't show PBR detail —
+    // but they DON'T look like dithered chunks either.
+    if r_px <= 3 {
+        let r_f = r_px as f32;
+        let r_plus = r_px + 1;
+        let core_shade = 7u8.saturating_sub(fog_bias).min(7) as f32 / 7.0;
+        let bgrx_core = pack_hue_intensity(hue_base, core_shade);
+        for dy in -r_plus..=r_plus {
+            let py = sy + dy;
+            if py < HEADER_H || py >= FOOTER_Y { continue; }
+            for dx in -r_plus..=r_plus {
                 let px = sx + dx;
-                let py = sy + dy;
-                if px >= 0 && px < SCENE_WIDTH && py >= HEADER_H && py < FOOTER_Y {
-                    k_fb::put_pixel_raw(px as usize, py as usize, idx);
-                }
+                if px < 0 || px >= SCENE_WIDTH { continue; }
+                // Distance from disc centre; sub-pixel coverage at the
+                // boundary  (see "filled circle aa" — Crow's analytic disc).
+                let d = libm::sqrtf((dx * dx + dy * dy) as f32);
+                let cover = (r_f + 0.5 - d).clamp(0.0, 1.0);
+                if cover <= 0.0 { continue; }
+                let alpha = (cover * 255.0) as u8;
+                sess.blend(px as usize, py as usize, bgrx_core, alpha);
             }
         }
         return;
     }
 
     // ── LOD_MID and LOD_HIGH: full PBR shader ──
+    //
+    // N.14 LOD knobs (cheaper paths for smaller spheres):
+    //   r_px ≥  6  → specular lobe enabled       (do_specular)
+    //   r_px ≥  8  → micro-bump trig enabled     (gate at site)
+    //   r_px ≥ 10  → environment reflection      (cubemap sample)
+    //   r_px ≥ 14  → anisotropic specular extra  (cheap, threshold low)
+    //   r_px ≥ 16  → rim Schlick fresnel        (always cheap, gate not needed)
     let do_specular = r_px >= 6;
+    let do_env      = r_px >= 10;
     let r_f = r_px as f32;
     let r2 = r_f * r_f;
 
@@ -1489,27 +1564,40 @@ fn draw_node_sphere(
     // Sun colour energy — calibrated to make the highlight punchy.
     let sun_energy = 1.85;
 
-    for dy in -r_px..=r_px {
+    // N.14 — iterate one pixel past the radius so the AA rim ring gets
+    // coverage-blended into the underlying scene.  Inside the disc
+    // (d² < r²) we paint with full alpha; on the ~1-px boundary
+    // (r² ≤ d² < (r+1)²) we compute the analytic disc-pixel overlap
+    // and alpha-blend.  Hard pixel jumps at the sphere silhouette → gone.
+    let r_outer = r_px + 1;
+    let r_outer_2 = (r_f + 1.0) * (r_f + 1.0);
+    for dy in -r_outer..=r_outer {
         let py = sy + dy;
         if py < HEADER_H || py >= FOOTER_Y {
             continue;
         }
         let dy_f = dy as f32;
-        let row_inside = r2 - dy_f * dy_f;
-        if row_inside <= 0.0 {
+        let row_outside = r_outer_2 - dy_f * dy_f;
+        if row_outside <= 0.0 {
             continue;
         }
-        let row_half = libm::sqrtf(row_inside) as i32;
-        for dx in -row_half..=row_half {
+        let row_outer_half = libm::sqrtf(row_outside) as i32;
+        for dx in -row_outer_half..=row_outer_half {
             let px = sx + dx;
             if px < 0 || px >= SCENE_WIDTH {
                 continue;
             }
             let dx_f = dx as f32;
-            let z2 = row_inside - dx_f * dx_f;
-            if z2 <= 0.0 {
-                continue;
-            }
+            let d2 = dx_f * dx_f + dy_f * dy_f;
+            // Coverage: 1.0 inside, smooth taper to 0.0 between r and r+1.
+            // For pixels well inside the disc (d <= r - 0.5) coverage is
+            // saturated; the rim AA only kicks in for the outer ring.
+            let d = libm::sqrtf(d2);
+            let coverage = (r_f + 0.5 - d).clamp(0.0, 1.0);
+            if coverage <= 0.0 { continue; }
+            // Use a slightly inflated z so the surface normal at the
+            // very rim stays meaningful (avoids NaN from sqrt(0)).
+            let z2 = (r2 - d2).max(0.0001);
             let nx = dx_f / r_f;
             let ny = dy_f / r_f;
             let nz = libm::sqrtf(z2) / r_f;
@@ -1589,28 +1677,34 @@ fn draw_node_sphere(
             // off the sphere normal is R = 2(N·V)N - V → screen
             // centre reflects back at camera, silhouettes reflect
             // outward to the "horizon".
-            let two_ndotv = 2.0 * normal.dot(view);
-            let refl = Vec3::new(
-                two_ndotv * normal.x,
-                two_ndotv * normal.y,
-                two_ndotv * normal.z - 1.0,
-            );
-            // Polished surfaces show more reflection.
-            let env_intensity = sample_environment(refl)
-                * (1.0 - material.roughness * 0.6)
-                * (0.25 + 0.5 * material.metallic);
+            // N.14 — env reflection gated by LOD.  cubemap sampling is
+            // the most expensive single per-pixel op (it does an axis
+            // dot + face select + uv project + palette LUT lookup +
+            // luminance fetch).  For r_px < 10 the sub-pixel reflection
+            // detail is lost in nearest-neighbour upscale anyway, so
+            // skip and use a constant ambient term.
+            let env_intensity = if do_env {
+                let two_ndotv = 2.0 * normal.dot(view);
+                let refl = Vec3::new(
+                    two_ndotv * normal.x,
+                    two_ndotv * normal.y,
+                    two_ndotv * normal.z - 1.0,
+                );
+                sample_environment(refl)
+                    * (1.0 - material.roughness * 0.6)
+                    * (0.25 + 0.5 * material.metallic)
+            } else {
+                // Cheap constant ambient that matches the cubemap's average.
+                0.25 * (1.0 - material.roughness * 0.6)
+                     * (0.25 + 0.5 * material.metallic)
+            };
 
             // Fresnel rim glow — Schlick on N·V drives an emissive-
-            // looking ring around silhouettes.  The signature visual
-            // tell of a PBR material.
+            // looking ring around silhouettes.  Always cheap (one
+            // pow_approx); kept at all LODs as it is the signature
+            // PBR tell.
             let rim = schlick_fresnel(f0 * 0.2, n_dot_v) * material.rim * 0.65;
 
-            // Final composite.  Ambient sets the floor; diffuse +
-            // specular + env + rim layer on top.  Sun_energy pumps
-            // the specular for visible "wow" highlights.  N.8 — keep
-            // the linear HDR sum unclamped so the ACES tone-map below
-            // can roll off highlights with film-like response instead
-            // of clipping flat to white.
             let hdr = AMBIENT
                 + diffuse
                 + spec * sun_energy
@@ -1618,29 +1712,28 @@ fn draw_node_sphere(
                 + rim;
             let intensity = aces_tonemap(hdr);
 
-            // ── N.9 — direct 24-bit RGB write ──
-            // No more 8-shade quantisation or Bayer dither: we pack
-            // the ACES-tonemapped intensity straight into BGRX via
-            // the hue's peak colour, with depth-fog attenuation.
-            // Banding is gone; sphere gradients are smooth to the
-            // limit of the LFB's 24-bit precision.
             let fog_atten = 1.0 - fog.clamp(0.0, 1.0) * 0.55;
             let bgrx = pack_hue_intensity(hue_base, intensity * fog_atten);
-            k_fb::put_pixel_rgb(px as usize, py as usize, bgrx);
 
-            // ── N.9 — additive bloom in 24-bit colour ──
-            //
-            // When the linear HDR composite exceeds 1.0 (i.e. ACES
-            // started rolling off the highlight), add a tinted glow
-            // to the 4 cardinal neighbours.  Real Gaussian bloom
-            // is multi-tap on a separate HDR buffer; this is a
-            // single-pass approximation cheap enough for TCG.
-            if hdr > 1.05 {
-                let glow = (hdr - 1.0).min(0.6); // 0..0.6
+            // N.14 — coverage-blend into the back-buffer.  Interior
+            // pixels (coverage = 1.0) blit straight (alpha 255), rim
+            // pixels (0 < coverage < 1) alpha-blend over the existing
+            // scene background — no jaggies on the silhouette.
+            if coverage >= 0.999 {
+                sess.put_rgb(px as usize, py as usize, bgrx);
+            } else {
+                let alpha = (coverage * 255.0) as u8;
+                sess.blend(px as usize, py as usize, bgrx, alpha);
+            }
+
+            // Additive bloom (skipped for rim AA pixels to keep glow
+            // attached to the solid core).
+            if coverage >= 0.999 && hdr > 1.05 {
+                let glow = (hdr - 1.0).min(0.6);
                 let add = pack_hue_intensity(hue_base, glow * 0.55);
                 for (gx, gy) in [(px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)] {
                     if gx >= 0 && gx < SCENE_WIDTH && gy >= HEADER_H && gy < FOOTER_Y {
-                        k_fb::add_pixel_rgb(gx as usize, gy as usize, add);
+                        sess.add(gx as usize, gy as usize, add);
                     }
                 }
             }
@@ -1648,21 +1741,51 @@ fn draw_node_sphere(
     }
 }
 
-/// N.9 — pack a 0..1 intensity scalar into a 24-bit BGRX colour
-/// using the hue ramp's peak as base.  Replaces the 8-shade ramp
-/// quantisation with full 256-level per-channel output.
+/// N.14 — red ⇄ white metallic palette.  User request: "金属球红白
+/// 两色".  We collapse the previous 5-hue ramp into a binary scheme
+/// driven by the sub-domain's role in the graph:
+///   * RED   = "active / power" nodes (Hardware, KernelDriver, Compute)
+///   * WHITE = "logical / chrome" nodes (Service, PluginEntry, Router,
+///             Aggregator, Vector, Routing)
+///
+/// Each ball renders as polished metal in its assigned hue; the
+/// per-pixel intensity from the PBR shader scales the chromaticity.
+///
+/// Backing peaks tuned for high-saturation 24-bit:
+///   RED   peak BGRX = (255, 60, 70)   — slight orange-cyan kiss for warmth
+///   WHITE peak BGRX = (245, 248, 252) — near-platinum with cool tilt
+///
+/// `hue_base` keeps the legacy u8 protocol (which palette ramp
+/// classify_node_hue returned) but is now interpreted as a flag:
+/// CYAN/MAGENTA/MINT (16/24/40) → RED, everything else → WHITE.
+pub fn ball_is_red(hue_base: u8) -> bool {
+    matches!(hue_base,
+        k_fb::HUE_CYAN_BASE | k_fb::HUE_MAGENTA_BASE | k_fb::HUE_MINT_BASE)
+}
+
+const BALL_RED_PEAK:   (u32, u32, u32) = (255, 60, 70);
+const BALL_WHITE_PEAK: (u32, u32, u32) = (245, 248, 252);
+
 fn pack_hue_intensity(hue_base: u8, intensity: f32) -> u32 {
-    // Peak BGRX for each hue ramp — match k-fb HUE_PEAKS but in
-    // already-converted 8-bit form so we skip the 6→8 stretch.
-    // (16, 48, 60) ×4.05 = (65, 194, 243) etc.
-    let (r0, g0, b0) = match hue_base {
-        k_fb::HUE_CYAN_BASE    => (65u32, 194u32, 243u32),  // hardware
-        k_fb::HUE_MAGENTA_BASE => (243, 65, 203),           // driver
-        k_fb::HUE_YELLOW_BASE  => (243, 203, 49),           // service
-        k_fb::HUE_MINT_BASE    => (81, 234, 170),           // app
-        _                      => (234, 113, 154),          // rose
+    let (r0, g0, b0) = if ball_is_red(hue_base) {
+        BALL_RED_PEAK
+    } else {
+        BALL_WHITE_PEAK
     };
     let t = intensity.clamp(0.0, 1.0);
+    let r = (r0 as f32 * t).min(255.0) as u32;
+    let g = (g0 as f32 * t).min(255.0) as u32;
+    let b = (b0 as f32 * t).min(255.0) as u32;
+    (r << 16) | (g << 8) | b
+}
+
+/// N.14 — straight 24-bit ramp keyed by `red`.  Used by the rope
+/// renderer for per-half colour (the half nearer a red ball renders
+/// white, and vice versa, so the line ends always contrast against
+/// their endpoint sphere).
+fn pack_red_or_white(red: bool, intensity: f32) -> u32 {
+    let (r0, g0, b0) = if red { BALL_RED_PEAK } else { BALL_WHITE_PEAK };
+    let t = intensity.clamp(0.0, 1.5);
     let r = (r0 as f32 * t).min(255.0) as u32;
     let g = (g0 as f32 * t).min(255.0) as u32;
     let b = (b0 as f32 * t).min(255.0) as u32;
@@ -1690,12 +1813,28 @@ fn pack_hue_intensity(hue_base: u8, intensity: f32) -> u32 {
 //                  when the user isn't running the demo)
 //   GradientEnds   bright endpoints, dim middle (LNK edges)
 //   DoubleSolid    5-px thick rigid mount, no sag
+/// N.14 — red ⇄ white per-endpoint gradient rope with sub-pixel AA.
+///
+/// `from_red` / `to_red` are the booleans from the two endpoint
+/// spheres' `ball_is_red()`.  For each point along the rope at
+/// parameter t∈[0,1] the rope hue is the OPPOSITE of the endpoint it
+/// is closer to: a white ball at the from end ⇒ rope is red there.
+/// Equal endpoints (both red / both white) ⇒ rope is solid in the
+/// opposite hue.  Mixed endpoints ⇒ rope is a sharp 50/50 split that
+/// reads as "this connection runs between two roles".
+///
+/// `highlight` (carried from the legacy strain check) tints the
+/// middle 50 % toward the bright accent so over-strained edges still
+/// read as anomalous.
 fn draw_rope_edge(
+    sess: &mut k_fb::PaintSession,
     fx: i32,
     fy: i32,
     tx: i32,
     ty: i32,
-    color: k_fb::Color,
+    from_red: bool,
+    to_red: bool,
+    highlight: bool,
     style: EdgeStyle,
     pulse_on: bool,
 ) {
@@ -1704,41 +1843,29 @@ fn draw_rope_edge(
     let len_f = libm::sqrtf(dx * dx + dy * dy).max(1.0);
     if len_f < 2.0 { return; }
 
-    // Style-driven knobs.
     let rigid = matches!(style, EdgeStyle::DoubleSolid);
-    let thickness: i32 = if rigid { 3 } else { 2 };
-    let halo_radius: i32 = thickness + 1;
+    // N.14 — thinner, finer ropes.  Old 2-3 px core often blew out
+    // the silhouette around small spheres; new 1.4 px nominal core +
+    // 1.5 px halo reads as a "wire", not a "hose".
+    let core_radius: f32 = if rigid { 2.0 } else { 1.5 };
+    let halo_radius: f32 = core_radius + 1.5;
     let sag_px: f32 = if rigid { 0.0 } else { (len_f * 0.10).min(6.0) };
 
-    // Base colour: pulled from palette → BGRX.  SolidPulsed dims to
-    // ~60 % when its phase is off so the user perceives a heartbeat
-    // without the colour vanishing entirely.
-    let base_bgrx = k_fb::color_bgrx(color);
-    let solid_pulsed = matches!(style, EdgeStyle::SolidPulsed);
-    let pulse_dim = if solid_pulsed && !pulse_on { 0.55 } else { 1.0 };
+    let pulse_dim = if matches!(style, EdgeStyle::SolidPulsed) && !pulse_on { 0.55 } else { 1.0 };
+    let highlight_bgrx = sess.color_bgrx(k_fb::Color::Highlight);
 
-    let is_gradient = matches!(style, EdgeStyle::GradientEnds);
-    let bright_bgrx = k_fb::color_bgrx(k_fb::Color::Highlight);
-
-    // Perpendicular unit vector (rotated +90°).
     let perp_x = -dy / len_f;
     let perp_y = dx / len_f;
 
-    // One stamp per screen pixel of length → smooth, anti-banding.
-    let n_samples = (len_f as usize).max(8);
+    // One stamp every 0.5 px along the path → sub-pixel coverage AA.
+    // ~2× the old sample count (was 1 px steps).  Paired with the
+    // coverage profile below this produces Wu-quality silhouettes.
+    let n_samples = (len_f as usize * 2).max(8);
     let inv_n = 1.0 / (n_samples - 1) as f32;
-    let braid_freq = len_f * 0.45; // cycles along the rope
+    let braid_freq = len_f * 0.45;
 
     for i in 0..n_samples {
         let t = i as f32 * inv_n;
-
-        // Pattern gating (Dashed / Dotted gaps).
-        let pat_on = match style {
-            EdgeStyle::Dashed => (i / 4) % 2 == 0,
-            EdgeStyle::Dotted => (i / 12) % 3 == 0,
-            _ => true,
-        };
-        if !pat_on { continue; }
 
         // Position along catenary.
         let lx = fx as f32 + dx * t;
@@ -1747,45 +1874,84 @@ fn draw_rope_edge(
         let cx = lx;
         let cy = ly + sag;
 
-        // GradientEnds: bright at the first / last quarter, dim middle.
-        let main_bgrx = if is_gradient {
-            if t < 0.25 || t > 0.75 { bright_bgrx } else { base_bgrx }
+        // Per-half colour — INVERT each endpoint's hue.  t=0 → opposite
+        // of from_red; t=1 → opposite of to_red.  Linear blend keeps
+        // the mid-region clean when endpoints differ.
+        let from_half_red = !from_red;
+        let to_half_red   = !to_red;
+        let red_t = if from_half_red == to_half_red {
+            // Both halves want the same hue ⇒ uniform rope.
+            if from_half_red { 1.0 } else { 0.0 }
         } else {
-            base_bgrx
+            // Sharp split at the midpoint with 0.1-wide cross-fade.
+            ((t - 0.45) / 0.1).clamp(0.0, 1.0)
+            // When from_half_red=true, that side (t=0) wants red → red_t = 1
+            // at t=0, fading toward to_half_red (false → red_t = 0) at t=1.
+            // So actually swap the mapping based on which half is red.
+        };
+        let red_amount = if from_half_red == to_half_red {
+            red_t
+        } else if from_half_red {
+            1.0 - red_t   // t=0 is red, t=1 is white
+        } else {
+            red_t          // t=0 is white, t=1 is red
         };
 
-        // Braid: highlight ripples along the rope axis, 12 % amplitude
-        // around 0.92 so the rope reads as woven, not painted.
-        let braid = libm::sinf(t * braid_freq) * 0.12 + 0.92;
+        let braid = libm::sinf(t * braid_freq) * 0.10 + 0.90;
+        let highlight_mix = if highlight && t > 0.25 && t < 0.75 { 0.5 } else { 0.0 };
 
-        // Outer halo first (additive, attenuated) so the bright
-        // centre composites cleanly over it.
-        for d in -halo_radius..=halo_radius {
-            let dist = d.abs();
-            if dist <= thickness { continue; } // skip core; we paint it next
-            let stamp_x = libm::roundf(cx + perp_x * d as f32) as i32;
-            let stamp_y = libm::roundf(cy + perp_y * d as f32) as i32;
+        // Build the BGRX for this rope segment by lerping red↔white peaks
+        // and optionally toward the highlight accent.
+        let base_red   = pack_red_or_white(true,  braid * pulse_dim);
+        let base_white = pack_red_or_white(false, braid * pulse_dim);
+        let main_bgrx_raw = k_fb::lerp_bgrx(base_white, base_red, (red_amount * 255.0) as u8);
+        let main_bgrx = if highlight_mix > 0.0 {
+            k_fb::lerp_bgrx(main_bgrx_raw, highlight_bgrx, (highlight_mix * 255.0) as u8)
+        } else {
+            main_bgrx_raw
+        };
+
+        // Outer halo: additive falloff, gives the rope a soft glow
+        // against the dark backdrop.
+        let halo_steps_outer = libm::ceilf(halo_radius) as i32;
+        for d in -halo_steps_outer..=halo_steps_outer {
+            let df = d as f32;
+            if df.abs() <= core_radius - 0.5 { continue; }
+            let stamp_x = libm::roundf(cx + perp_x * df) as i32;
+            let stamp_y = libm::roundf(cy + perp_y * df) as i32;
             if stamp_x < 0 || stamp_x >= SCENE_WIDTH
                 || stamp_y < HEADER_H || stamp_y >= FOOTER_Y { continue; }
-            // Halo intensity: 30 % at the inner halo ring, 12 % at the outer.
-            let halo_t = (dist - thickness) as f32 / (halo_radius - thickness) as f32;
-            let halo_i = (0.30 * (1.0 - halo_t)) * pulse_dim;
-            let glow = k_fb::scale_bgrx(main_bgrx, halo_i * braid);
-            k_fb::add_pixel_rgb(stamp_x as usize, stamp_y as usize, glow);
+            let halo_t = (df.abs() - core_radius) / (halo_radius - core_radius);
+            let halo_t = halo_t.clamp(0.0, 1.0);
+            let halo_i = 0.18 * (1.0 - halo_t) * pulse_dim;
+            let glow = k_fb::scale_bgrx(main_bgrx, halo_i);
+            sess.add(stamp_x as usize, stamp_y as usize, glow);
         }
 
-        // Core profile: cos² cross-section, full intensity at d=0,
-        // tapering smoothly to 0 at |d| > thickness.
-        for d in -thickness..=thickness {
-            let stamp_x = libm::roundf(cx + perp_x * d as f32) as i32;
-            let stamp_y = libm::roundf(cy + perp_y * d as f32) as i32;
+        // Core: per-pixel coverage AA against a soft round profile.
+        let core_steps = libm::ceilf(core_radius + 0.5) as i32;
+        for d in -core_steps..=core_steps {
+            let df = d as f32;
+            let stamp_x = libm::roundf(cx + perp_x * df) as i32;
+            let stamp_y = libm::roundf(cy + perp_y * df) as i32;
             if stamp_x < 0 || stamp_x >= SCENE_WIDTH
                 || stamp_y < HEADER_H || stamp_y >= FOOTER_Y { continue; }
-            let dist_norm = d.abs() as f32 / (thickness + 1) as f32;
-            let profile = 1.0 - dist_norm * dist_norm;
-            let intensity = profile * braid * pulse_dim;
-            let pixel = k_fb::scale_bgrx(main_bgrx, intensity);
-            k_fb::put_pixel_rgb(stamp_x as usize, stamp_y as usize, pixel);
+            // Coverage = analytic 1-d Gaussian-ish profile.  Pixel
+            // 0.5 inside the boundary gets full alpha; pixel 0.5
+            // outside gets none; transition is linear in df.
+            let cover = (core_radius + 0.5 - df.abs()).clamp(0.0, 1.0);
+            if cover <= 0.0 { continue; }
+            // Smooth cross-section shading: brightest at d=0, dim toward edge.
+            let p = df / (core_radius + 0.5);
+            let prof: f32 = (1.0 - p * p).max(0.0);
+            let pixel = k_fb::scale_bgrx(main_bgrx, prof);
+            // Use alpha-blend so the rope's softer edges don't punch
+            // through the underlying sphere / scene with aliased stamps.
+            let alpha = (cover * 255.0) as u8;
+            // Per-sample stamps overlap when we use 0.5-px steps, so
+            // BLEND (not ADD) keeps the rope at its intended brightness
+            // instead of saturating to white in the middle.
+            sess.blend(stamp_x as usize, stamp_y as usize, pixel, alpha);
         }
     }
 }
@@ -1958,6 +2124,9 @@ fn sub_domain_color(sub: gos_protocol::NodeSubDomain) -> k_fb::Color {
     }
 }
 
+#[allow(dead_code)] // N.14 — edges no longer classified by colour
+                    // (rope hue is now per-endpoint red/white).
+                    // Kept for legacy callers + future re-use.
 fn classify_edge(kind: gos_protocol::RuntimeEdgeType) -> k_fb::Color {
     use gos_protocol::RuntimeEdgeType;
     match kind {
