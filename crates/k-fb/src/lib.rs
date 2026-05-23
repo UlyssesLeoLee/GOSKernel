@@ -413,6 +413,30 @@ fn build_palette_lookup() {
             lut[base_slot + shade as usize] = pack_bgrx(r, g, b);
         }
     }
+
+    // Phase N.8 — derive a luminance table from BGRX so shader code
+    // can convert a palette index back to a 0..=255 brightness scalar
+    // without re-running the colour-pack math.  Uses ITU-R BT.601 weights.
+    let mut lum = PALETTE_LUM.lock();
+    for i in 0..256 {
+        let bgrx = lut[i];
+        let r = (bgrx >> 16) & 0xFF;
+        let g = (bgrx >> 8) & 0xFF;
+        let b = bgrx & 0xFF;
+        lum[i] = ((r * 299 + g * 587 + b * 114) / 1000).min(255) as u8;
+    }
+}
+
+/// 256-entry palette → luminance (BT.601 weighted).  Populated by
+/// `build_palette_lookup` so the shader (N.8 cubemap reflection)
+/// can read a baked palette-indexed pixel and reuse its brightness
+/// as an additive light contribution.
+static PALETTE_LUM: Mutex<[u8; 256]> = Mutex::new([0; 256]);
+
+/// Look up the cached BT.601 luminance of a palette index.
+/// Returns 0..=255.  Cheap atomic-ish access; safe from any context.
+pub fn palette_luminance(idx: u8) -> u8 {
+    PALETTE_LUM.lock()[idx as usize]
 }
 
 /// True once `init` has cached the framebuffer pointer.  Callers in

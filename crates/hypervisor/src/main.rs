@@ -1253,21 +1253,37 @@ fn material_for_sub_domain(sub: gos_protocol::NodeSubDomain) -> PbrMaterial {
     }
 }
 
-/// Cheap procedural environment sampler — returns a normalized
-/// intensity in [0, 1] for a given reflection direction.  Approximates
-/// a "kernel nebula" sky: bright at top (cyan), dim toward bottom,
-/// with a hot "sun" lobe in the LIGHT_DIR direction so polished
-/// spheres pick up the highlight reflected from the key light.  This
-/// stands in for a real cubemap until I.14.F bakes one from Blender.
+/// N.8 — baked-cubemap environment sampler.  The 6-face cubemap is
+/// pre-rendered offline by `tools/assets/generate.py` (path-traced
+/// "kernel nebula" sky with a key-light sun lobe + cyan zenith + warm
+/// horizon) and embedded into the kernel binary via `k-assets`.
+///
+/// `k_assets::sample_cubemap` returns a palette index; we map it to
+/// a 0..1 luminance using k-fb's BT.601 LUT and add a small additive
+/// sun contribution so polished spheres still pick up a tight specular
+/// reflection of the key light even when the cubemap quantization
+/// loses that detail.
 fn sample_environment(reflection: Vec3) -> f32 {
-    // Sun lobe: tight bright spot near LIGHT_DIR.
+    let idx = k_assets::sample_cubemap([reflection.x, reflection.y, reflection.z]);
+    let cube = (k_fb::palette_luminance(idx) as f32) / 255.0;
+    // Tight sun lobe layered on top so polished chrome catches the
+    // primary highlight reflection even after palette quantization.
     let r_dot_l = reflection.dot(LIGHT_DIR).max(0.0);
-    let sun = pow_approx(r_dot_l, 24.0);
-    // Sky gradient: brighter when reflection points up.
-    let sky = (reflection.y * 0.5 + 0.5).clamp(0.0, 1.0) * 0.55;
-    // Horizon glow at the equator (subtle ring).
-    let horizon = (1.0 - reflection.y.abs()).max(0.0) * 0.15;
-    (sun * 0.95 + sky + horizon).clamp(0.0, 1.5)
+    let sun = pow_approx(r_dot_l, 24.0) * 0.6;
+    (cube + sun).clamp(0.0, 1.5)
+}
+
+/// N.8 — ACES filmic tone-mapping (Narkowicz 2015 approximation).
+/// Squashes the HDR composite from `[0, 1.5+]` into perceptually-
+/// uniform `[0, 1]` with a soft highlight rolloff so over-exposed
+/// pixels don't all clip flat to white — they retain colour
+/// information up to the limit of the 8-shade ramp.  Cheap: 5 muls,
+/// 2 adds, 1 div, then the existing Bayer dither.
+#[inline]
+fn aces_tonemap(x: f32) -> f32 {
+    let a = 2.51_f32; let b = 0.03_f32;
+    let c = 2.43_f32; let d = 0.59_f32; let e = 0.14_f32;
+    ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
 }
 
 /// GGX/Trowbridge-Reitz normal-distribution function.  Standard PBR
@@ -1457,13 +1473,16 @@ fn draw_node_sphere(
 
             // Final composite.  Ambient sets the floor; diffuse +
             // specular + env + rim layer on top.  Sun_energy pumps
-            // the specular for visible "wow" highlights.
-            let intensity = (AMBIENT
+            // the specular for visible "wow" highlights.  N.8 — keep
+            // the linear HDR sum unclamped so the ACES tone-map below
+            // can roll off highlights with film-like response instead
+            // of clipping flat to white.
+            let hdr = AMBIENT
                 + diffuse
                 + spec * sun_energy
                 + env_intensity
-                + rim)
-                .clamp(0.0, 1.0);
+                + rim;
+            let intensity = aces_tonemap(hdr);
 
             // ── M.1 — Bayer 4×4 dither instead of nearest-shade ──
             // Eliminates banding on smooth gradients; each pixel's

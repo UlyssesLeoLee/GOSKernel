@@ -39,6 +39,7 @@ k-nim  = { path = "../k-nim" }
 k-fat32 = { path = "../k-fat32" }
 k-fb = { path = "../k-fb" }
 k-rast = { path = "../k-rast" }
+k-assets = { path = "../k-assets" }
 libm = "0.2"
 spin = "0.9"
 # Already a dep (declared above) but kept for grep visibility — the
