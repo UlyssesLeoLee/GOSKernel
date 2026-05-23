@@ -161,7 +161,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let gen_now = gos_runtime::graph_generation();
         let graph_dirty = gen_now != last_painted_gen;
         if graph_dirty || frame_counter % REPAINT_TICKS == 0 {
-            paint_frame(frame_counter);
+            // M.3.c — IRQ-safe paint pass.  `paint_3d_view` acquires
+            // `RUNTIME.lock()` (via snapshot/node_page/edge_page) and
+            // `k_fb` `LOCK` per pixel.  A PIT IRQ landing inside one
+            // of those windows runs `post_irq_signal` → `RUNTIME.lock()`
+            // and spins forever because the main thread can't release
+            // the lock while interrupted.  Disabling interrupts for
+            // the whole frame paint eliminates the deadlock window.
+            // Cost: ~10-50 ms of latency on PIT-driven input; that's
+            // acceptable for the Gen-1 boot UI.
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                paint_frame(frame_counter);
+            });
             last_painted_gen = gen_now;
         }
         x86_64::instructions::hlt();
