@@ -425,8 +425,14 @@ fn paint_3d_view(frame: u64) {
     // Bresenham closure with a center brightest + perpendicular halo
     // dimmer.  Style (pattern, pulse, gradient, mount-rigid) is
     // layered on top.
-    let pulse_phase = libm::sinf(frame as f32 * 0.22);
-    let pulse_on = pulse_phase > -0.4; // ~70% duty cycle for "active" feel
+    // N.10 — edge pulse only animates while the camera auto-rotates;
+    // otherwise stays solid-on so the scene reads as a still tableau.
+    let pulse_on = if k_fb::CAMERA_AUTO_ROTATE.load(Ordering::Relaxed) {
+        let pulse_phase = libm::sinf(frame as f32 * 0.22);
+        pulse_phase > -0.4
+    } else {
+        true
+    };
     for i in 0..returned_e {
         let from_idx = find_node_index(&nodes[..returned_n], edges[i].from_vector);
         let to_idx = find_node_index(&nodes[..returned_n], edges[i].to_vector);
@@ -1707,7 +1713,17 @@ fn draw_rope_edge(
 const STAR_COUNT: usize = 96;
 
 fn paint_starfield(frame: u64) {
-    let frame_f = frame as f32;
+    // N.10 — frozen unless camera auto-rotate is active.  An OS that
+    // sits still when nobody touches it shouldn't have a swirling
+    // starfield demanding attention; the field becomes a static
+    // backdrop, only twinkling/drifting while the orbit demo runs.
+    use core::sync::atomic::Ordering;
+    let frame_f = if k_fb::CAMERA_AUTO_ROTATE.load(Ordering::Relaxed) {
+        frame as f32
+    } else {
+        0.0
+    };
+    let _ = frame; // retain param for forward-compat
     for i in 0..STAR_COUNT {
         // LCG-derived properties: X seed, Y seed, layer, phase.
         let seed = (i as u32).wrapping_mul(2654435761);
@@ -2853,8 +2869,22 @@ fn paint_frame(frame: u64) {
     let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
     let scrollback_open = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
 
-    k_fb::clear(k_fb::Color::Background);
-    k_fb::fill_rect(0, 0, k_fb::WIDTH, HEADER_H as usize, k_fb::Color::HeaderBar);
+    // N.10 — modern UI chrome.  Replace flat-colour clear + header
+    // with a vertical gradient deep-space backdrop and a top header
+    // bar that fades from a brighter accent at the top to the body
+    // background at its bottom edge (Win11 Mica / Fluent inspiration).
+    // 24-bit RGB → smooth, no banding.
+    const BG_TOP:     u32 = 0x0a0f24; // deep navy at zenith
+    const BG_BOTTOM:  u32 = 0x05080f; // near-black at horizon
+    const HDR_TOP:    u32 = 0x1a2348; // cool blue glass
+    const HDR_BOTTOM: u32 = 0x0a0f24; // matches BG_TOP for seamless blend
+    const HDR_ACCENT: u32 = 0x4ad0ff; // cyan rim line at header bottom
+    k_fb::clear_gradient_vertical(BG_TOP, BG_BOTTOM);
+    k_fb::fill_rect_gradient(0, 0, k_fb::WIDTH, HEADER_H as usize, HDR_TOP, HDR_BOTTOM);
+    // 1-px accent line under the header for "glass shelf" depth cue.
+    for x in 0..k_fb::WIDTH {
+        k_fb::put_pixel_rgb(x, HEADER_H as usize - 1, HDR_ACCENT);
+    }
 
     match mode {
         k_fb::UI_MODE_KERNEL_VIEW => paint_3d_view(frame),
@@ -3022,8 +3052,17 @@ fn paint_os_shell_body(frame: u64) {
 fn paint_command_bar(frame: u64, mode: u8) {
     let bar_y = CMD_BAR_TOP as usize;
     let bar_h = CMD_BAR_H as usize;
-    k_fb::fill_rect(0, bar_y, k_fb::WIDTH, bar_h, k_fb::Color::HeaderBar);
-    k_fb::hline(0, bar_y, k_fb::WIDTH, k_fb::Color::DimWhite);
+    // N.10 — gradient command bar.  Matches the inverted Fluent dock:
+    // a darker top edge (separator) easing into a slightly brighter
+    // surface where the prompt sits.
+    const CMD_TOP:    u32 = 0x0a0f24;
+    const CMD_BOT:    u32 = 0x1a2348;
+    const CMD_ACCENT: u32 = 0x4ad0ff;
+    k_fb::fill_rect_gradient(0, bar_y, k_fb::WIDTH, bar_h, CMD_TOP, CMD_BOT);
+    // Cyan accent line on top edge — same as header bottom for symmetry.
+    for x in 0..k_fb::WIDTH {
+        k_fb::put_pixel_rgb(x, bar_y, CMD_ACCENT);
+    }
 
     // Prompt and typed text.  I.12 polish: chat-style `gos>` prompt
     // matches the kernel's response prefix in the chat HUD above.

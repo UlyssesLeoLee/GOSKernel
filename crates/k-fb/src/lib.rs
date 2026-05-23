@@ -1013,3 +1013,56 @@ pub fn draw_text_boxed(x: usize, y: usize, text: &str, fg: Color, bg: Color) {
     fill_rect(x, y, w.min(WIDTH.saturating_sub(x)), h, bg);
     draw_text(x + 2, y + 2, text, fg);
 }
+
+/// N.10 — 2× scaled glyph for headlines.  Each font pixel becomes a
+/// 2×2 block; total cell is 16×16.  Gives a "premium" weight to the
+/// header brand text instead of the bitmap-y 8×8 default.
+pub fn draw_glyph_2x(x: usize, y: usize, ch: char, color: Color) {
+    if x + 2 * GLYPH_W > WIDTH || y + 2 * GLYPH_H > HEIGHT {
+        return;
+    }
+    let glyph = if (ch as u32) < 128 {
+        &font8x8::legacy::BASIC_LEGACY[ch as usize]
+    } else {
+        return;
+    };
+    let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
+    let mut bb = BACKBUFFER.lock();
+    for row in 0..GLYPH_H {
+        let bits = glyph[row];
+        let py0 = y + row * 2;
+        let py1 = py0 + 1;
+        for col in 0..GLYPH_W {
+            if bits & (1 << col) == 0 { continue; }
+            let px0 = x + col * 2;
+            let px1 = px0 + 1;
+            bb[py0 * WIDTH + px0] = bgrx;
+            bb[py0 * WIDTH + px1] = bgrx;
+            bb[py1 * WIDTH + px0] = bgrx;
+            bb[py1 * WIDTH + px1] = bgrx;
+        }
+    }
+}
+
+/// 2× draw_text — string at 16×16 per glyph.  Width: 16 px per char.
+pub fn draw_text_2x(x: usize, y: usize, text: &str, color: Color) {
+    let mut cx = x;
+    for ch in text.chars() {
+        if cx + 2 * GLYPH_W > WIDTH {
+            break;
+        }
+        draw_glyph_2x(cx, y, ch, color);
+        cx += 2 * GLYPH_W;
+    }
+}
+
+/// N.10 — 1-pixel offset drop-shadow text.  Renders the background-
+/// colored ghost first, then the foreground.  Makes labels legible
+/// against any backdrop without a full text box.
+pub fn draw_text_shadowed(x: usize, y: usize, text: &str, fg: Color, shadow: Color) {
+    if x > 0 && y > 0 {
+        draw_text(x - 1, y - 1, text, shadow);
+        draw_text(x + 1, y + 1, text, shadow);
+    }
+    draw_text(x, y, text, fg);
+}
