@@ -936,10 +936,12 @@ fn paint_3d_view(frame: u64) {
 // re-seed: every node snaps to its grid home and history resets.
 
 const PHYS_NODES: usize = MAX_NODES;
-const PHYS_REST_LEN: f32 = 0.45;
-const PHYS_ANCHOR_K: f32 = 0.05;
-const PHYS_EDGE_K: f32 = 0.06;
-const PHYS_DAMPING: f32 = 0.86;
+// M.4.b — physics frozen; constants kept for the N.x adaptive
+// force-atlas pass which will re-enable spring relaxation.
+#[allow(dead_code)] const PHYS_REST_LEN: f32 = 0.45;
+#[allow(dead_code)] const PHYS_ANCHOR_K: f32 = 0.05;
+#[allow(dead_code)] const PHYS_EDGE_K: f32 = 0.06;
+#[allow(dead_code)] const PHYS_DAMPING: f32 = 0.86;
 
 struct PhysicsState {
     pos: [Vec3; PHYS_NODES],
@@ -983,14 +985,22 @@ fn node_home_position(i: usize, total: usize) -> Vec3 {
     Vec3::new(span_x, span_y, span_z)
 }
 
-/// Run one Verlet step + anchor + edge springs + flash decay.
-/// Re-seeds when the node count changes so newly-Cypher-added nodes
-/// snap to their grid home rather than spawning at the origin.
+/// Phase M.4.b — physics frozen.  The earlier Verlet + anchor + edge
+/// spring system was over-actuated (edges across the 5×5 grid have
+/// chord length ≈ 1.9 but `PHYS_REST_LEN=0.45`, so the springs
+/// permanently want to collapse the graph; anchor + damping can't
+/// fully settle the resulting oscillation).  Users saw the nodes
+/// jiggling instead of presenting a stable, readable layout.
+///
+/// Until a Force-Atlas / adaptive-rest-length pass lands in N.x we
+/// freeze positions at their grid home.  We keep `flash` decay and
+/// the (re-)seed logic so click feedback + Cypher LINK mutations
+/// still drop new nodes correctly.
 fn physics_step(
-    nodes: &[GraphNodeSummary],
+    _nodes: &[GraphNodeSummary],
     returned_n: usize,
-    edges: &[GraphEdgeSummary],
-    returned_e: usize,
+    _edges: &[GraphEdgeSummary],
+    _returned_e: usize,
 ) {
     let mut p = PHYSICS.lock();
     let n = returned_n.min(PHYS_NODES);
@@ -1008,51 +1018,7 @@ fn physics_step(
         return;
     }
 
-    // 1. Verlet integration with damping.
-    for i in 0..n {
-        let vx = (p.pos[i].x - p.prev_pos[i].x) * PHYS_DAMPING;
-        let vy = (p.pos[i].y - p.prev_pos[i].y) * PHYS_DAMPING;
-        let vz = (p.pos[i].z - p.prev_pos[i].z) * PHYS_DAMPING;
-        let new_pos = Vec3::new(p.pos[i].x + vx, p.pos[i].y + vy, p.pos[i].z + vz);
-        p.prev_pos[i] = p.pos[i];
-        p.pos[i] = new_pos;
-    }
-
-    // 2. Anchor spring toward grid home.
-    for i in 0..n {
-        let h = p.home[i];
-        p.pos[i].x += (h.x - p.pos[i].x) * PHYS_ANCHOR_K;
-        p.pos[i].y += (h.y - p.pos[i].y) * PHYS_ANCHOR_K;
-        p.pos[i].z += (h.z - p.pos[i].z) * PHYS_ANCHOR_K;
-    }
-
-    // 3. Edge springs (Hooke).  Snap endpoint indices each call so
-    // re-seeding doesn't break refs.
-    for e in &edges[..returned_e.min(edges.len())] {
-        let fi_opt = find_node_index(&nodes[..n], e.from_vector);
-        let ti_opt = find_node_index(&nodes[..n], e.to_vector);
-        let (Some(fi), Some(ti)) = (fi_opt, ti_opt) else { continue };
-        if fi >= n || ti >= n {
-            continue;
-        }
-        let dx = p.pos[ti].x - p.pos[fi].x;
-        let dy = p.pos[ti].y - p.pos[fi].y;
-        let dz = p.pos[ti].z - p.pos[fi].z;
-        let len = libm::sqrtf(dx * dx + dy * dy + dz * dz).max(0.001);
-        let stretch = len - PHYS_REST_LEN;
-        let force = stretch * PHYS_EDGE_K;
-        let nx = dx / len * force;
-        let ny = dy / len * force;
-        let nz = dz / len * force;
-        p.pos[fi].x += nx;
-        p.pos[fi].y += ny;
-        p.pos[fi].z += nz;
-        p.pos[ti].x -= nx;
-        p.pos[ti].y -= ny;
-        p.pos[ti].z -= nz;
-    }
-
-    // 4. Flash decay (I.6.4 feedback).
+    // Flash decay (I.6.4 click-feedback) is the only per-frame mutation.
     for i in 0..n {
         if p.flash[i] > 0 {
             p.flash[i] -= 1;

@@ -81,7 +81,7 @@ pub fn process(
                     // Reset everything to the boot-time default.
                     k_fb::CAMERA_YAW_BIAS_MRAD.store(0, Ordering::Relaxed);
                     k_fb::CAMERA_PITCH_BIAS_MRAD.store(0, Ordering::Relaxed);
-                    k_fb::CAMERA_RADIUS_MM.store(3500, Ordering::Relaxed);
+                    k_fb::CAMERA_RADIUS_MM.store(6500, Ordering::Relaxed);
                     k_fb::CAMERA_AUTO_ROTATE.store(true, Ordering::Relaxed);
                     return None;
                 }

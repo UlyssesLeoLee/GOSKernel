@@ -709,8 +709,10 @@ pub static CAMERA_YAW_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 pub static CAMERA_PITCH_BIAS_MRAD: AtomicI32 = AtomicI32::new(0);
 
 /// Camera orbit radius in millimetre-equivalent fixed-point.  Start
-/// at 3.5 units = 3500 mrad-equivalent.  F6 resets, F7/F8 zoom.
-pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(3500);
+/// pulled back at 6.5 units so the 25-node 1.8×1.8-world-unit
+/// grid fits comfortably with margin — was 3500 which made nodes
+/// fill the whole screen.  F6 resets, F7/F8 zoom.
+pub static CAMERA_RADIUS_MM: AtomicI32 = AtomicI32::new(6500);
 
 // ── Phase I.5 — kernel-UI command bar + mode switch ───────────────
 //
