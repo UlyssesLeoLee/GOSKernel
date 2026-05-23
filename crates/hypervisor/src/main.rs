@@ -617,19 +617,60 @@ fn paint_3d_view(frame: u64) {
         }
     }
 
-    // Cursor crosshair: 5-pixel '+' in Highlight, clipped to screen.
-    if mouse_x >= 0 && mouse_x < SCENE_WIDTH && mouse_y >= 0 && mouse_y < SCENE_HEIGHT {
-        for dx in -2..=2 {
-            let cx = mouse_x + dx;
-            if cx >= 0 && cx < SCENE_WIDTH && mouse_y >= HEADER_H && mouse_y < FOOTER_Y {
-                k_fb::put_pixel(cx as usize, mouse_y as usize, k_fb::Color::Highlight);
+    // ── N.15 — futuristic targeting-reticle cursor ────────────────
+    //
+    // Layout (mouse_x, mouse_y at the centre):
+    //                .              <- 1-px dim cyan tick (vertical top)
+    //              · · ·
+    //              ·   ·            <- AA ring r=4 in cyan
+    //         .  ·  X  ·  .         <- white core pixel +
+    //              ·   ·               4 cardinal tick marks (cyan)
+    //              · · ·
+    //                .
+    //          ◦         ◦          <- diagonal corner pips, very dim
+    //              ◦       ◦
+    //
+    // Reads as a sci-fi reticle: precision aim point (1-px white) +
+    // halo ring (orientation) + cardinal range marks (depth cue) +
+    // diagonal corner pips (subtle "tracking" feel).  No yellow.
+    if mouse_x >= 0 && mouse_x < SCENE_WIDTH
+        && mouse_y >= HEADER_H && mouse_y < FOOTER_Y {
+        use design::*;
+        let cx = mouse_x;
+        let cy = mouse_y;
+        // 1) AA ring (radius 4, 16 tap)
+        for theta in 0..24 {
+            let ang = theta as f32 * 6.2832 / 24.0;
+            let rx = libm::cosf(ang) * 4.0;
+            let ry = libm::sinf(ang) * 4.0;
+            let sx = cx + rx as i32;
+            let sy = cy + ry as i32;
+            if sx >= 0 && sx < SCENE_WIDTH && sy >= HEADER_H && sy < FOOTER_Y {
+                k_fb::blend_pixel_rgb(sx as usize, sy as usize, ACCENT_PRIMARY, 220);
             }
         }
-        for dy in -2..=2 {
-            let cy = mouse_y + dy;
-            if cy >= HEADER_H && cy < FOOTER_Y && mouse_x >= 0 && mouse_x < SCENE_WIDTH {
-                k_fb::put_pixel(mouse_x as usize, cy as usize, k_fb::Color::Highlight);
+        // 2) Four cardinal ticks at distance 7..8 — like an external
+        // reticle's "range" notches.
+        for d in 7..=8 {
+            for &(dx, dy) in &[(d, 0), (-d, 0), (0, d), (0, -d)] {
+                let sx = cx + dx;
+                let sy = cy + dy;
+                if sx >= 0 && sx < SCENE_WIDTH && sy >= HEADER_H && sy < FOOTER_Y {
+                    k_fb::put_pixel_rgb(sx as usize, sy as usize, ACCENT_PRIMARY);
+                }
             }
+        }
+        // 3) Diagonal corner pips at distance 6 (dim, "tracking" feel)
+        for &(dx, dy) in &[(6, 6), (-6, 6), (6, -6), (-6, -6)] {
+            let sx = cx + dx;
+            let sy = cy + dy;
+            if sx >= 0 && sx < SCENE_WIDTH && sy >= HEADER_H && sy < FOOTER_Y {
+                k_fb::blend_pixel_rgb(sx as usize, sy as usize, ACCENT_PRIMARY, 110);
+            }
+        }
+        // 4) Precision core: 1-px white at the exact cursor position.
+        if cx >= 0 && cx < SCENE_WIDTH && cy >= HEADER_H && cy < FOOTER_Y {
+            k_fb::put_pixel_rgb(cx as usize, cy as usize, 0xffffff);
         }
     }
 
@@ -693,15 +734,24 @@ fn paint_3d_view(frame: u64) {
     //          |
     //   -X --(o)-- +X
     //          |
-    //         -Y
-    // (+Z and −Z render as filled / hollow centre dots respectively.)
-    // N.12 — moved to top-LEFT of viewport (Unity scene view convention).
-    // Floating stats chip lives in top-right so they don't fight.
+    // ── N.15 — minimalist game-engine gizmo ────────────────────────
+    //
+    // Per user feedback ("gizmo 造型简洁一些, 就像游戏引擎里那样"):
+    // strip the previous busy 6-cap ViewCube down to the same shape
+    // Unity / Blender / Godot use in their viewport corner:
+    //   * 3 thin AA Wu-line arms in canonical R/G/B (X/Y/Z)
+    //   * tiny 2-px filled cap at each + axis end (clickable hit target)
+    //   * single 1-px white centre pivot
+    //   * no negative-axis stubs, no halo rings, no hover overlay
+    //   * hover state encoded as a brighter cap fill, not an extra ring
+    //
+    // Click any +axis cap → camera snaps to look down that axis.
+    // The same `frame_all` behaviour stays on F6.
     const GIZMO_CX: i32 = 28;
     const GIZMO_CY: i32 = HEADER_H + 22;
     const GIZMO_LEN: f32 = 14.0;
-    const GIZMO_CAP_R: i32 = 4;
-    const GIZMO_HIT_R: i32 = 6;
+    const GIZMO_CAP_R: i32 = 2;
+    const GIZMO_HIT_R: i32 = 5;
     let forward = Vec3::new(-eye.x, -eye.y, -eye.z).normalize();
     let world_up = Vec3::new(0.0, 1.0, 0.0);
     let right = forward.cross(world_up).normalize();
@@ -711,35 +761,35 @@ fn paint_3d_view(frame: u64) {
         let sy = -(axis.dot(true_up) * GIZMO_LEN) as i32;
         (sx, sy)
     };
-    // 6 caps with their hue.  Negative-axis caps render dim.
-    let caps: [(Vec3, u32, bool); 6] = [
-        (Vec3::new( 1.0, 0.0, 0.0), 0xff4d57, true),  // +X bright red
-        (Vec3::new(-1.0, 0.0, 0.0), 0xff4d57, false), // -X dim red
-        (Vec3::new(0.0,  1.0, 0.0), 0x80ff80, true),  // +Y bright green
-        (Vec3::new(0.0, -1.0, 0.0), 0x80ff80, false), // -Y dim green
-        (Vec3::new(0.0, 0.0,  1.0), 0x4ad0ff, true),  // +Z bright cyan
-        (Vec3::new(0.0, 0.0, -1.0), 0x4ad0ff, false), // -Z dim cyan
+    // Three +axes only (matches Unity / Blender minimal view gizmo).
+    let axes: [(Vec3, u32); 3] = [
+        (Vec3::new(1.0, 0.0, 0.0), 0xff4d57),  // X red
+        (Vec3::new(0.0, 1.0, 0.0), 0x6cdf78),  // Y green
+        (Vec3::new(0.0, 0.0, 1.0), 0x4ad0ff),  // Z cyan
     ];
-    // N.12 — AA Wu-line arms.  Each axis draws a 2-px-wide bright
-    // segment to the +cap and a thinner dim segment to the -cap.
-    for (axis, hue, _positive) in &caps[..3] {
+
+    // 1-px AA Wu line per axis arm.  Matches Blender's thin-line look.
+    for (axis, hue) in &axes {
         let (dx, dy) = project_axis(*axis);
-        let pen_bright = k_fb::scale_bgrx(*hue, 0.95);
-        let pen_dim    = k_fb::scale_bgrx(*hue, 0.45);
-        // Bright arm to +cap (slightly thicker — two parallel Wu-lines).
-        k_fb::draw_line_aa_rgb(GIZMO_CX,     GIZMO_CY,     GIZMO_CX + dx, GIZMO_CY + dy, pen_bright);
-        k_fb::draw_line_aa_rgb(GIZMO_CX + 1, GIZMO_CY,     GIZMO_CX + dx + 1, GIZMO_CY + dy, pen_bright);
-        // Dim arm to -cap.
-        k_fb::draw_line_aa_rgb(GIZMO_CX,     GIZMO_CY,     GIZMO_CX - dx, GIZMO_CY - dy, pen_dim);
+        k_fb::draw_line_aa_rgb(GIZMO_CX, GIZMO_CY, GIZMO_CX + dx, GIZMO_CY + dy, *hue);
     }
-    // Solid cap discs at each axis end.
-    let mut hovered_axis: Option<(i32, i32, i32)> = None; // (x, y, z) ∈ {-1, 0, 1}
-    for (axis, hue, positive) in &caps {
+
+    // Tiny solid caps + click hit test.
+    let mut hovered_axis: Option<(i32, i32, i32)> = None;
+    for (axis, hue) in &axes {
         let (dx, dy) = project_axis(*axis);
         let cap_x = GIZMO_CX + dx;
         let cap_y = GIZMO_CY + dy;
-        let cap_color = k_fb::scale_bgrx(*hue, if *positive { 1.0 } else { 0.45 });
-        // Filled disc, radius GIZMO_CAP_R
+        // Hit test against mouse (slightly larger than visual disc).
+        let dx_m = mouse_x - cap_x;
+        let dy_m = mouse_y - cap_y;
+        let hovering = dx_m * dx_m + dy_m * dy_m <= GIZMO_HIT_R * GIZMO_HIT_R;
+        if hovering {
+            hovered_axis = Some((axis.x as i32, axis.y as i32, axis.z as i32));
+        }
+        // Cap colour: hover → brighter / full saturation; idle → 85 %.
+        let cap_color = if hovering { 0xffffff } else { k_fb::scale_bgrx(*hue, 0.85) };
+        // Filled 2-px disc (5-pixel cluster).
         for ry in -GIZMO_CAP_R..=GIZMO_CAP_R {
             for rx in -GIZMO_CAP_R..=GIZMO_CAP_R {
                 if rx * rx + ry * ry > GIZMO_CAP_R * GIZMO_CAP_R { continue; }
@@ -750,62 +800,26 @@ fn paint_3d_view(frame: u64) {
                 }
             }
         }
-        // Hit test against mouse (read from local snapshot below).
-        let dx_m = mouse_x - cap_x;
-        let dy_m = mouse_y - cap_y;
-        if dx_m * dx_m + dy_m * dy_m <= GIZMO_HIT_R * GIZMO_HIT_R {
-            hovered_axis = Some((axis.x as i32, axis.y as i32, axis.z as i32));
-            // Hover ring (white outline)
-            for theta in 0..16 {
-                let ang = theta as f32 * 6.2832 / 16.0;
-                let rx = libm::cosf(ang) * (GIZMO_CAP_R as f32 + 2.0);
-                let ry = libm::sinf(ang) * (GIZMO_CAP_R as f32 + 2.0);
-                let sx = cap_x + rx as i32;
-                let sy = cap_y + ry as i32;
-                if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
-                    k_fb::put_pixel_rgb(sx as usize, sy as usize, 0xffffff);
-                }
-            }
-        }
     }
-    // Click-to-snap: if the user clicked while hovering a cap, set the
-    // camera bias atomics so the next frame looks straight down that axis.
+
+    // Single 1-px white centre pivot.
+    if GIZMO_CX >= 0 && GIZMO_CX < SCENE_WIDTH && GIZMO_CY < FOOTER_Y {
+        k_fb::put_pixel_rgb(GIZMO_CX as usize, GIZMO_CY as usize, 0xffffff);
+    }
+
+    // Click-to-snap (same as before, just shorter list — only +axes now).
     if left_edge {
         if let Some((ax, ay, az)) = hovered_axis {
-            // Yaw / pitch from cardinal axis vector.  Yaw measures
-            // rotation around world Y; pitch measures elevation.
-            // Matching look_at: eye = R*(cos(p)sin(y), sin(p), cos(p)cos(y))
-            // → +Z view = yaw 0, pitch 0
-            // → +X view = yaw π/2
-            // → +Y view = pitch +π/2 (almost; clamp to 1.4)
             let (target_yaw, target_pitch) = match (ax, ay, az) {
                 ( 1, 0, 0) => ( core::f32::consts::FRAC_PI_2, 0.0),
-                (-1, 0, 0) => (-core::f32::consts::FRAC_PI_2, 0.0),
                 (0,  1, 0) => (0.0,  1.35),
-                (0, -1, 0) => (0.0, -1.35),
                 (0, 0,  1) => (0.0, 0.0),
-                (0, 0, -1) => (core::f32::consts::PI, 0.0),
                 _ => (0.0, 0.45),
             };
-            // Convert to mrad atomic units; subtract the default
-            // pitch (0.45 rad) since CAMERA_PITCH_BIAS_MRAD is added on top.
             k_fb::CAMERA_YAW_BIAS_MRAD.store((target_yaw * 1000.0) as i32, Ordering::Relaxed);
             k_fb::CAMERA_PITCH_BIAS_MRAD.store(((target_pitch - 0.45) * 1000.0) as i32, Ordering::Relaxed);
             k_fb::CAMERA_AUTO_ROTATE.store(false, Ordering::Relaxed);
-            // Suppress the empty-space-click-clears-selection branch
-            // below by faking a hit (it's logically a "gizmo click",
-            // not a scene click).
             SELECTED_NODE_SLOT.store(-2, Ordering::Relaxed);
-        }
-    }
-    // Centre dot — white pip so the gizmo origin is always visible.
-    for ry in -1..=1 {
-        for rx in -1..=1 {
-            let sx = GIZMO_CX + rx;
-            let sy = GIZMO_CY + ry;
-            if sx >= 0 && sx < SCENE_WIDTH && sy >= 0 && sy < FOOTER_Y {
-                k_fb::put_pixel_rgb(sx as usize, sy as usize, 0xffffff);
-            }
         }
     }
 
@@ -1149,10 +1163,12 @@ pub fn frame_all_nodes(node_total: usize) {
     }
     let bound_r = libm::sqrtf(max_r2) + NODE_HALF * 1.5;
 
-    // Distance such that bound_r fits in the half-FoV vertical
-    // (fov_v = 60° → tan(30°) ≈ 0.577).  +25 % margin for breathing room.
+    // N.15 — pulled camera further back per user feedback ("镜头拉远
+    // 一些").  Margin 1.25 → 1.85: the bounding sphere sits at ~55 %
+    // of the vertical viewport instead of 80 %, leaving generous
+    // black-space halo around the graph for the floating UI cards.
     let half_fov = 30.0f32.to_radians();
-    let fit_dist = bound_r / libm::tanf(half_fov) * 1.25;
+    let fit_dist = bound_r / libm::tanf(half_fov) * 1.85;
     let radius_mm = ((fit_dist * 1000.0) as i32).max(1500);
 
     k_fb::CAMERA_RADIUS_MM.store(radius_mm, Ordering::Relaxed);
@@ -1852,7 +1868,7 @@ fn draw_rope_edge(
     let sag_px: f32 = if rigid { 0.0 } else { (len_f * 0.10).min(6.0) };
 
     let pulse_dim = if matches!(style, EdgeStyle::SolidPulsed) && !pulse_on { 0.55 } else { 1.0 };
-    let highlight_bgrx = sess.color_bgrx(k_fb::Color::Highlight);
+    // (highlight_bgrx removed in N.15 — ropes are pure red/white only)
 
     let perp_x = -dy / len_f;
     let perp_y = dx / len_f;
@@ -1898,18 +1914,12 @@ fn draw_rope_edge(
         };
 
         let braid = libm::sinf(t * braid_freq) * 0.10 + 0.90;
-        let highlight_mix = if highlight && t > 0.25 && t < 0.75 { 0.5 } else { 0.0 };
+        let _ = highlight; // N.15 — pure red/white only, no highlight tinting
 
-        // Build the BGRX for this rope segment by lerping red↔white peaks
-        // and optionally toward the highlight accent.
+        // Build the BGRX for this rope segment by lerping red↔white peaks.
         let base_red   = pack_red_or_white(true,  braid * pulse_dim);
         let base_white = pack_red_or_white(false, braid * pulse_dim);
-        let main_bgrx_raw = k_fb::lerp_bgrx(base_white, base_red, (red_amount * 255.0) as u8);
-        let main_bgrx = if highlight_mix > 0.0 {
-            k_fb::lerp_bgrx(main_bgrx_raw, highlight_bgrx, (highlight_mix * 255.0) as u8)
-        } else {
-            main_bgrx_raw
-        };
+        let main_bgrx = k_fb::lerp_bgrx(base_white, base_red, (red_amount * 255.0) as u8);
 
         // Outer halo: additive falloff, gives the rope a soft glow
         // against the dark backdrop.
