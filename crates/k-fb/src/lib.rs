@@ -685,6 +685,94 @@ pub fn vapor_rect_border(x: usize, y: usize, w: usize, h: usize, phase: f32) {
     vapor_v_line(x, y, y_end, phase_l, -freq);
 }
 
+/// Walk along the perimeter of `(x, y, w, h)` and return the (px, py)
+/// at distance `p` (in pixels) from the top-left corner, moving
+/// clockwise.  Wraps automatically.
+#[inline]
+fn perimeter_pos(x: usize, y: usize, w: usize, h: usize, p: f32) -> (i32, i32) {
+    let perimeter = (2 * w + 2 * h) as f32;
+    let mut p = p;
+    while p < 0.0   { p += perimeter; }
+    while p >= perimeter { p -= perimeter; }
+    let wf = (w - 1) as f32;
+    let hf = (h - 1) as f32;
+    if p < wf {
+        // Top edge L → R
+        ((x as f32 + p) as i32, y as i32)
+    } else if p < wf + hf {
+        // Right edge T → B
+        ((x + w - 1) as i32, (y as f32 + (p - wf)) as i32)
+    } else if p < 2.0 * wf + hf {
+        // Bottom edge R → L
+        ((x as f32 + wf - (p - wf - hf)) as i32, (y + h - 1) as i32)
+    } else {
+        // Left edge B → T
+        (x as i32, (y as f32 + hf - (p - 2.0 * wf - hf)) as i32)
+    }
+}
+
+/// Render a soft AA disc into the back-buffer (alpha-blended).
+/// Used by the particle vapor + by future gas / spark effects.
+#[inline]
+fn render_soft_disc(
+    bb: &mut [u32],
+    cx: i32, cy: i32, radius: f32,
+    bgrx: u32, peak_alpha: u8,
+) {
+    let ri = libm::ceilf(radius + 0.5) as i32;
+    for dy in -ri..=ri {
+        let py = cy + dy;
+        if py < 0 || py >= HEIGHT as i32 { continue; }
+        for dx in -ri..=ri {
+            let px = cx + dx;
+            if px < 0 || px >= WIDTH as i32 { continue; }
+            let d2 = (dx * dx + dy * dy) as f32;
+            let dist = libm::sqrtf(d2);
+            let cov = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            if cov == 0.0 { continue; }
+            let alpha = ((cov * peak_alpha as f32) as u32).min(255) as u8;
+            let off = py as usize * WIDTH + px as usize;
+            bb[off] = lerp_bgrx(bb[off], bgrx, alpha);
+        }
+    }
+}
+
+/// N.17 — gas-particle vapor border.  Replaces the continuous
+/// HSV-line look with discrete drifting "gas" particles strung
+/// around the perimeter.  Each particle:
+///   * 2-px radius soft AA disc
+///   * full-spectrum hue determined by index + phase
+///   * advances clockwise at `phase` rate
+///   * additive trail (one fainter copy 6 px behind) for motion blur
+///
+/// Particle density: 1 per ~10 px of perimeter, clamped 6..36.
+/// The whole pass takes one BACKBUFFER lock.
+pub fn vapor_rect_particles(x: usize, y: usize, w: usize, h: usize, phase: f32) {
+    if w < 4 || h < 4 { return; }
+    let perimeter = (2 * w + 2 * h) as f32;
+    let n = ((perimeter / 10.0) as usize).clamp(6, 36);
+    let inv_n = 1.0 / n as f32;
+    let mut bb = BACKBUFFER.lock();
+    for i in 0..n {
+        // Phase per particle: evenly spaced + global drift.
+        let t = i as f32 * inv_n + phase;
+        let pos_px = t * perimeter;
+        let (cx, cy) = perimeter_pos(x, y, w, h, pos_px);
+        // Hue: spatially varied + slow temporal drift.
+        let hue = i as f32 * inv_n * 1.3 + phase * 0.7;
+        let bgrx = hsv_to_bgrx(hue, 0.85, 1.0);
+        // Main particle (full alpha)
+        render_soft_disc(&mut bb[..], cx, cy, 1.8, bgrx, 230);
+        // Trail (one fainter disc ~5 px back along the perimeter)
+        let trail_pos = pos_px - 5.0;
+        let (tx, ty) = perimeter_pos(x, y, w, h, trail_pos);
+        render_soft_disc(&mut bb[..], tx, ty, 1.4, bgrx, 110);
+        let trail2_pos = pos_px - 10.0;
+        let (tx2, ty2) = perimeter_pos(x, y, w, h, trail2_pos);
+        render_soft_disc(&mut bb[..], tx2, ty2, 1.1, bgrx, 50);
+    }
+}
+
 // ── N.12 — alpha-blended primitives for next-gen UI ────────────────
 
 /// Alpha-blend a pixel onto the back-buffer.  `alpha` is 0..=255
@@ -1502,6 +1590,52 @@ pub fn draw_text_2x(x: usize, y: usize, text: &str, color: Color) {
         }
         draw_glyph_2x(cx, y, ch, color);
         cx += 2 * GLYPH_W;
+    }
+}
+
+/// N.17 — N× scaled BIOS 8×8 glyph with alpha blend, BGRX colour.
+/// Used by the boot splash to draw chunky pixel-style "GOS" letters
+/// that fade in / out.  Each font pixel becomes a `scale × scale`
+/// block, blended into the back-buffer with the supplied alpha.
+pub fn draw_glyph_pixel_scaled(
+    x: usize, y: usize, ch: char,
+    scale: usize, bgrx: u32, alpha: u8,
+) {
+    if scale == 0 || (ch as u32) >= 128 { return; }
+    let glyph = &font8x8::legacy::BASIC_LEGACY[ch as usize];
+    let mut bb = BACKBUFFER.lock();
+    for row in 0..GLYPH_H {
+        let bits = glyph[row];
+        for col in 0..GLYPH_W {
+            if bits & (1 << col) == 0 { continue; }
+            let base_x = x + col * scale;
+            let base_y = y + row * scale;
+            for dy in 0..scale {
+                let py = base_y + dy;
+                if py >= HEIGHT { break; }
+                for dx in 0..scale {
+                    let px = base_x + dx;
+                    if px >= WIDTH { break; }
+                    let off = py * WIDTH + px;
+                    bb[off] = lerp_bgrx(bb[off], bgrx, alpha);
+                }
+            }
+        }
+    }
+}
+
+/// N.17 — N× scaled string render, alpha-blended.  Wraps
+/// `draw_glyph_pixel_scaled` for each char in the input.
+pub fn draw_text_pixel_scaled(
+    x: usize, y: usize, text: &str,
+    scale: usize, bgrx: u32, alpha: u8,
+) {
+    let cell_w = GLYPH_W * scale;
+    let mut cx = x;
+    for ch in text.chars() {
+        if cx + cell_w > WIDTH { break; }
+        draw_glyph_pixel_scaled(cx, y, ch, scale, bgrx, alpha);
+        cx += cell_w;
     }
 }
 

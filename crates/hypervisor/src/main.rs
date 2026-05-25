@@ -143,9 +143,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     frame_all_nodes(snap_for_fit.node_count);
     raw_serial_println(format_args!("boot: camera framed to {} nodes", snap_for_fit.node_count));
 
-    // Phase I.3.8 — first 3D paint before going interactive.  Idle
-    // loop below repaints continuously to keep the camera rotation
-    // smooth.
+    // ── N.17 — pixel-style boot splash ───────────────────────────
+    // Big chunky "GOS" letters (BIOS 8×8 font scaled 8× to 64×64)
+    // fade in, hold, fade out over ~60 frames.  Each frame paints +
+    // present()s; under TCG that's ~1.5–2 s total — long enough to
+    // read but doesn't tax the user's patience.
+    raw_serial_println(format_args!("boot: splash animation"));
+    boot_splash();
+
+    // Phase I.3.8 — first 3D paint before going interactive.
     paint_frame(0);
     raw_serial_println(format_args!("boot: framebuffer 3D scene painted"));
 
@@ -216,13 +222,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
 const SCENE_WIDTH: i32 = k_fb::WIDTH as i32;
 const SCENE_HEIGHT: i32 = k_fb::HEIGHT as i32;
-// N.12 — header bumped 22→28 so the AA Noto 18 brand glyphs (25 px
-// cell) fit with 1 px padding top/bottom.  Footer/cmd bar bumped
-// 18→24 for the same breathing.  Scene body 152 px tall.
-const HEADER_H: i32 = 28;
-const FOOTER_Y: i32 = 172;
-const CMD_BAR_TOP: i32 = 176;
-const CMD_BAR_H: i32 = 24;
+// N.17 — chrome consolidated to a single slim 22-px footer.  The old
+// 28-px top header is gone (per user request "顶部的显示内容合并到底部")
+// — brand + node/edge stats + uptime + heartbeat + command input +
+// mode pill all coexist in one bottom strip ~1/3 the height of the
+// former two-strip chrome.  Scene body grows top→bottom from 0 to
+// FOOTER_Y, gaining 26 px of usable height.
+const HEADER_H: i32 = 0;
+const FOOTER_Y: i32 = 178;
+const CMD_BAR_TOP: i32 = 178;
+const CMD_BAR_H: i32 = 22;
 
 // ── N.12 — design tokens ──────────────────────────────────────────
 //
@@ -747,8 +756,10 @@ fn paint_3d_view(frame: u64) {
     //
     // Click any +axis cap → camera snaps to look down that axis.
     // The same `frame_all` behaviour stays on F6.
-    const GIZMO_CX: i32 = 28;
-    const GIZMO_CY: i32 = HEADER_H + 22;
+    // N.17 — viewport spans 0..FOOTER_Y now; place gizmo in the
+    // top-left with a comfortable margin instead of below a header.
+    const GIZMO_CX: i32 = 32;
+    const GIZMO_CY: i32 = 28;
     const GIZMO_LEN: f32 = 14.0;
     const GIZMO_CAP_R: i32 = 2;
     const GIZMO_HIT_R: i32 = 5;
@@ -841,9 +852,9 @@ fn paint_3d_view(frame: u64) {
         // Left-edge cyan accent bar (vertical) — keeps the panel's
         // "selected" emphasis anchored, complements the vapor halo.
         k_fb::fill_rect_alpha(px, py + SP_SM, 3, PANEL_H - 2 * SP_SM, ACCENT_PRIMARY, 255);
-        // N.16 chromatic-vapor perimeter (different phase from chip).
+        // N.17 — gas-particle vapor perimeter (replaces solid line).
         let vp = frame as f32 * 0.0018 + 0.67;
-        k_fb::vapor_rect_border(px, py, PANEL_W, PANEL_H, vp);
+        k_fb::vapor_rect_particles(px, py, PANEL_W, PANEL_H, vp);
 
         // Row 1 — eyebrow label (small, dim).
         k_fb::draw_text_aa_rgb(px + SP_LG, py + SP_SM, "SELECTED NODE", TEXT_TERTIARY, &k_assets::FONT_UI_14);
@@ -892,32 +903,10 @@ fn paint_3d_view(frame: u64) {
     // I.10 — compacter header that yields the right edge to the
     // I.10.2 uptime + heartbeat widget.  Three fixed-width chips,
     // no generation number (use `gen` command for that).
-    // ── N.12 — masthead brand + breadcrumb ──────────────────────────
-    //
-    // Header layout (left-to-right):
-    //   [4 px accent inset already painted by paint_frame]
-    //   [SP_MD pad] [GOS 18px] [SP_SM] [• cyan separator] [SP_SM]
-    //   [Kernel Graph 14px secondary]
-    // Stats counters move out of the header into a floating chip group
-    // anchored to the top-right of the viewport (paint_stats_chip).
-    use design::*;
-    let baseline_y: usize = (HEADER_H as usize - 25) / 2; // centre 25 px brand glyph in 28 px band
-    let body_y: usize = (HEADER_H as usize - 20) / 2;     // centre 20 px secondary glyph
-    let mut hx: usize = 12;
-    k_fb::draw_text_aa_rgb(hx, baseline_y, "GOS", TEXT_PRIMARY, &k_assets::FONT_UI_18);
-    hx += 3 * 18 + SP_SM;
-    // small cyan square as separator dot — sharper than a "·" glyph
-    k_fb::fill_rect_alpha(hx, baseline_y + 11, 3, 3, ACCENT_PRIMARY, 255);
-    hx += 3 + SP_SM;
-    k_fb::draw_text_aa_rgb(hx, body_y, "Kernel Graph", TEXT_SECONDARY, &k_assets::FONT_UI_14);
-
-    // ── N.12 — floating stats chip group, top-right of viewport ─────
-    //
-    // A frosted-glass card holding the node + edge counts.  Sits 8 px
-    // inside the viewport's top-right, never overlapping the gizmo
-    // (gizmo is moved to top-left of viewport in N.12) and never
-    // hovering the header chrome.
-    paint_stats_chip(returned_n, snapshot.edge_count);
+    // N.17 — brand + stats moved into the consolidated bottom strip.
+    // No in-viewport header chrome.  Viewport now spans full top-to-
+    // FOOTER_Y, giving the 3D scene the full canvas.
+    let _ = (returned_n, snapshot.edge_count); // consumed by paint_command_bar
 
     // ── I.4.5 — edge-style legend strip ──────────────────────────────
     // Bottom-left of the scene area, just above the footer hairline.
@@ -1165,18 +1154,106 @@ pub fn frame_all_nodes(node_total: usize) {
     }
     let bound_r = libm::sqrtf(max_r2) + NODE_HALF * 1.5;
 
-    // N.15 — pulled camera further back per user feedback ("镜头拉远
-    // 一些").  Margin 1.25 → 1.85: the bounding sphere sits at ~55 %
-    // of the vertical viewport instead of 80 %, leaving generous
-    // black-space halo around the graph for the floating UI cards.
-    let half_fov = 30.0f32.to_radians();
-    let fit_dist = bound_r / libm::tanf(half_fov) * 1.85;
+    // N.17 — fit camera to the *effective* scene window, not the full
+    // canvas.  The painter clips body geometry to [HEADER_H, FOOTER_Y]
+    // which is only ~72 % of HEIGHT — the previous fit ignored that
+    // and let nodes near the vertical edges get cropped by chrome.
+    // Now: compute the reduced vertical FOV the scene clip actually
+    // shows, then pad with a 1.6× margin so the floating gizmo + stats
+    // chip + detail card don't sit on top of any node.
+    let half_fov_v = 30.0f32.to_radians();
+    let scene_frac = (FOOTER_Y - HEADER_H) as f32 / SCENE_HEIGHT as f32;
+    let effective_tan = libm::tanf(half_fov_v) * scene_frac;
+    let fit_dist = bound_r / effective_tan * 1.6;
     let radius_mm = ((fit_dist * 1000.0) as i32).max(1500);
 
     k_fb::CAMERA_RADIUS_MM.store(radius_mm, Ordering::Relaxed);
     k_fb::CAMERA_YAW_BIAS_MRAD.store(0, Ordering::Relaxed);
     k_fb::CAMERA_PITCH_BIAS_MRAD.store(0, Ordering::Relaxed);
     k_fb::CAMERA_AUTO_ROTATE.store(false, Ordering::Relaxed);
+}
+
+/// N.17 — chunky pixel-style boot splash.  Runs once at boot before
+/// the main paint loop starts; renders ~60 animation frames showing
+/// "GOS" in 8×-scaled BIOS 8×8 font (so each font pixel is a 8×8
+/// physical block, total letter = 64×64 logical = 384×384 native at
+/// 6× HD scale).  Three phases:
+///   * t ∈ [0, 0.30]  fade in    (alpha 0 → 255)
+///   * t ∈ [0.30, 0.75] hold      (full)
+///   * t ∈ [0.75, 1.00] fade out  (255 → 0)
+///
+/// Letters render in white over a deep-space vertical gradient with
+/// a small tagline below in Noto Sans SC 14.  The whole splash
+/// finishes well under 2 s under TCG and serves as both a "GOS
+/// brand" beat and a "kernel is alive" reassurance before the 3D
+/// scene paints for the first time.
+pub fn boot_splash() {
+    use design::*;
+    const N_FRAMES: u32 = 60;
+    for f in 0..N_FRAMES {
+        let t = f as f32 / (N_FRAMES - 1) as f32;
+        paint_splash_frame(t);
+        k_fb::present();
+    }
+}
+
+fn paint_splash_frame(t: f32) {
+    use design::*;
+    // Deep gradient background.
+    k_fb::clear_gradient_vertical(SURFACE_0_TOP, SURFACE_0_BOTTOM);
+
+    // Three-phase alpha envelope.
+    let alpha_f = if t < 0.30 {
+        t / 0.30
+    } else if t < 0.75 {
+        1.0
+    } else {
+        ((1.0 - t) / 0.25).max(0.0)
+    };
+    let alpha = (alpha_f * 255.0) as u8;
+    if alpha == 0 { return; }
+
+    // Big GOS letters — BIOS 8×8 font scaled 5× so each letter is
+    // 40×40 logical = 240×240 native at HD 6× scale (chunky pixel).
+    let scale = 5usize;
+    let letter_w = 8 * scale; // 40 logical px
+    let letter_h = 8 * scale;
+    let spacing = 6usize;
+    let total_w = 3 * letter_w + 2 * spacing;
+    let start_x = (k_fb::WIDTH - total_w) / 2;
+    let y_brand = (k_fb::HEIGHT - letter_h) / 2 - 8;
+
+    for (i, ch) in "GOS".chars().enumerate() {
+        let x = start_x + i * (letter_w + spacing);
+        // Subtle hue cycle per letter so the brand feels "alive".
+        let hue = (t * 0.5 + i as f32 * 0.22) % 1.0;
+        let color = k_fb::hsv_to_bgrx(hue, 0.45, 1.0);
+        k_fb::draw_glyph_pixel_scaled(x, y_brand, ch, scale, color, alpha);
+    }
+
+    // Tagline below in AA Noto 14.
+    let tag = "graph-theory OS";
+    let tag_w = tag.len() * 14;
+    let tag_x = (k_fb::WIDTH - tag_w) / 2;
+    let tag_y = y_brand + letter_h + 14;
+    let tag_color = k_fb::scale_bgrx(TEXT_SECONDARY, alpha_f);
+    k_fb::draw_text_aa_rgb(tag_x, tag_y, tag, tag_color, &k_assets::FONT_UI_14);
+
+    // Subtle progress line at the bottom — animates the loading feel.
+    let bar_y = k_fb::HEIGHT - 12;
+    let bar_w = 120;
+    let bar_x = (k_fb::WIDTH - bar_w) / 2;
+    let fill_w = ((bar_w as f32) * t.min(1.0)) as usize;
+    k_fb::fill_rect_alpha(bar_x, bar_y, bar_w, 2, SURFACE_2_TOP, 200);
+    if fill_w > 0 {
+        let phase = t * 2.0;
+        for px in 0..fill_w {
+            let hue = (px as f32 * 0.008 + phase) % 1.0;
+            let bgrx = k_fb::hsv_to_bgrx(hue, 0.85, 1.0);
+            k_fb::put_pixel_rgb(bar_x + px, bar_y, bgrx);
+            k_fb::put_pixel_rgb(bar_x + px, bar_y + 1, bgrx);
+        }
+    }
 }
 
 /// Phase M.4.b — physics frozen.  The earlier Verlet + anchor + edge
@@ -3085,102 +3162,9 @@ fn interpret_command(raw: &str) {
 // `paint_frame` in BOTH modes (kernel view and OS shell) so the
 // user always has a "this kernel is running" affordance.
 
-fn paint_status_widget(frame: u64) {
-    use design::*;
-    // Uptime in HH:MM:SS, monospace so the digits don't dance.
-    let total_secs = frame / 50;
-    let hh = total_secs / 3600;
-    let mm = (total_secs / 60) % 60;
-    let ss = total_secs % 60;
-    let mut buf = TextBuf::<16>::new();
-    if hh < 10 { buf.push_str("0"); }
-    buf.push_dec(hh);
-    buf.push_str(":");
-    if mm < 10 { buf.push_str("0"); }
-    buf.push_dec(mm);
-    buf.push_str(":");
-    if ss < 10 { buf.push_str("0"); }
-    buf.push_dec(ss);
-
-    // Right-aligned with cyan heartbeat dot to its right.
-    let text = buf.as_str();
-    let mono_w = 10; // Cascadia cell width
-    let dot_size = 5;
-    let dot_x = k_fb::WIDTH - SP_LG - dot_size;
-    let tx = dot_x - SP_SM - text.len() * mono_w;
-    let ty = (HEADER_H as usize - 18) / 2;
-    k_fb::draw_text_aa_rgb(tx, ty, text, TEXT_SECONDARY, &k_assets::FONT_MONO_13);
-
-    // Heartbeat dot — pulses cyan once per second (~120 ms on).
-    let dot_y = (HEADER_H as usize - dot_size) / 2;
-    let pulsing = (frame % 50) < 6;
-    let dot_bg = if pulsing { ACCENT_PRIMARY } else { 0x1a2348 };
-    // Filled disc with soft halo for the "alive" feel.
-    for ry in 0..dot_size {
-        for rx in 0..dot_size {
-            let cx = dot_x + rx;
-            let cy = dot_y + ry;
-            let dx = rx as i32 * 2 - dot_size as i32;
-            let dy = ry as i32 * 2 - dot_size as i32;
-            let d2 = dx * dx + dy * dy;
-            let r2 = (dot_size as i32) * (dot_size as i32);
-            if d2 <= r2 {
-                k_fb::put_pixel_rgb(cx, cy, dot_bg);
-            }
-        }
-    }
-    if pulsing {
-        // Soft halo ring
-        for theta in 0..16 {
-            let ang = theta as f32 * 6.2832 / 16.0;
-            let r = (dot_size as f32 / 2.0) + 1.5;
-            let rx = libm::cosf(ang) * r;
-            let ry = libm::sinf(ang) * r;
-            let cx = (dot_x as i32 + dot_size as i32 / 2 + rx as i32) as usize;
-            let cy = (dot_y as i32 + dot_size as i32 / 2 + ry as i32) as usize;
-            k_fb::blend_pixel_rgb(cx, cy, ACCENT_PRIMARY, 120);
-        }
-    }
-}
-
-/// N.12/16 — floating stats chip at top-right of the viewport.
-/// Frosted glass card with N.16 chromatic-vapor border.
-fn paint_stats_chip(node_n: usize, edge_n: usize) {
-    use design::*;
-    let chip_w: usize = 96;
-    let chip_h: usize = 44;
-    let x = k_fb::WIDTH - chip_w - SP_MD;
-    let y = HEADER_H as usize + SP_MD;
-    // Frosted backdrop.
-    k_fb::box_blur_region(x, y, chip_w, chip_h);
-    k_fb::fill_round_rect_alpha(x, y, chip_w, chip_h, RADIUS_MD, SURFACE_1_TOP, 180);
-    // N.16 vapor border (drifts at a different phase so all chrome
-    // pieces don't pulse in unison — feels alive, not synchronised).
-    let frame_now = FRAME_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
-    let vapor_phase = frame_now as f32 * 0.0018 + 0.33;
-    k_fb::vapor_rect_border(x, y, chip_w, chip_h, vapor_phase);
-    // Two rows.
-    let row_pad: usize = 8;
-    let v_pad: usize = 4;
-    // Row 1 — node count
-    let mut buf = TextBuf::<8>::new();
-    buf.push_dec(node_n as u64);
-    let nm = "nodes";
-    let val = buf.as_str();
-    let val_x = x + row_pad;
-    let val_y = y + v_pad;
-    k_fb::draw_text_aa_rgb(val_x, val_y, val, ACCENT_PRIMARY, &k_assets::FONT_UI_14);
-    let val_w = val.len() * 14;
-    k_fb::draw_text_aa_rgb(val_x + val_w + 4, val_y + 4, nm, TEXT_TERTIARY, &k_assets::FONT_UI_14);
-    // Row 2 — edge count
-    let mut buf2 = TextBuf::<8>::new();
-    buf2.push_dec(edge_n as u64);
-    let val2 = buf2.as_str();
-    let val2_y = y + v_pad + 18;
-    k_fb::draw_text_aa_rgb(val_x, val2_y, val2, ACCENT_HOT, &k_assets::FONT_UI_14);
-    let val2_w = val2.len() * 14;
-    k_fb::draw_text_aa_rgb(val_x + val2_w + 4, val2_y + 4, "edges", TEXT_TERTIARY, &k_assets::FONT_UI_14);
-}
+// N.17 — paint_status_widget / paint_stats_chip retired; all of
+// their data lives in the consolidated bottom strip painted by
+// paint_command_bar.
 
 /// Top-level paint coordinator.  Drains input, paints the header
 /// + body (mode-dependent) + scrollback (when expanded) + command
@@ -3199,53 +3183,27 @@ fn paint_frame(frame: u64) {
     let mode = k_fb::UI_MODE.load(Ordering::Relaxed);
     let scrollback_open = k_fb::UI_SCROLLBACK_EXPANDED.load(Ordering::Relaxed);
 
-    // N.12/16 — design-token chrome with N.16 chromatic-vapor borders.
+    // N.17 — no top header anymore.  Body fills the whole canvas
+    // top→FOOTER_Y; the only chrome is the consolidated bottom strip
+    // painted by `paint_command_bar` below.
     use design::*;
     k_fb::clear_gradient_vertical(SURFACE_0_TOP, SURFACE_0_BOTTOM);
-
-    // Header band — taller (28 px) so the AA 18-px brand text breathes.
-    let header_h = HEADER_H as usize;
-    k_fb::fill_rect_gradient(0, 0, k_fb::WIDTH, header_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
-
-    // 3-px vertical accent at the very left — also vapor-cycled so the
-    // brand inset shimmers slowly through the chromatic palette.
-    let vapor_phase = frame as f32 * 0.0015; // ~11 s for one wheel cycle
-    let brand_hue = (vapor_phase * 0.5) % 1.0; // brand cycles half-speed
-    let brand_bgrx = k_fb::hsv_to_bgrx(brand_hue, 0.85, 0.95);
-    for y in 0..header_h {
-        k_fb::put_pixel_rgb(0, y, brand_bgrx);
-        k_fb::put_pixel_rgb(1, y, brand_bgrx);
-        k_fb::blend_pixel_rgb(2, y, brand_bgrx, 160);
-        k_fb::blend_pixel_rgb(3, y, brand_bgrx, 96);
-        k_fb::blend_pixel_rgb(4, y, brand_bgrx, 48);
-    }
-
-    // N.16 — chromatic vapor along the header bottom edge.  Replaces
-    // the old static cyan accent line.  Hue cycles spatially along
-    // the width + drifts with `vapor_phase`, glow halo above + below.
-    k_fb::vapor_h_line(header_h - 1, 0, k_fb::WIDTH, vapor_phase, 0.006);
 
     match mode {
         k_fb::UI_MODE_KERNEL_VIEW => paint_3d_view(frame),
         _ => paint_os_shell_body(frame),
     }
 
-    // I.10.2 — persistent uptime + heartbeat widget (mode-independent).
-    paint_status_widget(frame);
-
+    // N.17 — paint_status_widget is gone (uptime + heartbeat folded
+    // into the consolidated bottom strip below).
     if scrollback_open {
         paint_scrollback();
     } else {
-        // I.12 — ambient chat HUD: the 4 most recent scrollback
-        // lines floating just above the command bar with no box,
-        // no fill — text on top of the scene with a 1-pixel
-        // background-shadow outline for legibility on any
-        // backdrop.  Always visible so the chat conversation
-        // (typed commands + kernel responses) stays on screen
-        // without modal scrollback eclipsing the 3D scene.
         paint_chat_hud();
     }
-    paint_command_bar(frame, mode);
+    // Snapshot the live runtime stats for the bottom strip.
+    let snap = gos_runtime::snapshot();
+    paint_command_bar(frame, mode, snap.node_count, snap.edge_count);
 
     k_fb::present();
 }
@@ -3381,79 +3339,138 @@ fn paint_os_shell_body(frame: u64) {
 /// typed text in Foreground, blinking 1-px cursor in Foreground at
 /// the current insertion point.  Frame counter drives the blink at
 /// ~2.5 Hz so the user has a clear "I can type here" affordance.
-fn paint_command_bar(frame: u64, mode: u8) {
+fn paint_command_bar(frame: u64, mode: u8, node_n: usize, edge_n: usize) {
     use design::*;
-    // ── N.16 — Windows-Start-Menu-style centred floating command box ──
+    // ── N.17 — consolidated slim chrome strip ────────────────────────
     //
-    // Per user feedback ("输入栏像 Windows 开始菜单默认那么宽就足够"
-    // + "彩色蒸汽边框" + "大师风范 + 未来感"):
-    //   * Bar is a centred ~200-px-wide glass-tinted rounded card,
-    //     not a full-width strip — matches Win11 Start centroid.
-    //   * Vapor border (HSV-cycling rainbow) flows continuously around
-    //     the perimeter, ~11 s for one wheel.
-    //   * Frosted backdrop: blur a strip behind the box first.
-    //   * Right-edge mode pill stays floating outside the box at the
-    //     same vertical centre.
-    let box_w: usize = 196;          // ≈ Win11 Start centroid proportion
-    let box_h: usize = CMD_BAR_H as usize; // fits inside the 24-px chrome zone
-    let box_x = (k_fb::WIDTH - box_w) / 2;
-    let box_y = CMD_BAR_TOP as usize;
+    // One 22-px tall bar holds everything the old two-strip layout
+    // showed: brand, stats, uptime, heartbeat, command input, mode pill.
+    // Layout (left → right) in the 320-px logical width:
+    //
+    //   GOS · 25N · 63E · 03:42 ●     ┌─› cmd ──┐    KERNEL
+    //   └─── status cluster ────┘  └─ input ─┘  └─ pill ─┘
+    let bar_y = CMD_BAR_TOP as usize;
+    let bar_h = CMD_BAR_H as usize;
 
-    // Frosted glass: blur the underlying scene, then tint.
-    k_fb::box_blur_region(box_x, box_y, box_w, box_h);
-    k_fb::fill_round_rect_alpha(box_x, box_y, box_w, box_h, RADIUS_MD, SURFACE_1_TOP, 215);
+    // Slim gradient underlay across the full width — gives the chrome
+    // a quiet "shelf" without being a heavy bar.
+    k_fb::fill_rect_gradient(0, bar_y, k_fb::WIDTH, bar_h, SURFACE_2_TOP, SURFACE_2_BOTTOM);
+    // Vapor accent line along the top edge — animated, ties the chrome
+    // visually to the floating cards (which share the same vapor style).
+    let vapor_phase = frame as f32 * 0.0018;
+    k_fb::vapor_h_line(bar_y, 0, k_fb::WIDTH, vapor_phase, 0.005);
 
-    // N.16 vapor border around the perimeter.
-    let vapor_phase = frame as f32 * 0.0018; // slightly faster than header
-    k_fb::vapor_rect_border(box_x, box_y, box_w, box_h, vapor_phase);
+    // Text baseline: centre 18-px mono inside 22-px strip.
+    let text_y = bar_y + (bar_h - 18) / 2;
+    let mono_w: usize = 10;
 
-    // Prompt + typed text in Cascadia 13.  Cell_w = 10, cell_h = 18.
-    let mono_w = 10;
-    let text_y = box_y + (box_h - 18) / 2;
-    let prompt_x = box_x + SP_MD;
-    k_fb::draw_text_aa_rgb(prompt_x, text_y, "›", ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
-    let body_x = prompt_x + mono_w + SP_SM;
-
-    let ui = UI_STATE.lock();
-    let line = ui.current_line();
-    let line_len = line.len();
-    let max_visible_chars =
-        ((box_x + box_w).saturating_sub(body_x + SP_MD) / mono_w).min(CMD_LINE_CAP);
-    let visible_start = line_len.saturating_sub(max_visible_chars);
-    let visible = unsafe {
-        core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
-    };
-    k_fb::draw_text_aa_rgb(body_x, text_y, visible, TEXT_PRIMARY, &k_assets::FONT_MONO_13);
-
-    // 2-px vertical cursor bar — same accent colour as the vapor's
-    // current "active" hue at that point would be too noisy; keep
-    // cursor as a steady ACCENT_PRIMARY anchor.
-    let cursor_on = (frame / 16) & 1 == 0;
-    if cursor_on {
-        let cursor_x = body_x + (line_len - visible_start) * mono_w;
-        if cursor_x + 2 < box_x + box_w - SP_SM {
-            for cy in 0..16 {
-                let py = text_y + 1 + cy;
-                if py >= k_fb::HEIGHT { break; }
-                k_fb::put_pixel_rgb(cursor_x, py, ACCENT_PRIMARY);
-                k_fb::put_pixel_rgb(cursor_x + 1, py, ACCENT_PRIMARY);
+    // ── LEFT cluster: brand · stats · uptime · heartbeat ──
+    let mut hx: usize = SP_MD;
+    k_fb::draw_text_aa_rgb(hx, text_y, "GOS", ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    hx += 3 * mono_w + SP_SM;
+    k_fb::draw_text_aa_rgb(hx, text_y, "·", TEXT_TERTIARY, &k_assets::FONT_MONO_13);
+    hx += mono_w + SP_SM;
+    // Stats: "25N · 63E"
+    let mut stats = TextBuf::<12>::new();
+    stats.push_dec(node_n as u64);
+    stats.push_str("N");
+    k_fb::draw_text_aa_rgb(hx, text_y, stats.as_str(), TEXT_SECONDARY, &k_assets::FONT_MONO_13);
+    hx += stats.as_str().len() * mono_w + SP_SM;
+    k_fb::draw_text_aa_rgb(hx, text_y, "·", TEXT_TERTIARY, &k_assets::FONT_MONO_13);
+    hx += mono_w + SP_SM;
+    let mut stats2 = TextBuf::<12>::new();
+    stats2.push_dec(edge_n as u64);
+    stats2.push_str("E");
+    k_fb::draw_text_aa_rgb(hx, text_y, stats2.as_str(), TEXT_SECONDARY, &k_assets::FONT_MONO_13);
+    hx += stats2.as_str().len() * mono_w + SP_SM;
+    k_fb::draw_text_aa_rgb(hx, text_y, "·", TEXT_TERTIARY, &k_assets::FONT_MONO_13);
+    hx += mono_w + SP_SM;
+    // Uptime "MM:SS" — strip hours for compactness, ~99 min wraps.
+    let total_secs = frame / 50;
+    let mm = (total_secs / 60) % 100;
+    let ss = total_secs % 60;
+    let mut upt = TextBuf::<8>::new();
+    if mm < 10 { upt.push_str("0"); }
+    upt.push_dec(mm);
+    upt.push_str(":");
+    if ss < 10 { upt.push_str("0"); }
+    upt.push_dec(ss);
+    k_fb::draw_text_aa_rgb(hx, text_y, upt.as_str(), TEXT_SECONDARY, &k_assets::FONT_MONO_13);
+    hx += upt.as_str().len() * mono_w + SP_SM;
+    // Heartbeat dot.
+    let pulsing = (frame % 50) < 6;
+    let dot = if pulsing { ACCENT_PRIMARY } else { ACCENT_PRIMARY_DIM };
+    let dot_size = 4usize;
+    let dot_y = bar_y + (bar_h - dot_size) / 2;
+    for dy in 0..dot_size {
+        for dx in 0..dot_size {
+            let drx = dx as i32 * 2 - dot_size as i32;
+            let dry = dy as i32 * 2 - dot_size as i32;
+            if drx * drx + dry * dry <= (dot_size as i32) * (dot_size as i32) {
+                k_fb::put_pixel_rgb(hx + dx, dot_y + dy, dot);
             }
         }
     }
+    let left_end = hx + dot_size + SP_MD;
 
-    // Mode pill floats to the right of the command box, outside its
-    // chrome — keeps the input area uncluttered.
+    // ── RIGHT cluster: mode pill ──
     let pill = match mode {
         k_fb::UI_MODE_KERNEL_VIEW => "KERNEL",
         _ => "SHELL",
     };
     let pill_text_w = pill.len() * mono_w;
     let pill_w = pill_text_w + 2 * SP_MD;
-    let pill_y = box_y + (box_h - CHIP_H) / 2;
-    let pill_x = box_x + box_w + SP_MD;
-    if pill_x + pill_w + SP_MD <= k_fb::WIDTH {
-        k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, CHIP_H, RADIUS_SM, ACCENT_PRIMARY_DIM, 150);
-        k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y + 1, pill, ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    let pill_h = (bar_h - 2).min(16);
+    let pill_x = k_fb::WIDTH - pill_w - SP_MD;
+    let pill_y = bar_y + (bar_h - pill_h) / 2;
+    k_fb::fill_round_rect_alpha(pill_x, pill_y, pill_w, pill_h, RADIUS_SM, ACCENT_PRIMARY_DIM, 160);
+    k_fb::draw_text_aa_rgb(pill_x + SP_MD, pill_y, pill, ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+    let right_start = pill_x - SP_MD;
+
+    // ── CENTRE cluster: command input box ──
+    // Fits whatever horizontal budget is left between the two clusters.
+    // Win11 Start-style centred glass card with vapor particle border.
+    let box_w = right_start.saturating_sub(left_end).min(196);
+    if box_w >= 80 {
+        let box_h = bar_h - 2;
+        let box_x = left_end + (right_start - left_end - box_w) / 2;
+        let box_y = bar_y + 1;
+
+        k_fb::box_blur_region(box_x, box_y, box_w, box_h);
+        k_fb::fill_round_rect_alpha(box_x, box_y, box_w, box_h, RADIUS_MD, SURFACE_1_TOP, 215);
+        // N.17 — gas-particle vapor border (replaces solid line vapor).
+        k_fb::vapor_rect_particles(box_x, box_y, box_w, box_h, vapor_phase);
+
+        // Prompt + typed text.
+        let prompt_x = box_x + SP_SM;
+        let prompt_y = box_y + (box_h.saturating_sub(18)) / 2;
+        k_fb::draw_text_aa_rgb(prompt_x, prompt_y, "›", ACCENT_PRIMARY, &k_assets::FONT_MONO_13);
+        let body_x = prompt_x + mono_w + 2;
+
+        let ui = UI_STATE.lock();
+        let line = ui.current_line();
+        let line_len = line.len();
+        let max_visible_chars =
+            ((box_x + box_w).saturating_sub(body_x + SP_SM) / mono_w).min(CMD_LINE_CAP);
+        let visible_start = line_len.saturating_sub(max_visible_chars);
+        let visible = unsafe {
+            core::str::from_utf8_unchecked(&line.as_bytes()[visible_start..line_len])
+        };
+        k_fb::draw_text_aa_rgb(body_x, prompt_y, visible, TEXT_PRIMARY, &k_assets::FONT_MONO_13);
+
+        // 2-px cyan cursor.
+        let cursor_on = (frame / 16) & 1 == 0;
+        if cursor_on {
+            let cursor_x = body_x + (line_len - visible_start) * mono_w;
+            if cursor_x + 2 < box_x + box_w - SP_SM {
+                for cy in 1..(box_h - 2) {
+                    let py = box_y + cy;
+                    if py >= k_fb::HEIGHT { break; }
+                    k_fb::put_pixel_rgb(cursor_x, py, ACCENT_PRIMARY);
+                    k_fb::put_pixel_rgb(cursor_x + 1, py, ACCENT_PRIMARY);
+                }
+            }
+        }
     }
 }
 
