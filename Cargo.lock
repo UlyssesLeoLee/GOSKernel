@@ -107,6 +107,7 @@ dependencies = [
  "k-serial",
  "k-shell",
  "k-vga",
+ "k-vk-host",
  "k-vmm",
  "x86_64",
 ]
@@ -386,6 +387,15 @@ name = "k-vga"
 version = "0.2.0"
 dependencies = [
  "gos-protocol",
+ "x86_64",
+]
+
+[[package]]
+name = "k-vk-host"
+version = "0.2.0"
+dependencies = [
+ "gos-protocol",
+ "gos-runtime",
  "x86_64",
 ]
 

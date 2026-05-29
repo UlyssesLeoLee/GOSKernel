@@ -42,3 +42,4 @@ pub const SVC_CYPHER: VectorAddress = VectorAddress::new(6, 6, 0, 0);
 pub const SVC_CUDA: VectorAddress = VectorAddress::new(6, 7, 0, 0);
 pub const SVC_CHAT: VectorAddress = VectorAddress::new(6, 8, 0, 0);
 pub const SVC_NIM: VectorAddress  = VectorAddress::new(6, 9, 0, 0);
+pub const SVC_VK: VectorAddress   = VectorAddress::new(6, 10, 0, 0); // graph-native visual bridge (k-vk-host)

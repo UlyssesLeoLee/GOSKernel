@@ -93,10 +93,24 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
+    // Auto-live visual surface: throttle on the 120 Hz PIT so we re-check the
+    // graph ~4x/s. k-vk-host re-emits the @gos.vk frame only when the structural
+    // graph_epoch changed (idle graph -> just an epoch read). Runs OUTSIDE the
+    // without_interrupts block so the slow UART emit never stalls IRQs; the
+    // RUNTIME reads inside vk_auto_refresh bracket themselves. Manual `vk` still
+    // forces a redraw via VK_CONTROL_REPORT.
+    const VK_REFRESH_TICKS: usize = 30;
+    let mut vk_last_tick = k_pit::get_ticks();
+
     loop {
         x86_64::instructions::interrupts::without_interrupts(|| {
             gos_supervisor::service_system_cycle();
         });
+        let now = k_pit::get_ticks();
+        if now.wrapping_sub(vk_last_tick) >= VK_REFRESH_TICKS {
+            vk_last_tick = now;
+            k_vk_host::vk_auto_refresh();
+        }
         x86_64::instructions::hlt();
     }
 }

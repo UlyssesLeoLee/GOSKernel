@@ -364,6 +364,14 @@ pub const CUDA_CONTROL_JOB_BEGIN: u8 = 0xE0;
 pub const CUDA_CONTROL_JOB_COMMIT: u8 = 0xE1;
 pub const CUDA_CONTROL_REPORT: u8 = 0xE2;
 pub const CUDA_CONTROL_RESET: u8 = 0xE3;
+
+// ── VK (graph-native visual bridge) commands (k-shell → k-vk-host) ──────────
+/// Shell → k-vk-host: emit a demo graph display-list frame to the visual bridge.
+pub const VK_CONTROL_DEMO: u8 = 0xD0;
+/// Shell → k-vk-host: clear the visual surface.
+pub const VK_CONTROL_CLEAR: u8 = 0xD1;
+/// Shell → k-vk-host: emit a bridge status report frame.
+pub const VK_CONTROL_REPORT: u8 = 0xD2;
 pub const CLIPBOARD_DATA_BEGIN: u8 = 0xF8;
 pub const CLIPBOARD_DATA_COMMIT: u8 = 0xF9;
 pub const CLIPBOARD_DATA_CLEAR: u8 = 0xFA;

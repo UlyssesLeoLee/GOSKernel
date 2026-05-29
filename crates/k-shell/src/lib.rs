@@ -2981,6 +2981,20 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         }
         return true;
     }
+    if cmd == "vk" {
+        begin_graph_command(sink, state);
+        match gos_runtime::post_signal(
+            gos_protocol::vectors::SVC_VK,
+            Signal::Control { cmd: gos_protocol::VK_CONTROL_REPORT, val: 0 },
+        ) {
+            Ok(_) => {
+                gos_runtime::pump();
+                render_graph_notice(sink, state, "VK", "live graph frame dispatched", "run tools/gfx-bridge.py to view the graph surface", 10);
+            }
+            Err(_) => render_graph_notice(sink, state, "VK", "visual bridge unavailable", "k-vk-host did not accept the frame", 12),
+        }
+        return true;
+    }
     if let Some(edge_vector) = parse_edge_command(cmd) {
         begin_graph_command(sink, state);
         push_graph_nav_state(state);

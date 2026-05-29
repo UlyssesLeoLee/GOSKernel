@@ -269,6 +269,18 @@ impl AdjacencyArena {
     }
 }
 
+/// One entry in the cached edge enumeration order: the edge's storage
+/// slot plus its endpoints' node slots, resolved once when the order is
+/// (re)built so per-edge summaries skip the O(nodes) id lookup that
+/// `edge_summary_from_slot` performs.  `u16::MAX` marks an unresolved
+/// endpoint.
+#[derive(Clone, Copy)]
+struct EdgeOrderEntry {
+    slot: u16,
+    from_slot: u16,
+    to_slot: u16,
+}
+
 pub struct GraphRuntime {
     plugins: [Option<PluginRecord>; MAX_PLUGINS],
     nodes: [Option<NodeRecord>; MAX_NODES],
@@ -282,6 +294,21 @@ pub struct GraphRuntime {
     control_plane: RingQueue<ControlPlaneEnvelope, MAX_CONTROL_PLANE_MESSAGES>,
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
+    /// Monotonic epoch bumped on every structural mutation (node or edge
+    /// add/remove).  Enumeration caches an ordered snapshot keyed on this
+    /// epoch, and host bridges can read it to skip re-rendering an
+    /// unchanged graph — the change-tracking primitive for live streaming.
+    graph_epoch: u64,
+    /// Cached node enumeration order: storage-slot indices sorted by
+    /// vector key, rebuilt lazily when `node_order_epoch != graph_epoch`.
+    node_order: [u16; MAX_NODES],
+    node_order_len: usize,
+    node_order_epoch: u64,
+    /// Cached edge enumeration order (with resolved endpoint slots),
+    /// rebuilt lazily when `edge_order_epoch != graph_epoch`.
+    edge_order: [EdgeOrderEntry; MAX_EDGES],
+    edge_order_len: usize,
+    edge_order_epoch: u64,
     tick: u64,
 }
 
@@ -300,6 +327,17 @@ impl GraphRuntime {
             control_plane: RingQueue::new(),
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
+            graph_epoch: 0,
+            node_order: [0u16; MAX_NODES],
+            node_order_len: 0,
+            node_order_epoch: u64::MAX,
+            edge_order: [EdgeOrderEntry {
+                slot: 0,
+                from_slot: u16::MAX,
+                to_slot: u16::MAX,
+            }; MAX_EDGES],
+            edge_order_len: 0,
+            edge_order_epoch: u64::MAX,
             tick: 0,
         }
     }
@@ -384,8 +422,25 @@ impl GraphRuntime {
         let record = self.edges.get(slot).and_then(|slot| *slot)?;
         let from_slot = self.node_slot_by_id(record.spec.from_node)?;
         let to_slot = self.node_slot_by_id(record.spec.to_node)?;
-        let from = self.nodes[from_slot]?;
-        let to = self.nodes[to_slot]?;
+        self.edge_summary_resolved(slot, from_slot, to_slot, direction)
+    }
+
+    /// Build an edge summary from a storage slot whose endpoints are
+    /// already resolved to node slots.  The cached `edge_page` fast path
+    /// uses this so each edge avoids the two O(nodes) id lookups that
+    /// `edge_summary_from_slot` performs.  An out-of-range endpoint slot
+    /// (e.g. `u16::MAX`, unresolved when the order was built) yields
+    /// `None`, matching the skip behaviour of the lookup path.
+    fn edge_summary_resolved(
+        &self,
+        slot: usize,
+        from_slot: usize,
+        to_slot: usize,
+        direction: GraphEdgeDirection,
+    ) -> Option<GraphEdgeSummary> {
+        let record = self.edges.get(slot).and_then(|slot| *slot)?;
+        let from = self.nodes.get(from_slot).and_then(|slot| *slot)?;
+        let to = self.nodes.get(to_slot).and_then(|slot| *slot)?;
         Some(GraphEdgeSummary {
             edge_vector: record.edge_vector,
             edge_id: record.spec.edge_id,
@@ -409,6 +464,12 @@ impl GraphRuntime {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Current structural epoch (see the `graph_epoch` field).  Bumped on
+    /// every node/edge add or remove; stable across pure reads.
+    pub fn graph_epoch(&self) -> u64 {
+        self.graph_epoch
     }
 
     pub fn discover_plugin(&mut self, manifest: PluginManifest) -> Result<(), RuntimeError> {
@@ -475,6 +536,7 @@ impl GraphRuntime {
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
         self.state_delta(spec.node_id, NodeLifecycle::Registered);
         self.state_delta(spec.node_id, NodeLifecycle::Allocated);
+        self.graph_epoch = self.graph_epoch.wrapping_add(1);
         Ok(spec.node_id)
     }
 
@@ -490,6 +552,7 @@ impl GraphRuntime {
             spec,
         });
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
+        self.graph_epoch = self.graph_epoch.wrapping_add(1);
         Ok(spec.edge_id)
     }
 
@@ -519,6 +582,7 @@ impl GraphRuntime {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
         self.edges[slot] = None;
         self.adjacency_arena.release(edge_id);
+        self.graph_epoch = self.graph_epoch.wrapping_add(1);
         Ok(())
     }
 
@@ -597,39 +661,113 @@ impl GraphRuntime {
         self.edge_summary_from_slot(slot, GraphEdgeDirection::Outbound)
     }
 
-    pub fn node_page<const N: usize>(
-        &self,
-        offset: usize,
-        out: &mut [GraphNodeSummary; N],
-    ) -> (usize, usize) {
-        let mut slots = [usize::MAX; MAX_NODES];
+    /// Rebuild the cached node enumeration order if the graph mutated
+    /// since it was last built.  Sorting once per snapshot — rather than
+    /// on every page request — turns a full paginated walk from
+    /// O((V/N)·V²) into one O(V²) build plus O(V) of slicing: every page
+    /// after the first is a plain array read.
+    fn refresh_node_order(&mut self) {
+        if self.node_order_epoch == self.graph_epoch {
+            return;
+        }
+        let mut slots = [0u16; MAX_NODES];
+        let mut keys = [0u64; MAX_NODES];
         let mut total = 0usize;
         for (idx, slot) in self.nodes.iter().enumerate() {
-            if slot.is_some() {
-                slots[total] = idx;
+            if let Some(record) = slot {
+                slots[total] = idx as u16;
+                keys[total] = record.vector.as_u64();
                 total += 1;
             }
         }
-
+        // Insertion sort on cached keys (loop-invariant key reads).
         let mut i = 1usize;
         while i < total {
-            let current = slots[i];
+            let cur_slot = slots[i];
+            let cur_key = keys[i];
             let mut j = i;
-            while j > 0
-                && self.nodes[slots[j - 1]].unwrap().vector.as_u64()
-                    > self.nodes[current].unwrap().vector.as_u64()
-            {
+            while j > 0 && keys[j - 1] > cur_key {
                 slots[j] = slots[j - 1];
+                keys[j] = keys[j - 1];
                 j -= 1;
             }
-            slots[j] = current;
+            slots[j] = cur_slot;
+            keys[j] = cur_key;
             i += 1;
         }
+        self.node_order[..total].copy_from_slice(&slots[..total]);
+        self.node_order_len = total;
+        self.node_order_epoch = self.graph_epoch;
+    }
 
+    /// Rebuild the cached edge enumeration order if the graph mutated
+    /// since it was last built.  Besides sorting once per snapshot, each
+    /// entry caches its endpoints' node slots so `edge_page` skips the two
+    /// O(nodes) id lookups `edge_summary_from_slot` would do per edge —
+    /// collapsing a full paged edge walk from O((E/N)·E·V) to one
+    /// O(E·V) build plus O(E) slicing.
+    fn refresh_edge_order(&mut self) {
+        if self.edge_order_epoch == self.graph_epoch {
+            return;
+        }
+        let mut entries = [EdgeOrderEntry {
+            slot: 0,
+            from_slot: u16::MAX,
+            to_slot: u16::MAX,
+        }; MAX_EDGES];
+        let mut keys = [0u64; MAX_EDGES];
+        let mut total = 0usize;
+        for (idx, edge) in self.edges.iter().enumerate() {
+            if let Some(record) = edge {
+                let from_slot = self
+                    .node_slot_by_id(record.spec.from_node)
+                    .map(|s| s as u16)
+                    .unwrap_or(u16::MAX);
+                let to_slot = self
+                    .node_slot_by_id(record.spec.to_node)
+                    .map(|s| s as u16)
+                    .unwrap_or(u16::MAX);
+                entries[total] = EdgeOrderEntry {
+                    slot: idx as u16,
+                    from_slot,
+                    to_slot,
+                };
+                keys[total] = record.edge_vector.as_u64();
+                total += 1;
+            }
+        }
+        // Insertion sort on cached keys (loop-invariant key reads).
+        let mut i = 1usize;
+        while i < total {
+            let cur = entries[i];
+            let cur_key = keys[i];
+            let mut j = i;
+            while j > 0 && keys[j - 1] > cur_key {
+                entries[j] = entries[j - 1];
+                keys[j] = keys[j - 1];
+                j -= 1;
+            }
+            entries[j] = cur;
+            keys[j] = cur_key;
+            i += 1;
+        }
+        self.edge_order[..total].copy_from_slice(&entries[..total]);
+        self.edge_order_len = total;
+        self.edge_order_epoch = self.graph_epoch;
+    }
+
+    pub fn node_page<const N: usize>(
+        &mut self,
+        offset: usize,
+        out: &mut [GraphNodeSummary; N],
+    ) -> (usize, usize) {
+        self.refresh_node_order();
+        let total = self.node_order_len;
         let mut returned = 0usize;
         let mut cursor = offset.min(total);
         while cursor < total && returned < N {
-            if let Some(summary) = self.node_summary_from_slot(slots[cursor]) {
+            let slot = self.node_order[cursor] as usize;
+            if let Some(summary) = self.node_summary_from_slot(slot) {
                 out[returned] = summary;
                 returned += 1;
             }
@@ -646,6 +784,7 @@ impl GraphRuntime {
     ) -> Result<(usize, usize), RuntimeError> {
         let node_id = self.node_id_for_vec(node_vec).ok_or(RuntimeError::NodeNotFound)?;
         let mut slots = [(usize::MAX, GraphEdgeDirection::Outbound); MAX_EDGES];
+        let mut keys = [0u64; MAX_EDGES];
         let mut total = 0usize;
         for (idx, edge) in self.edges.iter().enumerate() {
             let Some(edge) = edge else {
@@ -653,25 +792,30 @@ impl GraphRuntime {
             };
             if edge.spec.from_node == node_id {
                 slots[total] = (idx, GraphEdgeDirection::Outbound);
+                keys[total] = edge.edge_vector.as_u64();
                 total += 1;
             } else if edge.spec.to_node == node_id {
                 slots[total] = (idx, GraphEdgeDirection::Inbound);
+                keys[total] = edge.edge_vector.as_u64();
                 total += 1;
             }
         }
 
+        // Insertion sort on cached keys (see node_page): avoids the
+        // O(n^2) recomputation of edge_vector.as_u64() inside the
+        // comparison.
         let mut i = 1usize;
         while i < total {
-            let current = slots[i];
+            let cur_slot = slots[i];
+            let cur_key = keys[i];
             let mut j = i;
-            while j > 0
-                && self.edges[slots[j - 1].0].unwrap().edge_vector.as_u64()
-                    > self.edges[current.0].unwrap().edge_vector.as_u64()
-            {
+            while j > 0 && keys[j - 1] > cur_key {
                 slots[j] = slots[j - 1];
+                keys[j] = keys[j - 1];
                 j -= 1;
             }
-            slots[j] = current;
+            slots[j] = cur_slot;
+            keys[j] = cur_key;
             i += 1;
         }
 
@@ -689,40 +833,22 @@ impl GraphRuntime {
     }
 
     pub fn edge_page<const N: usize>(
-        &self,
+        &mut self,
         offset: usize,
         out: &mut [GraphEdgeSummary; N],
     ) -> (usize, usize) {
-        let mut slots = [usize::MAX; MAX_EDGES];
-        let mut total = 0usize;
-        for (idx, edge) in self.edges.iter().enumerate() {
-            if edge.is_some() {
-                slots[total] = idx;
-                total += 1;
-            }
-        }
-
-        let mut i = 1usize;
-        while i < total {
-            let current = slots[i];
-            let mut j = i;
-            while j > 0
-                && self.edges[slots[j - 1]].unwrap().edge_vector.as_u64()
-                    > self.edges[current].unwrap().edge_vector.as_u64()
-            {
-                slots[j] = slots[j - 1];
-                j -= 1;
-            }
-            slots[j] = current;
-            i += 1;
-        }
-
+        self.refresh_edge_order();
+        let total = self.edge_order_len;
         let mut returned = 0usize;
         let mut cursor = offset.min(total);
         while cursor < total && returned < N {
-            if let Some(summary) =
-                self.edge_summary_from_slot(slots[cursor], GraphEdgeDirection::Outbound)
-            {
+            let entry = self.edge_order[cursor];
+            if let Some(summary) = self.edge_summary_resolved(
+                entry.slot as usize,
+                entry.from_slot as usize,
+                entry.to_slot as usize,
+                GraphEdgeDirection::Outbound,
+            ) {
                 out[returned] = summary;
                 returned += 1;
             }
@@ -1546,6 +1672,13 @@ pub fn node_telemetry(vector: VectorAddress) -> Option<NodeTelemetry> {
 
 pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
     RUNTIME.lock().edge_summary(edge_vector)
+}
+
+/// Current structural epoch of the runtime graph.  Increments on every
+/// node/edge add or remove and is stable across pure reads, so a host
+/// bridge can poll it to render only when the topology actually changed.
+pub fn graph_epoch() -> u64 {
+    RUNTIME.lock().graph_epoch()
 }
 
 pub fn node_page<const N: usize>(

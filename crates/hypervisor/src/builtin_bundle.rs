@@ -83,6 +83,7 @@ const K_SHELL_ID: PluginId = PluginId::from_ascii("K_SHELL");
 const K_AI_ID: PluginId = PluginId::from_ascii("K_AI");
 const K_CHAT_ID: PluginId = PluginId::from_ascii("K_CHAT");
 const K_NIM_ID:  PluginId = PluginId::from_ascii("K_NIM");
+const K_VK_ID:   PluginId = PluginId::from_ascii("K_VK");
 
 const NONE_PERMS: &[PermissionSpec] = &[];
 
@@ -148,6 +149,12 @@ const CUDA_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::ScheduleHint, arg0: 0, arg1: 0 },
 ];
+const VK_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x3E8, arg1: 8 }, // COM3 visual bridge
+    PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
+];
 const IME_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphRead, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
@@ -200,6 +207,9 @@ const AI_EXPORTS: &[CapabilitySpec] = &[
 const CUDA_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "cuda", name: "bridge" },
 ];
+const VK_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "vk", name: "bridge" },
+];
 const CYPHER_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "cypher", name: "query" },
 ];
@@ -225,6 +235,7 @@ const CUDA_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
     ImportSpec { namespace: "serial", capability: "write", required: true },
 ];
+const VK_IMPORTS: &[ImportSpec] = &[]; // drives COM3 directly, no capability imports
 const CHAT_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true },
     ImportSpec { namespace: "net",     capability: "uplink", required: false },
@@ -262,6 +273,7 @@ const DEP_CUDA: &[PluginId] = &[K_VGA_ID, K_SERIAL_ID];
 const DEP_SHELL: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_HEAP_ID, K_IME_ID, K_NET_ID, K_CYPHER_ID, K_CUDA_ID];
 const DEP_CHAT: &[PluginId] = &[K_VGA_ID, K_NET_ID];
 const DEP_NIM:  &[PluginId] = &[K_VGA_ID, K_NET_ID];
+const DEP_VK:   &[PluginId] = &[];
 const DEP_AI: &[PluginId] = &[K_SHELL_ID];
 
 const MOD_DEP_PIT: &[ModuleDependencySpec] = &[ModuleDependencySpec {
@@ -332,6 +344,7 @@ const MOD_DEP_CUDA: &[ModuleDependencySpec] = &[
         required: true,
     },
 ];
+const MOD_DEP_VK: &[ModuleDependencySpec] = &[];
 const MOD_DEP_SHELL: &[ModuleDependencySpec] = &[
     ModuleDependencySpec {
         module_id: module_id(K_VGA_ID),
@@ -418,6 +431,7 @@ const K_CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "cl
 const K_AI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_AI_ID, "ai.supervisor");
 const K_CHAT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CHAT_ID, "chat.bridge");
 const K_NIM_NODE_ID:  gos_protocol::NodeId = derive_node_id(K_NIM_ID,  "nim.inference");
+const K_VK_NODE_ID:   gos_protocol::NodeId = derive_node_id(K_VK_ID,   "vk.bridge");
 
 const PANIC_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     node_id: K_PANIC_NODE_ID,
@@ -623,6 +637,18 @@ const CUDA_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     vector_ref: None,
 }];
 
+const VK_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_VK_NODE_ID,
+    local_node_key: "vk.bridge",
+    node_type: RuntimeNodeType::Compute,
+    entry_policy: EntryPolicy::Background,
+    executor_id: k_vk_host::EXECUTOR_ID,
+    state_schema_hash: 0x2022,
+    permissions: VK_PERMS,
+    exports: VK_EXPORTS,
+    vector_ref: None,
+}];
+
 const SHELL_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     node_id: K_SHELL_NODE_ID,
     local_node_key: "shell.entry",
@@ -812,6 +838,12 @@ const CUDA_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     executor: k_cuda_host::EXECUTOR_VTABLE,
 }];
 
+const VK_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_vk_host::NODE_VEC,
+    local_node_key: "vk.bridge",
+    executor: k_vk_host::EXECUTOR_VTABLE,
+}];
+
 const SHELL_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_shell::NODE_VEC,
     local_node_key: "shell.entry",
@@ -978,6 +1010,15 @@ const CUDA_MANIFEST: PluginManifest = manifest_with_nodes(
     CUDA_IMPORTS,
     CUDA_NODE_SPECS,
 );
+const VK_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_VK_ID,
+    "K_VK",
+    DEP_VK,
+    VK_PERMS,
+    VK_EXPORTS,
+    VK_IMPORTS,
+    VK_NODE_SPECS,
+);
 const SHELL_MANIFEST: PluginManifest = manifest_with_nodes(
     K_SHELL_ID,
     "K_SHELL",
@@ -1111,7 +1152,7 @@ const fn manifest_with_nodes(
     }
 }
 
-const BUILTIN_MODULES: [BuiltinModule; 21] = [
+const BUILTIN_MODULES: [BuiltinModule; 22] = [
     BuiltinModule::Native(NativeModule {
         manifest: PANIC_MANIFEST,
         granted_permissions: NONE_PERMS,
@@ -1238,9 +1279,15 @@ const BUILTIN_MODULES: [BuiltinModule; 21] = [
         nodes: NIM_NATIVE_NODES,
         register_hook: None,
     }),
+    BuiltinModule::Native(NativeModule {
+        manifest: VK_MANIFEST,
+        granted_permissions: VK_PERMS,
+        nodes: VK_NATIVE_NODES,
+        register_hook: None,
+    }),
 ];
 
-const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
+const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 22] = [
     module_descriptor(
         K_PANIC_ID,
         "K_PANIC",
@@ -1431,6 +1478,15 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 21] = [
         NIM_PERMS,
         NIM_EXPORTS,
         NIM_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor_app(
+        K_VK_ID,
+        "K_VK",
+        MOD_DEP_VK,
+        VK_PERMS,
+        VK_EXPORTS,
+        VK_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
 ];
@@ -1817,6 +1873,8 @@ fn activate_kernel_tier_nodes() {
         k_ps2::NODE_VEC, // initialises Ps2State, the Keyboard parse machine
         k_mouse::NODE_VEC,
         k_net::NODE_VEC,
+        // Graph-native visual bridge — deterministic boot draw of the seed graph.
+        k_vk_host::NODE_VEC,
     ];
     for vec in order {
         let _ = gos_runtime::activate(*vec);

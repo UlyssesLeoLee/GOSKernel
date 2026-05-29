@@ -1892,3 +1892,193 @@ fn instance_binding_propagates_through_dispatch_and_clears_on_unbind() {
         Some(NodeInstanceId::ZERO)
     );
 }
+
+// ── Graph enumeration perf foundation: structural epoch + cached order ──
+//
+// Locks in the change-tracking + cached-pagination contract that lets the
+// @gos.vk live bridge (and future incremental streaming) walk the graph
+// without re-sorting on every page or re-resolving edge endpoints with an
+// O(nodes) scan per edge.  Vectors are compared via as_u64() so the test
+// does not depend on VectorAddress deriving Debug.
+use gos_protocol::{
+    EdgeId, EdgeSpec, GraphEdgeSummary, GraphNodeSummary, NodeId, RoutePolicy, RuntimeEdgeType,
+};
+
+const PERF_PLUGIN_ID: PluginId = PluginId::from_ascii("HARNESS_PG");
+const PERF_EXECUTOR: ExecutorId = ExecutorId::from_ascii("native.perf");
+
+fn perf_node_spec(key: &'static str, ty: RuntimeNodeType) -> NodeSpec {
+    NodeSpec {
+        node_id: derive_node_id(PERF_PLUGIN_ID, key),
+        local_node_key: key,
+        node_type: ty,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: PERF_EXECUTOR,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    }
+}
+
+fn perf_edge_spec(id: u8, from: NodeId, to: NodeId, ty: RuntimeEdgeType) -> EdgeSpec {
+    EdgeSpec {
+        edge_id: EdgeId([id; 16]),
+        from_node: from,
+        to_node: to,
+        edge_type: ty,
+        weight: 1.0,
+        acl_mask: 0,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }
+}
+
+fn perf_install_plugin() {
+    gos_runtime::reset();
+    gos_runtime::discover_plugin(PluginManifest::empty(PERF_PLUGIN_ID, "HARNESS_PG"))
+        .expect("discover perf plugin");
+    gos_runtime::mark_plugin_loaded(PERF_PLUGIN_ID).expect("mark loaded");
+}
+
+#[test]
+fn graph_epoch_tracks_structural_mutations_only() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    perf_install_plugin();
+
+    // discover/load are not structural graph changes.
+    assert_eq!(gos_runtime::graph_epoch(), 0);
+
+    let a = perf_node_spec("a", RuntimeNodeType::Service);
+    let b = perf_node_spec("b", RuntimeNodeType::Service);
+    gos_runtime::register_node(PERF_PLUGIN_ID, VectorAddress::new(1, 0, 0, 0), a)
+        .expect("register a");
+    assert_eq!(gos_runtime::graph_epoch(), 1, "register node bumps epoch");
+    gos_runtime::register_node(PERF_PLUGIN_ID, VectorAddress::new(2, 0, 0, 0), b)
+        .expect("register b");
+    assert_eq!(gos_runtime::graph_epoch(), 2);
+
+    // Duplicate registration is a no-op and must not bump.
+    gos_runtime::register_node(PERF_PLUGIN_ID, VectorAddress::new(1, 0, 0, 0), a).expect("dup a");
+    assert_eq!(gos_runtime::graph_epoch(), 2, "dup register is a no-op");
+
+    let e = perf_edge_spec(1, a.node_id, b.node_id, RuntimeEdgeType::Call);
+    gos_runtime::register_edge(e).expect("register edge");
+    assert_eq!(gos_runtime::graph_epoch(), 3, "register edge bumps epoch");
+
+    // Pure reads never bump the epoch.
+    let mut nbuf = [GraphNodeSummary::EMPTY; 4];
+    let mut ebuf = [GraphEdgeSummary::EMPTY; 4];
+    let _ = gos_runtime::node_page::<4>(0, &mut nbuf);
+    let _ = gos_runtime::edge_page::<4>(0, &mut ebuf);
+    assert_eq!(gos_runtime::graph_epoch(), 3, "reads do not bump epoch");
+
+    gos_runtime::unregister_edge(EdgeId([1; 16])).expect("unregister edge");
+    assert_eq!(gos_runtime::graph_epoch(), 4, "unregister edge bumps epoch");
+}
+
+#[test]
+fn node_page_returns_sorted_stable_pages_and_invalidates_on_mutation() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    perf_install_plugin();
+
+    // Register five nodes with vectors in deliberately unsorted order.
+    let keys = ["n5", "n1", "n4", "n2", "n3"];
+    let vecs = [
+        VectorAddress::new(5, 0, 0, 0),
+        VectorAddress::new(1, 0, 0, 0),
+        VectorAddress::new(4, 0, 0, 0),
+        VectorAddress::new(2, 0, 0, 0),
+        VectorAddress::new(3, 0, 0, 0),
+    ];
+    for (k, v) in keys.iter().zip(vecs.iter()) {
+        gos_runtime::register_node(PERF_PLUGIN_ID, *v, perf_node_spec(k, RuntimeNodeType::Service))
+            .expect("register node");
+    }
+
+    // Walk the graph two-at-a-time and collect the full ordered sequence.
+    let collect_all = || {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let mut page = [GraphNodeSummary::EMPTY; 2];
+            let (total, returned) = gos_runtime::node_page::<2>(offset, &mut page);
+            for s in page.iter().take(returned) {
+                out.push(s.vector.as_u64());
+            }
+            offset += returned;
+            if offset >= total || returned == 0 {
+                break;
+            }
+        }
+        out
+    };
+
+    let first = collect_all();
+    assert_eq!(first.len(), 5, "every node enumerated exactly once");
+    // Strictly ascending by vector key (the cached sort order).
+    for w in first.windows(2) {
+        assert!(w[0] < w[1], "pages are globally sorted: {:?}", first);
+    }
+    // Same epoch → identical order (cache reused, not rebuilt incorrectly).
+    assert_eq!(collect_all(), first, "stable across repeated reads");
+
+    // A structural mutation must invalidate the cache.
+    gos_runtime::register_node(
+        PERF_PLUGIN_ID,
+        VectorAddress::new(6, 0, 0, 0),
+        perf_node_spec("n6", RuntimeNodeType::Service),
+    )
+    .expect("register n6");
+    let after = collect_all();
+    assert_eq!(after.len(), 6, "new node visible after mutation");
+    assert_eq!(
+        after.last().copied(),
+        Some(VectorAddress::new(6, 0, 0, 0).as_u64())
+    );
+}
+
+#[test]
+fn edge_page_resolves_cached_endpoints() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    perf_install_plugin();
+
+    let a = perf_node_spec("a", RuntimeNodeType::Service);
+    let b = perf_node_spec("b", RuntimeNodeType::Driver);
+    let c = perf_node_spec("c", RuntimeNodeType::Compute);
+    let va = VectorAddress::new(10, 0, 0, 0);
+    let vb = VectorAddress::new(20, 0, 0, 0);
+    let vc = VectorAddress::new(30, 0, 0, 0);
+    gos_runtime::register_node(PERF_PLUGIN_ID, va, a).expect("a");
+    gos_runtime::register_node(PERF_PLUGIN_ID, vb, b).expect("b");
+    gos_runtime::register_node(PERF_PLUGIN_ID, vc, c).expect("c");
+    gos_runtime::register_edge(perf_edge_spec(1, a.node_id, b.node_id, RuntimeEdgeType::Call))
+        .expect("edge a->b");
+    gos_runtime::register_edge(perf_edge_spec(2, b.node_id, c.node_id, RuntimeEdgeType::Signal))
+        .expect("edge b->c");
+
+    let mut page = [GraphEdgeSummary::EMPTY; 8];
+    let (total, returned) = gos_runtime::edge_page::<8>(0, &mut page);
+    assert_eq!(total, 2);
+    assert_eq!(returned, 2);
+
+    // Match by edge id (order is by derived edge vector, not insertion);
+    // assert the cached endpoint slots resolved to the right nodes.
+    for s in page.iter().take(returned) {
+        if s.edge_id.0 == [1u8; 16] {
+            assert_eq!(s.from_vector.as_u64(), va.as_u64());
+            assert_eq!(s.to_vector.as_u64(), vb.as_u64());
+            assert_eq!(s.from_key, "a");
+            assert_eq!(s.to_key, "b");
+        } else if s.edge_id.0 == [2u8; 16] {
+            assert_eq!(s.from_vector.as_u64(), vb.as_u64());
+            assert_eq!(s.to_vector.as_u64(), vc.as_u64());
+            assert_eq!(s.from_key, "b");
+            assert_eq!(s.to_key, "c");
+        } else {
+            panic!("unexpected edge id {:?}", s.edge_id.0);
+        }
+    }
+}
