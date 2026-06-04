@@ -221,6 +221,23 @@ fn node_color(t: RuntimeNodeType) -> u32 {
     }
 }
 
+/// Architectural tier (row) for a node kind: lower tiers are the physical /
+/// foundation layers, higher tiers the logical / data layers. `render_live_graph`
+/// lays the surface out in these bands so the graph reads as layers instead of a
+/// structure-blind grid.
+fn node_tier(t: RuntimeNodeType) -> usize {
+    match t {
+        RuntimeNodeType::Hardware => 0,
+        RuntimeNodeType::Driver => 1,
+        RuntimeNodeType::Service => 2,
+        RuntimeNodeType::Router => 3,
+        RuntimeNodeType::Aggregator => 4,
+        RuntimeNodeType::Compute => 5,
+        RuntimeNodeType::PluginEntry => 6,
+        RuntimeNodeType::Vector => 7,
+    }
+}
+
 /// Stable color per edge kind so conduits are distinguishable in the hairball.
 fn edge_color(t: RuntimeEdgeType) -> u32 {
     match t {
@@ -238,6 +255,30 @@ fn edge_color(t: RuntimeEdgeType) -> u32 {
 
 fn find_key(keys: &[u64], key: u64) -> Option<usize> {
     keys.iter().position(|&k| k == key)
+}
+
+/// Shorten a node label to roughly fit `node_w` px (the host renders a bold
+/// monospace at ~7 px/char). Tries the full key, then the head before the first
+/// '.' (so `clipboard.mount` -> `clipboard`), then a char-safe truncation.
+/// Returns a borrowed slice — no allocation. Only crowded tiers trigger
+/// shortening, so roomy rows (e.g. `theme.*`) keep their full keys.
+fn fit_label(label: &str, node_w: u32) -> &str {
+    let max = (node_w / 7).max(3) as usize;
+    if label.len() <= max {
+        return label;
+    }
+    let head = match label.find('.') {
+        Some(i) => &label[..i],
+        None => label,
+    };
+    if head.len() <= max {
+        return head;
+    }
+    let mut n = max.min(head.len());
+    while n > 0 && !head.is_char_boundary(n) {
+        n -= 1;
+    }
+    &head[..n]
 }
 
 /// Structural `graph_epoch` of the last frame emitted to the visual surface.
@@ -278,21 +319,52 @@ fn render_live_graph() {
     }
     let total = total.min(CAP);
 
-    let mut cols = 1usize;
-    while cols * cols < total {
-        cols += 1;
+    // Tier the nodes by kind so the surface reads as architectural layers
+    // (drivers -> services -> routing -> compute -> plugins/data) instead of a
+    // structure-blind grid. Pass A: tally how many live nodes fall in each tier;
+    // only non-empty tiers get a row, so the bands compact. (node_page is cached
+    // per epoch, so this extra walk is cheap.)
+    const NUM_TIERS: usize = 8;
+    let mut tier_total = [0usize; NUM_TIERS];
+    {
+        let mut counted = 0usize;
+        let mut offset = 0usize;
+        while offset < total {
+            let mut page = [GraphNodeSummary::EMPTY; PAGE];
+            let (_, returned) =
+                interrupts::without_interrupts(|| gos_runtime::node_page::<PAGE>(offset, &mut page));
+            if returned == 0 {
+                break;
+            }
+            for entry in page.iter().take(returned) {
+                if counted >= total {
+                    break;
+                }
+                counted += 1;
+                tier_total[node_tier(entry.node_type)] += 1;
+            }
+            offset += returned;
+        }
     }
-    let rows = (total + cols - 1) / cols;
-    let cell_w = (CANVAS_W - 2 * MARGIN) / cols as u32;
-    let cell_h = (CANVAS_H - 2 * MARGIN) / rows as u32;
-    let node_w = cell_w.saturating_sub(14).min(132).max(36);
-    let node_h = 40u32.min(cell_h.saturating_sub(6)).max(20);
+    let mut row_of_tier = [u32::MAX; NUM_TIERS];
+    let mut num_rows = 0u32;
+    for t in 0..NUM_TIERS {
+        if tier_total[t] > 0 {
+            row_of_tier[t] = num_rows;
+            num_rows += 1;
+        }
+    }
+    let num_rows = num_rows.max(1);
+    let row_h = (CANVAS_H - 2 * MARGIN) / num_rows;
+    let node_h = 40u32.min(row_h.saturating_sub(8)).max(18);
 
     com3_emit(b"VKDIM:800x600\nVKCLR:101018\n");
 
-    // Pass 1: one VKNOD per live node, recording each vector key so edges can
-    // be resolved to frame-local ids.
+    // Pass B: one VKNOD per live node, positioned by tier (row) and spread
+    // evenly within its tier (column). keys[] records each vector in emission
+    // order so Pass 2 can resolve edge endpoints to frame-local ids.
     let mut keys = [0u64; CAP];
+    let mut tier_placed = [0u32; NUM_TIERS];
     let mut node_count = 0usize;
     let mut fb = FrameBuf::new();
     let mut offset = 0usize;
@@ -310,17 +382,22 @@ fn render_live_graph() {
             }
             keys[gi] = entry.vector.as_u64();
             node_count += 1;
-            let col = (gi % cols) as u32;
-            let row = (gi / cols) as u32;
-            let x = MARGIN + col * cell_w + cell_w.saturating_sub(node_w) / 2;
-            let y = MARGIN + row * cell_h + cell_h.saturating_sub(node_h) / 2;
-            let label = if !entry.local_node_key.is_empty() {
+            let tier = node_tier(entry.node_type);
+            let n_tier = tier_total[tier].max(1) as u32;
+            let within = tier_placed[tier];
+            tier_placed[tier] += 1;
+            let col_w = (CANVAS_W - 2 * MARGIN) / n_tier;
+            let node_w = col_w.saturating_sub(12).min(140).max(34);
+            let x = MARGIN + within * col_w + col_w.saturating_sub(node_w) / 2;
+            let y = MARGIN + row_of_tier[tier] * row_h + row_h.saturating_sub(node_h) / 2;
+            let raw_label = if !entry.local_node_key.is_empty() {
                 entry.local_node_key
             } else if !entry.plugin_name.is_empty() {
                 entry.plugin_name
             } else {
                 "node"
             };
+            let label = fit_label(raw_label, node_w);
             fb.reset();
             let _ = write!(
                 fb,
