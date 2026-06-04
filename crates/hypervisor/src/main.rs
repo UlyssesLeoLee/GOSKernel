@@ -93,24 +93,24 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
-    // Auto-live visual surface: throttle on the 120 Hz PIT so we re-check the
-    // graph ~4x/s. k-vk-host re-emits the @gos.vk frame only when the structural
-    // graph_epoch changed (idle graph -> just an epoch read). Runs OUTSIDE the
-    // without_interrupts block so the slow UART emit never stalls IRQs; the
-    // RUNTIME reads inside vk_auto_refresh bracket themselves. Manual `vk` still
-    // forces a redraw via VK_CONTROL_REPORT.
-    const VK_REFRESH_TICKS: usize = 30;
-    let mut vk_last_tick = k_pit::get_ticks();
-
+    // Auto-live visual surface: after each supervisor cycle, re-emit the @gos.vk
+    // frame iff the structural graph_epoch changed since the last emit (otherwise
+    // just a cheap O(1) epoch read). `hlt` gates the loop to the IRQ wake rate,
+    // so this runs at most once per interrupt (~timer rate on hardware; a few Hz
+    // under QEMU TCG, where service_system_cycle dominates each iteration).
+    //
+    // Deliberately NOT throttled on PIT ticks: under TCG the processed-tick rate
+    // collapses (most 120 Hz IRQ0s coalesce while interrupts are masked inside
+    // the cycle), so a 30-tick gate became ~9 s of refresh latency in-VM. Gating
+    // on graph_epoch alone keeps idle cost ~nil while making the refresh track
+    // the loop, not the timer. Runs OUTSIDE without_interrupts so the UART emit
+    // can't stall IRQs; the RUNTIME reads inside vk_auto_refresh bracket
+    // themselves. Manual `vk` still forces a redraw via VK_CONTROL_REPORT.
     loop {
         x86_64::instructions::interrupts::without_interrupts(|| {
             gos_supervisor::service_system_cycle();
         });
-        let now = k_pit::get_ticks();
-        if now.wrapping_sub(vk_last_tick) >= VK_REFRESH_TICKS {
-            vk_last_tick = now;
-            k_vk_host::vk_auto_refresh();
-        }
+        k_vk_host::vk_auto_refresh();
         x86_64::instructions::hlt();
     }
 }
