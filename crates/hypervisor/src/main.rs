@@ -95,16 +95,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
-    // Steady-state loop: drain the runtime work queue each iteration (input +
-    // signals + ready-work via gos_runtime::pump — bounded, interrupts-off), then
-    // render one frame of the in-guest 3D desktop, then hlt. render_frame only
-    // reads k-mouse's motion atomics + draws the framebuffer (never locks
-    // RUNTIME). NOTE: the full supervisor cycle (service_system_cycle) stalls in
-    // this post-init context — tracked separately; pump covers input/commands/
-    // ready scheduling, which is what the desktop needs.
+    // One-shot supervisor drain: clears the post-boot ready queue before the
+    // render loop starts. service_system_cycle loops until dispatched==0 &&
+    // !restarted (hard cap: 2048 iterations). Running it outside the loop keeps
+    // the first frame latency bounded regardless of startup cascade depth.
     fbtest::init();
+    x86_64::instructions::interrupts::without_interrupts(gos_supervisor::service_system_cycle);
+    // Steady-state loop: per-frame supervisor cycle (delegates input + signals +
+    // ready-work to gos_supervisor::service_system_cycle) then one render frame
+    // then hlt. In steady state the supervisor queue is empty so the cycle exits
+    // on the first iteration (dispatched==0).
     loop {
-        x86_64::instructions::interrupts::without_interrupts(gos_runtime::pump);
+        x86_64::instructions::interrupts::without_interrupts(gos_supervisor::service_system_cycle);
         fbtest::render_frame();
         x86_64::instructions::hlt();
     }
