@@ -81,4 +81,8 @@ fn apply_delta(state: &mut super::MouseState, dx: i32, dy: i32, buttons: u8) {
     state.row = (state.y_px / 16) as u8;
     state.buttons = buttons;
     state.visible = 1;
+    // Mirror relative motion into the global accumulators for the 3D UI camera.
+    super::MOTION_DX.fetch_add(dx, Ordering::Relaxed);
+    super::MOTION_DY.fetch_add(dy, Ordering::Relaxed);
+    super::MOTION_BTN.store(buttons, Ordering::Relaxed);
 }

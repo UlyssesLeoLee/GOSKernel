@@ -65,6 +65,22 @@ static PENDING_DX: AtomicI32 = AtomicI32::new(0);
 static PENDING_DY: AtomicI32 = AtomicI32::new(0);
 static PENDING_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
+// Global relative-motion accumulators for in-kernel consumers (e.g. the 3D UI
+// camera). Accumulated in `apply_delta`; drained by `take_motion`.
+pub static MOTION_DX: AtomicI32 = AtomicI32::new(0);
+pub static MOTION_DY: AtomicI32 = AtomicI32::new(0);
+pub static MOTION_BTN: AtomicU8 = AtomicU8::new(0);
+
+/// Drain accumulated pointer motion since the last call: (dx, dy, buttons).
+pub fn take_motion() -> (i32, i32, u8) {
+    use core::sync::atomic::Ordering;
+    (
+        MOTION_DX.swap(0, Ordering::Relaxed),
+        MOTION_DY.swap(0, Ordering::Relaxed),
+        MOTION_BTN.load(Ordering::Relaxed),
+    )
+}
+
 #[repr(C)]
 struct MouseState {
     display_target: u64,

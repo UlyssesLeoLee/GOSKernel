@@ -15,6 +15,7 @@ pub unsafe fn emit(
 ) -> ExecStatus {
     match output {
         super::proc::Output::Ascii(b) => {
+            super::push_key(b);
             unsafe {
                 (*ctx).route_signal =
                     signal_to_packet(Signal::Data { from: super::NODE_VEC.as_u64(), byte: b });

@@ -4,6 +4,8 @@
 extern crate alloc;
 
 mod builtin_bundle;
+mod fbtest;
+mod kfont;
 mod ring3;
 
 use bootloader::{entry_point, BootInfo};
@@ -93,24 +95,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
 
-    // Auto-live visual surface: after each supervisor cycle, re-emit the @gos.vk
-    // frame iff the structural graph_epoch changed since the last emit (otherwise
-    // just a cheap O(1) epoch read). `hlt` gates the loop to the IRQ wake rate,
-    // so this runs at most once per interrupt (~timer rate on hardware; a few Hz
-    // under QEMU TCG, where service_system_cycle dominates each iteration).
-    //
-    // Deliberately NOT throttled on PIT ticks: under TCG the processed-tick rate
-    // collapses (most 120 Hz IRQ0s coalesce while interrupts are masked inside
-    // the cycle), so a 30-tick gate became ~9 s of refresh latency in-VM. Gating
-    // on graph_epoch alone keeps idle cost ~nil while making the refresh track
-    // the loop, not the timer. Runs OUTSIDE without_interrupts so the UART emit
-    // can't stall IRQs; the RUNTIME reads inside vk_auto_refresh bracket
-    // themselves. Manual `vk` still forces a redraw via VK_CONTROL_REPORT.
+    // Steady-state loop: drain the runtime work queue each iteration (input +
+    // signals + ready-work via gos_runtime::pump — bounded, interrupts-off), then
+    // render one frame of the in-guest 3D desktop, then hlt. render_frame only
+    // reads k-mouse's motion atomics + draws the framebuffer (never locks
+    // RUNTIME). NOTE: the full supervisor cycle (service_system_cycle) stalls in
+    // this post-init context — tracked separately; pump covers input/commands/
+    // ready scheduling, which is what the desktop needs.
+    fbtest::init();
     loop {
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            gos_supervisor::service_system_cycle();
-        });
-        k_vk_host::vk_auto_refresh();
+        x86_64::instructions::interrupts::without_interrupts(gos_runtime::pump);
+        fbtest::render_frame();
         x86_64::instructions::hlt();
     }
 }

@@ -38,6 +38,38 @@ pub const PS2_ROUTE_SHELL: u8 = 0x00;
 /// Route key → k_ime::NODE_VEC (reserved for IME pre-processing).
 pub const PS2_ROUTE_IME: u8 = 0x01;
 
+// ── Global decoded-key ring for in-kernel consumers (the 3D desktop taskbar's
+//    command input). Filled in post::emit (alongside shell routing), drained by
+//    take_key. ─────────────────────────────────────────────────────────────────
+const KEY_RING: usize = 64;
+static KEY_BUF: [core::sync::atomic::AtomicU8; KEY_RING] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; KEY_RING];
+static KEY_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static KEY_TAIL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Push a decoded ASCII byte for desktop consumers (in addition to shell routing).
+pub fn push_key(b: u8) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let h = KEY_HEAD.load(Relaxed);
+    let nh = (h + 1) % KEY_RING;
+    if nh != KEY_TAIL.load(Relaxed) {
+        KEY_BUF[h].store(b, Relaxed);
+        KEY_HEAD.store(nh, Relaxed);
+    }
+}
+
+/// Drain one decoded key for the desktop, or None if empty.
+pub fn take_key() -> Option<u8> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let t = KEY_TAIL.load(Relaxed);
+    if t == KEY_HEAD.load(Relaxed) {
+        return None;
+    }
+    let b = KEY_BUF[t].load(Relaxed);
+    KEY_TAIL.store((t + 1) % KEY_RING, Relaxed);
+    Some(b)
+}
+
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.ps2");
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: EXECUTOR_ID,
