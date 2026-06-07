@@ -1,17 +1,20 @@
 // ```cypher
 // CREATE
 //   (file:File {name: "fbtest.rs", type: "file", language: "rust"}),
-//   (desk:Class {name: "Desktop", type: "class", signature: "struct Desktop { lfb, n, ne, node_color, edges, px,py,pz, yaw,pitch, cur_x,cur_y, snap_nx/ny/nr, popup_*, press_*, gizmo_* }"}),
+//   (desk:Class {name: "Desktop", type: "class", signature: "struct Desktop { lfb, n, ne, node_color, edges, px,py,pz, yaw,pitch, cur_x,cur_y, snap_nx/ny/nr, popup_*, press_*, gizmo_*, corner_hover }"}),
 //   (init:Function {name: "init", type: "function", signature: "pub fn init()", visibility: "public"}),
 //   (rend:Function {name: "render_frame", type: "function", signature: "pub fn render_frame()", visibility: "public"}),
 //   (pick:Function {name: "do_pick", type: "function", signature: "fn do_pick(d,cx,cy)"}),
 //   (pop:Function {name: "draw_popup", type: "function", signature: "fn draw_popup(fb,d)"}),
 //   (giz:Function {name: "update_gizmo_hover", type: "function"}),
 //   (pclick:Function {name: "handle_popup_click", type: "function"}),
+//   (cgiz:Function {name: "draw_corner_gizmo", type: "function", signature: "fn draw_corner_gizmo(fb,d,cyw,syw,cp,sp)"}),
+//   (csnap:Function {name: "corner_snap", type: "function", signature: "fn corner_snap(d) -> bool"}),
 //   (file)-[:CONTAINS]->(desk),(file)-[:CONTAINS]->(init),(file)-[:CONTAINS]->(rend),
 //   (file)-[:CONTAINS]->(pick),(file)-[:CONTAINS]->(pop),(file)-[:CONTAINS]->(giz),
-//   (file)-[:CONTAINS]->(pclick),
-//   (rend)-[:CALLS]->(pick),(rend)-[:CALLS]->(pop),(rend)-[:CALLS]->(giz),(rend)-[:CALLS]->(pclick);
+//   (file)-[:CONTAINS]->(pclick),(file)-[:CONTAINS]->(cgiz),(file)-[:CONTAINS]->(csnap),
+//   (rend)-[:CALLS]->(pick),(rend)-[:CALLS]->(pop),(rend)-[:CALLS]->(giz),(rend)-[:CALLS]->(pclick),
+//   (rend)-[:CALLS]->(cgiz),(rend)-[:CALLS]->(csnap);
 // ```
 //
 // GOS — in-guest 3D desktop subsystem (prototype, in hypervisor). init() sets up
@@ -77,6 +80,14 @@ const PAL_NAME: [&str; 4] = ["RED", "WHITE", "CYAN", "GOLD"];
 const POP_W: i32 = 224;
 const POP_H: i32 = 130;
 
+// ── Corner orientation gizmo (Unity-style, top-right) ───────────────────────
+// Small 92px-diameter widget showing X/Y/Z axes rotating with the camera.
+// Clicking an axis tip snaps the camera to that canonical view direction.
+const CGIZ_CX:  i32 = (W as i32) - 54; // center X  (= 746 for 800-wide screen)
+const CGIZ_CY:  i32 = 54;              // center Y
+const CGIZ_R:   f32 = 34.0;            // arm radius in pixels
+const CGIZ_HIT: f32 = 11.0;            // pick radius around each tip
+
 // RED/WHITE/RED_U32/WHITE_U32 superseded by PAL_RGB/PAL_U32 — kept for ref only.
 #[allow(dead_code)]
 const RED: (f32, f32, f32) = (0.86, 0.11, 0.13);
@@ -127,6 +138,10 @@ struct Desktop {
     // Unity-style gizmo: which ring is hovered / being dragged (1/2/3 = ring0/1/2).
     gizmo_hover: u8,
     gizmo_drag:  u8,
+    // Corner gizmo: which axis tip (1=+X 2=+Y 3=+Z 4=-X 5=-Y 6=-Z) is hovered, 0=none.
+    corner_hover: u8,
+    // PIT tick at which auto-spin last advanced (ensures spin rate = PIT Hz, not render Hz).
+    last_spin_tick: u64,
 }
 
 static DESK: SyncUnsafe<Desktop> = SyncUnsafe::new(Desktop {
@@ -160,6 +175,8 @@ static DESK: SyncUnsafe<Desktop> = SyncUnsafe::new(Desktop {
     press_y: 0.0,
     gizmo_hover: 0,
     gizmo_drag: 0,
+    corner_hover: 0,
+    last_spin_tick: 0,
 });
 
 #[inline(always)]
@@ -1116,6 +1133,166 @@ fn draw_popup(fb: &mut [u32], d: &Desktop) {
     }
 }
 
+// ── Corner orientation gizmo helpers ────────────────────────────────────────
+
+/// Filled circle, clipped to the framebuffer.
+fn fill_circ(fb: &mut [u32], cx: i32, cy: i32, r: i32, color: u32) {
+    let r2 = r * r;
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            if dx * dx + dy * dy <= r2 {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px >= 0 && px < W as i32 && py >= 0 && py < H as i32 {
+                    fb[py as usize * W + px as usize] = color;
+                }
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+}
+
+/// Project a unit axis direction through the camera rotation.
+/// axis: 0=+X 1=+Y 2=+Z 3=-X 4=-Y 5=-Z
+/// Returns (screen_dx, screen_dy, z_depth) — multiply dx/dy by CGIZ_R to get pixels.
+fn cgiz_proj(axis: u8, cyw: f32, syw: f32, cp: f32, sp: f32) -> (f32, f32, f32) {
+    let (dx, dy, dz): (f32, f32, f32) = match axis {
+        0 => ( 1.0,  0.0,  0.0),
+        1 => ( 0.0,  1.0,  0.0),
+        2 => ( 0.0,  0.0,  1.0),
+        3 => (-1.0,  0.0,  0.0),
+        4 => ( 0.0, -1.0,  0.0),
+        _ => ( 0.0,  0.0, -1.0),
+    };
+    let x1 =  dx * cyw + dz * syw;
+    let z1 = -dx * syw + dz * cyw;
+    let y2 =  dy * cp  - z1 * sp;
+    let z2 =  dy * sp  + z1 * cp;
+    (x1 * CGIZ_R, -y2 * CGIZ_R, z2)
+}
+
+/// Draw the corner orientation gizmo: dark circle background + 3 colored axis arms
+/// (X=red, Y=green, Z=blue) with dim negative stubs. Hovered tip enlarges and
+/// turns white (Unity-style highlight). Back-to-front sorted each frame.
+fn draw_corner_gizmo(fb: &mut [u32], d: &Desktop, cyw: f32, syw: f32, cp: f32, sp: f32) {
+    let gcx = CGIZ_CX;
+    let gcy = CGIZ_CY;
+    // Subtle border ring then dark fill.
+    fill_circ(fb, gcx, gcy, 47, 0x001e_3050);
+    fill_circ(fb, gcx, gcy, 46, 0x0008_0d1a);
+
+    // Compute projected screen offsets for all 6 axis tips.
+    let mut tips = [(0f32, 0f32, 0f32); 6];
+    for i in 0u8..6 {
+        tips[i as usize] = cgiz_proj(i, cyw, syw, cp, sp);
+    }
+
+    // Sort back-to-front (larger z2 = further from camera = draw first).
+    let mut ord = [0u8, 1, 2, 3, 4, 5];
+    for i in 0..6usize {
+        let mut mi = i;
+        for j in (i + 1)..6 {
+            if tips[ord[j] as usize].2 > tips[ord[mi] as usize].2 {
+                mi = j;
+            }
+        }
+        ord.swap(i, mi);
+    }
+
+    // Colors: +X=red +Y=green +Z=blue; dim versions for negative halves.
+    let col: [u32; 6] = [
+        0x00e8_4040, 0x0040_e040, 0x0050_90ff,  // +X +Y +Z
+        0x0052_1818, 0x0018_5018, 0x0018_2848,  // -X -Y -Z
+    ];
+    let lbl = [b'X', b'Y', b'Z'];
+
+    for &ai in &ord {
+        let ai = ai as usize;
+        let (sdx, sdy, _) = tips[ai];
+        let tx = gcx + sdx as i32;
+        let ty = gcy + sdy as i32;
+        let hov = d.corner_hover == (ai as u8 + 1);
+        let c = if hov { 0x00ff_ffff } else { col[ai] };
+        draw_line2d(fb, gcx as f32, gcy as f32, tx as f32, ty as f32, c);
+        let dot_r = if hov { 7i32 } else { 5i32 };
+        fill_circ(fb, tx, ty, dot_r, c);
+        if ai < 3 {
+            // Label slightly above-left of tip (positive axes only).
+            let lc = if hov { 0x00ff_ffff } else { 0x00d0_e8ff };
+            let lx = (tx - 4).max(0) as usize;
+            let ly = (ty - 8).max(0) as usize;
+            if lx < W - 8 && ly < H - 16 {
+                draw_glyph(fb, lx, ly, lbl[ai], lc);
+            }
+        }
+    }
+    fill_circ(fb, gcx, gcy, 3, 0x0090_a8c0);
+}
+
+/// Update d.corner_hover each frame: which axis tip (1..=6) the cursor is near.
+fn update_corner_hover(d: &mut Desktop, cyw: f32, syw: f32, cp: f32, sp: f32) {
+    let (cx, cy) = (d.cur_x, d.cur_y);
+    let (gcx, gcy) = (CGIZ_CX as f32, CGIZ_CY as f32);
+    let mut best = 0u8;
+    let mut best_d = CGIZ_HIT;
+    for i in 0u8..6 {
+        let (sdx, sdy, _) = cgiz_proj(i, cyw, syw, cp, sp);
+        let tx = gcx + sdx;
+        let ty = gcy + sdy;
+        let dist = sqrtf((cx - tx) * (cx - tx) + (cy - ty) * (cy - ty));
+        if dist < best_d {
+            best_d = dist;
+            best = i + 1;
+        }
+    }
+    d.corner_hover = best;
+}
+
+/// On left-click: if the press position landed on a corner gizmo axis tip, snap
+/// the camera to that canonical view and return true (consuming the click).
+fn corner_snap(d: &mut Desktop) -> bool {
+    let cyw = libm::cosf(d.yaw);
+    let syw = libm::sinf(d.yaw);
+    let cp  = libm::cosf(d.pitch);
+    let sp  = libm::sinf(d.pitch);
+    let (cx, cy) = (d.press_x, d.press_y);
+    let (gcx, gcy) = (CGIZ_CX as f32, CGIZ_CY as f32);
+    for i in 0u8..6 {
+        let (sdx, sdy, _) = cgiz_proj(i, cyw, syw, cp, sp);
+        let tx = gcx + sdx;
+        let ty = gcy + sdy;
+        let dx = cx - tx;
+        let dy = cy - ty;
+        if dx * dx + dy * dy < CGIZ_HIT * CGIZ_HIT {
+            const H_PI: f32 = core::f32::consts::PI * 0.5;
+            let (ny, np): (f32, f32) = match i {
+                0 => (-H_PI,  0.0 ),               // +X: look from +X side
+                1 => ( 0.0,   1.35),               // +Y: top-down
+                2 => ( 0.0,   0.0 ),               // +Z: front view
+                3 => ( H_PI,  0.0 ),               // -X: look from -X side
+                4 => ( 0.0,  -1.35),               // -Y: bottom-up
+                _ => (core::f32::consts::PI, 0.0), // -Z: back view
+            };
+            d.yaw   = ny;
+            d.pitch = np;
+            d.popup_vis = false;
+            return true;
+        }
+    }
+    false
+}
+
+/// Return true if (x,y) is inside the corner gizmo background circle.
+/// Used to swallow clicks that land in the gizmo area but miss every axis tip.
+fn in_corner_gizmo(x: f32, y: f32) -> bool {
+    let dx = x - CGIZ_CX as f32;
+    let dy = y - CGIZ_CY as f32;
+    dx * dx + dy * dy <= 47.0 * 47.0
+}
+
 /// Render one frame: handle pointer input (cursor / left-drag orbit / right-click
 /// console), keyboard (taskbar command buffer), draw the scene + taskbar + cursor,
 /// and blit to the LFB. Reads only k-mouse / k-ps2 atomics — never touches RUNTIME.
@@ -1179,6 +1356,10 @@ pub fn render_frame() {
                     }
                     b += 1;
                 }
+            } else if corner_snap(d) {
+                // Camera snapped to corner gizmo axis — click consumed.
+            } else if in_corner_gizmo(d.press_x, d.press_y) {
+                // Click landed in gizmo background but missed every tip — ignore.
             } else if !handle_popup_click(d, d.press_x, d.press_y) {
                 // Not a color swatch → pick sphere / rope (or close popup).
                 do_pick(d, d.press_x, d.press_y);
@@ -1210,7 +1391,13 @@ pub fn render_frame() {
                 }
             }
         } else if !d.popup_vis {
-            d.yaw += 0.003; // auto-spin only when no popup is open
+            // Gate auto-spin on PIT ticks so the spin rate is frame-rate independent.
+            // PIT runs at 120 Hz → spin = 0.003 × 120 ≈ 0.36 rad/s regardless of FPS.
+            let ct = k_pit::get_ticks() as u64;
+            if ct != d.last_spin_tick {
+                d.last_spin_tick = ct;
+                d.yaw += 0.003;
+            }
         }
 
         let cyw = libm::cosf(d.yaw);
@@ -1220,8 +1407,10 @@ pub fn render_frame() {
 
         // Update gizmo hover (skip during drag to avoid snapping).
         if !gdrag { update_gizmo_hover(d, cyw, syw, cp, sp); }
+        if !gdrag { update_corner_hover(d, cyw, syw, cp, sp); }
 
         let zb = unsafe { ZB.get_mut() };
+        let t_fill = unsafe { core::arch::x86_64::_rdtsc() };
         fb.fill(BG);
         zb.fill(1.0e9);
 
@@ -1260,6 +1449,7 @@ pub fn render_frame() {
         }
 
         // Draw ropes: two-tone — half color = contrasting palette entry of endpoint.
+        let t_rope = unsafe { core::arch::x86_64::_rdtsc() };
         for &(a, b) in &d.edges[..d.ne] {
             let (a, b) = (a as usize, b as usize);
             let mx = (nx[a] + nx[b]) * 0.5;
@@ -1271,12 +1461,14 @@ pub fn render_frame() {
             draw_seg(fb, zb, mx, my, md, nx[b], nyv[b], nd[b], cb);
         }
         // Draw spheres with palette color.
+        let t_sphere = unsafe { core::arch::x86_64::_rdtsc() };
         for i in 0..d.n {
             let base = PAL_RGB[d.node_color[i] as usize];
             draw_sphere(fb, zb, nx[i], nyv[i], nr[i], nd[i], base);
         }
 
         // Gizmo rings: brighten the hovered / dragged ring (Unity-style highlight).
+        let t_ring = unsafe { core::arch::x86_64::_rdtsc() };
         let (c0, c1, c2) = if d.gizmo_hover == 1 || d.gizmo_drag == 1 {
             (0x00ff_9898u32, 0x0040_ff40, 0x0050_70ff)
         } else if d.gizmo_hover == 2 || d.gizmo_drag == 2 {
@@ -1290,15 +1482,47 @@ pub fn render_frame() {
         draw_ring(fb, 1, c1, cyw, syw, cp, sp);
         draw_ring(fb, 2, c2, cyw, syw, cp, sp);
 
+        let t_ui = unsafe { core::arch::x86_64::_rdtsc() };
+        draw_corner_gizmo(fb, d, cyw, syw, cp, sp);
         draw_taskbar(fb, d);
         draw_popup(fb, d);
+
+        // Log section timings every 60 frames.
+        // wrapping_sub avoids debug-mode panic if RDTSC skips (can happen with WHPX exits).
+        // Divide by 3000 → microseconds at ~3 GHz.
+        if d.frame % 60 == 59 {
+            let t_end = unsafe { core::arch::x86_64::_rdtsc() };
+            crate::raw_serial_println(format_args!(
+                "PERF fill={}us rope={}us sphere={}us ring={}us ui={}us",
+                t_rope.wrapping_sub(t_fill)   / 3_000,
+                t_sphere.wrapping_sub(t_rope)  / 3_000,
+                t_ring.wrapping_sub(t_sphere)  / 3_000,
+                t_ui.wrapping_sub(t_ring)      / 3_000,
+                t_end.wrapping_sub(t_ui)       / 3_000,
+            ));
+        }
     }
     draw_cursor(fb, d.cur_x as i32, d.cur_y as i32);
+    let t_blit0 = unsafe { core::arch::x86_64::_rdtsc() };
     if d.lfb != 0 {
-        unsafe { core::ptr::copy_nonoverlapping(fb.as_ptr(), d.lfb as *mut u32, PIXELS) };
+        // Non-temporal blit: _mm_stream_si128 (MOVNTDQ) writes 16 bytes at a time.
+        unsafe {
+            use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_stream_si128, _mm_sfence};
+            let dst = d.lfb as *mut __m128i;
+            let src = fb.as_ptr() as *const __m128i;
+            let count = PIXELS / 4; // 4 pixels = 16 bytes = one _mm_stream_si128
+            let mut i = 0usize;
+            while i < count {
+                _mm_stream_si128(dst.add(i), _mm_loadu_si128(src.add(i)));
+                i += 1;
+            }
+            _mm_sfence(); // ensure all NT stores are visible before next frame
+        }
     }
+    let t_blit1 = unsafe { core::arch::x86_64::_rdtsc() };
     d.frame += 1;
     if d.frame % 60 == 0 {
-        crate::raw_serial_println(format_args!("FBF {}", d.frame));
+        crate::raw_serial_println(format_args!("FBF {} blit={}us",
+            d.frame, t_blit1.wrapping_sub(t_blit0) / 3_000));
     }
 }

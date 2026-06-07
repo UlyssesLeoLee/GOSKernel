@@ -85,9 +85,11 @@ const VGA_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 /// COM2 base I/O port.
 const COM2: u16 = 0x2F8;
 /// Bridge detection probe timeout in poll iterations.
-const PROBE_TIMEOUT: usize = 5_000_000;
-/// Per-line read timeout (≈ 5 s worth of polling).
-const LINE_TIMEOUT: usize = 50_000_000;
+/// Keep tiny: in TCG mode each iteration costs ~100 ns, so 200 = 20 µs max.
+const PROBE_TIMEOUT: usize = 200;
+/// Per-line read timeout in poll iterations.
+/// 2 000 iterations ≈ 200 µs in TCG — enough for a real bridge, instant fail otherwise.
+const LINE_TIMEOUT: usize = 2_000;
 /// Maximum message buffer (user input).
 pub const MSG_BUF_SIZE: usize = 512;
 /// Response accumulator size.
@@ -281,7 +283,7 @@ fn com2_write_byte(b: u8) {
     while !com2_tx_ready() {
         spin_loop();
         spins += 1;
-        if spins > 10_000_000 { return; } // TX stuck — give up
+        if spins > 500 { return; } // TX stuck — give up
     }
     unsafe { out8(COM2, b); }
 }
@@ -298,13 +300,15 @@ pub(crate) fn com2_write_line(prefix: &[u8], msg: &[u8]) {
 
 /// Read one byte with a per-iteration spin budget.
 /// Returns `None` on timeout.
+/// Budget is decremented on every iteration so a floating bus (LSR=0xFF,
+/// DR=1 always) cannot produce an infinite loop.
 fn com2_read_byte_timed(budget: &mut usize) -> Option<u8> {
     loop {
+        if *budget == 0 { return None; }
+        *budget -= 1;
         if com2_rx_ready() {
             return Some(unsafe { in8(COM2) });
         }
-        if *budget == 0 { return None; }
-        *budget -= 1;
         spin_loop();
     }
 }

@@ -105,9 +105,25 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ready-work to gos_supervisor::service_system_cycle) then one render frame
     // then hlt. In steady state the supervisor queue is empty so the cycle exits
     // on the first iteration (dispatched==0).
+    // RDTSC loop-level timing (svc=service_system_cycle, rf=render_frame) is
+    // logged on the first few iterations and then every 60 — a permanent,
+    // lightweight FPS/latency trace (see also fbtest's PERF/FBF logs).
+    let mut loop_iter: u64 = 0;
     loop {
+        let lt0 = unsafe { core::arch::x86_64::_rdtsc() };
         x86_64::instructions::interrupts::without_interrupts(gos_supervisor::service_system_cycle);
+        let lt1 = unsafe { core::arch::x86_64::_rdtsc() };
         fbtest::render_frame();
+        let lt2 = unsafe { core::arch::x86_64::_rdtsc() };
+        loop_iter = loop_iter.wrapping_add(1);
+        // Print timing on iteration 1, 2, 3, then every 60 iterations.
+        if loop_iter <= 3 || loop_iter % 60 == 0 {
+            raw_serial_println(format_args!("LOOP #{} svc={}us rf={}us",
+                loop_iter,
+                lt1.wrapping_sub(lt0) / 3_000,
+                lt2.wrapping_sub(lt1) / 3_000,
+            ));
+        }
         x86_64::instructions::hlt();
     }
 }
