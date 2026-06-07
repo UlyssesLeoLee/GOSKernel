@@ -84,12 +84,41 @@ const VGA_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 
 /// COM2 base I/O port.
 const COM2: u16 = 0x2F8;
-/// Bridge detection probe timeout in poll iterations.
-/// Keep tiny: in TCG mode each iteration costs ~100 ns, so 200 = 20 µs max.
-const PROBE_TIMEOUT: usize = 200;
-/// Per-line read timeout in poll iterations.
-/// 2 000 iterations ≈ 200 µs in TCG — enough for a real bridge, instant fail otherwise.
-const LINE_TIMEOUT: usize = 2_000;
+/// Per-iteration cost of the spin loops below, *empirically measured* via
+/// RDTSC straddling a `com2_probe()` call under this project's actual run
+/// config (WHPX-accelerated QEMU): 1,000,000 iterations cost 23,664,792,694
+/// cycles ⇒ at the ~3 GHz TSC this codebase assumes elsewhere (see
+/// `main.rs`'s `/ 3_000` ⇒ µs conversion), that's ≈ 7.9 µs/iteration —
+/// roughly 80x slower than a bare `pause` because each `in8`/`out8` on these
+/// emulated UART ports takes a VM-exit round trip, not a few cycles. BOTH
+/// the pre-PR#2 values (tuned as if ~100 ns/iter ⇒ hung 200+ s with no
+/// bridge attached) and PR#2's shrunk values (also tuned as if ~100 ns/iter,
+/// just smaller ⇒ ~20-200 µs, far too short to survive a real handshake)
+/// were sized against that same wrong assumption. The constants below are
+/// derived from the measured ~7.9 µs/iter rate (≈ 23,665 cycles/iter) against
+/// sensible wall-clock targets — do not rescale them by guesswork; if the
+/// spin body changes, recalibrate with RDTSC rather than assuming a
+/// per-iteration cost.
+///
+/// Bridge detection probe timeout: ~300_000 iters × 7.9 µs ≈ 2.4 s. One-shot
+/// check in chat_on_init (no per-frame cost, doesn't affect FPS) — long
+/// enough for a host-side Python process to wake from its serial-port read,
+/// parse `GHELO:`, and reply `GOKAY:` even under normal OS-scheduling
+/// jitter (the exact failure PR #2 review flagged: "the similarly tiny
+/// probe window can also miss GOKAY during normal host scheduling"), short
+/// enough that booting with no bridge attached isn't painfully delayed.
+const PROBE_TIMEOUT: usize = 300_000;
+/// Per-line read timeout: ~650_000 iters × 7.9 µs ≈ 5.1 s. Must comfortably
+/// outlast real AI-backend latency: collect_bridge_response() calls this
+/// right after sending GCHAT, and the Python bridge only emits
+/// GRESP:/GDONE: once the AI/backend call completes — milliseconds to
+/// seconds later, not µs. Too short here makes the kernel mistake "still
+/// thinking" for "end of turn" and silently return with no reply (do not
+/// shrink this to "optimize" spin overhead — it bounds wall-clock wait on a
+/// slow external process, not CPU-bound work; PR #2 review caught this
+/// exact regression — see the calibration note above for why naive
+/// iteration-count guesses keep getting this wrong in both directions).
+const LINE_TIMEOUT: usize = 650_000;
 /// Maximum message buffer (user input).
 pub const MSG_BUF_SIZE: usize = 512;
 /// Response accumulator size.
@@ -283,7 +312,11 @@ fn com2_write_byte(b: u8) {
     while !com2_tx_ready() {
         spin_loop();
         spins += 1;
-        if spins > 500 { return; } // TX stuck — give up
+        // ~100_000 iters x 7.9 us/iter (see PROBE_TIMEOUT's calibration note)
+        // ~= 0.8 s. THR empties in microseconds on real/emulated UARTs alike,
+        // so this only ever spins on a genuinely wedged line — give up well
+        // before that becomes a user-visible multi-second hang.
+        if spins > 100_000 { return; } // TX stuck — give up
     }
     unsafe { out8(COM2, b); }
 }
