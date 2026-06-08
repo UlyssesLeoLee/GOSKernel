@@ -1,0 +1,9 @@
+[package]
+name = "gos-rewrite-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-rewrite = { path = "../../crates/gos-rewrite" }

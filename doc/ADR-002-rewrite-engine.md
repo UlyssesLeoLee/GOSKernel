@@ -1,8 +1,8 @@
 # ADR-002：图重写引擎语义（Rewrite Engine）
 
-> 状态：**提案（待批准 — 含一个必须由你拍板的宪法级决定，见 §六）** · 日期：2026-06-08 · 配套：[ADR-001 边代数](./ADR-001-edge-algebra-constitution.md) · [ADR-004 可见性](./ADR-004-mutation-visibility.md) · [V2 计划](../plan/V2_DEVELOPMENT_PLAN.md) Phase V2.2
+> 状态：**§六 渲染模型已批准 = B「图即场景」（用户 2026-06-08）；其余条款仍为提案** · 日期：2026-06-08 · 配套：[ADR-001 边代数](./ADR-001-edge-algebra-constitution.md) · [ADR-004 可见性](./ADR-004-mutation-visibility.md) · [V2 计划](../plan/V2_DEVELOPMENT_PLAN.md) Phase V2.2
 >
-> 口径：本 ADR 定义 V2.2 的核心——把 boot、调度、节点执行统一成**图重写**。它是 V2.2 实现的前置门禁（计划 sequencing 铁律 #3：ADR 先于实现）。**本文档由 autonomous push 起草为提案，实现尚未开始，因为 §六 的决定只有你能做。**
+> 口径：本 ADR 定义 V2.2 的核心——把 boot、调度、节点执行统一成**图重写**。它是 V2.2 实现的前置门禁（计划 sequencing 铁律 #3：ADR 先于实现）。§六 的宪法级渲染模型决定已由用户拍板为 **B**，V2.2a 引擎骨架据此可以开工。
 
 ## 一、上下文与现状
 
@@ -76,7 +76,7 @@ V2.3（响应式 Subscribe）依赖一个 V2.2 必须先定的问题。这是我
 
 **为什么必须现在定**：rewrite engine 的 mutation→fire 传播机制（§三）要不要原生支持"render node 作为 Subscribe 反向传播的终点"，取决于这个选择。选 B 则 Subscribe + reactive 属性（ADR-001 §2.2）是引擎的一等机制；选 A 则 renderer 在引擎之外轮询 epoch。**选错则 V2.3-V2.5 全部返工。**
 
-> 我的建议是 **B**——它是 GOSKernel 这个名字对得起的唯一选项，且 V2.0/V2.1 的边代数+epoch 正是为它铺的路。但这是你的宪法级决定，本 ADR 不替你锁定。请在批准本 ADR 时明确 A 或 B。
+> ✅ **已决定 = B「图即场景」（用户 2026-06-08）。** renderer 是 graph subscription 的纯函数；node 自带 render policy，边自带视觉语义。后果：rewrite engine **原生**把 `Subscribe`（ADR-001 的 `Refer` + `reactive` 属性）的反向传播当一等机制——mutation 触及某 node 时，engine 沿反向 reactive 边向订阅者发 `Send`。theme 0 行扩散与脏矩形渲染共用这一个机制。V2.2a 引擎骨架据此把 reactive 传播纳入核心循环；V2.3 的 renderer 将是它的纯函数终点。选项 A 不再考虑。
 
 ## 七、考虑过但否决
 
@@ -88,7 +88,7 @@ V2.3（响应式 Subscribe）依赖一个 V2.2 必须先定的问题。这是我
 
 ## 八、批准检查单
 
-- [ ] **§六 渲染模型 A/B 决定**（阻塞 V2.3-V2.5；本 ADR 批准时必须明确）
+- [x] **§六 渲染模型 A/B 决定 = B「图即场景」**（用户 2026-06-08）——V2.3-V2.5 解锁，引擎须原生支持 reactive 反向传播
 - [ ] §二 rewrite rule trait 形状评审（LHS=MATCH / guard / RHS=mutation）
 - [ ] §四 quiescence 不变式 + 因果深度计纳入 harness 方法学
 - [ ] §五 三子切片的"每切片不破坏稳态 + smoke 绿"作为合入门禁
