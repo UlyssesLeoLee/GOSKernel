@@ -17,7 +17,7 @@
 | 阶段 | 主题 | 核心交付 | Killer Demo | 退出判据 |
 |---|---|---|---|---|
 | **V2.0** ✅ 地基已落 | 立宪 & 地基 | primitive 边代数进 `gos-protocol`（`edge_algebra.rs`）；9 边 → primitive lowering；harness `gos-protocol-harness` | 9 边全部机械分解忠实于 ADR §2.3；6 边往返恒等、`{Signal,Return,Sync}` 形稳定（property test 8/8 绿） | ✅ 零行为变更（内核 `cargo check` 干净 + 治理门禁 OK）；edge-algebra property test 全绿。ADR-001/002/003 批准仍待办 |
-| **V2.1** | Cypher = ISA | `MutationDispatcher` 真实写入 runtime edge table；可见性语义（ADR-004）；snapshot isolation；audit envelope 接通 | `CALL create_node(...)` → 下一 snapshot 可见该 node，且被审计 | 1 NodeKind + 1 EdgeKind 端到端；mutation 下一 cycle 可见；fault 注入测试绿 |
+| **V2.1** | Cypher = ISA（edge 写路径） | 真实 `impl MutationDispatcher` 接 runtime edge table（替换 harness `Stub`）；可见性语义 [ADR-004](../doc/ADR-004-mutation-visibility.md)：epoch-published + 原子批提交；audit 同 epoch | theme `RebindUse` **原子**提交（删旧 Use+建新 Use 一次 epoch），reader 全程见恰好一条 `Use` 边——Demo C 写路径地基 | edge mutation（AddEdge/RemoveEdge/RebindUse）端到端接 edge table；`RebindUse` 原子性 harness 绿；`GraphSnapshot` 暴露 epoch；node-create 仍被拒（范围外，见 ADR-005） |
 | **V2.2** | Rewrite Engine & Boot-as-fixpoint | `RewriteEngine`（match→guard→emit）；boot manifest 静态图；`kernel_main` < 300 行；调度 = 边传播；因果深度计 替换 2048 hardcap | 在 manifest 里打乱 boot 依赖顺序，系统照常正确启动（序被求解，不是被编码） | GDT/IDT/PIC 经依赖边 fire 而非硬编码序；quiescence test + livelock 检测绿 |
 | **V2.3** | 响应式 Subscribe & 渲染统一 | `Subscribe` 反向传播索引；`theme.wabi/shoji` 变调色板数据 node（杀掉 `PAL_U32` 常量）；`fbtest.rs` → `k-render`（纯光栅）+ `k-desktop`（场景图构造） | **Demo C**：切 theme 0 行代码扩散；静止画面 0 帧重绘；脏矩形免费 | theme 扩散 0 行；idle = 0 帧；鼠标更新独立于渲染 tick（修掉 PIT→shell heartbeat lag 根因） |
 | **V2.4** | 能力即可达性 & 显示 HAL | capability 检查 = Grant 路径图查询；`gos-hal::display` trait（Bochs-VBE backend #1）；跨域调用走 Grant 路径 | 热插拔 node，外部持有的 capability 仍工作；子图 fault 被 Grant 拓扑天然 firewall | 5 个 killer demo 全绿；capability-path / hot-swap / fault-containment test 绿 |
@@ -44,14 +44,14 @@
 
 ### Phase V2.1 — Cypher = ISA（约 3–4 周）
 
-**目标**：兑现"Cypher 是 GOS 的机器码"。当前 [`gos-cypher-mut`](../crates/gos-cypher-mut/) 仅 175 行 ABI + audit envelope，`MutationDispatcher` 未实现——这是写路径，是 OS 存在的前提，不是待办功能。
+**目标**：兑现"Cypher 是 GOS 的机器码"——先通 **edge 写路径**。勘察修正（2026-06-08）：[`gos-cypher-mut`](../crates/gos-cypher-mut/) 的 `MutationDispatcher` trait + `apply_mutation` + `AuditedMutation` **已存在**，且 `gos-runtime` 的 `graph_epoch` 可见性机制**已存在**；真实缺口是**没有任何接真实 edge table 的 impl**（唯一实现是 harness `Stub`）。同时尊重现有约束：mutation 是 **edge-only**（`AddEdge/RemoveEdge/RebindUse`，仅 `Mount/Use`），node create/delete 被有意禁止（保护 claim/quota/NodeId 稳定），**推迟到 ADR-005**，V2.1 不碰。
 
 **交付**：
-- `MutationDispatcher`：`CreateNode / DeleteNode / SetProp / CreateEdge / DeleteEdge` 真实写入 runtime edge table（trait 草图见附录 B）。
+- 真实 `impl MutationDispatcher`（接 `gos-runtime` 的 `register_edge`/`unregister_edge` + 新增**原子 rebind** 入口），替换 harness `Stub`。约束：不改 `register_edge`/`unregister_edge` 旧单次递增语义（零行为变更回归）。附录 B 的 `CreateNode/DeleteNode/SetProp` 是 V2.2 rewrite-engine 的远期 ISA，非 V2.1 范畴。
 - **ADR-004 决定 mutation 可见性语义**：epoch-published（下一 cycle 可见，reader snapshot 隔离）vs immediate。**这个决定反向约束 V2.3 renderer 怎么读图**——必须在此钉死，否则 Phase I 建在沙上。推荐 epoch-published：reader 永远看一致 snapshot，writer 批量提交一个 epoch。
 - audit envelope（已存在）接到真实 mutation；fault attribution（哪个 node 发起的 mutation 失败）。
 
-**退出判据**：1 NodeKind + 1 EdgeKind 端到端：`CALL create_node` → MutationDispatcher → edge table 写入 → 下一 `snapshot()` 可见，且 audit log 有记录。Harness：mutation golden test、可见性排序 test、fault 注入（mutation 中途 fire 失败，系统回到一致态）。
+**退出判据**（= [ADR-004 §七](../doc/ADR-004-mutation-visibility.md) 检查单）：`RebindUse` / `AddEdge` / `RemoveEdge` 端到端经真实 dispatcher 写入 edge table；`RebindUse` **原子性** harness 绿（全程不暴露零/双 `Use` 边的可观察 epoch）；`GraphSnapshot` 暴露 `graph_epoch`；audit envelope 与 mutation 同临界区入队；node-create 仍被 `pre_validate` 拒绝。Harness：rebind 原子性 test、epoch 可见性 test、dispatcher-接真实-runtime 的回归（旧 edge API 行为不变）。
 
 **风险**：可见性语义选错会波及全栈——故先于一切 UI 工作完成 ADR-004。
 
