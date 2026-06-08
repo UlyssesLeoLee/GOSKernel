@@ -6,6 +6,8 @@
 //! legacy compatibility layer used during the v0.2 runtime migration.
 
 pub mod block;
+pub mod edge_algebra;
+pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm};
 pub mod socket;
 pub mod stem;
 pub use stem::*;
