@@ -69,6 +69,17 @@ reader 在 `RUNTIME.lock()` 持有期间看到的图是自洽的（当前 `snaps
 
 任何 reader 要么看到旧 epoch（指向 wabi，恰好一条 Use），要么看到新 epoch（指向 shoji，恰好一条 Use）。排他不变式全程成立。这正是 V2.3 让 theme "0 行扩散"的写路径前提——V2.3 的 Subscribe 反向传播挂在 §2.1 的 epoch 契约上。
 
+### 四.1 集成阻塞发现（2026-06-08，edge-key 两套约定）
+
+把上述原子原语真正接到生产 theme 切换（[`k-shell::sync_theme_use_edges`](../crates/k-shell/src/lib.rs)，它现在做 `unregister`×2 + `register` = 3 次 epoch 递增，有零-`Use` 窗口）时，发现一个**预先存在的不一致**：
+
+- k-shell 的 theme Use 边用 `THEME_EDGE_KEY = "theme.use"` 派生 edge_id（[k-shell:174](../crates/k-shell/src/lib.rs)）。
+- `rebind_exclusive_use` 与 `RuntimeDispatcher::add_edge` 用 `"use"`（k-cypher 约定，[k-cypher:175](../crates/k-cypher/src/lib.rs)）。
+
+直接把 `sync_theme_use_edges` 改调 `rebind_use` 会产生 **edge_id 不匹配**：rebind 按"扫描 from+type"删旧边（仍能正确清掉 `"theme.use"` 边）并按 `"use"` 建新边，但此后 `theme_edge_id()`（按 `"theme.use"` 计算）不再等于实际边的 id。`linked_theme_kind()` 靠扫描不靠 id，仍能工作；但任何按 `theme_edge_id()` 精确查/删的代码会失配。
+
+**结论**：k-shell 集成被**两件事**阻塞，autonomous push 不擅自改：(1) 统一 edge-key 约定（把 theme 改成 `"use"`，或让 rebind 接受 key 参数——涉及边身份稳定性，是一个设计决定）；(2) 改动运行中桌面行为，需一次 QEMU 桌面目视验证（切 theme 不闪/不崩）。原子原语本身已就绪并被 harness 证明，只是尚未在生产 caller 上启用。
+
 ## 五、考虑过但否决
 
 | 方案 | 否决理由 |
