@@ -51,6 +51,8 @@
 //!   (emit_send)-[:USES]->(sig);
 //! ```
 
+pub mod boot;
+
 /// Capacity of the engine's pending-signal queue (back-pressure bound).
 pub const MAX_PENDING: usize = 256;
 /// Max signals one rule firing may emit (fan-out bound).
