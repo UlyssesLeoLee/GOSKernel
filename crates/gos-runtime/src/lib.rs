@@ -10,7 +10,7 @@ use gos_protocol::{
     GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
     MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId,
     NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
-    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
+    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_id, derive_edge_vector,
     CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
@@ -586,6 +586,78 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// Atomically repoint the exclusive `Use` edge out of `from` to
+    /// `new_target` (ADR-004 §2.2).  Removes every existing `Use` edge sourced
+    /// at `from`, then inserts `from -[Use]-> new_target`, under a **single**
+    /// `graph_epoch` bump.  Because the whole remove+insert happens within one
+    /// epoch transition, no reader can observe `from` holding zero or two
+    /// `Use` edges mid-rebind — which would violate the ADR-001 `Use`
+    /// exclusivity invariant (exactly one).  Contrast the multi-step
+    /// `unregister_edge`×N + `register_edge` path (3 separate epoch bumps,
+    /// with windows of zero `Use` edges) that `k-shell::sync_theme_use_edges`
+    /// uses today.  `register_edge`/`unregister_edge` keep their single-bump
+    /// semantics unchanged; this is an additional atomic entry, not a rewrite.
+    pub fn rebind_exclusive_use(
+        &mut self,
+        from: NodeId,
+        new_target: NodeId,
+    ) -> Result<EdgeId, RuntimeError> {
+        // Pass 1: drop every existing Use edge sourced at `from` (no bump yet).
+        // The match scope ends before the mutation so the edges/adjacency
+        // borrows stay disjoint.
+        let mut i = 0;
+        while i < self.edges.len() {
+            let drop_it = match &self.edges[i] {
+                Some(rec) => {
+                    rec.spec.edge_type == RuntimeEdgeType::Use && rec.spec.from_node == from
+                }
+                None => false,
+            };
+            if drop_it {
+                let edge_id = self.edges[i].as_ref().unwrap().spec.edge_id;
+                self.edges[i] = None;
+                self.adjacency_arena.release(edge_id);
+            }
+            i += 1;
+        }
+
+        // Pass 2: insert the new exclusive Use edge (idempotent if present).
+        let edge_id = derive_edge_id(from, new_target, "use");
+        if self.edge_slot(edge_id).is_none() {
+            self.adjacency_arena.allocate(edge_id)?;
+            let slot = self
+                .edges
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(RuntimeError::EdgeTableFull)?;
+            *slot = Some(EdgeRecord {
+                edge_vector: derive_edge_vector(edge_id),
+                spec: EdgeSpec {
+                    edge_id,
+                    from_node: from,
+                    to_node: new_target,
+                    edge_type: RuntimeEdgeType::Use,
+                    weight: 1.0,
+                    acl_mask: u64::MAX,
+                    route_policy: RoutePolicy::Direct,
+                    capability_namespace: None,
+                    capability_binding: None,
+                    vector_ref: None,
+                },
+            });
+            self.emit_control_plane(
+                ControlPlaneMessageKind::EdgeUpsert,
+                edge_id.0,
+                from.0[0] as u64,
+                new_target.0[0] as u64,
+            );
+        }
+
+        // One epoch bump for the whole logical mutation (ADR-004 §2.2).
+        self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        Ok(edge_id)
+    }
+
     pub fn bind_legacy_cell(
         &mut self,
         vector: VectorAddress,
@@ -1139,6 +1211,7 @@ impl GraphRuntime {
             ready_queue_len: self.ready_queue.len(),
             signal_queue_len: self.signal_queue.len(),
             tick: self.tick,
+            graph_epoch: self.graph_epoch,
         }
     }
 
@@ -1660,6 +1733,83 @@ pub fn edge_vector_for_id(edge_id: EdgeId) -> Option<EdgeVector> {
 
 pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
     RUNTIME.lock().edge_id_for_vector(edge_vector)
+}
+
+/// Atomically repoint the exclusive `Use` edge out of `from` to `new_target`
+/// under a single epoch bump (ADR-004 §2.2).  Free-function wrapper over
+/// [`Runtime::rebind_exclusive_use`].
+pub fn rebind_use(from: NodeId, new_target: NodeId) -> Result<EdgeId, RuntimeError> {
+    RUNTIME.lock().rebind_exclusive_use(from, new_target)
+}
+
+/// Map a [`RuntimeError`] to the opaque `u32` tag the `MutationDispatcher`
+/// trait surfaces through `MutationError::DispatcherRejected`.
+fn dispatcher_reject_tag(err: RuntimeError) -> u32 {
+    match err {
+        RuntimeError::EdgeTableFull => 1,
+        RuntimeError::NodeNotFound => 2,
+        RuntimeError::EdgeNotFound => 3,
+        RuntimeError::NodeArenaFull => 4,
+        _ => 0xFF,
+    }
+}
+
+/// The real [`MutationDispatcher`](gos_cypher_mut::MutationDispatcher) (ADR-004),
+/// backed by the live runtime graph — this is what replaces the harness `Stub`.
+/// Every verb operates on the global edge table under the runtime lock;
+/// `rebind_use` takes the atomic single-epoch path so theme switching never
+/// exposes a zero-`Use` window.
+pub struct RuntimeDispatcher;
+
+impl gos_cypher_mut::MutationDispatcher for RuntimeDispatcher {
+    fn lookup_node(&self, id: NodeId) -> bool {
+        RUNTIME.lock().node_slot_by_id(id).is_some()
+    }
+
+    fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        kind: gos_cypher_mut::ReceptiveEdgeKind,
+    ) -> Result<(), u32> {
+        let (edge_type, edge_key) = match kind {
+            gos_cypher_mut::ReceptiveEdgeKind::Mount => (RuntimeEdgeType::Mount, "mount"),
+            gos_cypher_mut::ReceptiveEdgeKind::Use => (RuntimeEdgeType::Use, "use"),
+        };
+        let edge_id = derive_edge_id(from, to, edge_key);
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: to,
+            edge_type,
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        RUNTIME
+            .lock()
+            .register_edge(spec)
+            .map(|_| ())
+            .map_err(dispatcher_reject_tag)
+    }
+
+    fn remove_edge(&mut self, id: EdgeId) -> Result<(), u32> {
+        RUNTIME
+            .lock()
+            .unregister_edge(id)
+            .map_err(dispatcher_reject_tag)
+    }
+
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<(), u32> {
+        RUNTIME
+            .lock()
+            .rebind_exclusive_use(from, new_target)
+            .map(|_| ())
+            .map_err(dispatcher_reject_tag)
+    }
 }
 
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {
