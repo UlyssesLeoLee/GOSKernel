@@ -59,4 +59,13 @@ if ($ValidateOnly) {
 Stop-StaleGosQemu
 
 Write-Host "[GOS] Compiling Kernel & Launching QEMU..." -ForegroundColor Green
-cargo run -p gos-kernel
+# --release: the in-guest desktop is a software rasterizer (fbtest.rs draws
+# every pixel of a 1920x1080 framebuffer + z-buffer each frame on the CPU).
+# Measured directly off its own PERF/FBF serial telemetry (see tools/fps_test_whpx.py
+# for the harness pattern) that the plain `dev` profile ran it at ~5.8 FPS
+# (~172ms/frame) -- which surfaces as "鼠标卡顿" (mouse stutter), since the
+# cursor only moves -- in one big jump -- about six times a second. --release
+# lifts that to ~18-19 FPS (~53ms/frame), 3x smoother, for only a ~1s cost on
+# incremental rebuilds (2-3s vs 1-2s; deps are compiled+cached per profile, so
+# the ~65s full dependency build is a one-time hit, not a per-run one).
+cargo run -p gos-kernel --release

@@ -10,11 +10,13 @@
 //   (pclick:Function {name: "handle_popup_click", type: "function"}),
 //   (cgiz:Function {name: "draw_corner_gizmo", type: "function", signature: "fn draw_corner_gizmo(fb,d,cyw,syw,cp,sp)"}),
 //   (csnap:Function {name: "corner_snap", type: "function", signature: "fn corner_snap(d) -> bool"}),
+//   (cmdr:Function {name: "draw_cmd_result", type: "function", signature: "fn draw_cmd_result(fb,d)"}),
 //   (file)-[:CONTAINS]->(desk),(file)-[:CONTAINS]->(init),(file)-[:CONTAINS]->(rend),
 //   (file)-[:CONTAINS]->(pick),(file)-[:CONTAINS]->(pop),(file)-[:CONTAINS]->(giz),
 //   (file)-[:CONTAINS]->(pclick),(file)-[:CONTAINS]->(cgiz),(file)-[:CONTAINS]->(csnap),
+//   (file)-[:CONTAINS]->(cmdr),
 //   (rend)-[:CALLS]->(pick),(rend)-[:CALLS]->(pop),(rend)-[:CALLS]->(giz),(rend)-[:CALLS]->(pclick),
-//   (rend)-[:CALLS]->(cgiz),(rend)-[:CALLS]->(csnap);
+//   (rend)-[:CALLS]->(cgiz),(rend)-[:CALLS]->(csnap),(rend)-[:CALLS]->(cmdr);
 // ```
 //
 // GOS — in-guest 3D desktop subsystem (prototype, in hypervisor). init() sets up
@@ -46,8 +48,17 @@ use x86_64::instructions::port::Port;
 use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
-const W: usize = 800;
-const H: usize = 600;
+// HD default (was 800x600 — "overall resolution too low" feedback). setup_framebuffer()
+// already parametrizes the Bochs-VBE mode-set on W/H, so no mode-set changes are needed.
+// Tradeoff (surfaced to and accepted by the user): FB+ZB are static arrays sized by
+// PIXELS at compile time, and the software rasterizer's fill/blit cost scales linearly
+// with pixel count — 1920x1080 is 4.3x the pixels of 800x600, so the ~18 FPS measured
+// after the post.rs heartbeat-throttle fix is expected to drop to roughly ~8-13 FPS.
+// 4K/8K were deliberately NOT wired in: at 17x/69x pixels they would reproduce (or
+// worsen) the ~2.6 FPS stall that fix resolved, and their linear framebuffers (33MB/
+// 133MB) exceed default QEMU std-vga VRAM (~16MB) — would need run-arg changes too.
+const W: usize = 1920;
+const H: usize = 1080;
 const PIXELS: usize = W * H;
 const BG: u32 = 0x0a0a12;
 const MAXN: usize = 128;
@@ -58,10 +69,28 @@ const FOCAL: f32 = 724.0;
 const CAM_D: f32 = 11.0;
 const NODE_R: f32 = 0.4;
 const FIT_R: f32 = 3.8;
+/// World-space position of the standalone "minimized console" sphere — sits
+/// above the graph cluster (which fits within FIT_R=3.8 of the origin), so
+/// it reads as a separate companion object that orbits along with the scene
+/// rather than blending into the node cluster.
+const CONSOLE_BALL_POS: (f32, f32, f32) = (0.0, 5.4, 0.0);
+/// Slightly larger than a graph node (NODE_R=0.4) so the minimized console
+/// reads as a distinct, special object rather than just another graph node.
+const CONSOLE_BALL_R: f32 = 0.55;
 const ROPE_RAD: i32 = 2;
 const BAR_H: i32 = 36;
 const BTN_W: i32 = 92;
 const BTN_H: i32 = 24;
+
+/// Cursor-speed multiplier applied to raw PS/2 motion deltas before moving
+/// the on-screen cursor (the orbit-drag camera below reads the raw deltas
+/// directly and is independently tuned — not affected by this constant).
+/// Each PS/2 packet reports a small per-event integer delta, so a 1:1
+/// mapping made crossing the 800px-wide screen take a long physical sweep
+/// ("too low" sensitivity). 3x triples on-screen travel per physical
+/// movement while staying easy to land on small targets (buttons, swatches,
+/// gizmo tips); retune here if it ever feels too twitchy or still sluggish.
+const MOUSE_SENSITIVITY: f32 = 3.0;
 
 // ── Node/rope color palette ─────────────────────────────────────────────────
 // 0=RED 1=WHITE 2=CYAN 3=GOLD
@@ -80,10 +109,16 @@ const PAL_NAME: [&str; 4] = ["RED", "WHITE", "CYAN", "GOLD"];
 const POP_W: i32 = 224;
 const POP_H: i32 = 130;
 
+// ── Command-result panel (collapsed strip above the taskbar input line;
+// click toggles a taller detail view) ───────────────────────────────────────
+const CMDR_W:     i32 = 300;
+const CMDR_H_MIN: i32 = 24;
+const CMDR_H_MAX: i32 = 72;
+
 // ── Corner orientation gizmo (Unity-style, top-right) ───────────────────────
 // Small 92px-diameter widget showing X/Y/Z axes rotating with the camera.
 // Clicking an axis tip snaps the camera to that canonical view direction.
-const CGIZ_CX:  i32 = (W as i32) - 54; // center X  (= 746 for 800-wide screen)
+const CGIZ_CX:  i32 = (W as i32) - 54; // center X  (= 1866 for the 1920-wide HD screen)
 const CGIZ_CY:  i32 = 54;              // center Y
 const CGIZ_R:   f32 = 34.0;            // arm radius in pixels
 const CGIZ_HIT: f32 = 11.0;            // pick radius around each tip
@@ -117,15 +152,35 @@ struct Desktop {
     cur_y: f32,
     console: bool,
     prev_btn: u8,
+    /// Consecutive frames the right mouse button has been held. The console
+    /// toggle fires only when this reaches 2, so a single-frame phantom button
+    /// bit (residual PS/2 packet glitch) can't flip the console and flicker it.
+    rbtn_hold: u8,
     frame: u64,
     cmd: [u8; 48],
     cmd_len: usize,
+    // Result of the last executed command — drawn as a panel anchored just
+    // above the taskbar's input line (see show_cmd_result/draw_cmd_result).
+    // Starts collapsed (one line); click toggles cmd_result_open.
+    cmd_result: [u8; 48],
+    cmd_result_len: usize,
+    cmd_result_ok: bool,
+    cmd_result_vis: bool,
+    cmd_result_open: bool,
     // Node palette index (0=RED 1=WHITE 2=CYAN 3=GOLD) — persists for the session.
     node_color: [u8; MAXN],
     // Cached screen-space coords of each node (updated every 3-D frame) for pick.
     snap_nx: [f32; MAXN],
     snap_ny: [f32; MAXN],
     snap_nr: [f32; MAXN],
+    // Standalone "minimized console": when the console overlay isn't shown,
+    // it collapses into a clickable red sphere floating at CONSOLE_BALL_POS
+    // (see also draw_console / in_console_ball). Cached screen-space circle,
+    // refreshed every 3-D frame — same one-frame-stale pick pattern as
+    // snap_n* above.
+    console_ball_sx: f32,
+    console_ball_sy: f32,
+    console_ball_sr: f32,
     // Sci-fi info popup state.
     popup_vis:  bool,
     popup_kind: u8,   // 1 = node, 2 = edge
@@ -159,13 +214,22 @@ static DESK: SyncUnsafe<Desktop> = SyncUnsafe::new(Desktop {
     cur_y: 300.0,
     console: false,
     prev_btn: 0,
+    rbtn_hold: 0,
     frame: 0,
     cmd: [0u8; 48],
     cmd_len: 0,
+    cmd_result: [0u8; 48],
+    cmd_result_len: 0,
+    cmd_result_ok: false,
+    cmd_result_vis: false,
+    cmd_result_open: false,
     node_color: [0u8; MAXN],
     snap_nx: [0.0f32; MAXN],
     snap_ny: [0.0f32; MAXN],
     snap_nr: [0.0f32; MAXN],
+    console_ball_sx: 0.0,
+    console_ball_sy: 0.0,
+    console_ball_sr: 0.0,
     popup_vis: false,
     popup_kind: 0,
     popup_id: 0,
@@ -671,6 +735,29 @@ fn draw_num(fb: &mut [u32], x: usize, y: usize, mut v: usize, color: u32) -> usi
     cx
 }
 
+// ── Console close button (top-right corner) ────────────────────────────────
+// The console view is a static full-screen overlay (no camera/scene to
+// offset against), so its geometry is fixed regardless of scene state.
+const CLOSE_BTN_W: i32 = 34;
+const CLOSE_BTN_H: i32 = 26;
+const CLOSE_BTN_X: i32 = W as i32 - 12 - CLOSE_BTN_W;
+const CLOSE_BTN_Y: i32 = 12;
+
+fn draw_close_button(fb: &mut [u32]) {
+    fill_rect(fb, CLOSE_BTN_X, CLOSE_BTN_Y, CLOSE_BTN_W, CLOSE_BTN_H, 0x002a_1418);
+    fill_rect(fb, CLOSE_BTN_X, CLOSE_BTN_Y, CLOSE_BTN_W, 1, 0x00aa_5060);
+    fill_rect(fb, CLOSE_BTN_X, CLOSE_BTN_Y + CLOSE_BTN_H - 1, CLOSE_BTN_W, 1, 0x00aa_5060);
+    draw_str(fb, (CLOSE_BTN_X + 11) as usize, (CLOSE_BTN_Y + 5) as usize, "X", 0x00ff_8080);
+}
+
+/// Hit-test the close button. `(x, y)` is screen-space (the console overlay
+/// has no camera transform, so raw cursor coords are already button-local).
+fn in_close_button(x: f32, y: f32) -> bool {
+    let (xi, yi) = (x as i32, y as i32);
+    xi >= CLOSE_BTN_X && xi < CLOSE_BTN_X + CLOSE_BTN_W
+        && yi >= CLOSE_BTN_Y && yi < CLOSE_BTN_Y + CLOSE_BTN_H
+}
+
 fn draw_console(fb: &mut [u32], n: usize, ne: usize) {
     for p in fb.iter_mut() {
         *p = 0x000c_1408;
@@ -680,12 +767,13 @@ fn draw_console(fb: &mut [u32], n: usize, ne: usize) {
     let dim = 0x0066_aa88;
     let green = 0x0033_ff66;
     draw_str(fb, ox, oy, "GOS  -  graph-theory OS  -  kernel console", title);
+    draw_close_button(fb);
     let mut x = draw_str(fb, ox, oy + 28, "live graph:  ", dim);
     x = draw_num(fb, x, oy + 28, n, green);
     x = draw_str(fb, x, oy + 28, " nodes   ", dim);
     x = draw_num(fb, x, oy + 28, ne, green);
     let _ = draw_str(fb, x, oy + 28, " edges", dim);
-    draw_str(fb, ox, oy + 52, "right-click: return to the 3D desktop", dim);
+    draw_str(fb, ox, oy + 52, "ESC, the X (top-right), or right-click: return to the 3D desktop, where the console becomes a red sphere", dim);
     draw_str(fb, ox, oy + 86, "gos> _", green);
     let text = 0xB8000 as *const u16;
     let mut row = 0usize;
@@ -864,41 +952,140 @@ fn apply_action(d: &mut Desktop, id: usize) {
     }
 }
 
-/// Execute the typed command (on Enter), then clear the buffer.
+/// Execute the typed command (on Enter), stash the outcome for the
+/// on-screen result panel (show_cmd_result/draw_cmd_result), then clear
+/// the input buffer.
 fn run_cmd(d: &mut Desktop) {
-    let s = &d.cmd[..d.cmd_len];
+    // Copy into a local buffer first: this severs the borrow from `d.cmd`
+    // so every branch below is free to mutate `d` (including stashing the
+    // text back into `d.cmd_result`) while still holding the command text.
+    let len = d.cmd_len.min(d.cmd.len());
+    let mut buf = [0u8; 48];
+    buf[..len].copy_from_slice(&d.cmd[..len]);
+    let s = &buf[..len];
     d.cmd_len = 0;
-    // "reset" — reset camera
-    if s == b"reset" { apply_action(d, 0); return; }
-    // "console" — open kernel console
-    if s == b"console" { apply_action(d, 1); return; }
-    // "layout" / "relayout" — rerun force layout
-    if s == b"layout" || s == b"relayout" { apply_action(d, 2); return; }
-    // "savecolors" — persist current palette to config disk
-    if s == b"savecolors" {
+    if s.is_empty() {
+        return; // Enter on an empty line — nothing to report.
+    }
+
+    // "reset" / "console" / "layout"|"relayout" — quick-action shortcuts;
+    // "savecolors" / "color N C" — persist / change the node palette.
+    let ok = if s == b"reset" {
+        apply_action(d, 0);
+        true
+    } else if s == b"console" {
+        apply_action(d, 1);
+        true
+    } else if s == b"layout" || s == b"relayout" {
+        apply_action(d, 2);
+        true
+    } else if s == b"savecolors" {
         save_colors(d);
         crate::raw_serial_println(format_args!("persist: savecolors done"));
-        return;
-    }
-    // "color N C" — set node N (0-127) to palette color C (0-3), then save
-    // Command format: b"color " then digits for N then space then digit for C.
-    if s.len() >= 9 && &s[..6] == b"color " {
+        true
+    } else if s.len() >= 9 && &s[..6] == b"color " {
+        // Command format: b"color " then digits for N then space then digit for C.
         let rest = &s[6..];
-        // parse node index
         let mut ni = 0usize;
         let mut ri = 0usize;
         while ri < rest.len() && rest[ri] >= b'0' && rest[ri] <= b'9' {
             ni = ni * 10 + (rest[ri] - b'0') as usize;
             ri += 1;
         }
+        let mut applied = false;
         if ri < rest.len() && rest[ri] == b' ' && ri + 1 < rest.len() {
             let ci = (rest[ri + 1] - b'0') as usize;
             if ni < d.n && ci < 4 {
                 d.node_color[ni] = ci as u8;
                 save_colors(d);
                 crate::raw_serial_println(format_args!("color: node {} → {}", ni, ci));
+                applied = true;
             }
         }
+        applied
+    } else {
+        false
+    };
+    show_cmd_result(d, s, ok);
+}
+
+/// Stash the just-run command text + outcome as the result-panel content.
+/// Always (re)opens collapsed — a fresh result starts as a one-line strip;
+/// see draw_cmd_result / handle_cmd_result_click for the click-to-expand UI.
+fn show_cmd_result(d: &mut Desktop, cmd: &[u8], ok: bool) {
+    let n = cmd.len().min(d.cmd_result.len());
+    d.cmd_result[..n].copy_from_slice(&cmd[..n]);
+    d.cmd_result_len = n;
+    d.cmd_result_ok = ok;
+    d.cmd_result_vis = true;
+    d.cmd_result_open = false;
+}
+
+/// Result-panel bounds (rx, ry, rh) for the current open/collapsed state —
+/// shared by draw_cmd_result and handle_cmd_result_click so the click
+/// hit-test always agrees with what is actually drawn on screen.
+fn cmdr_rect(d: &Desktop) -> (i32, i32, i32) {
+    let rh = if d.cmd_result_open { CMDR_H_MAX } else { CMDR_H_MIN };
+    let rx = 8i32;
+    let ry = (H as i32 - BAR_H) - rh - 6;
+    (rx, ry, rh)
+}
+
+/// Result strip: last typed command + an OK/ERR tag, anchored just above
+/// the taskbar's input line. Click toggles a taller detail view — the same
+/// "click a HUD panel to inspect / collapse" idiom as the node/edge popup.
+fn draw_cmd_result(fb: &mut [u32], d: &Desktop) {
+    if !d.cmd_result_vis {
+        return;
+    }
+    let (rx, ry, rh) = cmdr_rect(d);
+
+    // Glowing border + dark fill — same idiom as draw_popup.
+    fill_rect(fb, rx - 1, ry - 1, CMDR_W + 2, rh + 2, 0x0044_aaff);
+    fill_rect(fb, rx, ry, CMDR_W, rh, 0x000c_1620);
+
+    // Echo the command bytes directly via draw_glyph — same idiom as
+    // draw_taskbar's prompt echo (the buffer only ever holds
+    // validated-ASCII keyboard input, so no UTF-8 conversion is needed).
+    let x = draw_str(fb, (rx + 8) as usize, (ry + 4) as usize, "> ", 0x0040_e0ff);
+    let n = d.cmd_result_len.min(28);
+    let mut tx = x;
+    for &b in &d.cmd_result[..n] {
+        draw_glyph(fb, tx, (ry + 4) as usize, b, 0x00d0_e8ff);
+        tx += 8;
+    }
+    let (tag, tcol): (&str, u32) = if d.cmd_result_ok {
+        ("OK", 0x0050_ff90)
+    } else {
+        ("ERR", 0x00ff_7060)
+    };
+    let tagx = (rx + CMDR_W - 8 - tag.len() as i32 * 8) as usize;
+    draw_str(fb, tagx, (ry + 4) as usize, tag, tcol);
+
+    if d.cmd_result_open {
+        fill_rect(fb, rx, ry + 22, CMDR_W, 1, 0x0030_60a0);
+        let hint: &str = if d.cmd_result_ok {
+            "Command applied - state updated."
+        } else {
+            "Unrecognised command (ignored)."
+        };
+        draw_str(fb, (rx + 8) as usize, (ry + 30) as usize, hint, 0x005a_80a0);
+        draw_str(fb, (rx + CMDR_W - 15 * 8) as usize, (ry + rh - 22) as usize, "click to close", 0x003a_5a78);
+    }
+}
+
+/// True if (cx, cy) lands on the result panel — toggles open/collapsed as a
+/// side effect (consumes the click whenever the visible panel is hit).
+fn handle_cmd_result_click(d: &mut Desktop, cx: f32, cy: f32) -> bool {
+    if !d.cmd_result_vis {
+        return false;
+    }
+    let (rx, ry, rh) = cmdr_rect(d);
+    if cx >= rx as f32 && cx < (rx + CMDR_W) as f32 && cy >= ry as f32 && cy < (ry + rh) as f32 {
+        d.cmd_result_open = !d.cmd_result_open;
+        true
+    } else {
+        false
     }
 }
 
@@ -1293,21 +1480,38 @@ fn in_corner_gizmo(x: f32, y: f32) -> bool {
     dx * dx + dy * dy <= 47.0 * 47.0
 }
 
+/// Hit-test the minimized-console sphere using its screen-space projection
+/// from the most recent 3-D frame (console_ball_s{x,y,r} — refreshed every
+/// frame in render_frame's 3-D branch; one-frame-stale, same as snap_n* /
+/// do_pick above — imperceptible at frame rate).
+fn in_console_ball(d: &Desktop, x: f32, y: f32) -> bool {
+    let dx = x - d.console_ball_sx;
+    let dy = y - d.console_ball_sy;
+    dx * dx + dy * dy <= d.console_ball_sr * d.console_ball_sr
+}
+
 /// Render one frame: handle pointer input (cursor / left-drag orbit / right-click
 /// console), keyboard (taskbar command buffer), draw the scene + taskbar + cursor,
 /// and blit to the LFB. Reads only k-mouse / k-ps2 atomics — never touches RUNTIME.
 pub fn render_frame() {
     let d = unsafe { DESK.get_mut() };
     let (mdx, mdy, btn) = k_mouse::take_motion();
-    d.cur_x = (d.cur_x + mdx as f32).clamp(0.0, (W - 1) as f32);
-    d.cur_y = (d.cur_y - mdy as f32).clamp(0.0, (H - 1) as f32);
+    d.cur_x = (d.cur_x + mdx as f32 * MOUSE_SENSITIVITY).clamp(0.0, (W - 1) as f32);
+    d.cur_y = (d.cur_y - mdy as f32 * MOUSE_SENSITIVITY).clamp(0.0, (H - 1) as f32);
 
-    // ── Keyboard: command buffer + Escape closes popup ───────────────────────
+    // ── Keyboard: command buffer + Escape closes console / popup ─────────────
     while let Some(k) = k_ps2::take_key() {
         match k {
             0x08 => { if d.cmd_len > 0 { d.cmd_len -= 1; } }
             0x0A | 0x0D => run_cmd(d),
-            0x1B => { d.popup_vis = false; }
+            // Context-sensitive: from the console, ESC returns to the 3-D
+            // desktop (mirrors the X button / right-click — see render below
+            // for how the console then reappears as a red sphere); otherwise
+            // it just dismisses an open info popup. The two states are
+            // mutually exclusive (entering the console always clears
+            // popup_vis — see the right-click toggle below), so this can't
+            // accidentally do both / neither.
+            0x1B => { if d.console { d.console = false; } else { d.popup_vis = false; } }
             0x20..=0x7E => {
                 if d.cmd_len < d.cmd.len() - 1 {
                     d.cmd[d.cmd_len] = k;
@@ -1319,9 +1523,19 @@ pub fn render_frame() {
     }
 
     // ── Right-click: toggle console (also closes popup) ─────────────────────
-    if btn & 0x02 != 0 && d.prev_btn & 0x02 == 0 {
-        d.console = !d.console;
-        d.popup_vis = false;
+    // Debounced: a genuine right-click is held across many frames, while a
+    // phantom button bit from a (rare, residual) PS/2 packet glitch lasts a
+    // single frame. Require the button to persist 2 consecutive frames and
+    // toggle exactly once (on the rising count==2 edge), so noise can't flip
+    // the console and flicker its green overlay.
+    if btn & 0x02 != 0 {
+        d.rbtn_hold = d.rbtn_hold.saturating_add(1);
+        if d.rbtn_hold == 2 {
+            d.console = !d.console;
+            d.popup_vis = false;
+        }
+    } else {
+        d.rbtn_hold = 0;
     }
 
     // ── Left button: press / release tracking for click vs drag ─────────────
@@ -1330,12 +1544,25 @@ pub fn render_frame() {
     let held          = btn & 0x01 != 0;
     let bar_top       = (H as i32 - BAR_H) as f32;
 
-    if just_pressed && !d.console {
+    if just_pressed {
         d.press_x = d.cur_x;
         d.press_y = d.cur_y;
-        // Grab a gizmo ring if the cursor is near one.
-        if d.cur_y < bar_top && d.gizmo_hover > 0 {
+        // Grab a gizmo ring if the cursor is near one (3-D view only — the
+        // console overlay has no gizmo; press tracking above is still needed
+        // there too, for the close-button click-vs-drag check below).
+        if !d.console && d.cur_y < bar_top && d.gizmo_hover > 0 {
             d.gizmo_drag = d.gizmo_hover;
+        }
+    }
+
+    // ── Console overlay: click the X button (top-right) to return to 3-D ────
+    if just_released && d.console {
+        let ddx = d.cur_x - d.press_x;
+        let ddy = d.cur_y - d.press_y;
+        if ddx * ddx + ddy * ddy < 64.0 && in_close_button(d.press_x, d.press_y) {
+            // Same effect as ESC / right-click: back to the 3-D desktop,
+            // where the console reappears as a red sphere (see render below).
+            d.console = false;
         }
     }
 
@@ -1356,10 +1583,17 @@ pub fn render_frame() {
                     }
                     b += 1;
                 }
+            } else if handle_cmd_result_click(d, d.press_x, d.press_y) {
+                // Result panel expanded/collapsed — click consumed.
             } else if corner_snap(d) {
                 // Camera snapped to corner gizmo axis — click consumed.
             } else if in_corner_gizmo(d.press_x, d.press_y) {
                 // Click landed in gizmo background but missed every tip — ignore.
+            } else if in_console_ball(d, d.press_x, d.press_y) {
+                // Minimized-console sphere — restores the console (mirrors
+                // the X button / ESC / right-click, just in reverse).
+                d.console = true;
+                d.popup_vis = false;
             } else if !handle_popup_click(d, d.press_x, d.press_y) {
                 // Not a color swatch → pick sphere / rope (or close popup).
                 do_pick(d, d.press_x, d.press_y);
@@ -1467,6 +1701,22 @@ pub fn render_frame() {
             draw_sphere(fb, zb, nx[i], nyv[i], nr[i], nd[i], base);
         }
 
+        // Standalone "minimized console": while the console overlay is
+        // hidden, it lives in the scene as its own red sphere (orbits with
+        // the camera like everything else here) — clicking it, like ESC /
+        // the X button / right-click in reverse, restores the console (see
+        // in_console_ball / the click chain above). Cache its projected
+        // circle for that one-frame-stale pick, same as snap_n* / nx/nyv/nr.
+        {
+            let (bx, by, bz) = CONSOLE_BALL_POS;
+            let (bsx, bsy, bd) = project_pt(bx, by, bz, cyw, syw, cp, sp);
+            let bsr = CONSOLE_BALL_R * FOCAL / bd;
+            d.console_ball_sx = bsx;
+            d.console_ball_sy = bsy;
+            d.console_ball_sr = bsr;
+            draw_sphere(fb, zb, bsx, bsy, bsr, bd, PAL_RGB[0]);
+        }
+
         // Gizmo rings: brighten the hovered / dragged ring (Unity-style highlight).
         let t_ring = unsafe { core::arch::x86_64::_rdtsc() };
         let (c0, c1, c2) = if d.gizmo_hover == 1 || d.gizmo_drag == 1 {
@@ -1485,6 +1735,7 @@ pub fn render_frame() {
         let t_ui = unsafe { core::arch::x86_64::_rdtsc() };
         draw_corner_gizmo(fb, d, cyw, syw, cp, sp);
         draw_taskbar(fb, d);
+        draw_cmd_result(fb, d);
         draw_popup(fb, d);
 
         // Log section timings every 60 frames.
