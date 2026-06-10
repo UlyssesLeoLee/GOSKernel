@@ -44,7 +44,23 @@ fn flush_motion(ctx: *mut ExecutorContext) -> Option<Output> {
 fn accumulate_byte(ctx: *mut ExecutorContext, byte: u8) -> Option<Output> {
     let slot = super::PACKET_INDEX.load(Ordering::Relaxed);
     match slot {
-        0 => { super::PACKET0.store(byte, Ordering::Relaxed); super::PACKET_INDEX.store(1, Ordering::Relaxed); None }
+        0 => {
+            // PS/2 mouse packet byte 0 ALWAYS has bit 3 (0x08) set. If a byte
+            // arrives at slot 0 without it, the stream is misaligned — a byte
+            // was dropped or an extra one arrived (e.g. the PS/2 output FIFO
+            // overran while the slow software renderer delayed IRQ servicing).
+            // Discard this stray byte and STAY at slot 0 to resync. Without
+            // this, the misalignment persists and movement bytes (dx/dy) get
+            // shifted into the button slot, producing phantom button bits —
+            // including spurious right-clicks, which toggle the console overlay
+            // and make its green background flicker in and out.
+            if byte & 0x08 == 0 {
+                return None;
+            }
+            super::PACKET0.store(byte, Ordering::Relaxed);
+            super::PACKET_INDEX.store(1, Ordering::Relaxed);
+            None
+        }
         1 => { super::PACKET1.store(byte, Ordering::Relaxed); super::PACKET_INDEX.store(2, Ordering::Relaxed); None }
         _ => {
             super::PACKET2.store(byte, Ordering::Relaxed);
