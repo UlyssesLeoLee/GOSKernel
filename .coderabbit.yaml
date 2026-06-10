@@ -1,0 +1,138 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+tone_instructions: >
+  This is GOSKernel, an experimental no_std graph-theory operating system
+  written in Rust (bare-metal x86_64 via the `bootloader` crate, plus a
+  family of kernel-tier driver crates). The code is research/early-stage and
+  intentionally heavy on `unsafe` for hardware access (port I/O, MMIO,
+  control registers, MSRs, interrupt handlers). Prioritize correctness and
+  safety findings over style nits:
+  - `unsafe` blocks: verify preconditions, pointer validity/aliasing, and
+    that nothing allocates or blocks inside interrupt/IRQ context.
+  - Graph mutations (gos-runtime, gos-protocol, gos-cypher-mut): verify the
+    atomic mutation dispatcher invariants hold (Use-edge exclusivity, single
+    writer, `graph_epoch` bumped on every structural change) and that any
+    ADRs referenced in the PR description are respected.
+  - Boot sequencing in crates/hypervisor/src/main.rs is order-dependent
+    (vaddr/meta init -> supervisor bootstrap -> builtin graph boot ->
+    kernel-tier drivers -> ring3 -> enable interrupts); flag any reordering
+    as high-risk.
+  Style/formatting nits on a no_std kernel are low priority unless they hide
+  a real bug.
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: true
+  abort_on_close: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+
+  path_filters:
+    - "!target/**"
+    - "!dist/**"
+    - "!**/*.log"
+    - "!**/*.txt"
+    - "!.claude/**"
+
+  path_instructions:
+    - path: "crates/gos-protocol/**/*.rs"
+      instructions: >
+        Core graph protocol: node/edge/signal types, vector addresses, and
+        edge-algebra primitives. Changes here affect the whole runtime's
+        ABI - flag any change to GraphSnapshot, vector address constants, or
+        signal payload layouts as breaking and call out whether a version
+        bump is needed.
+
+    - path: "crates/gos-runtime/**/*.rs"
+      instructions: >
+        Atomic mutation dispatcher and graph storage. Every structural
+        mutation (add/remove node or edge, rebind) must bump graph_epoch and
+        go through the dispatcher - flag any direct mutation that bypasses
+        it. For `Use` edges, verify exclusivity (single active Use edge per
+        target) is enforced on every code path, including error/rollback
+        paths.
+
+    - path: "crates/gos-supervisor/**/*.rs"
+      instructions: >
+        Module lifecycle and boot-time capability publishing.
+        `service_system_cycle` must remain a bounded loop (hard cap on
+        iterations) that terminates when dispatched==0 && !restarted - flag
+        any change that could make it loop unboundedly or skip the cap.
+
+    - path: "crates/hypervisor/src/**/*.rs"
+      instructions: >
+        no_std/no_main kernel entry point (gos-kernel). `kernel_main`'s boot
+        order is load-bearing: vaddr/meta init -> supervisor bootstrap ->
+        builtin graph boot -> kernel-tier drivers (GDT/IDT/PIC) -> ring3 ->
+        `interrupts::enable()`. Flag any reordering, and verify the
+        steady-state loop never blocks indefinitely (it must keep reaching
+        `hlt` each iteration). The panic handler must not allocate or use
+        anything that could itself panic. Review raw CR0/CR4/MSR/port
+        `unsafe` blocks against documented x86_64 semantics.
+
+    - path: "crates/k-*/**/*.rs"
+      instructions: >
+        Kernel-tier driver crates (PS/2, PIT, PIC, VGA, NIC, mouse, FAT32,
+        etc). These run in interrupt/IRQ context or are polled from the
+        steady-state loop: flag any allocation, blocking, or unbounded loop
+        inside an interrupt handler. For byte/packet state machines (e.g.
+        PS/2 mouse packet accumulation), check resync handling for
+        dropped/desynced bytes, not just the happy path. All `unsafe` port
+        I/O must use correct, documented port addresses and bit widths.
+
+    - path: "crates/k-vk-host/**/*.rs"
+      instructions: >
+        Host-bridge serial protocol (`@gos.vk` display-list frames over
+        COM3/TCP). Check frame framing/length-prefixing stays consistent
+        between the kernel emitter and the `tools/gos-vk-viewer` consumer,
+        and that emission is throttled (epoch-gated / keepalive) so an idle
+        graph doesn't flood the link.
+
+    - path: "tools/gos-vk-viewer/**/*.rs"
+      instructions: >
+        Host-side wgpu/winit viewer (normal std Rust, not no_std). Network
+        I/O against the kernel's COM3 TCP bridge must be non-blocking /
+        resilient to partial frames, disconnects, and reconnect loops - none
+        of these may freeze the render loop.
+
+    - path: "**/*.ps1"
+      instructions: >
+        Windows PowerShell tooling (build/run scripts). Flag destructive
+        defaults (force-deleting, overwriting without confirmation) and any
+        change to QEMU `run-args` - cross-check against
+        crates/hypervisor/Cargo.toml's `[package.metadata.bootimage]` notes,
+        since some flags (e.g. `-display gtk,gl=on`, large `-m` sizes) have
+        previously broken QEMU on this host.
+
+    - path: ".github/workflows/**/*.yml"
+      instructions: >
+        CI must keep `cargo check -p gos-kernel` and
+        `tools/verify-graph-architecture.ps1` passing on the nightly
+        bare-metal `x86_64-gos-kernel` target. Flag any change that weakens
+        or removes these checks.
+
+  tools:
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+chat:
+  auto_reply: true
