@@ -1,0 +1,9 @@
+# Host-side tool: override the repo-root kernel target pin so cargo builds for
+# the host (mirrors host-tests/*). build-std is inherited from the root config,
+# so we re-point it at std (the root targets core/alloc for the no_std kernel).
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = []

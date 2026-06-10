@@ -466,3 +466,29 @@ pub fn vk_auto_refresh() {
         render_live_graph();
     }
 }
+
+/// Force-emit the current graph as an `@gos.vk` frame regardless of whether the
+/// structural epoch changed. `vk_auto_refresh` only emits on change, so a visual
+/// surface (gos-vk-viewer) that connects *after* boot — when the graph is idle —
+/// would otherwise never receive a frame. Call this on a slow keepalive timer so
+/// a late-joining viewer obtains the current scene within ~1s.
+pub fn vk_force_refresh() {
+    ensure_com3();
+    render_live_graph();
+}
+
+/// Drain one byte of input from the visual bridge (COM3 RX), or `None` if none
+/// is waiting (B3b). gos-vk-viewer forwards host keyboard back over the SAME
+/// TCP serial it reads @gos.vk frames from — serial is full-duplex, so kernel
+/// TX (frames) and RX (input) share the one 14445 connection. The caller (the
+/// steady-state loop) routes these bytes into the input queue, so typing in the
+/// viewer drives the OS and the resulting graph change streams back as a frame.
+pub fn vk_drain_input() -> Option<u8> {
+    ensure_com3();
+    // LSR (COM3+5) bit 0 = receive-data-ready.
+    if unsafe { in8(COM3 + 5) } & 0x01 != 0 {
+        Some(unsafe { in8(COM3) })
+    } else {
+        None
+    }
+}

@@ -109,12 +109,47 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // logged on the first few iterations and then every 60 — a permanent,
     // lightweight FPS/latency trace (see also fbtest's PERF/FBF logs).
     let mut loop_iter: u64 = 0;
+    // Host-bridged GPU surface (Phase B): in addition to the in-guest software
+    // desktop, emit the live graph as an `@gos.vk` display-list frame to COM3
+    // (TCP:14445) so `gos-vk-viewer --live` can render it on the host GPU
+    // (smooth, high-res, host-VRAM). Throttled on the 120 Hz PIT and gated on
+    // graph_epoch inside vk_auto_refresh, so an idle graph costs ~one epoch
+    // read. Runs OUTSIDE without_interrupts (the slow UART emit must not stall
+    // IRQs). fbtest stays during the transition; once the viewer is solid the
+    // in-guest renderer can be retired.
+    const VK_REFRESH_TICKS: u64 = 30; // ~0.25s: emit promptly when the graph changes
+    const VK_KEEPALIVE_TICKS: u64 = 120; // ~1s: full frame so a late viewer still gets the scene
+    let mut vk_last_tick = k_pit::get_ticks() as u64;
+    let mut vk_keepalive_tick = vk_last_tick;
     loop {
         let lt0 = unsafe { core::arch::x86_64::_rdtsc() };
         x86_64::instructions::interrupts::without_interrupts(gos_supervisor::service_system_cycle);
         let lt1 = unsafe { core::arch::x86_64::_rdtsc() };
         fbtest::render_frame();
         let lt2 = unsafe { core::arch::x86_64::_rdtsc() };
+        let now = k_pit::get_ticks() as u64;
+        if now.wrapping_sub(vk_last_tick) >= VK_REFRESH_TICKS {
+            vk_last_tick = now;
+            k_vk_host::vk_auto_refresh();
+        }
+        if now.wrapping_sub(vk_keepalive_tick) >= VK_KEEPALIVE_TICKS {
+            vk_keepalive_tick = now;
+            k_vk_host::vk_force_refresh();
+        }
+        // B3b: drain viewer→kernel input (COM3 RX) and feed it to the key queue.
+        // Echo each byte to the boot serial (COM1) so the round-trip is
+        // observable in terminal A. Mirror the real PS/2 IRQ path: push into
+        // fbtest's local desktop ring buffer AND post a Signal::Data to
+        // k-shell's NODE_VEC, so viewer keystrokes drive the same graph CLI
+        // (theme switches, cypher commands, ...) that a physical keyboard does.
+        while let Some(b) = k_vk_host::vk_drain_input() {
+            raw_serial_println(format_args!("vk-input: {:#04x}", b));
+            k_ps2::push_key(b);
+            let _ = gos_runtime::post_signal(
+                k_shell::NODE_VEC,
+                gos_protocol::Signal::Data { from: k_ps2::NODE_VEC.as_u64(), byte: b },
+            );
+        }
         loop_iter = loop_iter.wrapping_add(1);
         // Print timing on iteration 1, 2, 3, then every 60 iterations.
         if loop_iter <= 3 || loop_iter % 60 == 0 {

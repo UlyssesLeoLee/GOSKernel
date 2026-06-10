@@ -1,0 +1,17 @@
+[package]
+name = "gos-vk-viewer"
+version = "0.1.0"
+edition = "2021"
+
+# Detach from the kernel workspace: this is a host-side GPU tool, built for the
+# host target (see .cargo/config.toml), not the no_std kernel target.
+[workspace]
+
+[dependencies]
+wgpu = "0.20"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+glam = { version = "0.28", features = ["bytemuck"] }
+# Live window mode (`--live`): winit 0.29 pairs with wgpu 0.20 (both raw-window-handle 0.6).
+winit = "0.29"
