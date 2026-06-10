@@ -597,11 +597,23 @@ impl GraphRuntime {
     /// with windows of zero `Use` edges) that `k-shell::sync_theme_use_edges`
     /// uses today.  `register_edge`/`unregister_edge` keep their single-bump
     /// semantics unchanged; this is an additional atomic entry, not a rewrite.
+    ///
+    /// If `from -[Use]-> new_target` already exists (the exclusivity
+    /// invariant guarantees it is the *only* `Use` edge from `from`), this is
+    /// a true no-op: no removal, no reinsertion, no `graph_epoch` bump, no
+    /// `EdgeUpsert`. Idempotent callers (e.g. a Cypher `MERGE` that lowers to
+    /// [`RuntimeDispatcher::add_edge`] for a `Use` edge that already points at
+    /// `new_target`) must not appear to mutate the graph when nothing changed.
     pub fn rebind_exclusive_use(
         &mut self,
         from: NodeId,
         new_target: NodeId,
     ) -> Result<EdgeId, RuntimeError> {
+        let edge_id = derive_edge_id(from, new_target, "use");
+        if self.edge_slot(edge_id).is_some() {
+            return Ok(edge_id);
+        }
+
         // Pass 1: drop every existing Use edge sourced at `from` (no bump yet).
         // The match scope ends before the mutation so the edges/adjacency
         // borrows stay disjoint.
@@ -621,37 +633,36 @@ impl GraphRuntime {
             i += 1;
         }
 
-        // Pass 2: insert the new exclusive Use edge (idempotent if present).
-        let edge_id = derive_edge_id(from, new_target, "use");
-        if self.edge_slot(edge_id).is_none() {
-            self.adjacency_arena.allocate(edge_id)?;
-            let slot = self
-                .edges
-                .iter_mut()
-                .find(|slot| slot.is_none())
-                .ok_or(RuntimeError::EdgeTableFull)?;
-            *slot = Some(EdgeRecord {
-                edge_vector: derive_edge_vector(edge_id),
-                spec: EdgeSpec {
-                    edge_id,
-                    from_node: from,
-                    to_node: new_target,
-                    edge_type: RuntimeEdgeType::Use,
-                    weight: 1.0,
-                    acl_mask: u64::MAX,
-                    route_policy: RoutePolicy::Direct,
-                    capability_namespace: None,
-                    capability_binding: None,
-                    vector_ref: None,
-                },
-            });
-            self.emit_control_plane(
-                ControlPlaneMessageKind::EdgeUpsert,
-                edge_id.0,
-                from.0[0] as u64,
-                new_target.0[0] as u64,
-            );
-        }
+        // Pass 2: insert the new exclusive Use edge. `edge_id` is guaranteed
+        // absent here (Pass 1 only removes slots, and the function already
+        // returned early above if `edge_id` was present).
+        self.adjacency_arena.allocate(edge_id)?;
+        let slot = self
+            .edges
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(RuntimeError::EdgeTableFull)?;
+        *slot = Some(EdgeRecord {
+            edge_vector: derive_edge_vector(edge_id),
+            spec: EdgeSpec {
+                edge_id,
+                from_node: from,
+                to_node: new_target,
+                edge_type: RuntimeEdgeType::Use,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::Direct,
+                capability_namespace: None,
+                capability_binding: None,
+                vector_ref: None,
+            },
+        });
+        self.emit_control_plane(
+            ControlPlaneMessageKind::EdgeUpsert,
+            edge_id.0,
+            from.0[0] as u64,
+            new_target.0[0] as u64,
+        );
 
         // One epoch bump for the whole logical mutation (ADR-004 §2.2).
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
@@ -1772,16 +1783,20 @@ impl gos_cypher_mut::MutationDispatcher for RuntimeDispatcher {
         to: NodeId,
         kind: gos_cypher_mut::ReceptiveEdgeKind,
     ) -> Result<(), u32> {
-        let (edge_type, edge_key) = match kind {
-            gos_cypher_mut::ReceptiveEdgeKind::Mount => (RuntimeEdgeType::Mount, "mount"),
-            gos_cypher_mut::ReceptiveEdgeKind::Use => (RuntimeEdgeType::Use, "use"),
-        };
-        let edge_id = derive_edge_id(from, to, edge_key);
+        // `Use` edges carry the ADR-001 exclusivity invariant (exactly one
+        // `Use` edge per source node), so a Cypher `MERGE ... -[:USE]->` that
+        // lowers to `add_edge(.., Use)` must take the same atomic
+        // remove-old/insert-new path as `rebind_use`, not a bare
+        // `register_edge` that could leave two `Use` edges from `from`.
+        if matches!(kind, gos_cypher_mut::ReceptiveEdgeKind::Use) {
+            return self.rebind_use(from, to);
+        }
+        let edge_id = derive_edge_id(from, to, "mount");
         let spec = EdgeSpec {
             edge_id,
             from_node: from,
             to_node: to,
-            edge_type,
+            edge_type: RuntimeEdgeType::Mount,
             weight: 1.0,
             acl_mask: u64::MAX,
             route_policy: RoutePolicy::Direct,
