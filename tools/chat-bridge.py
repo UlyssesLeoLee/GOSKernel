@@ -7,7 +7,7 @@ server on 127.0.0.1:14444) and forwards chat messages to a configured AI API.
 
 Usage
 -----
-  python tools/chat-bridge.py [--api openai|anthropic|ollama] [--model MODEL]
+  python tools/chat-bridge.py [--api openai|anthropic|gemini|ollama] [--model MODEL]
                                [--key API_KEY] [--host HOST] [--port PORT]
                                [--serial-port TCP_PORT]
 
@@ -24,6 +24,16 @@ Supported back-ends
   ollama      http://<host>:<port>/api/chat  (Ollama local inference)
   openai      https://api.openai.com/v1/chat/completions
   anthropic   https://api.anthropic.com/v1/messages
+  gemini      https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+
+API keys
+--------
+  --key is optional: if omitted, the key is read from an environment
+  variable so it never appears in shell history or process listings:
+    openai      -> OPENAI_API_KEY
+    anthropic   -> ANTHROPIC_API_KEY
+    gemini      -> GEMINI_API_KEY  (or GOOGLE_API_KEY)
+  ollama needs no key.
 
 GOS Bridge Protocol (COM2 / TCP 14444)
 --------------------------------------
@@ -51,6 +61,7 @@ The system prompt instructs the model to:
 
 import argparse
 import json
+import os
 import socket
 import sys
 import textwrap
@@ -197,11 +208,47 @@ class AIBackend:
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
+    def _gemini_chat(self, user_msg: str) -> str:
+        self.history.append({"role": "user", "content": user_msg})
+        contents = [
+            {
+                "role": "model" if h["role"] == "assistant" else "user",
+                "parts": [{"text": h["content"]}],
+            }
+            for h in self.history
+        ]
+        payload = json.dumps({
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        }).encode()
+        model = self.model or "gemini-2.5-flash"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={self.key}"
+        )
+        req = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as exc:
+            return f"[bridge error] Gemini HTTP {exc.code}: {exc.read().decode()[:200]}"
+        except Exception as exc:
+            return f"[bridge error] {exc}"
+        try:
+            reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError):
+            reply = f"[bridge error] unexpected Gemini response: {json.dumps(data)[:200]}"
+        self.history.append({"role": "assistant", "content": reply})
+        return reply
+
     def ask(self, user_msg: str) -> str:
         if self.api == "openai":
             return self._openai_chat(user_msg)
         elif self.api == "anthropic":
             return self._anthropic_chat(user_msg)
+        elif self.api == "gemini":
+            return self._gemini_chat(user_msg)
         else:
             return self._ollama_chat(user_msg)
 
@@ -300,12 +347,14 @@ def run_bridge(ai: AIBackend, serial_port: int) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="GOS Chat Bridge")
     p.add_argument("--api",         default="ollama",
-                   choices=["ollama", "openai", "anthropic"],
+                   choices=["ollama", "openai", "anthropic", "gemini"],
                    help="AI API back-end (default: ollama)")
     p.add_argument("--model",       default="",
                    help="Model name (default: qwen2.5:7b for Ollama)")
     p.add_argument("--key",         default="",
-                   help="API key (required for openai/anthropic)")
+                   help="API key for openai/anthropic/gemini. If omitted, read from "
+                        "OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY (or "
+                        "GOOGLE_API_KEY) so the key never appears in shell history.")
     p.add_argument("--host",        default="127.0.0.1",
                    help="API server host (default: 127.0.0.1)")
     p.add_argument("--port",        default=11434, type=int,
@@ -319,13 +368,35 @@ def main() -> None:
         "ollama":    "qwen2.5:7b",
         "openai":    "gpt-4o-mini",
         "anthropic": "claude-haiku-4-5",
+        "gemini":    "gemini-2.5-flash",
     }
     model = args.model or model_defaults[args.api]
 
-    log(CYAN, "CONFIG", f"api={args.api}  model={model}  "
-        f"host={args.host}:{args.port}  com2-tcp={args.serial_port}")
+    # Resolve API key: --key wins, else the back-end's env var(s). Never log
+    # the key itself.
+    key_env_vars = {
+        "openai":    ["OPENAI_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY"],
+        "gemini":    ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    }
+    key = args.key
+    if not key:
+        for var in key_env_vars.get(args.api, []):
+            if os.environ.get(var):
+                key = os.environ[var]
+                break
 
-    ai = AIBackend(args.api, model, args.key, args.host, args.port)
+    if args.api in key_env_vars and not key:
+        log(RED, "ERROR",
+            f"--api {args.api} needs a key: pass --key or set "
+            f"{'/'.join(key_env_vars[args.api])}.")
+        sys.exit(1)
+
+    log(CYAN, "CONFIG", f"api={args.api}  model={model}  "
+        f"host={args.host}:{args.port}  com2-tcp={args.serial_port}  "
+        f"key={'set' if key else 'none'}")
+
+    ai = AIBackend(args.api, model, key, args.host, args.port)
 
     while True:
         try:

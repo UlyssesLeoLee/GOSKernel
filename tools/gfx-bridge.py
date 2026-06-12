@@ -36,15 +36,26 @@ Usage
   python tools/gfx-bridge.py --selftest      draw a sample graph (no QEMU)
   python tools/gfx-bridge.py --replay FILE    render a captured frame dump
   python tools/gfx-bridge.py --check          headless parse self-test (CI)
+  python tools/gfx-bridge.py --dump-ppm out.ppm                  sample frame -> host PPM
+  python tools/gfx-bridge.py --dump-ppm out.ppm --replay FILE    captured frame -> host PPM
 
 `--check` needs neither QEMU nor a display: it runs the built-in sample
 display-list through a headless renderer and asserts the resulting op counts,
 exiting non-zero on mismatch. This is the verifiable goal for the protocol.
+
+`--dump-ppm FILE` rasterises the display list (sample, or `--replay`'s
+captured frames) into FILE as a binary PPM (P6) — zero dependencies,
+byte-diffable. This is the host-side "golden frame" capture for V2.5's gfx
+golden-frame/gfx-fuzz harness: the screenshot lands on the *host* filesystem
+via this COM3 bridge, independent of the kernel's FAT32/F.5 write path (see
+doc/ADR-009-f5-screenshot-scope.md).
 """
 
 import argparse
+import os
 import socket
 import sys
+import tempfile
 import threading
 import queue
 
@@ -190,6 +201,98 @@ class TkRenderer:
             self.root.update()
 
 
+def _rgb_bytes(hexcolor: str):
+    """'#rrggbb' -> (r, g, b) ints. Malformed input -> black."""
+    s = hexcolor.lstrip("#")
+    if len(s) != 6:
+        return (0, 0, 0)
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return (0, 0, 0)
+
+
+class FrameBuffer:
+    """Rasterises the display list into an RGB byte buffer — the host-side
+    pixel sink for `--dump-ppm` golden-frame capture. No tkinter, no display;
+    same drawing primitives as TkRenderer (filled rects, lines, pixels)."""
+
+    def __init__(self, width=800, height=600):
+        self.width, self.height = width, height
+        self.buf = bytearray(width * height * 3)
+        self.nodes = {}        # id -> (cx, cy)
+
+    def _resize(self, width, height):
+        self.width, self.height = width, height
+        self.buf = bytearray(width * height * 3)
+
+    def _set(self, x, y, rgb):
+        if 0 <= x < self.width and 0 <= y < self.height:
+            i = (y * self.width + x) * 3
+            self.buf[i:i + 3] = bytes(_rgb_bytes(rgb))
+
+    def _fill_rect(self, x, y, w, h, rgb):
+        rgb_bytes = bytes(_rgb_bytes(rgb))
+        for yy in range(max(0, y), min(self.height, y + h)):
+            row = (yy * self.width + max(0, x)) * 3
+            for _ in range(max(0, x), min(self.width, x + w)):
+                self.buf[row:row + 3] = rgb_bytes
+                row += 3
+
+    def _draw_line(self, x1, y1, x2, y2, rgb):
+        # Bresenham
+        dx, dy = abs(x2 - x1), -abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx + dy
+        x, y = x1, y1
+        while True:
+            self._set(x, y, rgb)
+            if x == x2 and y == y2:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x += sx
+            if e2 <= dx:
+                err += dx
+                y += sy
+
+    def _clear(self, rgb):
+        rgb_bytes = bytes(_rgb_bytes(rgb))
+        self.buf[:] = rgb_bytes * (self.width * self.height)
+        self.nodes.clear()
+
+    def apply(self, op):
+        kind = op[0]
+        if kind == "dim":
+            self._resize(op[1], op[2])
+        elif kind == "clr":
+            self._clear(op[1])
+        elif kind == "nod":
+            _, nid, x, y, w, h, rgb, _label = op
+            self._fill_rect(x, y, w, h, rgb)
+            self.nodes[nid] = (x + w // 2, y + h // 2)
+        elif kind == "edg":
+            _, a, b, rgb = op
+            if a in self.nodes and b in self.nodes:
+                (x1, y1), (x2, y2) = self.nodes[a], self.nodes[b]
+                self._draw_line(x1, y1, x2, y2, rgb)
+        elif kind == "pix":
+            _, x, y, rgb = op
+            self._set(x, y, rgb)
+        # "end" (present) is a no-op for a single-frame capture.
+
+
+def write_ppm(path: str, fb: "FrameBuffer") -> None:
+    """Write `fb` as a binary PPM (P6) — zero dependencies, byte-diffable
+    golden-frame format."""
+    header = f"P6\n{fb.width} {fb.height}\n255\n".encode("ascii")
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(bytes(fb.buf))
+
+
 # ── Built-in sample display list (graph-native demo / self-test) ──────────────
 # A tiny slice of the GOS graph: kernel core wired to a VGA render unit and a
 # shell unit. Restated as one immediate-mode frame.
@@ -234,6 +337,29 @@ def run_check() -> int:
 
     log(GREY, "CHECK", f"  surface dim parsed as {r.dim[0]}x{r.dim[1]}")
 
+    # PPM dump round trip — the host-side golden-frame path (no kernel
+    # FAT32/F.5 needed; see doc/ADR-009-f5-screenshot-scope.md).
+    fb = FrameBuffer()
+    for line in SAMPLE_SCRIPT:
+        op = parse_frame(line)
+        if op:
+            fb.apply(op)
+    fd, tmp_path = tempfile.mkstemp(suffix=".ppm")
+    os.close(fd)
+    try:
+        write_ppm(tmp_path, fb)
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        expected_header = f"P6\n{fb.width} {fb.height}\n255\n".encode("ascii")
+        expected_len = len(expected_header) + fb.width * fb.height * 3
+        ppm_ok = data.startswith(expected_header) and len(data) == expected_len
+        mark = GREEN + "ok" + RESET if ppm_ok else RED + "MISMATCH" + RESET
+        if not ppm_ok:
+            ok = False
+        log(GREY, "CHECK", f"  ppm dump: {len(data)} bytes (expected {expected_len})  [{mark}]")
+    finally:
+        os.unlink(tmp_path)
+
     if ok:
         log(GREEN, "CHECK", f"PASS - {parsed} frames parsed, all op counts match")
         return 0
@@ -271,6 +397,26 @@ def run_replay(path: str) -> int:
                 r.apply(op)
     log(GREEN, "REPLAY", f"replayed {path} — close the window to exit")
     r.root.mainloop()
+    return 0
+
+
+def run_dump_ppm(path: str, replay_path) -> int:
+    """Rasterise the sample (or --replay'd) display list to `path` as a PPM.
+    Host-side golden-frame capture — no display, no kernel FAT32/F.5."""
+    fb = FrameBuffer()
+    if replay_path:
+        with open(replay_path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    else:
+        lines = SAMPLE_SCRIPT
+    parsed = 0
+    for line in lines:
+        op = parse_frame(line)
+        if op:
+            fb.apply(op)
+            parsed += 1
+    write_ppm(path, fb)
+    log(GREEN, "DUMP", f"wrote {fb.width}x{fb.height} PPM ({parsed} ops) to {path}")
     return 0
 
 
@@ -346,10 +492,15 @@ def main() -> int:
                    help="render a captured frame dump from FILE")
     p.add_argument("--check", action="store_true",
                    help="headless parse self-test; exit non-zero on contract failure")
+    p.add_argument("--dump-ppm", metavar="FILE",
+                   help="rasterise the sample (or --replay'd) display list to FILE as a "
+                        "PPM (host-side golden-frame capture; no kernel FAT32 needed)")
     args = p.parse_args()
 
     if args.check:
         return run_check()
+    if args.dump_ppm:
+        return run_dump_ppm(args.dump_ppm, args.replay)
     if args.selftest:
         return run_selftest()
     if args.replay:

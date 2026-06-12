@@ -3,6 +3,11 @@
 /.claude/worktrees/
 *.log
 *.txt
+.env
+.env.*
+*.key
+__pycache__/
+*.pyc
 # Specific patterns found in current directory
 qemu_out.txt
 boot_out.txt
