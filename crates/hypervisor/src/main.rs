@@ -90,7 +90,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Phase E.2: program the syscall MSRs once the GDT is live.
     raw_serial_println(format_args!("boot: arming ring3 syscall surface"));
     unsafe { ring3::init(); }
-    raw_serial_println(format_args!("boot: ring3 syscall surface armed"));
 
     raw_serial_println(format_args!("boot: enabling interrupts; entering steady-state"));
     x86_64::instructions::interrupts::enable();
@@ -138,17 +137,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         }
         // B3b: drain viewer→kernel input (COM3 RX) and feed it to the key queue.
         // Echo each byte to the boot serial (COM1) so the round-trip is
-        // observable in terminal A. Mirror the real PS/2 IRQ path: push into
-        // fbtest's local desktop ring buffer AND post a Signal::Data to
-        // k-shell's NODE_VEC, so viewer keystrokes drive the same graph CLI
-        // (theme switches, cypher commands, ...) that a physical keyboard does.
+        // observable in terminal A. k_ps2::inject_byte mirrors the real PS/2
+        // IRQ path (push into the desktop ring buffer + route to k-shell), so
+        // viewer keystrokes drive the same graph CLI (theme switches, cypher
+        // commands, ...) that a physical keyboard does.
         while let Some(b) = k_vk_host::vk_drain_input() {
             raw_serial_println(format_args!("vk-input: {:#04x}", b));
-            k_ps2::push_key(b);
-            let _ = gos_runtime::post_signal(
-                k_shell::NODE_VEC,
-                gos_protocol::Signal::Data { from: k_ps2::NODE_VEC.as_u64(), byte: b },
-            );
+            k_ps2::inject_byte(b);
         }
         loop_iter = loop_iter.wrapping_add(1);
         // Print timing on iteration 1, 2, 3, then every 60 iterations.

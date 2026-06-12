@@ -70,6 +70,20 @@ pub fn take_key() -> Option<u8> {
     Some(b)
 }
 
+/// Inject a byte from a synthetic input source (e.g. the B3b host-bridged
+/// viewer over COM3) as if it had arrived via the real PS/2 IRQ path:
+/// push it into the desktop key ring and route it to `k_shell::NODE_VEC`,
+/// mirroring `post::emit`'s `Output::Ascii` branch. Keeps callers (e.g.
+/// `kernel_main`) from hardcoding plugin node vectors or posting signals
+/// directly.
+pub fn inject_byte(b: u8) {
+    push_key(b);
+    let _ = gos_runtime::post_signal(
+        k_shell::NODE_VEC,
+        Signal::Data { from: NODE_VEC.as_u64(), byte: b },
+    );
+}
+
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.ps2");
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: EXECUTOR_ID,
