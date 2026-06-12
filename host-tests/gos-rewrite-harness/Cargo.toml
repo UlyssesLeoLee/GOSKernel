@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 gos-rewrite = { path = "../../crates/gos-rewrite" }
+gos-protocol = { path = "../../crates/gos-protocol" }

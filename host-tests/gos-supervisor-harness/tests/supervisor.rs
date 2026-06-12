@@ -14,8 +14,9 @@ use gos_supervisor::{
     bootstrap, charge_heap, claim_resource, current_instance, dequeue_ready_instance,
     drain_revocation, fault_module, heap_grant_summary, install_module, instance_domain_root,
     instance_is_degraded, instance_restart_generation, process_restart_queue, queue_restart,
-    realize_boot_modules, release_claim, schedule_instance, snapshot, spawn_instance,
-    template_for_module, SupervisorError, MAX_CLAIMS, MAX_RESTARTS_BEFORE_DEGRADE,
+    realize_boot_modules, release_claim, schedule_instance, service_system_cycle, snapshot,
+    spawn_instance, template_for_module, SupervisorError, CYCLE_DEPTH_CAP, MAX_CLAIMS,
+    MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -270,6 +271,33 @@ fn queued_restart_restarts_module_through_scheduler_control_plane() {
     let summary = gos_supervisor::instance_summary(instance).expect("instance summary");
     assert_eq!(summary.lane, ExecutionLaneClass::Background);
     assert!(summary.ready_queued);
+}
+
+#[test]
+fn service_system_cycle_quiesces_when_idle() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    // Mirrors kernel_main's steady-state loop (V2.2c, ADR-002 §4): with no new
+    // external work arriving between ticks, each cycle's internal drain
+    // (restart queue -> ready queue -> runtime pump -> fault policy) must
+    // converge well under CYCLE_DEPTH_CAP, never silently truncate.
+    for _ in 0..4 {
+        let report = service_system_cycle();
+        assert!(
+            report.quiesced,
+            "idle cycle must drain to quiescence, not trip the depth guard: {report:?}"
+        );
+        assert!(!report.overflowed, "idle cycle must not overflow the pending queue");
+        assert!(report.steps >= 1, "the engine always fires at least once");
+        assert!(
+            report.max_causal_depth < CYCLE_DEPTH_CAP,
+            "idle cycle must stay far below the ADR-002 depth guard"
+        );
+    }
 }
 
 #[test]

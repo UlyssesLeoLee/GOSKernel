@@ -134,7 +134,7 @@ fn cypher_mutation_pre_validate_and_dispatch() {
     let remove = CypherMutation::RemoveEdge {
         edge_id: EdgeId([3u8; 16]),
     };
-    for m in [mount, use_e, rebind, remove] {
+    for m in [mount, use_e, rebind, remove, CypherMutation::CreateNode] {
         pre_validate(&m).expect("receptive");
     }
 
@@ -143,6 +143,7 @@ fn cypher_mutation_pre_validate_and_dispatch() {
         added: u32,
         removed: u32,
         rebound: u32,
+        created: u32,
     }
     impl MutationDispatcher for Stub {
         fn lookup_node(&self, id: NodeId) -> bool {
@@ -160,12 +161,17 @@ fn cypher_mutation_pre_validate_and_dispatch() {
             self.rebound += 1;
             Ok(())
         }
+        fn create_node(&mut self) -> Result<NodeId, u32> {
+            self.created += 1;
+            Ok(NodeId([0xC0u8; 16]))
+        }
     }
     let mut d = Stub {
         known: [id_a, id_b],
         added: 0,
         removed: 0,
         rebound: 0,
+        created: 0,
     };
     apply_mutation(&mut d, mount).expect("mount applies");
     apply_mutation(&mut d, rebind).expect("rebind applies");
@@ -173,6 +179,11 @@ fn cypher_mutation_pre_validate_and_dispatch() {
     assert_eq!(d.added, 1);
     assert_eq!(d.removed, 1);
     assert_eq!(d.rebound, 1);
+
+    // CreateNode -> Some(new_id), dispatcher.create_node() invoked once.
+    let created = apply_mutation(&mut d, CypherMutation::CreateNode).expect("create applies");
+    assert_eq!(created, Some(NodeId([0xC0u8; 16])));
+    assert_eq!(d.created, 1);
 
     // Unknown endpoint -> error.
     let id_x = NodeId([99u8; 16]);
