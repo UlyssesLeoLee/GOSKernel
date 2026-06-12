@@ -43,7 +43,7 @@
 // be retuned without recompiling. Native wgpu (Vulkan), instanced + depth-tested
 // + metallic lighting, offscreen -> PNG. Same @gos.vk protocol; zero kernel change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
 use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
@@ -53,6 +53,8 @@ const WHITE: [f32; 3] = [0.93, 0.93, 0.95];
 const NODE_R: f32 = 0.34;
 const ROPE_R: f32 = 0.045;
 const FIT_R: f32 = 4.0;
+/// Max recently-sent input bytes shown by the B3b input-echo overlay.
+const ECHO_CAP: usize = 24;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -338,6 +340,21 @@ fn make_cylinder(slices: u32) -> (Vec<Vertex3>, Vec<u16>) {
         idx.extend_from_slice(&[b0, t0, b1, b1, t0, t1]);
     }
     (v, idx)
+}
+
+/// Unit quad in the XY plane (z=0, normal=+Z), centered at the origin,
+/// spanning [-0.5, 0.5]^2. Used by the B3b input-echo HUD overlay, drawn
+/// with `view_proj = IDENTITY` so instance positions map directly to NDC,
+/// independent of the orbit camera.
+fn make_quad() -> (Vec<Vertex3>, Vec<u16>) {
+    let n = [0.0, 0.0, 1.0];
+    let v = vec![
+        Vertex3 { pos: [-0.5, -0.5, 0.0], normal: n },
+        Vertex3 { pos: [0.5, -0.5, 0.0], normal: n },
+        Vertex3 { pos: [0.5, 0.5, 0.0], normal: n },
+        Vertex3 { pos: [-0.5, 0.5, 0.0], normal: n },
+    ];
+    (v, vec![0, 1, 2, 0, 2, 3])
 }
 
 const SHADER: &str = r#"
@@ -790,18 +807,69 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
         multiview: None,
     });
 
+    // ── B3b input-echo overlay ──────────────────────────────────────────
+    // A second pipeline that draws flat quads directly in NDC space
+    // (view_proj = IDENTITY, depth test = Always/no-write), independent of
+    // the orbit camera. Reuses the main shader and bind-group layout.
+    let overlay_uniforms = Uniforms { view_proj: Mat4::IDENTITY.to_cols_array_2d(), light_dir: [0.0, 0.0, 1.0, 0.0], camera_pos: [0.0, 0.0, 1.0, 1.0] };
+    let overlay_ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("overlay-uniforms"),
+        contents: bytemuck::bytes_of(&overlay_uniforms),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let overlay_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("overlay-bg"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: overlay_ubuf.as_entire_binding() }],
+    });
+    let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("overlay"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs",
+            buffers: &[
+                wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex3>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &mesh_attrs },
+                wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Instance>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &inst_attrs },
+            ],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs",
+            targets: &[Some(wgpu::ColorTargetState { format: fmt, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
     let (sv, si) = make_sphere(20, 28);
     let (cv, ci) = make_cylinder(14);
+    let (qv, qi) = make_quad();
     let sphere_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sv"), contents: bytemuck::cast_slice(&sv), usage: wgpu::BufferUsages::VERTEX });
     let sphere_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("si"), contents: bytemuck::cast_slice(&si), usage: wgpu::BufferUsages::INDEX });
     let cyl_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("cv"), contents: bytemuck::cast_slice(&cv), usage: wgpu::BufferUsages::VERTEX });
     let cyl_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("ci"), contents: bytemuck::cast_slice(&ci), usage: wgpu::BufferUsages::INDEX });
+    let quad_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("qv"), contents: bytemuck::cast_slice(&qv), usage: wgpu::BufferUsages::VERTEX });
+    let quad_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("qi"), contents: bytemuck::cast_slice(&qi), usage: wgpu::BufferUsages::INDEX });
     let si_len = si.len() as u32;
     let ci_len = ci.len() as u32;
+    let qi_len = qi.len() as u32;
 
     let idle_spin = env_f32("VK_SPIN", 0.005); // gentle idle rotation; pauses while dragging
     let mut dragging = false;
     let mut last_cursor = (0.0f64, 0.0f64);
+    // B3b input-echo overlay: ring buffer of recently-sent input bytes.
+    let mut echo_log: VecDeque<u8> = VecDeque::with_capacity(ECHO_CAP);
     let mut fps_frames = 0u32;
     let mut fps_since = std::time::Instant::now();
     println!("gos-vk-viewer live: window up, reading @gos.vk from {addr} (close window to exit)");
@@ -828,6 +896,29 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
                         .unwrap_or_else(|| (Vec::new(), Vec::new(), [0.06, 0.06, 0.10]));
                     let sphere_inst = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sphere_inst"), contents: bytemuck::cast_slice(&spheres), usage: wgpu::BufferUsages::VERTEX });
                     let rope_inst = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("rope_inst"), contents: bytemuck::cast_slice(&ropes), usage: wgpu::BufferUsages::VERTEX });
+
+                    // B3b input-echo overlay: one tile per recently-sent input
+                    // byte (green=printable, amber=Enter/Backspace/Esc,
+                    // gray=other) plus a connection-status dot (green=B3b
+                    // link up, red=down) — bottom-left HUD, in NDC space.
+                    let connected = input_tx.lock().map(|g| g.is_some()).unwrap_or(false);
+                    let mut overlay_inst: Vec<Instance> = echo_log
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &b)| {
+                            let model = Mat4::from_translation(Vec3::new(-0.94 + i as f32 * 0.07, -0.92, 0.5)) * Mat4::from_scale(Vec3::splat(0.055));
+                            let color = match b {
+                                0x20..=0x7e => [0.25, 0.85, 0.35, 1.0],
+                                b'\r' | 8 | 27 => [0.95, 0.65, 0.15, 1.0],
+                                _ => [0.55, 0.55, 0.6, 1.0],
+                            };
+                            Instance { model: model.to_cols_array_2d(), color }
+                        })
+                        .collect();
+                    let status_color = if connected { [0.2, 0.85, 0.3, 1.0] } else { [0.85, 0.2, 0.2, 1.0] };
+                    let status_model = Mat4::from_translation(Vec3::new(-0.94, -0.84, 0.5)) * Mat4::from_scale(Vec3::splat(0.04));
+                    overlay_inst.push(Instance { model: status_model.to_cols_array_2d(), color: status_color });
+                    let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("overlay_inst"), contents: bytemuck::cast_slice(&overlay_inst), usage: wgpu::BufferUsages::VERTEX });
                     let frame_tex = match surface.get_current_texture() {
                         Ok(t) => t,
                         Err(_) => { surface.configure(&device, &config); return; }
@@ -864,6 +955,12 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
                             rp.set_index_buffer(sphere_ib.slice(..), wgpu::IndexFormat::Uint16);
                             rp.draw_indexed(0..si_len, 0, 0..spheres.len() as u32);
                         }
+                        rp.set_pipeline(&overlay_pipeline);
+                        rp.set_bind_group(0, &overlay_bind_group, &[]);
+                        rp.set_vertex_buffer(0, quad_vb.slice(..));
+                        rp.set_vertex_buffer(1, overlay_buf.slice(..));
+                        rp.set_index_buffer(quad_ib.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..qi_len, 0, 0..overlay_inst.len() as u32);
                     }
                     queue.submit([enc.finish()]);
                     frame_tex.present();
@@ -910,10 +1007,21 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
                             _ => None,
                         };
                         if let Some(b) = byte {
+                            let mut sent = false;
                             if let Ok(mut g) = input_tx.lock() {
                                 if let Some(s) = g.as_mut() {
-                                    let _ = std::io::Write::write_all(s, &[b]);
+                                    sent = std::io::Write::write_all(s, &[b]).is_ok();
                                 }
+                            }
+                            // On-screen echo: mirrors the kernel's COM1
+                            // `vk-input:` log so a human watching the live
+                            // window (no serial console open) can confirm
+                            // the B3b round trip without leaving the GUI.
+                            if sent {
+                                if echo_log.len() == ECHO_CAP {
+                                    echo_log.pop_front();
+                                }
+                                echo_log.push_back(b);
                             }
                         }
                     }
