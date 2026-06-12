@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "schedule": ["before 6am on monday"],
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "ignorePaths": [".claude/worktrees/**"],
+  "packageRules": [
+    {
+      "description": "Kernel-critical low-level crates touch boot-path APIs (segment descriptors, MSRs, paging). Open PRs for visibility but never automerge -- each needs a manual QEMU boot check.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["x86_64", "bootloader", "bootloader_api", "bootloader-x86_64-common"],
+      "groupName": "kernel-critical low-level crates",
+      "automerge": false,
+      "labels": ["dependencies", "kernel-critical"]
+    },
+    {
+      "description": "Batch routine patch/minor bumps across the 40+ workspace crates into one PR to cut review noise.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "cargo non-major dependencies"
+    },
+    {
+      "description": "Group GitHub Actions workflow updates (and their pinned-digest refreshes) into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    }
+  ]
+}

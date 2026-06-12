@@ -50,7 +50,7 @@ function Get-BootImagePath {
         [string]$Profile
     )
 
-    $candidate = Join-Path $RepoRoot ("target\x86_64-gos-kernel\{0}\bootimage-gos-kernel.bin" -f $Profile)
+    $candidate = Join-Path $RepoRoot ("target/x86_64-gos-kernel/{0}/bootimage-gos-kernel.bin" -f $Profile)
     if (Test-Path $candidate) {
         return $candidate
     }
@@ -119,8 +119,8 @@ $Manifest = [ordered]@{
 }
 $Manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
 
-Copy-Item -LiteralPath (Join-Path $RepoRoot "tools\write-usb-image.ps1") -Destination (Join-Path $PackageRoot "write-usb-image.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "doc\INSTALL_BARE_METAL_zh.md") -Destination (Join-Path $PackageRoot "INSTALL_BARE_METAL_zh.md") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "tools/write-usb-image.ps1") -Destination (Join-Path $PackageRoot "write-usb-image.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "doc/INSTALL_BARE_METAL_zh.md") -Destination (Join-Path $PackageRoot "INSTALL_BARE_METAL_zh.md") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path $PackageRoot "README.md") -Force
 
 if (Test-Path $ZipPath) {

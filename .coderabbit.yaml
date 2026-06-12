@@ -3,24 +3,10 @@
 language: "en-US"
 
 tone_instructions: >
-  This is GOSKernel, an experimental no_std graph-theory operating system
-  written in Rust (bare-metal x86_64 via the `bootloader` crate, plus a
-  family of kernel-tier driver crates). The code is research/early-stage and
-  intentionally heavy on `unsafe` for hardware access (port I/O, MMIO,
-  control registers, MSRs, interrupt handlers). Prioritize correctness and
-  safety findings over style nits:
-  - `unsafe` blocks: verify preconditions, pointer validity/aliasing, and
-    that nothing allocates or blocks inside interrupt/IRQ context.
-  - Graph mutations (gos-runtime, gos-protocol, gos-cypher-mut): verify the
-    atomic mutation dispatcher invariants hold (Use-edge exclusivity, single
-    writer, `graph_epoch` bumped on every structural change) and that any
-    ADRs referenced in the PR description are respected.
-  - Boot sequencing in crates/hypervisor/src/main.rs is order-dependent
-    (vaddr/meta init -> supervisor bootstrap -> builtin graph boot ->
-    kernel-tier drivers -> ring3 -> enable interrupts); flag any reordering
-    as high-risk.
-  Style/formatting nits on a no_std kernel are low priority unless they hide
-  a real bug.
+  GOSKernel: experimental no_std bare-metal x86_64 graph-theory OS in Rust,
+  research-stage, heavy on unsafe for hardware access (port I/O, MMIO,
+  interrupts). Prioritize correctness/safety over style nits unless they
+  hide a real bug.
 
 reviews:
   profile: "chill"
