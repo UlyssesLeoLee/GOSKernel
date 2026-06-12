@@ -1780,64 +1780,18 @@ fn idt_load_hook(_ctx: &mut BootContext) {
     );
 }
 
-/// Phase G.1 — synchronous kernel-tier init pass.
-///
-/// Hardware drivers must finish their CPU-state setup (GDT/IDT
-/// installed, PIC unmasked) BEFORE the kernel enables interrupts.
-/// The runtime's pump-driven dispatch path is signal-driven and
-/// doesn't run until interrupts are on, so anything that needs to
-/// fire pre-interrupts must be invoked by direct Rust calls here.
-///
-/// App-tier modules (shell, cypher, ai, chat, ...) skip this pass —
-/// they activate via the steady-state pump in `service_system_cycle`
-/// once the system is interactive.
-///
-/// Order matters:
-///   1. GDT before IDT (TSS selector lives in GDT; IDT IST entries
-///      reference TSS slots).
-///   2. IDT before PIC unmask (an IRQ arriving before IDT loaded
-///      would jump into an unmapped vector and triple-fault).
-///   3. PIC unmask must be the LAST step before main.rs enables
-///      interrupts — once unmasked + sti, IRQs start flowing.
-pub fn init_kernel_tier_drivers() {
-    // 1. GDT — write the GdtState into HAL_MATRIX, then lgdt + reload
-    //    CS + load_tss.  `boot_init_gdt` combines what `gdt_on_init`
-    //    and `init_gdt` would do separately under the runtime-pump
-    //    path that doesn't run pre-interrupts.
-    k_gdt::boot_init_gdt();
-    // 2. IDT — k-idt::init_idt is already self-contained (writes the
-    //    IDT into HAL_MATRIX and lidts it in one call).
-    unsafe { k_idt::init_idt(); }
-    // 3. PIC — initialises the 8259 chain, unmasks Timer / Keyboard /
-    //    Cascade / Mouse.  PIT was already programmed via
-    //    pit_register_hook (120 Hz) during register_hooks pass.
-    k_pic::init_pic();
-    // 4. Drain the PS/2 controller's output buffer.  BIOS / QEMU
-    //    initialization leaves a stale byte in port 0x60 (we observed
-    //    IRQ 1 = 1 right after boot).  As long as that byte sits
-    //    there, the i8042 controller will NOT raise another IRQ 1 —
-    //    its buffer is full from the controller's perspective, so
-    //    user keystrokes get queued in the keyboard cable but never
-    //    delivered to the CPU.  A defensive drain (read until status
-    //    bit 0 clears) lets the controller raise IRQ 1 on the next
-    //    real keypress.  Also drain the mouse channel for symmetry.
-    drain_ps2_buffer();
-    // 5. Activate every Kernel-tier node through the runtime so its
-    //    on_init / on_resume run synchronously.  Without this, plugins
-    //    like k-ps2 never enter their Keyboard parse state and a
-    //    keyboard IRQ would queue but on_event would dereference an
-    //    uninitialized Ps2State.  We use gos_runtime::activate()
-    //    directly per-vector so order is deterministic and we can
-    //    skip App-tier nodes (which init lazily via interrupts).
-    activate_kernel_tier_nodes();
-}
-
 /// Drain any byte sitting in the i8042 PS/2 controller's output
 /// buffer.  Reads port 0x64 (status) — if bit 0 (output buffer full)
 /// is set, port 0x60 has a byte for us; reading it clears the buffer
 /// so the controller can raise IRQ 1 / IRQ 12 again.  Bounded loop
 /// (max 64 iterations) so a misbehaving controller can't hang us.
-fn drain_ps2_buffer() {
+///
+/// V2.2d: called from `hypervisor::main::step_ps2_drain`, the
+/// `gos_rewrite::boot::gos_kernel::PS2_DRAIN` boot node — BIOS/QEMU init
+/// leaves a stale byte in port 0x60 (observed IRQ1=1 right after boot); as
+/// long as it sits there the i8042 controller won't raise IRQ1 again, so
+/// user keystrokes queue in the cable but never reach the CPU.
+pub(crate) fn drain_ps2_buffer() {
     use x86_64::instructions::port::Port;
     let mut status: Port<u8> = Port::new(0x64);
     let mut data: Port<u8> = Port::new(0x60);
@@ -1852,12 +1806,14 @@ fn drain_ps2_buffer() {
 }
 
 /// Phase G.1 — synchronous on_init pass for Kernel-tier nodes.
-/// Called from `init_kernel_tier_drivers` after GDT/IDT/PIC are up.
-/// Each `gos_runtime::activate(vec)` runs the node's on_init (first
-/// time) then on_resume.  Order matches BUILTIN_MODULES topological
-/// order so dependencies (k-pmm before k-vmm before k-heap, etc) are
-/// satisfied.
-fn activate_kernel_tier_nodes() {
+///
+/// V2.2d: called from `hypervisor::main::step_activate_kernel_tier`, the
+/// `gos_rewrite::boot::gos_kernel::ACTIVATE_KERNEL_TIER` boot node (after
+/// GDT/IDT/PIC/PS2_DRAIN). Each `gos_runtime::activate(vec)` runs the node's
+/// on_init (first time) then on_resume.  Order matches BUILTIN_MODULES
+/// topological order so dependencies (k-pmm before k-vmm before k-heap, etc)
+/// are satisfied.
+pub(crate) fn activate_kernel_tier_nodes() {
     let order: &[gos_protocol::VectorAddress] = &[
         // Foundation drivers — touch hardware state, must come first.
         k_serial::NODE_VEC, // UART up so subsequent on_init can log

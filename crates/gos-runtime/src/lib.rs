@@ -8,10 +8,10 @@ use gos_protocol::{
     ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
     EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
     GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
-    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId,
-    NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
-    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_id, derive_edge_vector,
-    CONTROL_PLANE_PROTOCOL_VERSION,
+    EntryPolicy, ExecutorId, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
+    NodeId, NodeInstanceId, NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId,
+    PluginManifest, RoutePolicy, RuntimeEdgeType, RuntimeNodeType, Signal, StateDelta,
+    VectorAddress, derive_edge_id, derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
 
@@ -1711,6 +1711,90 @@ pub fn register_node(
     RUNTIME.lock().register_node(plugin_id, vector, spec)
 }
 
+/// First byte of every [`NodeId`] allocated by [`create_provisional_node`].
+///
+/// `derive_node_id` (used for builtin/plugin NodeIds) hashes plugin+key
+/// bytes, so its first byte is effectively uniform over `0..=255` — no fixed
+/// value is reserved a priori. A constant tag byte here instead makes
+/// "is this NodeId provisional" ([`is_provisional_node_id`]) an exact O(1)
+/// check rather than a probabilistic one, at the cost of reserving this one
+/// namespace point for ADR-005 option A node creation.
+const PROVISIONAL_NODE_ID_TAG: u8 = 0xC0;
+
+/// `VectorAddress.l4` for provisional nodes. Existing builtin/plugin vectors
+/// use small hand-assigned `l4` values (0-30 across the codebase); `0xC0`
+/// keeps the provisional range disjoint from those without needing a
+/// registry.
+const PROVISIONAL_VECTOR_L4: u8 = PROVISIONAL_NODE_ID_TAG;
+
+/// Plugin identity stamped on every node created via
+/// [`create_provisional_node`] (ADR-005 option A). Not a real plugin —
+/// `register_node` does not validate `plugin_id` against the plugin table —
+/// this exists purely so `node_summary`/`node_telemetry` can attribute
+/// provisional nodes to "Cypher CREATE" rather than a boot module.
+pub const PROVISIONAL_PLUGIN_ID: PluginId = PluginId::from_ascii("cypher.provisional");
+
+/// Monotonic source for provisional `NodeId`/`VectorAddress` allocation.
+/// Sequence 0 is never issued so `NodeId([0xC0, 0, ..., 0])` (all-zero
+/// sequence) stays distinguishable from a real allocation in debug output.
+static NEXT_PROVISIONAL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Register a fresh provisional node (ADR-005 option A, §五 step 1):
+/// visible / connectable / renderable (V2.5a `provisional_render.rs`,
+/// V2.5c `vk_auto_refresh`), but `NodeBinding::Unbound` +
+/// `NodeInstanceId::ZERO` — no claim/quota/instance until "promoted" via a
+/// Grant edge (§五 step 3, not yet wired).
+///
+/// Each call allocates a new, distinct `NodeId`/`VectorAddress` pair from
+/// [`NEXT_PROVISIONAL_SEQ`] — the returned pair is always fresh, so
+/// `register_node`'s idempotent-on-`node_id` short-circuit never triggers
+/// here (unlike boot nodes, which intentionally re-register the same
+/// `derive_node_id`-derived id every boot).
+pub fn create_provisional_node() -> Result<(NodeId, VectorAddress), RuntimeError> {
+    let seq = NEXT_PROVISIONAL_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let mut id_bytes = [0u8; 16];
+    id_bytes[0] = PROVISIONAL_NODE_ID_TAG;
+    id_bytes[8..16].copy_from_slice(&seq.to_be_bytes());
+    let node_id = NodeId(id_bytes);
+
+    let vector = VectorAddress {
+        l4: PROVISIONAL_VECTOR_L4,
+        l3: ((seq >> 24) & 0x0FFF) as u16,
+        l2: ((seq >> 12) & 0x0FFF) as u16,
+        offset: (seq & 0x0FFF) as u16,
+    };
+
+    // RuntimeNodeType::Vector is the existing "passive data node" type (cf.
+    // theme.current/theme.wabi/theme.shoji in builtin_bundle.rs);
+    // EntryPolicy::Manual means never auto-scheduled; ExecutorId::ZERO
+    // leaves the node NodeBinding::Unbound + NodeInstanceId::ZERO after
+    // register_node — exactly the "visible, connectable, renderable, but no
+    // claim/quota/instance" state ADR-005 §四 already proved is render- and
+    // capability-transparent.
+    let spec = NodeSpec {
+        node_id,
+        local_node_key: "cypher.provisional",
+        node_type: RuntimeNodeType::Vector,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: ExecutorId::ZERO,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    RUNTIME
+        .lock()
+        .register_node(PROVISIONAL_PLUGIN_ID, vector, spec)
+        .map(|id| (id, vector))
+}
+
+/// `true` iff `node_id` was allocated by [`create_provisional_node`]
+/// (ADR-005 option A namespace marker, see [`PROVISIONAL_NODE_ID_TAG`]).
+pub fn is_provisional_node_id(node_id: NodeId) -> bool {
+    node_id.0[0] == PROVISIONAL_NODE_ID_TAG
+}
+
 pub fn register_edge(spec: EdgeSpec) -> Result<EdgeId, RuntimeError> {
     RUNTIME.lock().register_edge(spec)
 }
@@ -1823,6 +1907,17 @@ impl gos_cypher_mut::MutationDispatcher for RuntimeDispatcher {
             .lock()
             .rebind_exclusive_use(from, new_target)
             .map(|_| ())
+            .map_err(dispatcher_reject_tag)
+    }
+
+    /// `CREATE (n:Label {props})` for an unbound node pattern (ADR-005
+    /// option A, V2.5e) — allocates a fresh provisional node via
+    /// [`create_provisional_node`]. `Label`/`{props}` storage is left for a
+    /// follow-up step; the caller gets the new `NodeId` back so a
+    /// same-statement edge-add can reference it.
+    fn create_node(&mut self) -> Result<NodeId, u32> {
+        create_provisional_node()
+            .map(|(id, _vector)| id)
             .map_err(dispatcher_reject_tag)
     }
 }

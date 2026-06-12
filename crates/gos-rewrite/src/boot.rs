@@ -142,3 +142,78 @@ pub fn resolve_boot_order(
 
     Ok(BootOrder { order, len: placed_count })
 }
+
+/// GOS `kernel_main`'s real boot manifest (V2.2b *wiring*).
+///
+/// `hypervisor::main` resolves [`DEPS`] over [`NODES`] with
+/// [`resolve_boot_order`] and dispatches each step through the result,
+/// instead of hardcoding the call sequence as source order (ADR-002 §3:
+/// "boot order is solved, not encoded"). `host-tests/gos-rewrite-harness`'s
+/// `boot_order.rs` imports these same consts, so "the manifest under test"
+/// and "the manifest the kernel actually boots from" cannot drift apart —
+/// shuffling [`DEPS`]' declaration order still resolves to a valid sequence,
+/// and a cycle is reported rather than hung (ADR-002 §4).
+///
+/// ```cypher
+/// CREATE
+///   (m:Module {name: "gos_rewrite::boot::gos_kernel", type: "module"}),
+///   (nodes:Const {name: "NODES", type: "const"}),
+///   (deps:Const {name: "DEPS", type: "const"}),
+///   (m)-[:CONTAINS]->(nodes), (m)-[:CONTAINS]->(deps),
+///   (deps)-[:USES]->(nodes);
+/// ```
+pub mod gos_kernel {
+    use super::{BootNodeId, Depend};
+
+    pub const CPU_FEATURES: BootNodeId = BootNodeId(1);
+    pub const HAL_INIT: BootNodeId = BootNodeId(2);
+    pub const SUPERVISOR_BOOTSTRAP: BootNodeId = BootNodeId(3);
+    pub const INSTALL_MODULES: BootNodeId = BootNodeId(4);
+    pub const BUILTIN_GRAPH: BootNodeId = BootNodeId(5);
+    pub const REALIZE_MODULES: BootNodeId = BootNodeId(6);
+    // V2.2d: the former single KERNEL_DRIVERS node is now its own
+    // GDT -> IDT -> PIC -> PS2_DRAIN -> ACTIVATE_KERNEL_TIER sub-chain —
+    // hardware ordering constraints expressed as Depend edges instead of a
+    // hand-written call sequence in `init_kernel_tier_drivers`.
+    pub const GDT_INIT: BootNodeId = BootNodeId(7);
+    pub const IDT_INIT: BootNodeId = BootNodeId(8); // IDT gates encode GDT selectors
+    pub const PIC_INIT: BootNodeId = BootNodeId(9); // 8259 remap before IRQs are live
+    pub const PS2_DRAIN: BootNodeId = BootNodeId(10); // stale i8042 byte, after PIC remap
+    pub const ACTIVATE_KERNEL_TIER: BootNodeId = BootNodeId(11); // on_init/on_resume pass
+    pub const RING3: BootNodeId = BootNodeId(12); // syscall MSRs — needs GDT live
+    pub const STEADY_STATE: BootNodeId = BootNodeId(13);
+
+    pub const NODES: [BootNodeId; 13] = [
+        CPU_FEATURES,
+        HAL_INIT,
+        SUPERVISOR_BOOTSTRAP,
+        INSTALL_MODULES,
+        BUILTIN_GRAPH,
+        REALIZE_MODULES,
+        GDT_INIT,
+        IDT_INIT,
+        PIC_INIT,
+        PS2_DRAIN,
+        ACTIVATE_KERNEL_TIER,
+        RING3,
+        STEADY_STATE,
+    ];
+
+    // The real dependency structure: a bootstrap chain, plus RING3 explicitly
+    // depending on the end of the kernel-driver sub-chain (the GDT must be
+    // live before syscall MSRs — see `hypervisor::ring3::init`).
+    pub const DEPS: [Depend; 12] = [
+        Depend { node: HAL_INIT, on: CPU_FEATURES },
+        Depend { node: SUPERVISOR_BOOTSTRAP, on: HAL_INIT },
+        Depend { node: INSTALL_MODULES, on: SUPERVISOR_BOOTSTRAP },
+        Depend { node: BUILTIN_GRAPH, on: INSTALL_MODULES },
+        Depend { node: REALIZE_MODULES, on: BUILTIN_GRAPH },
+        Depend { node: GDT_INIT, on: REALIZE_MODULES },
+        Depend { node: IDT_INIT, on: GDT_INIT },
+        Depend { node: PIC_INIT, on: IDT_INIT },
+        Depend { node: PS2_DRAIN, on: PIC_INIT },
+        Depend { node: ACTIVATE_KERNEL_TIER, on: PS2_DRAIN },
+        Depend { node: RING3, on: ACTIVATE_KERNEL_TIER },
+        Depend { node: STEADY_STATE, on: RING3 },
+    ];
+}

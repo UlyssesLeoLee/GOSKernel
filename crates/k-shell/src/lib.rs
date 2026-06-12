@@ -64,7 +64,7 @@ use gos_protocol::{
     IME_CONTROL_SET_MODE, IME_MODE_ASCII, IME_MODE_ZH_PINYIN, INPUT_KEY_DOWN,
     INPUT_KEY_PAGE_DOWN, INPUT_KEY_PAGE_UP, INPUT_KEY_UP, KernelAbi,
     NodeEvent,
-    NodeExecutorVTable, PluginId, RoutePolicy, RuntimeEdgeType, Signal,
+    NodeExecutorVTable, PluginId, Region, RoutePolicy, RuntimeEdgeType, Signal,
     VectorAddress,
 };
 
@@ -779,21 +779,68 @@ fn sync_theme_use_edges(theme: u8) -> bool {
     gos_runtime::rebind_use(THEME_CURRENT_NODE_ID, theme_node_id(theme)).is_ok()
 }
 
+/// Abstract reactive-subscriber identities for theme diffusion (V2.3c).
+/// `gos_rewrite::NodeId` is the *engine's* opaque identity (a bare `u32`)
+/// used only to index [`THEME_SUBSCRIPTIONS`] / [`reactive_target_vector`] —
+/// distinct from the `gos_protocol::NodeId` graph-node identities derived
+/// via `derive_node_id` elsewhere in this file.
+const REACT_THEME_CURRENT: gos_rewrite::NodeId = gos_rewrite::NodeId(0);
+const REACT_VGA: gos_rewrite::NodeId = gos_rewrite::NodeId(1);
+
+/// Repaint-signal kind threaded through
+/// [`gos_rewrite::reactive::propagate_with`]. Opaque to the table scan;
+/// [`reactive_target_vector`] is what gives a subscriber meaning.
+const KIND_THEME_REPAINT: u32 = 1;
+
+/// Reactive-subscription table for theme diffusion (V2.3 plan deliverables
+/// 1+2; ADR-001 §2.2 `Subscribe` = `Refer` + reactive; V2.3a
+/// `gos_rewrite::reactive` reverse-propagation index, wired here in V2.3c).
+///
+/// `theme.current` mutating is region-independent (`Region::EVERYTHING`,
+/// per ADR-001 §2.2), so every row here repaints on a theme switch. Adding a
+/// render target that should also repaint on theme change is a new row plus
+/// a [`reactive_target_vector`] arm — not a new dispatch call site
+/// (Demo C "0 行代码扩散").
+static THEME_SUBSCRIPTIONS: &[gos_rewrite::reactive::Subscription] =
+    &[gos_rewrite::reactive::Subscription::new(REACT_THEME_CURRENT, REACT_VGA, Region::EVERYTHING)];
+
+/// Resolve an abstract theme-repaint subscriber ([`THEME_SUBSCRIPTIONS`]) to
+/// the signal target [`apply_theme_choice_raw`] sends `DISPLAY_CONTROL_THEME`
+/// to.
+///
+/// `REACT_VGA` honours the caller's `console_target` override, falling back
+/// to the VGA console — the same resolution `apply_theme_choice_raw`
+/// performed inline before V2.3c.
+fn reactive_target_vector(subscriber: gos_rewrite::NodeId, console_target: u64) -> Option<u64> {
+    match subscriber {
+        REACT_VGA => Some(if console_target == 0 { VGA_VEC.as_u64() } else { console_target }),
+        _ => None,
+    }
+}
+
 fn apply_theme_choice_raw(abi: &KernelAbi, from: u64, console_target: u64, theme: u8) -> bool {
     let graph_ok = sync_theme_use_edges(theme);
-    let target = if console_target == 0 {
-        VGA_VEC.as_u64()
-    } else {
-        console_target
-    };
-    let visual_ok = emit_target_signal_raw(
-        abi,
-        target,
-        Signal::Control {
-            cmd: DISPLAY_CONTROL_THEME,
-            val: theme,
+
+    let mut visual_ok = true;
+    gos_rewrite::reactive::propagate_with(
+        THEME_SUBSCRIPTIONS,
+        REACT_THEME_CURRENT,
+        Region::EVERYTHING,
+        KIND_THEME_REPAINT,
+        |subscriber, _kind| {
+            if let Some(target) = reactive_target_vector(subscriber, console_target) {
+                visual_ok &= emit_target_signal_raw(
+                    abi,
+                    target,
+                    Signal::Control {
+                        cmd: DISPLAY_CONTROL_THEME,
+                        val: theme,
+                    },
+                );
+            }
         },
     );
+
     ACTIVE_THEME.store(theme, Ordering::SeqCst);
     if from != 0 && from != NODE_VEC.as_u64() {
         let _ = gos_runtime::post_signal(NODE_VEC, Signal::Interrupt { irq: 32 });

@@ -82,6 +82,7 @@ dependencies = [
  "gos-journal",
  "gos-log",
  "gos-protocol",
+ "gos-rewrite",
  "gos-runtime",
  "gos-sign",
  "gos-supervisor",
@@ -136,6 +137,9 @@ version = "0.2.0"
 [[package]]
 name = "gos-rewrite"
 version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+]
 
 [[package]]
 name = "gos-runtime"
@@ -159,6 +163,7 @@ name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
  "gos-protocol",
+ "gos-rewrite",
  "gos-runtime",
  "gos-sign",
  "k-vmm",
@@ -382,6 +387,7 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-protocol",
+ "gos-rewrite",
  "gos-runtime",
  "gos-supervisor",
  "spin",

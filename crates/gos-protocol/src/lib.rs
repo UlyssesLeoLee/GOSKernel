@@ -7,10 +7,12 @@
 
 pub mod block;
 pub mod edge_algebra;
-pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm};
+pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm, Region, Subscribe};
 pub mod socket;
 pub mod stem;
 pub use stem::*;
+pub mod theme;
+pub use theme::{palette_for_theme, Palette, PALETTE_SHOJI, PALETTE_WABI};
 
 pub mod trap;
 pub use trap::{TrapFrame, TrapVector, TrapClass, HardwareEvent};

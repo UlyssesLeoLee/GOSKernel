@@ -52,6 +52,8 @@
 //! ```
 
 pub mod boot;
+pub mod capability;
+pub mod reactive;
 
 /// Capacity of the engine's pending-signal queue (back-pressure bound).
 pub const MAX_PENDING: usize = 256;

@@ -48,19 +48,29 @@
 //!   (ef_recog:Function {name: "EdgeForm::recognize", type: "function", visibility: "pub"}),
 //!   (ef_comp:Function {name: "EdgeForm::compose", type: "function", visibility: "pub"}),
 //!   (low:Function {name: "RuntimeEdgeType::lower", type: "function", visibility: "pub"}),
+//!   (rg:Class {name: "Region", type: "struct", signature: "{x,y,w,h: u32}"}),
+//!   (sub:Class {name: "Subscribe", type: "struct", signature: "{form: EdgeForm, region: Region}"}),
+//!   (rg_overlaps:Function {name: "Region::overlaps", type: "function", visibility: "pub"}),
+//!   (sub_new:Function {name: "Subscribe::new", type: "function", visibility: "pub"}),
+//!   (sub_everything:Function {name: "Subscribe::everything", type: "function", visibility: "pub"}),
 //!   (f)-[:CONTAINS]->(m),
 //!   (m)-[:CONTAINS]->(eb), (m)-[:CONTAINS]->(ca), (m)-[:CONTAINS]->(ea), (m)-[:CONTAINS]->(ef),
+//!   (m)-[:CONTAINS]->(rg), (m)-[:CONTAINS]->(sub),
 //!   (eb)-[:HAS_METHOD]->(eb_new), (eb)-[:HAS_METHOD]->(eb_none), (eb)-[:HAS_METHOD]->(eb_refer),
 //!   (eb)-[:HAS_METHOD]->(eb_union), (eb)-[:HAS_METHOD]->(eb_floor),
 //!   (ca)-[:HAS_METHOD]->(ca_join),
 //!   (ea)-[:HAS_METHOD]->(ea_new), (ea)-[:HAS_METHOD]->(ea_plain), (ea)-[:HAS_METHOD]->(ea_merge),
 //!   (ef)-[:HAS_METHOD]->(ef_new), (ef)-[:HAS_METHOD]->(ef_valid),
 //!   (ef)-[:HAS_METHOD]->(ef_recog), (ef)-[:HAS_METHOD]->(ef_comp),
+//!   (rg)-[:HAS_METHOD]->(rg_overlaps),
+//!   (sub)-[:HAS_METHOD]->(sub_new), (sub)-[:HAS_METHOD]->(sub_everything),
 //!   (ret)-[:HAS_METHOD]->(low),
 //!   (low)-[:CALLS]->(eb_new), (low)-[:CALLS]->(ea_new), (low)-[:CALLS]->(ef_new),
 //!   (ef_valid)-[:CALLS]->(eb_floor),
 //!   (ef_comp)-[:CALLS]->(eb_union), (ef_comp)-[:CALLS]->(ea_merge), (ef_comp)-[:CALLS]->(ef_new),
-//!   (ea_merge)-[:CALLS]->(ca_join);
+//!   (ea_merge)-[:CALLS]->(ca_join),
+//!   (sub_new)-[:USES]->(eb), (sub_new)-[:USES]->(ea), (sub_new)-[:USES]->(rg),
+//!   (sub_everything)-[:CALLS]->(sub_new);
 //! ```
 
 use crate::RuntimeEdgeType;
@@ -283,5 +293,71 @@ impl RuntimeEdgeType {
                 EdgeAttrs::new(false, true, Cardinality::One, false),
             ),
         }
+    }
+}
+
+/// A 2D dirty-rect predicate carried by a [`Subscribe`] edge — the
+/// region-predicate payload V2.0 deferred ("`reactive` is modeled as a bool
+/// for V2.0; its region-predicate payload (ADR-001 §2.2) arrives with
+/// `Subscribe` in V2.3", see [`EdgeAttrs::reactive`]). Coordinates are
+/// framebuffer pixels; a zero-width or zero-height region is empty and
+/// overlaps nothing, including itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Region {
+    pub const fn new(x: u32, y: u32, w: u32, h: u32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// Subscribes to every mutation regardless of where it lands — the
+    /// theme-diffusion case (ADR-001 §2.2: a theme switch is region-independent;
+    /// per-window dirty-rects are the *opt-in* narrowing other render nodes
+    /// apply on top of this).
+    pub const EVERYTHING: Region = Region::new(0, 0, u32::MAX, u32::MAX);
+
+    /// True iff `self` and `other` share at least one pixel.
+    pub const fn overlaps(&self, other: &Region) -> bool {
+        if self.w == 0 || self.h == 0 || other.w == 0 || other.h == 0 {
+            return false;
+        }
+        let a_right = self.x.saturating_add(self.w);
+        let b_right = other.x.saturating_add(other.w);
+        let a_bottom = self.y.saturating_add(self.h);
+        let b_bottom = other.y.saturating_add(other.h);
+        self.x < b_right && other.x < a_right && self.y < b_bottom && other.y < a_bottom
+    }
+}
+
+/// `Subscribe` (ADR-001 §2.3 V2 row): `Refer` + `reactive` attribute, paired
+/// with the [`Region`] predicate payload. Not a 5th primitive —
+/// [`EdgeForm::recognize`] already returns `None` for any reactive form
+/// (V2.0); `Subscribe` is exactly that form plus the region V2.0 deferred.
+/// The engine's reverse-propagation index (`gos_rewrite::reactive`, V2.3a)
+/// consumes `(target, subscriber, region)` triples built from this form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Subscribe {
+    pub form: EdgeForm,
+    pub region: Region,
+}
+
+impl Subscribe {
+    /// `Refer` + `reactive=true` (ADR-001 §2.3), scoped to `region`.
+    pub const fn new(region: Region) -> Self {
+        Self {
+            form: EdgeForm::new(EdgeBits::refer_only(), EdgeAttrs::new(false, false, Cardinality::One, true)),
+            region,
+        }
+    }
+
+    /// Subscribe to every mutation of the target, independent of region —
+    /// the theme-diffusion case.
+    pub const fn everything() -> Self {
+        Self::new(Region::EVERYTHING)
     }
 }

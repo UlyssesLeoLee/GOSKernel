@@ -2584,15 +2584,15 @@ pub fn instance_domain_root(instance_id: NodeInstanceId) -> Option<u64> {
     Some(guard.modules[mod_slot].domain.root_table_phys)
 }
 
-pub fn service_system_cycle() {
-    // Hard cap: any individual cycle that can't drain in this many
-    // iterations is in a fault-restart loop or similar pathology.
-    // Bail rather than hang the kernel.  Phase B.5's restart cap
-    // catches single-module loops; this cap catches multi-module
-    // round-robins that B.5 alone can't see.
-    const MAX_CYCLE_ITERATIONS: u32 = 2048;
-    let mut iter: u32 = 0;
-    loop {
+/// One unit of supervisor/runtime work, modeled as a [`gos_rewrite::Rule`]
+/// firing (V2.2c, [`doc/ADR-002`] §3-4): drain the restart queue and
+/// lane-class ready queues into the runtime, pump, then apply fault policy
+/// to anything pump faulted. Re-posts itself (causal depth + 1) iff there is
+/// more work to do — an empty re-post is quiescence.
+struct CycleRule;
+
+impl gos_rewrite::Rule for CycleRule {
+    fn fire(&mut self, sig: gos_rewrite::Signal, out: &mut gos_rewrite::Emit) {
         let restarted = process_restart_queue().ok().flatten().is_some();
         // Drain supervisor lane-class ready queues into the runtime ready
         // queue so that pump() picks up scheduled instances on this tick.
@@ -2607,16 +2607,29 @@ pub fn service_system_cycle() {
                 }
             }
         }
-        if !restarted && dispatched == 0 {
-            break;
-        }
-        iter = iter.wrapping_add(1);
-        if iter >= MAX_CYCLE_ITERATIONS {
-            // Diagnostic break — leaves the runtime in whatever state
-            // it reached.  Steady-state shell pump will pick back up.
-            break;
+        if restarted || dispatched != 0 {
+            out.send(sig.to, sig.kind);
         }
     }
+}
+
+/// Causal-depth cap (ADR-002 §4): a cycle whose work doesn't settle within
+/// this many self-re-posts is a fault-restart loop or similar pathology —
+/// Phase B.5's restart cap catches single-module loops, this cap catches
+/// multi-module round-robins that B.5 alone can't see. Same trip point as
+/// the old `MAX_CYCLE_ITERATIONS` hardcap, but the *outcome* differs: the
+/// returned [`gos_rewrite::QuiescenceReport`] reports `max_causal_depth` and
+/// `steps` instead of silently leaving the runtime mid-drain.
+pub const CYCLE_DEPTH_CAP: u32 = 2048;
+
+/// Drive one supervisor service cycle to quiescence (or to
+/// [`CYCLE_DEPTH_CAP`] causal depth). The caller decides what to do with a
+/// non-quiescent [`gos_rewrite::QuiescenceReport`] (e.g. log it) — this never
+/// silently truncates.
+pub fn service_system_cycle() -> gos_rewrite::QuiescenceReport {
+    let mut engine = gos_rewrite::Engine::new(CycleRule);
+    engine.post(gos_rewrite::Signal::external(gos_rewrite::NodeId(0), 0));
+    engine.run_to_quiescence(CYCLE_DEPTH_CAP)
 }
 
 pub fn claim_resource(

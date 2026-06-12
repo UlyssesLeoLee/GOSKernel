@@ -453,6 +453,7 @@ fn print_help(sink: &ConsoleSink) {
     print_str(sink, "  MATCH (n {vector:'6.1.0.0'}) CALL activate(n)\n");
     print_str(sink, "  MATCH (n {vector:'6.1.0.0'}) CALL spawn(n)\n");
     print_str(sink, "  MATCH ()-[e {vector:'e:6.1.0.0'}]-() CALL route(e)\n");
+    print_str(sink, "  MATCH (n) CREATE (m)\n");
 }
 
 fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
@@ -561,6 +562,28 @@ fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
                 print_str(sink, "cypher> route failed ");
                 print_edge_vector(sink, edge_vector);
                 print_byte(sink, b'\n');
+                state.faults = state.faults.saturating_add(1);
+            }
+        }
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // V2.5e (ADR-005 option A): `CREATE (n)` allocates a fresh provisional
+    // node directly via gos_runtime — same direct-call style as the CALL
+    // verbs above. `register_node` bumps `graph_epoch` synchronously, so the
+    // next `vk_auto_refresh` poll (V2.5c) picks the new node up with no pump.
+    if contains_ci(query, "create (") {
+        match gos_runtime::create_provisional_node() {
+            Ok((_id, vector)) => {
+                set_color(sink, 10, 0);
+                print_str(sink, "cypher> created ");
+                print_vector(sink, vector);
+                print_byte(sink, b'\n');
+            }
+            Err(_) => {
+                set_color(sink, 12, 0);
+                print_str(sink, "cypher> create failed\n");
                 state.faults = state.faults.saturating_add(1);
             }
         }
