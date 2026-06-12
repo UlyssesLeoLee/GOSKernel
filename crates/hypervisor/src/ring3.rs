@@ -60,33 +60,26 @@ pub unsafe fn init() {
     //   bits 32..47  -> kernel CS, kernel SS = kernel CS + 8
     //   bits 48..63  -> user-32 CS, user data SS = user-32 CS + 8,
     //                   user-64 CS = user-32 CS + 16
-    // The x86_64 crate's `Star::write` validates this contiguity.
-    // The x86_64 crate's Star::write enforces:
+    // The x86_64 crate's `Star::write` validates this contiguity:
     //   * user_data    == user_code - 8        (sysret layout)
     //   * kernel_data  == kernel_code + 8      (syscall layout)
     //
-    // Today k-gdt does NOT install a separate kernel data segment
-    // between the kernel code and the user descriptors — the kernel
-    // currently runs entirely with CS=kernel_code and SS=0 (no data
-    // segment loads).  Once a Ring 3 plugin actually issues `syscall`
-    // we need a real kernel data descriptor (E.2.1 follow-up) for
-    // syscall to reload SS correctly.  Until then we skip the MSR
-    // program if the layout doesn't satisfy the invariant — boot
-    // continues, the syscall surface stays disarmed, and the failure
-    // path surfaces on the serial console for diagnosis.
+    // Phase E.2.1 added `kernel_data_selector` to k-gdt's GDT
+    // (immediately after `code_selector`), so both invariants now hold.
+    // The kernel still runs with SS=0 day-to-day — this descriptor only
+    // matters as the Ring 0 SS that `syscall` switches to.
     if let Err(reason) = Star::write(
         selectors.user_code_selector,
         selectors.user_data_selector,
         selectors.code_selector,
-        selectors.code_selector,
+        selectors.kernel_data_selector,
     ) {
-        // Print to serial via the hypervisor's raw helper.  The
-        // syscall trampoline never gets enabled — any future user
-        // plugin issuing `syscall` will #UD, which is a recoverable
-        // CPU fault routed through B.4.3's IST stack.
+        // Should be unreachable after E.2.1 — keep the diagnostic so a
+        // future GDT-layout change that breaks the +8/-8 invariants
+        // fails loud on serial instead of silently #GP-ing on the first
+        // `syscall`.
         crate::raw_serial_println(format_args!(
-            "ring3: skipping IA32_STAR program — {} (kernel data segment not yet in GDT, see E.2.1)",
-            reason
+            "ring3: skipping IA32_STAR program — {reason} (GDT layout violates Star::write invariants)"
         ));
         return;
     }
@@ -103,6 +96,10 @@ pub unsafe fn init() {
     let mut efer = Efer::read();
     efer.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
     Efer::write(efer);
+
+    crate::raw_serial_println(format_args!(
+        "ring3: syscall surface armed (IA32_STAR/LSTAR/FMASK programmed, EFER.SCE=1)"
+    ));
 }
 
 // ── Syscall trampoline ──────────────────────────────────────────────────

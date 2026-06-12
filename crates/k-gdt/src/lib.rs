@@ -42,6 +42,12 @@ pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 
 pub struct Selectors {
     pub code_selector: SegmentSelector,
+    /// Phase E.2.1 — kernel data descriptor, installed immediately after
+    /// `code_selector` so `IA32_STAR`'s `kernel_data == kernel_code + 8`
+    /// invariant holds (see `hypervisor::ring3::init`). The kernel runs
+    /// with SS=0 day-to-day; this descriptor exists only as the Ring 0
+    /// SS that `syscall` switches to.
+    pub kernel_data_selector: SegmentSelector,
     pub tss_selector: SegmentSelector,
     /// Phase E.2 — user-mode code descriptor.  Populated alongside the
     /// kernel selectors so `IA32_STAR` can be programmed with both
@@ -95,6 +101,7 @@ unsafe fn init_hal_state() {
             gdt: GlobalDescriptorTable::new(),
             selectors: Selectors {
                 code_selector: SegmentSelector(0),
+                kernel_data_selector: SegmentSelector(0),
                 tss_selector: SegmentSelector(0),
                 user_code_selector: SegmentSelector(0),
                 user_data_selector: SegmentSelector(0),
@@ -133,6 +140,13 @@ unsafe fn init_hal_state() {
     };
 
     state.selectors.code_selector = state.gdt.add_entry(Descriptor::kernel_code_segment());
+    // Phase E.2.1: kernel data segment, installed immediately after the
+    // kernel code segment so `kernel_data_selector == code_selector + 8`
+    // (required by `Star::write`'s SYSCALL CS/SS pairing). This mirrors
+    // the x86_64 crate's own canonical STAR layout: kernel_code,
+    // kernel_data, [user32 placeholder], user_data, user_code.
+    state.selectors.kernel_data_selector =
+        state.gdt.add_entry(Descriptor::kernel_data_segment());
     // Phase E.2: order is significant.  IA32_STAR encodes user CS/SS as
     // (selector_base, selector_base + 8) for sysret, so the descriptors
     // must be installed contiguously in this order:
