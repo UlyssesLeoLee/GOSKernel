@@ -1,0 +1,90 @@
+name: Weekly Auto-Optimization
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # Monday 02:00 UTC
+    - cron: '0 2 * * 6'   # Saturday 02:00 UTC
+  workflow_dispatch:        # Manual trigger for testing
+
+jobs:
+  auto-optimize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools-preview, rustfmt, clippy
+
+      - name: Run Claude Code Auto-Optimization
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch_prefix: auto-optimize
+          direct_prompt: |
+            You are an automated code optimizer for GOSKernel — a graph-native x86_64 bare-metal OS kernel
+            written in Rust (nightly). The workspace has 37 crates under `crates/` including the hypervisor,
+            runtime, supervisor, HAL, graph plugins (k-shell, k-cypher, k-ai, k-net, k-vga, etc.), and support
+            libraries.
+
+            Your task: perform a focused, high-quality optimization pass on this repository. Pick ONE or TWO
+            well-scoped areas per run so the resulting PR is reviewable. Rotate focus across runs to cover
+            different areas over time.
+
+            ## Priority areas (apply judgment on what needs most attention):
+
+            ### 1. Code Quality / Clippy / Formatting
+            - Run `cargo fmt --check 2>&1 | head -50` to find formatting issues, then apply `cargo fmt`
+            - Analyze source files for common Clippy lints (unwrap in non-trivial paths, needless clones,
+              redundant patterns, dead_code, unused imports, missing #[must_use], etc.)
+            - Fix warnings without changing behavior
+            - Remove dead code that is clearly unused
+
+            ### 2. Test Coverage
+            - Identify modules that have zero or minimal tests (`#[cfg(test)]` blocks)
+            - Add unit tests for pure logic: parsers, data structures, graph traversal, capability checks,
+              protocol encoding/decoding, etc.
+            - Focus on host-compilable crates (gos-protocol, gos-cypher-mut, gos-log, gos-sign, gos-verify,
+              k-cypher, k-heap logic, etc.) — avoid adding tests that require bare-metal target
+            - Tests must be logically correct and actually test meaningful behavior
+
+            ### 3. Performance
+            - Look for obvious allocations that can be avoided (unnecessary Vec cloning, string formatting
+              in hot paths, repeated HashMap lookups)
+            - Identify places where `&str` / `&[u8]` should replace `String` / `Vec<u8>`
+            - Replace linear scans with better data structures where appropriate
+            - Do NOT speculate about performance without reading the actual code
+
+            ### 4. Architecture / Migration Debt
+            - The README notes a "legacy island" of loader-first / procedure-first patterns still present
+            - Identify legacy patterns (procedural init sequences, bare function calls that bypass the graph)
+              and refactor them to use the graph-native `node`/`edge`/`use` model
+            - Prefer small, contained migrations (one module at a time) over broad sweeps
+
+            ## Constraints:
+            - Read the relevant source files BEFORE making any changes
+            - Only modify code you have actually read and understood
+            - Do NOT change the public API surface or inter-crate interfaces without strong justification
+            - Do NOT modify `Cargo.lock`, CI workflow files, or the custom target JSON
+            - All changes must compile — run `cargo check --target x86_64-gos-kernel.json -p hypervisor`
+              if the target JSON is available, otherwise run `cargo check -p gos-protocol` and similar
+              host-compilable crates to validate your changes
+            - Keep the PR diff focused and reviewable (< 400 lines changed)
+            - Write a clear PR description explaining WHAT changed and WHY, with specific file references
+
+            ## Process:
+            1. Explore the codebase to decide which area needs attention most this run
+            2. Read the specific files you plan to change
+            3. Make the changes
+            4. Validate with `cargo fmt` and `cargo check` where feasible
+            5. Summarize what was done and why in the commit message and PR description
