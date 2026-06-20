@@ -27,7 +27,7 @@ use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
     PhysFrame, Size4KiB,
 };
-use x86_64::VirtAddr;
+use x86_64::{PhysAddr, VirtAddr};
 use gos_hal::{meta, vaddr};
 use gos_protocol::*;
 
@@ -200,6 +200,62 @@ pub unsafe fn map_anonymous_window(
             .map_to(page, frame, flags, &mut allocator)
             .map_err(|_| "map_to failed")?
             .ignore();
+    }
+
+    Ok(())
+}
+
+/// Counterpart to `create_isolated_address_space`: unmaps every page in
+/// the image/stack/ipc/heap windows (freeing their physical frames back
+/// to the PMM) and then frees the domain's root page-table frame itself.
+///
+/// Used by the supervisor to roll an isolated domain back to nothing when
+/// a module's bring-up pipeline fails partway through, so a faulting
+/// plugin never leaks physical memory.  `heap_len` should be the number
+/// of bytes actually mapped via `map_anonymous_window` (the heap window
+/// is demand-mapped, unlike the other three), not the full reserved
+/// window — pages never mapped are silently skipped either way.
+pub unsafe fn destroy_isolated_address_space(
+    root_table_phys: u64,
+    image_base: u64,
+    image_len: u64,
+    stack_base: u64,
+    stack_len: u64,
+    ipc_base: u64,
+    ipc_len: u64,
+    heap_base: u64,
+    heap_len: u64,
+) -> Result<(), &'static str> {
+    unmap_window(root_table_phys, image_base, image_len)?;
+    unmap_window(root_table_phys, stack_base, stack_len)?;
+    unmap_window(root_table_phys, ipc_base, ipc_len)?;
+    unmap_window(root_table_phys, heap_base, heap_len)?;
+    let root_frame = PhysFrame::from_start_address(PhysAddr::new(root_table_phys))
+        .map_err(|_| "root table phys not frame-aligned")?;
+    deallocate_frame(root_frame);
+    Ok(())
+}
+
+/// Unmaps every page in `[virt_base, virt_base + byte_len)` within the
+/// page table rooted at `root_table_phys`, returning each backing frame
+/// to the PMM.  Pages that were never mapped (e.g. the unused tail of a
+/// demand-mapped heap window) are skipped rather than treated as errors.
+unsafe fn unmap_window(root_table_phys: u64, virt_base: u64, byte_len: u64) -> Result<(), &'static str> {
+    if byte_len == 0 {
+        return Ok(());
+    }
+
+    let mut mapper = mapper_for_root(root_table_phys);
+    let page_count = ((byte_len + Size4KiB::SIZE - 1) / Size4KiB::SIZE) as usize;
+
+    for page_idx in 0..page_count {
+        let page = Page::containing_address(VirtAddr::new(
+            virt_base + (page_idx as u64 * Size4KiB::SIZE),
+        ));
+        if let Ok((frame, flush)) = mapper.unmap(page) {
+            flush.ignore();
+            k_pmm::allocator().lock().dealloc_frame(frame);
+        }
     }
 
     Ok(())

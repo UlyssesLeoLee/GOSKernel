@@ -80,6 +80,7 @@ pub enum SupervisorError {
     InvalidState,
     ModuleRejected,
     DomainCreateFailed,
+    DomainTeardownFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +114,13 @@ pub struct SupervisorBootReport {
     pub running_modules: usize,
     pub isolated_domains: usize,
     pub published_capabilities: usize,
+    /// Modules whose bring-up pipeline (validate/map/instantiate/start)
+    /// failed partway through and were atomically rolled back to a clean
+    /// `Faulted` state (no leaked instance/domain/capabilities).  A
+    /// non-zero count means the boot is degraded but did *not* abort:
+    /// every other module still came up normally, and a faulted module
+    /// can be retried later via `restart_module`.
+    pub failed_modules: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +300,29 @@ fn create_domain_root(
         )
         .map_err(|_| SupervisorError::DomainCreateFailed)
     }
+}
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+fn destroy_domain_root(domain: ModuleDomain, heap_bytes_used: u64) -> Result<(), SupervisorError> {
+    unsafe {
+        k_vmm::destroy_isolated_address_space(
+            domain.root_table_phys,
+            domain.image_base,
+            domain.image_len,
+            domain.stack_base,
+            domain.stack_len,
+            domain.ipc_base,
+            domain.ipc_len,
+            domain.heap_base,
+            heap_bytes_used,
+        )
+        .map_err(|_| SupervisorError::DomainTeardownFailed)
+    }
+}
+
+#[cfg(any(test, feature = "host-testing"))]
+fn destroy_domain_root(_domain: ModuleDomain, _heap_bytes_used: u64) -> Result<(), SupervisorError> {
+    Ok(())
 }
 
 #[cfg(any(test, feature = "host-testing"))]
@@ -998,10 +1029,16 @@ impl Supervisor {
             }
             self.modules[slot].restart_generation =
                 self.modules[slot].restart_generation.wrapping_add(1);
-            self.validate_module(handle)?;
-            self.map_module(handle)?;
-            self.instantiate_module(handle)?;
-            self.start_module(handle)?;
+            // bring_up_module rolls the module atomically back to a
+            // clean Faulted state on failure (no leaked instance/
+            // domain/capabilities) and already emitted the Fault
+            // control-plane event; apply_fault_policy decides what
+            // happens next — another restart, degrade, or wait for an
+            // operator — exactly as it would for a runtime fault.
+            if let Err(err) = self.bring_up_module(handle) {
+                let _ = self.apply_fault_policy(handle);
+                return Err(err);
+            }
             return Ok(Some(handle));
         }
         Ok(None)
@@ -1294,6 +1331,87 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Frees a module's isolated domain (page tables + backing frames)
+    /// and resets its `ModuleDomain` to `EMPTY`.  No-op if the module
+    /// never got as far as `map_module`.  `heap_bytes_used` must cover
+    /// only the heap pages actually demand-mapped via `request_pages` —
+    /// the rest of the reserved heap window was never touched.
+    fn unmap_domain(&mut self, handle: ModuleHandle, heap_bytes_used: u64) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        let domain = self.modules[slot].domain;
+        if domain.root_table_phys == 0 {
+            return Ok(());
+        }
+        destroy_domain_root(domain, heap_bytes_used)?;
+        self.modules[slot].domain = ModuleDomain::EMPTY;
+        Ok(())
+    }
+
+    /// Atomically unwinds every side effect a module's bring-up pipeline
+    /// (validate -> map -> instantiate -> start) may have produced,
+    /// regardless of which stage it reached, and leaves the module
+    /// `Faulted` — the same end state a runtime fault produces — with
+    /// *no* committed resources left behind (unlike `degrade_module`,
+    /// which keeps the domain mapped for a cheap restart, a rolled-back
+    /// module's domain may never have finished construction, so it is
+    /// always freed).  Existing recovery paths apply unchanged:
+    /// `restart_module` / `process_next_restart` already know how to
+    /// re-drive a `Faulted` module, and `ModuleFaultPolicy` still governs
+    /// whether that happens automatically or waits for an operator.
+    ///
+    /// Each cleanup step is independently idempotent (filtering by
+    /// `handle`/`instance_id`, so "nothing of mine was ever created" is
+    /// just a fast no-op), which is what makes calling all of them
+    /// unconditionally — instead of tracking exactly which stage failed
+    /// — safe.
+    fn rollback_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let mut heap_bytes_used: u64 = 0;
+        for record in self.instances.iter() {
+            if record.occupied && record.module == handle {
+                heap_bytes_used = heap_bytes_used.max(record.heap_cursor_pages as u64 * PAGE_BYTES);
+            }
+        }
+        self.revoke_capabilities(handle);
+        self.drain_messages(handle);
+        self.teardown_module_instances(handle);
+        self.unmap_domain(handle, heap_bytes_used)?;
+        let slot = self.find_module_slot(handle)?;
+        self.modules[slot].state = ModuleLifecycle::Faulted;
+        self.modules[slot].queued_restart = false;
+        self.emit_fault_event(handle)?;
+        Ok(())
+    }
+
+    /// Drives a single module through its full bring-up pipeline as one
+    /// atomic unit: either every stage succeeds and the module ends up
+    /// `Running`, or the first failing stage triggers `rollback_module`
+    /// and the original error is returned with the module cleanly
+    /// `Faulted` — never half-mapped, half-instantiated, or leaking a
+    /// domain/instance/capability.
+    ///
+    /// This is what lets `realize_boot_modules` treat each plugin as an
+    /// independent unit: one module's failure can't corrupt another's
+    /// state, and a caller can retry a rolled-back module later without
+    /// first hand-untangling whatever it left behind.
+    fn bring_up_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let outcome = (|| {
+            self.validate_module(handle)?;
+            self.map_module(handle)?;
+            self.instantiate_module(handle)?;
+            self.start_module(handle)
+        })();
+        if let Err(err) = outcome {
+            // Best-effort: if rollback itself fails (e.g. the domain
+            // teardown faults), surface that failure instead of masking
+            // it as the original error — a stuck half-torn-down domain
+            // is a more urgent problem than the bring-up failure that
+            // triggered it.
+            self.rollback_module(handle)?;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn disconnect_endpoints(&mut self, handle: ModuleHandle) {
         for idx in 0..self.subscriptions.len() {
             if !self.subscriptions[idx].occupied {
@@ -1361,14 +1479,15 @@ impl Supervisor {
         Ok(())
     }
 
-    fn fault_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+    /// Emit a Fault control-plane envelope so shell/observer can show the
+    /// most recent fault subject + policy + restart count.  Shared by
+    /// `fault_module` (runtime faults) and `rollback_module` (bring-up
+    /// failures) so both surfaces the same way to operators.
+    fn emit_fault_event(&self, handle: ModuleHandle) -> Result<(), SupervisorError> {
         let slot = self.find_module_slot(handle)?;
-        self.modules[slot].state = ModuleLifecycle::Faulted;
         let policy = self.modules[slot].source.fault_policy();
         let restart_count = self.modules[slot].restart_generation;
         let module_id = self.modules[slot].source.module_id();
-        // Emit a Fault control-plane envelope so shell/observer can show
-        // the most recent fault subject + policy + restart count.
         gos_runtime::with_runtime(|rt| {
             rt.emit_control_plane(
                 ControlPlaneMessageKind::Fault,
@@ -1377,6 +1496,27 @@ impl Supervisor {
                 restart_count as u64,
             );
         });
+        Ok(())
+    }
+
+    fn fault_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        self.modules[slot].state = ModuleLifecycle::Faulted;
+        self.emit_fault_event(handle)?;
+        self.apply_fault_policy(handle)
+    }
+
+    /// Decide what happens to an already-`Faulted` module: give the
+    /// restart policy another try (bounded by
+    /// `MAX_RESTARTS_BEFORE_DEGRADE`), degrade permanently, or leave it
+    /// for an operator.  Split out of `fault_module` so
+    /// `process_next_restart` can re-apply the same policy after a
+    /// `bring_up_module` retry fails, without emitting a second
+    /// duplicate Fault control-plane event.
+    fn apply_fault_policy(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        let policy = self.modules[slot].source.fault_policy();
+        let restart_count = self.modules[slot].restart_generation;
         match policy {
             ModuleFaultPolicy::Restart | ModuleFaultPolicy::RestartAlways => {
                 if restart_count >= MAX_RESTARTS_BEFORE_DEGRADE {
@@ -1410,6 +1550,11 @@ impl Supervisor {
         self.find_module_slot(handle)
             .map(|slot| self.modules[slot].state == ModuleLifecycle::Faulted)
             .unwrap_or(true)
+    }
+
+    fn module_lifecycle(&self, handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        Ok(self.modules[slot].state)
     }
 
     fn uninstall_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
@@ -1931,16 +2076,22 @@ impl Supervisor {
 
     fn realize_boot_modules(&mut self) -> Result<SupervisorBootReport, SupervisorError> {
         self.ensure_bootstrapped()?;
+        let mut failed_modules = 0usize;
         for idx in 0..self.modules.len() {
             if !self.modules[idx].occupied {
                 continue;
             }
             let handle = self.modules[idx].handle;
             if self.modules[idx].state == ModuleLifecycle::Installed {
-                self.validate_module(handle)?;
-                self.map_module(handle)?;
-                self.instantiate_module(handle)?;
-                self.start_module(handle)?;
+                // Each module is its own atomic unit: bring_up_module
+                // either commits it to Running or rolls it all the way
+                // back to a clean Faulted state. Either way we move on
+                // to the next module instead of letting one bad plugin
+                // (missing dependency, signature rejection, a faulting
+                // module_init, ...) abort boot for every other module.
+                if self.bring_up_module(handle).is_err() {
+                    failed_modules += 1;
+                }
             }
         }
         // Defense-in-depth: after every module has been started, sweep
@@ -1956,6 +2107,7 @@ impl Supervisor {
             running_modules: snapshot.running_modules,
             isolated_domains: snapshot.isolated_domains,
             published_capabilities: snapshot.published_capabilities,
+            failed_modules,
         })
     }
 
@@ -2436,6 +2588,21 @@ pub fn install_module(descriptor: ModuleDescriptor) -> Result<ModuleHandle, Supe
 
 pub fn realize_boot_modules() -> Result<SupervisorBootReport, SupervisorError> {
     SUPERVISOR.lock().realize_boot_modules()
+}
+
+/// Atomically run a single `Installed`/`Stopped` module through
+/// validate -> map -> instantiate -> start. On success the module ends
+/// up `Running`; on failure it is rolled back to a clean `Faulted` state
+/// (no leaked domain/instance/capabilities) and the triggering error is
+/// returned. Lets a caller retry an individual module — e.g. one that
+/// `realize_boot_modules` rolled back for a missing dependency that has
+/// since been installed — without re-running the whole boot sequence.
+pub fn bring_up_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().bring_up_module(handle)
+}
+
+pub fn module_lifecycle(handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
+    SUPERVISOR.lock().module_lifecycle(handle)
 }
 
 pub fn snapshot() -> Result<SupervisorSnapshot, SupervisorError> {
