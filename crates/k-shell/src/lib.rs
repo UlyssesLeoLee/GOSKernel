@@ -1064,6 +1064,28 @@ fn lifecycle_label(state: gos_protocol::NodeLifecycle) -> &'static str {
     }
 }
 
+fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
+    match state {
+        gos_protocol::ModuleLifecycle::Installed => "installed",
+        gos_protocol::ModuleLifecycle::Validated => "validated",
+        gos_protocol::ModuleLifecycle::Mapped => "mapped",
+        gos_protocol::ModuleLifecycle::Instantiated => "instantiated",
+        gos_protocol::ModuleLifecycle::Running => "running",
+        gos_protocol::ModuleLifecycle::Quiescing => "quiescing",
+        gos_protocol::ModuleLifecycle::Stopped => "stopped",
+        gos_protocol::ModuleLifecycle::Faulted => "faulted",
+    }
+}
+
+fn module_fault_policy_label(policy: gos_protocol::ModuleFaultPolicy) -> &'static str {
+    match policy {
+        gos_protocol::ModuleFaultPolicy::FaultKernelDegraded => "kernel-degrade",
+        gos_protocol::ModuleFaultPolicy::Restart => "restart",
+        gos_protocol::ModuleFaultPolicy::RestartAlways => "restart-always",
+        gos_protocol::ModuleFaultPolicy::Manual => "manual",
+    }
+}
+
 fn entry_policy_label(policy: gos_protocol::EntryPolicy) -> &'static str {
     match policy {
         gos_protocol::EntryPolicy::Manual => "manual",

@@ -1974,29 +1974,38 @@ pub fn pump() {
     // cycle calls pump repeatedly, so this cap doesn't drop work —
     // it just gives the supervisor a chance to drain faults / apply
     // restart policy between batches.
+    enum Dispatch {
+        Activate(Result<VectorAddress, RuntimeError>),
+        Signal(RuntimeSignal),
+    }
+
     const MAX_WORK_ITEMS_PER_PUMP: u32 = 4096;
     let mut processed: u32 = 0;
     loop {
-        let work = {
+        // next_work_item() and node_vector() are both pure/non-recursive
+        // reads against the same Runtime, so they share one lock
+        // acquisition instead of two.
+        let dispatch = {
             let mut runtime = RUNTIME.lock();
-            runtime.next_work_item()
+            match runtime.next_work_item() {
+                Some(WorkItem::Ready(node_id)) => {
+                    Some(Dispatch::Activate(runtime.node_vector(node_id)))
+                }
+                Some(WorkItem::Signal(signal)) => Some(Dispatch::Signal(signal)),
+                None => None,
+            }
         };
 
-        let Some(work) = work else {
+        let Some(dispatch) = dispatch else {
             break;
         };
 
-        match work {
-            WorkItem::Ready(node_id) => {
-                let vector = {
-                    let runtime = RUNTIME.lock();
-                    runtime.node_vector(node_id)
-                };
-                if let Ok(vector) = vector {
-                    let _ = activate(vector);
-                }
+        match dispatch {
+            Dispatch::Activate(Ok(vector)) => {
+                let _ = activate(vector);
             }
-            WorkItem::Signal(signal) => {
+            Dispatch::Activate(Err(_)) => {}
+            Dispatch::Signal(signal) => {
                 let _ = route_signal(signal.target, signal.signal);
             }
         }

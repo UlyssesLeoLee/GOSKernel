@@ -123,6 +123,21 @@ pub struct SupervisorBootReport {
     pub failed_modules: usize,
 }
 
+/// At-a-glance health for a single installed module: lifecycle state,
+/// configured fault policy, and how many times it has been restarted.
+/// `degraded` mirrors the condition `process_next_restart` uses to stop
+/// retrying (Faulted + restart_generation at the cap) so callers don't
+/// have to re-derive the threshold themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleStatusSummary {
+    pub handle: ModuleHandle,
+    pub module_id: ModuleId,
+    pub state: ModuleLifecycle,
+    pub fault_policy: ModuleFaultPolicy,
+    pub restart_generation: u32,
+    pub degraded: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModuleDomain {
     pub id: DomainId,
@@ -1557,6 +1572,36 @@ impl Supervisor {
         Ok(self.modules[slot].state)
     }
 
+    /// Fill `out` with a status summary for every occupied module slot,
+    /// in slot order, and return how many were written. Caller-supplied
+    /// buffer keeps this no_std/no-alloc; if `out` is shorter than the
+    /// number of installed modules, only the first `out.len()` are
+    /// written (matches the bring-up slot scan order, not insertion
+    /// order).
+    fn module_status_summaries(&self, out: &mut [ModuleStatusSummary]) -> usize {
+        let mut written = 0;
+        for record in self.modules.iter() {
+            if written >= out.len() {
+                break;
+            }
+            if !record.occupied {
+                continue;
+            }
+            let degraded = record.state == ModuleLifecycle::Faulted
+                && record.restart_generation >= MAX_RESTARTS_BEFORE_DEGRADE;
+            out[written] = ModuleStatusSummary {
+                handle: record.handle,
+                module_id: record.source.module_id(),
+                state: record.state,
+                fault_policy: record.source.fault_policy(),
+                restart_generation: record.restart_generation,
+                degraded,
+            };
+            written += 1;
+        }
+        written
+    }
+
     fn uninstall_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
         let slot = self.find_module_slot(handle)?;
         let _ = self.stop_module(handle);
@@ -2603,6 +2648,14 @@ pub fn bring_up_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
 
 pub fn module_lifecycle(handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
     SUPERVISOR.lock().module_lifecycle(handle)
+}
+
+/// Snapshot the lifecycle/fault-policy/restart state of every installed
+/// module into `out`, returning how many were written. Lets callers
+/// (e.g. the shell `modules` command) render a global health view
+/// instead of having to know individual handles up front.
+pub fn module_status_summaries(out: &mut [ModuleStatusSummary]) -> usize {
+    SUPERVISOR.lock().module_status_summaries(out)
 }
 
 pub fn snapshot() -> Result<SupervisorSnapshot, SupervisorError> {

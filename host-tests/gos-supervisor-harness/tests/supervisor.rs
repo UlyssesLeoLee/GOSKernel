@@ -14,8 +14,9 @@ use gos_supervisor::{
     bootstrap, charge_heap, claim_resource, current_instance,
     dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
     instance_domain_root, instance_is_degraded, instance_restart_generation, module_lifecycle,
-    process_restart_queue, queue_restart, realize_boot_modules, release_claim, restart_module,
-    schedule_instance, snapshot, spawn_instance, template_for_module, SupervisorError, MAX_CLAIMS,
+    module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
+    release_claim, restart_module, schedule_instance, snapshot, spawn_instance,
+    template_for_module, ModuleStatusSummary, SupervisorError, MAX_CLAIMS, MAX_MODULES,
     MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
@@ -809,4 +810,53 @@ fn restart_cap_demotes_to_degraded_and_blocks_new_claims_and_charges() {
         "expected InstanceNotFound or ModuleRejected, got {:?}",
         charge_result
     );
+}
+
+const ZERO_SUMMARY: ModuleStatusSummary = ModuleStatusSummary {
+    handle: ModuleHandle::ZERO,
+    module_id: ModuleId::ZERO,
+    state: ModuleLifecycle::Stopped,
+    fault_policy: ModuleFaultPolicy::Manual,
+    restart_generation: 0,
+    degraded: false,
+};
+
+#[test]
+fn module_status_summaries_reports_lifecycle_and_degraded_state() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1, "exactly the one installed module is reported");
+    let running = out[0];
+    assert_eq!(running.handle, provider);
+    assert_eq!(running.module_id, ModuleId::from_ascii("MOD.PROVIDER"));
+    assert_eq!(running.state, ModuleLifecycle::Running);
+    assert_eq!(running.fault_policy, ModuleFaultPolicy::RestartAlways);
+    assert_eq!(running.restart_generation, 0);
+    assert!(!running.degraded);
+
+    // Drive the module past the restart cap so it lands in Faulted +
+    // degraded, and confirm the summary reflects both the bumped
+    // restart_generation and the derived `degraded` flag.
+    for _ in 0..=MAX_RESTARTS_BEFORE_DEGRADE {
+        fault_module(provider).expect("fault");
+    }
+
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1);
+    let faulted = out[0];
+    assert_eq!(faulted.handle, provider);
+    assert_eq!(faulted.state, ModuleLifecycle::Faulted);
+    // The cap-th restart bumps restart_generation to the cap; the
+    // following fault sees restart_count >= cap and degrades instead of
+    // restarting again, so the counter stays at the cap rather than
+    // incrementing past it.
+    assert_eq!(faulted.restart_generation, MAX_RESTARTS_BEFORE_DEGRADE);
+    assert!(faulted.degraded, "restart cap must surface as degraded");
 }
