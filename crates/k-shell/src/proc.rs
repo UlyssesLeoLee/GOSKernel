@@ -503,6 +503,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  help    show commands\n");
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
+        super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -611,6 +612,42 @@ fn dispatch_text_command(
             super::print_str(sink, "none");
         }
         super::print_str(sink, "\n");
+    } else if cmd == "modules" || cmd == "mods" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " module health\n");
+        super::set_color(sink, 7, 0);
+        let mut summaries = [gos_supervisor::ModuleStatusSummary {
+            handle: gos_protocol::ModuleHandle::ZERO,
+            module_id: gos_protocol::ModuleId::ZERO,
+            state: gos_protocol::ModuleLifecycle::Stopped,
+            fault_policy: gos_protocol::ModuleFaultPolicy::Manual,
+            restart_generation: 0,
+            degraded: false,
+        }; gos_supervisor::MAX_MODULES];
+        let count = gos_supervisor::module_status_summaries(&mut summaries);
+        if count == 0 {
+            super::print_str(sink, "  (no modules installed)\n");
+        }
+        for summary in summaries.iter().take(count) {
+            let raw = summary.module_id.0;
+            let mut len = 0;
+            while len < raw.len() && raw[len] != 0 {
+                len += 1;
+            }
+            let name = core::str::from_utf8(&raw[..len]).unwrap_or("?");
+            super::print_str(sink, "  ");
+            super::print_str(sink, name);
+            super::print_str(sink, "  state: ");
+            super::print_str(sink, super::module_lifecycle_label(summary.state));
+            super::print_str(sink, "  policy: ");
+            super::print_str(sink, super::module_fault_policy_label(summary.fault_policy));
+            super::print_str(sink, "  restarts: ");
+            super::print_num_inline(sink, summary.restart_generation as usize);
+            if summary.degraded {
+                super::print_str(sink, "  DEGRADED");
+            }
+            super::print_str(sink, "\n");
+        }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);

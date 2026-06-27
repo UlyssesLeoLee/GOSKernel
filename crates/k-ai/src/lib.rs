@@ -173,6 +173,17 @@ fn print_runtime_brief(sink: &ConsoleSink, state: &AiState) {
     print_num(sink, snapshot.edge_count);
     print_str(sink, "\n     control-plane drained: ");
     print_num(sink, state.drained_messages);
+    print_str(sink, " (plugin:");
+    print_num(sink, state.plugin_events);
+    print_str(sink, " node:");
+    print_num(sink, state.node_events);
+    print_str(sink, " edge:");
+    print_num(sink, state.edge_events);
+    print_str(sink, " delta:");
+    print_num(sink, state.state_deltas);
+    print_str(sink, " fault:");
+    print_num(sink, state.fault_events);
+    print_str(sink, ")");
     print_str(sink, " api: ");
     print_str(sink, if state.api_ready { "armed" } else { "missing" });
     if state.api_ready {
