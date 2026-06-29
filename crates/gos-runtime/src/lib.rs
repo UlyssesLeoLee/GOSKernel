@@ -26,6 +26,10 @@ pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
 pub const MAX_CONTROL_PLANE_MESSAGES: usize = 256;
 pub const NODE_ARENA_PAGES: usize = 64;
+/// Capacity of the persistent in-memory control-plane journal (distinct
+/// from `MAX_CONTROL_PLANE_MESSAGES`'s consume-once dispatch queue — see
+/// `GraphRuntime::journal`).
+pub const JOURNAL_RING_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -292,6 +296,12 @@ pub struct GraphRuntime {
     wait_sets: [Option<WaitSet>; MAX_WAITSETS],
     barriers: [Option<Barrier>; MAX_BARRIERS],
     control_plane: RingQueue<ControlPlaneEnvelope, MAX_CONTROL_PLANE_MESSAGES>,
+    /// Read-only tail of recently emitted control-plane envelopes, kept
+    /// around after `control_plane` has been drained so an operator can
+    /// inspect what happened (analogous to `dmesg` / the Windows Event
+    /// Log) instead of only seeing live counters. Wraps by resetting to
+    /// empty once full — see `emit_control_plane`.
+    journal: gos_journal::JournalRing<JOURNAL_RING_CAPACITY>,
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
     /// Monotonic epoch bumped on every structural mutation (node or edge
@@ -325,6 +335,7 @@ impl GraphRuntime {
             wait_sets: [None; MAX_WAITSETS],
             barriers: [None; MAX_BARRIERS],
             control_plane: RingQueue::new(),
+            journal: gos_journal::JournalRing::new(),
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             graph_epoch: 0,
@@ -349,13 +360,34 @@ impl GraphRuntime {
         arg0: u64,
         arg1: u64,
     ) {
-        let _ = self.control_plane.push_control_plane(ControlPlaneEnvelope {
+        let envelope = ControlPlaneEnvelope {
             version: CONTROL_PLANE_PROTOCOL_VERSION,
             kind,
             subject,
             arg0,
             arg1,
-        });
+        };
+        let _ = self.control_plane.push_control_plane(envelope);
+        if self.journal.is_full() {
+            self.journal.reset();
+        }
+        let _ = self.journal.append(&envelope);
+    }
+
+    /// Copy up to `out.len()` of the most recently emitted control-plane
+    /// envelopes into `out`, oldest-buffered first, and return how many
+    /// were written. Independent of `drain_control_plane` — reading the
+    /// journal never consumes it.
+    pub fn journal_recent(&self, out: &mut [ControlPlaneEnvelope]) -> usize {
+        let len = self.journal.len().min(out.len());
+        let mut written = 0;
+        for i in 0..len {
+            if let Some(envelope) = self.journal.get(i) {
+                out[written] = envelope;
+                written += 1;
+            }
+        }
+        written
     }
 
     fn plugin_slot(&self, plugin_id: PluginId) -> Option<usize> {
@@ -1607,6 +1639,10 @@ pub fn emit_hello() {
     RUNTIME.lock().emit_hello();
 }
 
+pub fn emit_control_plane(kind: ControlPlaneMessageKind, subject: [u8; 16], arg0: u64, arg1: u64) {
+    RUNTIME.lock().emit_control_plane(kind, subject, arg0, arg1);
+}
+
 pub fn discover_plugin(manifest: PluginManifest) -> Result<(), RuntimeError> {
     RUNTIME.lock().discover_plugin(manifest)
 }
@@ -2029,6 +2065,11 @@ pub fn is_stable() -> bool {
 
 pub fn drain_control_plane() -> Option<ControlPlaneEnvelope> {
     RUNTIME.lock().drain_control_plane()
+}
+
+/// See `GraphRuntime::journal_recent`.
+pub fn journal_recent(out: &mut [ControlPlaneEnvelope]) -> usize {
+    RUNTIME.lock().journal_recent(out)
 }
 
 pub fn last_state_delta(node_id: NodeId) -> Option<StateDelta> {

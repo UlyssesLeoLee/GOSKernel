@@ -240,6 +240,17 @@ impl<const N: usize> JournalRing<N> {
     pub fn reset(&mut self) {
         self.len = 0;
     }
+
+    /// Decode the `index`-th buffered envelope (0 = oldest still
+    /// buffered). `None` if `index >= len()`. Lets an in-memory
+    /// consumer (e.g. a shell "recent events" view) read the ring back
+    /// without round-tripping through `flush_into` + `replay`.
+    pub fn get(&self, index: usize) -> Option<ControlPlaneEnvelope> {
+        if index >= self.len {
+            return None;
+        }
+        deserialize_envelope(&self.records[index]).ok()
+    }
 }
 
 // ── Phase H.5 — runtime snapshot ────────────────────────────────────────────

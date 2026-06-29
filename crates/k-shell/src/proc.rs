@@ -504,6 +504,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
         super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  journal / events  recent control-plane event log\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -646,6 +647,32 @@ fn dispatch_text_command(
             if summary.degraded {
                 super::print_str(sink, "  DEGRADED");
             }
+            super::print_str(sink, "\n");
+        }
+    } else if cmd == "journal" || cmd == "events" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " control-plane journal (oldest buffered first)\n");
+        super::set_color(sink, 7, 0);
+        let mut envelopes = [gos_protocol::ControlPlaneEnvelope {
+            version: 0,
+            kind: gos_protocol::ControlPlaneMessageKind::Hello,
+            subject: [0u8; 16],
+            arg0: 0,
+            arg1: 0,
+        }; gos_runtime::JOURNAL_RING_CAPACITY];
+        let count = gos_runtime::journal_recent(&mut envelopes);
+        if count == 0 {
+            super::print_str(sink, "  (no events recorded)\n");
+        }
+        for envelope in envelopes.iter().take(count) {
+            super::print_str(sink, "  ");
+            super::print_str(sink, super::control_plane_kind_label(envelope.kind));
+            super::print_str(sink, "  subject: ");
+            super::print_str(sink, super::ascii_tag(&envelope.subject));
+            super::print_str(sink, "  arg0: ");
+            super::print_num_inline(sink, envelope.arg0 as usize);
+            super::print_str(sink, "  arg1: ");
+            super::print_num_inline(sink, envelope.arg1 as usize);
             super::print_str(sink, "\n");
         }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {

@@ -2082,3 +2082,77 @@ fn edge_page_resolves_cached_endpoints() {
         }
     }
 }
+
+#[test]
+fn journal_recent_reads_back_emitted_envelopes_without_draining() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    gos_runtime::emit_control_plane(gos_protocol::ControlPlaneMessageKind::NodeUpsert, [1u8; 16], 10, 11);
+    gos_runtime::emit_control_plane(gos_protocol::ControlPlaneMessageKind::Fault, [2u8; 16], 20, 21);
+    gos_runtime::emit_control_plane(gos_protocol::ControlPlaneMessageKind::Metric, [3u8; 16], 30, 31);
+
+    let mut out = [gos_protocol::ControlPlaneEnvelope {
+        version: 0,
+        kind: gos_protocol::ControlPlaneMessageKind::Hello,
+        subject: [0u8; 16],
+        arg0: 0,
+        arg1: 0,
+    }; 8];
+    let count = gos_runtime::journal_recent(&mut out);
+    assert_eq!(count, 3);
+    assert_eq!(out[0].kind, gos_protocol::ControlPlaneMessageKind::NodeUpsert);
+    assert_eq!(out[0].subject, [1u8; 16]);
+    assert_eq!(out[1].kind, gos_protocol::ControlPlaneMessageKind::Fault);
+    assert_eq!(out[2].kind, gos_protocol::ControlPlaneMessageKind::Metric);
+    assert_eq!(out[2].arg0, 30);
+    assert_eq!(out[2].arg1, 31);
+
+    // Reading the journal must not consume the live dispatch queue: the
+    // same 3 envelopes should still be there for drain_control_plane.
+    let mut drained = 0;
+    while gos_runtime::drain_control_plane().is_some() {
+        drained += 1;
+    }
+    assert_eq!(drained, 3);
+}
+
+#[test]
+fn journal_wraps_by_resetting_once_full() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    for i in 0..gos_runtime::JOURNAL_RING_CAPACITY {
+        gos_runtime::emit_control_plane(
+            gos_protocol::ControlPlaneMessageKind::Metric,
+            [0u8; 16],
+            i as u64,
+            0,
+        );
+    }
+    let mut out = [gos_protocol::ControlPlaneEnvelope {
+        version: 0,
+        kind: gos_protocol::ControlPlaneMessageKind::Hello,
+        subject: [0u8; 16],
+        arg0: 0,
+        arg1: 0,
+    }; gos_runtime::JOURNAL_RING_CAPACITY + 4];
+    assert_eq!(
+        gos_runtime::journal_recent(&mut out),
+        gos_runtime::JOURNAL_RING_CAPACITY
+    );
+
+    // One more emit overflows the ring; per the documented wrap policy
+    // it resets to empty and starts refilling, so only this newest
+    // envelope is visible afterwards.
+    gos_runtime::emit_control_plane(
+        gos_protocol::ControlPlaneMessageKind::Metric,
+        [9u8; 16],
+        999,
+        0,
+    );
+    let count = gos_runtime::journal_recent(&mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].subject, [9u8; 16]);
+    assert_eq!(out[0].arg0, 999);
+}

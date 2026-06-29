@@ -1086,6 +1086,30 @@ fn module_fault_policy_label(policy: gos_protocol::ModuleFaultPolicy) -> &'stati
     }
 }
 
+fn control_plane_kind_label(kind: gos_protocol::ControlPlaneMessageKind) -> &'static str {
+    match kind {
+        gos_protocol::ControlPlaneMessageKind::Hello => "hello",
+        gos_protocol::ControlPlaneMessageKind::PluginDiscovered => "plugin-discovered",
+        gos_protocol::ControlPlaneMessageKind::NodeUpsert => "node-upsert",
+        gos_protocol::ControlPlaneMessageKind::EdgeUpsert => "edge-upsert",
+        gos_protocol::ControlPlaneMessageKind::StateDelta => "state-delta",
+        gos_protocol::ControlPlaneMessageKind::SnapshotChunk => "snapshot-chunk",
+        gos_protocol::ControlPlaneMessageKind::Fault => "fault",
+        gos_protocol::ControlPlaneMessageKind::Metric => "metric",
+    }
+}
+
+/// `[u8; 16]` ascii-tag identifiers (ModuleId/PluginId/NodeId/EdgeId)
+/// are conventionally zero-padded ascii; trim at the first nul like
+/// the `modules` command's `module_id` rendering does.
+fn ascii_tag(raw: &[u8; 16]) -> &str {
+    let mut len = 0;
+    while len < raw.len() && raw[len] != 0 {
+        len += 1;
+    }
+    core::str::from_utf8(&raw[..len]).unwrap_or("?")
+}
+
 fn entry_policy_label(policy: gos_protocol::EntryPolicy) -> &'static str {
     match policy {
         gos_protocol::EntryPolicy::Manual => "manual",
