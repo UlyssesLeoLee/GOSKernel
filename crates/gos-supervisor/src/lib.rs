@@ -138,6 +138,25 @@ pub struct ModuleStatusSummary {
     pub degraded: bool,
 }
 
+/// At-a-glance resource accounting for a single live node instance:
+/// heap pages and GPU bytes currently charged against the quotas it was
+/// spawned with. Mirrors `ModuleStatusSummary`'s "no enumeration API
+/// existed before this" gap, but for resource usage instead of module
+/// lifecycle — `instance_heap_usage`/`instance_gpu_usage` already
+/// existed but both require the caller to already know a
+/// `NodeInstanceId`, so there was no global view (the supervisor
+/// equivalent of `free`/Task Manager's performance tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceResourceSummary {
+    pub instance_id: NodeInstanceId,
+    pub module: ModuleHandle,
+    pub lifecycle: NodeInstanceLifecycle,
+    pub heap_pages_used: u32,
+    pub heap_pages_max: u32,
+    pub gpu_bytes_used: u64,
+    pub gpu_bytes_max: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModuleDomain {
     pub id: DomainId,
@@ -1602,6 +1621,33 @@ impl Supervisor {
         written
     }
 
+    /// Fill `out` with a resource-usage summary for every occupied
+    /// instance slot, in slot order, and return how many were written.
+    /// Same caller-supplied-buffer shape as `module_status_summaries`,
+    /// for the same no_std/no-alloc reason.
+    fn instance_resource_summaries(&self, out: &mut [InstanceResourceSummary]) -> usize {
+        let mut written = 0;
+        for record in self.instances.iter() {
+            if written >= out.len() {
+                break;
+            }
+            if !record.occupied {
+                continue;
+            }
+            out[written] = InstanceResourceSummary {
+                instance_id: record.id,
+                module: record.module,
+                lifecycle: record.lifecycle,
+                heap_pages_used: record.heap_pages_used,
+                heap_pages_max: record.heap_quota.max_pages,
+                gpu_bytes_used: record.gpu_bytes_used,
+                gpu_bytes_max: record.gpu_bytes_quota,
+            };
+            written += 1;
+        }
+        written
+    }
+
     fn uninstall_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
         let slot = self.find_module_slot(handle)?;
         let _ = self.stop_module(handle);
@@ -2656,6 +2702,14 @@ pub fn module_lifecycle(handle: ModuleHandle) -> Result<ModuleLifecycle, Supervi
 /// instead of having to know individual handles up front.
 pub fn module_status_summaries(out: &mut [ModuleStatusSummary]) -> usize {
     SUPERVISOR.lock().module_status_summaries(out)
+}
+
+/// Snapshot heap/GPU usage against quota for every live node instance
+/// into `out`, returning how many were written. Lets callers (e.g. the
+/// shell `resources` command) render a global resource-pressure view
+/// without already knowing which `NodeInstanceId`s exist.
+pub fn instance_resource_summaries(out: &mut [InstanceResourceSummary]) -> usize {
+    SUPERVISOR.lock().instance_resource_summaries(out)
 }
 
 pub fn snapshot() -> Result<SupervisorSnapshot, SupervisorError> {
