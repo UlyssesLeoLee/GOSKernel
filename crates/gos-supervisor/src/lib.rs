@@ -1567,6 +1567,22 @@ impl Supervisor {
             .unwrap_or(true)
     }
 
+    /// Operator-acknowledged "the root cause is fixed" action: zero a
+    /// module's lifetime `restart_generation` so `apply_fault_policy` and
+    /// `module_status_summaries`'s `degraded` flag stop counting restarts
+    /// from before this point. Mirrors `systemctl reset-failed` — it does
+    /// not change `ModuleLifecycle` or attempt to bring a `Faulted` module
+    /// back up; `restart_module` is still needed for that. Without this,
+    /// `MAX_RESTARTS_BEFORE_DEGRADE` is a one-way, lifetime-cumulative
+    /// counter: a module that crashed 5 times months apart and has been
+    /// stable ever since would still be permanently degraded by its 6th
+    /// fault, indistinguishable from a module stuck in a tight crash loop.
+    fn clear_restart_history(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        self.modules[slot].restart_generation = 0;
+        Ok(())
+    }
+
     fn module_lifecycle(&self, handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
         let slot = self.find_module_slot(handle)?;
         Ok(self.modules[slot].state)
@@ -2670,6 +2686,10 @@ pub fn fault_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
 
 pub fn restart_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
     SUPERVISOR.lock().restart_module(handle)
+}
+
+pub fn clear_restart_history(handle: ModuleHandle) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().clear_restart_history(handle)
 }
 
 pub fn uninstall_module(handle: ModuleHandle) -> Result<(), SupervisorError> {

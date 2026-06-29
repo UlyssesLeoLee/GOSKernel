@@ -11,7 +11,7 @@ use gos_protocol::{
     MODULE_ABI_VERSION,
 };
 use gos_supervisor::{
-    bootstrap, charge_heap, claim_resource, current_instance,
+    bootstrap, charge_heap, claim_resource, clear_restart_history, current_instance,
     dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
     instance_domain_root, instance_is_degraded, instance_restart_generation, module_lifecycle,
     module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
@@ -859,4 +859,70 @@ fn module_status_summaries_reports_lifecycle_and_degraded_state() {
     // incrementing past it.
     assert_eq!(faulted.restart_generation, MAX_RESTARTS_BEFORE_DEGRADE);
     assert!(faulted.degraded, "restart cap must surface as degraded");
+}
+
+// ── clear_restart_history: operator "reset-failed" recovery path ────────────
+//
+// MAX_RESTARTS_BEFORE_DEGRADE is a one-way, lifetime-cumulative counter
+// with no decay (see clear_restart_history's doc comment). Once a module
+// hits the cap and degrades, the only way back is an explicit operator
+// acknowledgement that the root cause is fixed. clear_restart_history must
+// zero the counter (and clear `degraded`) without itself touching
+// lifecycle state — and restart_module must still work afterward to
+// actually bring the module back up.
+#[test]
+fn clear_restart_history_unblocks_a_permanently_degraded_module() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    // Drive the module to the restart cap and one fault past it, landing
+    // in degraded Faulted state exactly as in the cap test above.
+    for _ in 0..=MAX_RESTARTS_BEFORE_DEGRADE {
+        fault_module(provider).expect("fault");
+    }
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].state, ModuleLifecycle::Faulted);
+    assert!(out[0].degraded, "must be degraded before the clear");
+
+    clear_restart_history(provider).expect("clear_restart_history");
+
+    // Lifecycle is untouched by the clear alone — still Faulted, just no
+    // longer carrying a degraded restart count.
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].state, ModuleLifecycle::Faulted);
+    assert_eq!(out[0].restart_generation, 0);
+    assert!(!out[0].degraded, "clearing history must drop the degraded flag");
+
+    // The module is no longer treated as permanently degraded, so
+    // restart_module can bring it back up and the counter resumes
+    // counting from zero.
+    restart_module(provider).expect("restart after clear");
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].state, ModuleLifecycle::Running);
+    assert_eq!(out[0].restart_generation, 1);
+    assert!(!out[0].degraded);
+}
+
+// clear_restart_history on a module that was never installed must fail
+// the same way every other handle-keyed supervisor call does, rather than
+// silently doing nothing.
+#[test]
+fn clear_restart_history_rejects_unknown_handle() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let unknown = ModuleHandle(0xDEAD_BEEF);
+    assert_eq!(
+        clear_restart_history(unknown),
+        Err(SupervisorError::ModuleNotFound)
+    );
 }
