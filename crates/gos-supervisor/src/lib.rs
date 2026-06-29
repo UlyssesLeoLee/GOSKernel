@@ -2672,6 +2672,14 @@ pub fn restart_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
     SUPERVISOR.lock().restart_module(handle)
 }
 
+/// Resolve a module's `ModuleHandle` from its `ModuleId`, so a caller that
+/// only knows a module by name (e.g. the shell `restart <name>` command)
+/// doesn't need to enumerate `module_status_summaries` itself to find the
+/// handle `restart_module` requires.
+pub fn module_handle_for_id(module_id: ModuleId) -> Option<ModuleHandle> {
+    SUPERVISOR.lock().find_module_by_module_id(module_id)
+}
+
 pub fn uninstall_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
     SUPERVISOR.lock().uninstall_module(handle)
 }

@@ -42,6 +42,7 @@ See:
 - [doc/GRAPH_CLI_COMMANDS_zh.md](./doc/GRAPH_CLI_COMMANDS_zh.md)
 - [doc/CYPHER_NODE_zh.md](./doc/CYPHER_NODE_zh.md)
 - [doc/NETWORK_NODE_zh.md](./doc/NETWORK_NODE_zh.md)
+- [doc/OPS_MODULE_HEALTH.md](./doc/OPS_MODULE_HEALTH.md)
 
 ## Developer Quick Start
 
