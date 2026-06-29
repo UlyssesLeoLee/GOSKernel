@@ -11,7 +11,7 @@ use gos_protocol::{
     MODULE_ABI_VERSION,
 };
 use gos_supervisor::{
-    bootstrap, charge_heap, claim_resource, current_instance,
+    bootstrap, bring_up_module, charge_heap, claim_resource, current_instance,
     dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
     instance_domain_root, instance_is_degraded, instance_restart_generation, module_lifecycle,
     module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
@@ -310,6 +310,45 @@ fn missing_dependency_is_rejected() {
     let snap = snapshot().expect("snapshot");
     assert_eq!(snap.live_instances, 1, "only PROVIDER's instance should remain live");
     assert_eq!(snap.isolated_domains, 1, "only PROVIDER's domain should remain mapped");
+}
+
+// ADR-015 axis2 gate: a module descriptor whose `abi_version` the host's
+// MODULE_ABI_VERSION rejects (major mismatch here) must fail validation
+// instead of being mapped/started against a vtable shape it doesn't
+// understand — mirrors gos_loader's GOS_ABI_VERSION manifest gate, which
+// this module-vtable axis never had until now.
+#[test]
+fn incompatible_module_abi_version_is_rejected_at_bring_up() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+
+    const FUTURE_MAJOR_ABI: ModuleDescriptor = ModuleDescriptor {
+        abi_version: MODULE_ABI_VERSION + (1 << 24),
+        module_id: ModuleId::from_ascii("MOD.FUTUREABI"),
+        name: "MOD_FUTURE_ABI",
+        version: 1,
+        image_format: ModuleImageFormat::Builtin,
+        fault_policy: ModuleFaultPolicy::Manual,
+        dependencies: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        segments: TEST_SEGMENTS,
+        entry: TEST_ENTRY,
+        signature: None,
+        flags: 0,
+    };
+
+    let handle = install_module(FUTURE_MAJOR_ABI).expect("install does not check abi");
+    assert_eq!(
+        bring_up_module(handle),
+        Err(SupervisorError::AbiVersionMismatch)
+    );
+    assert_eq!(
+        module_lifecycle(handle).expect("lifecycle"),
+        ModuleLifecycle::Faulted
+    );
 }
 
 // Once the missing dependency is installed, the rolled-back module can
