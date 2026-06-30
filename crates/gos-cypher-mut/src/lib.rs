@@ -98,7 +98,7 @@ impl AuditedMutation {
         };
         ControlPlaneEnvelope {
             version: 1,
-            kind: ControlPlaneMessageKind::EdgeUpsert,
+            kind: ControlPlaneMessageKind::MutationAudit,
             subject: self.source,
             arg0,
             arg1,

@@ -1217,6 +1217,8 @@ fn control_plane_kind_from_u8(raw: u8) -> ControlPlaneMessageKind {
         x if x == ControlPlaneMessageKind::StateDelta as u8 => ControlPlaneMessageKind::StateDelta,
         x if x == ControlPlaneMessageKind::SnapshotChunk as u8 => ControlPlaneMessageKind::SnapshotChunk,
         x if x == ControlPlaneMessageKind::Fault as u8 => ControlPlaneMessageKind::Fault,
+        x if x == ControlPlaneMessageKind::MutationAudit as u8 => ControlPlaneMessageKind::MutationAudit,
+        x if x == ControlPlaneMessageKind::CausalOverflow as u8 => ControlPlaneMessageKind::CausalOverflow,
         _ => ControlPlaneMessageKind::Metric,
     }
 }
@@ -1685,6 +1687,13 @@ pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
 /// bridge can poll it to render only when the topology actually changed.
 pub fn graph_epoch() -> u64 {
     RUNTIME.lock().graph_epoch()
+}
+
+/// Current monotonic tick counter.  Bumped by `pump()` on every dispatch
+/// cycle.  Useful as the `tick` field in `AuditedMutation` when the caller
+/// does not have a wall-clock source (e.g. bare-metal shell commands).
+pub fn runtime_tick() -> u64 {
+    RUNTIME.lock().tick
 }
 
 pub fn node_page<const N: usize>(
@@ -2191,10 +2200,37 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
 /// `REBIND USE` issued by the Cypher shell or AI bridge flows through here.
 /// The mutation is validated by `gos-cypher-mut::apply_mutation` before
 /// any runtime state is touched.
+///
+/// On success the mutation is wrapped in an `AuditedMutation` (stamped with
+/// `source` and the current runtime tick) and emitted as a `MutationAudit`
+/// control-plane envelope, making it visible to the journal and the shell's
+/// live telemetry stream.  The caller receives the `AuditedMutation` back so
+/// it can additionally write it to the journal ring if desired.
+///
+/// `source` is a 16-byte attestation tag identifying the initiator:
+/// `b"K_SHELL\0\0\0\0\0\0\0\0\0"` for direct shell entry,
+/// `b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0"` for AI bridge mutations.
 pub fn apply_cypher_mutation(
     mutation: gos_cypher_mut::CypherMutation,
-) -> Result<(), gos_cypher_mut::MutationError> {
-    gos_cypher_mut::apply_mutation(&mut *RUNTIME.lock(), mutation)
+    source: [u8; 16],
+) -> Result<gos_cypher_mut::AuditedMutation, gos_cypher_mut::MutationError> {
+    let mut rt = RUNTIME.lock();
+    let tick = rt.tick;
+    gos_cypher_mut::apply_mutation(&mut *rt, mutation)?;
+    let audited = gos_cypher_mut::AuditedMutation { mutation, source, tick };
+    let env = audited.to_envelope();
+    rt.emit_control_plane(env.kind, env.subject, env.arg0, env.arg1);
+    Ok(audited)
+}
+
+/// Emit a `CausalOverflow` control-plane event when the cycle iteration cap
+/// is hit.  Called by `gos_supervisor::service_system_cycle` instead of
+/// silently truncating.  The shell `where` view and serial logs can surface
+/// this to help diagnose deep causal chains or livelock candidates.
+pub fn notify_causal_overflow(depth: u32) {
+    RUNTIME
+        .lock()
+        .emit_control_plane(ControlPlaneMessageKind::CausalOverflow, [0u8; 16], depth as u64, 0);
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

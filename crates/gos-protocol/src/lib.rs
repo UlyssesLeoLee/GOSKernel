@@ -808,6 +808,16 @@ pub enum ControlPlaneMessageKind {
     SnapshotChunk = 0x06,
     Fault = 0x07,
     Metric = 0x08,
+    /// A Cypher write mutation was applied successfully.  `subject` is the
+    /// caller-supplied source attestation ([u8;16]); `arg0` encodes the
+    /// mutation kind and first operand; `arg1` encodes the second operand.
+    /// Every `apply_cypher_mutation` success produces exactly one of these.
+    MutationAudit = 0x09,
+    /// `service_system_cycle` hit its per-cycle iteration cap — indicates a
+    /// deep causal chain or livelock candidate.  `arg0` = iteration depth at
+    /// overflow.  Does NOT mean the system halted; the loop bails and steady-
+    /// state picks back up on the next PIT tick.
+    CausalOverflow = 0x0A,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

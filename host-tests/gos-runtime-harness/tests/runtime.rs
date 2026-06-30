@@ -2114,11 +2114,14 @@ fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
     gos_runtime::register_node(PERF_PLUGIN_ID, v_alt, spec_alt).expect("alt");
 
     // ── 1. AddEdge Mount ─────────────────────────────────────────────────────
-    gos_runtime::apply_cypher_mutation(CypherMutation::AddEdge {
-        from: spec_src.node_id,
-        to: spec_dst.node_id,
-        edge_kind: ReceptiveEdgeKind::Mount,
-    })
+    gos_runtime::apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: spec_src.node_id,
+            to: spec_dst.node_id,
+            edge_kind: ReceptiveEdgeKind::Mount,
+        },
+        *b"TEST\0\0\0\0\0\0\0\0\0\0\0\0",
+    )
     .expect("AddEdge Mount must succeed");
 
     let expected_mount_id = derive_edge_id(spec_src.node_id, spec_dst.node_id, "cypher.Mount");
@@ -2132,9 +2135,10 @@ fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
     assert_eq!(page[0].edge_id, expected_mount_id);
 
     // ── 2. RemoveEdge ────────────────────────────────────────────────────────
-    gos_runtime::apply_cypher_mutation(CypherMutation::RemoveEdge {
-        edge_id: expected_mount_id,
-    })
+    gos_runtime::apply_cypher_mutation(
+        CypherMutation::RemoveEdge { edge_id: expected_mount_id },
+        *b"TEST\0\0\0\0\0\0\0\0\0\0\0\0",
+    )
     .expect("RemoveEdge must succeed");
 
     let (total_after_remove, _) = gos_runtime::edge_page::<8>(0, &mut page);
@@ -2147,11 +2151,14 @@ fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
 
     // ── 3. RebindUse ─────────────────────────────────────────────────────────
     // First, insert a Use edge src→dst, then rebind to src→alt.
-    gos_runtime::apply_cypher_mutation(CypherMutation::AddEdge {
-        from: spec_src.node_id,
-        to: spec_dst.node_id,
-        edge_kind: ReceptiveEdgeKind::Use,
-    })
+    gos_runtime::apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: spec_src.node_id,
+            to: spec_dst.node_id,
+            edge_kind: ReceptiveEdgeKind::Use,
+        },
+        *b"TEST\0\0\0\0\0\0\0\0\0\0\0\0",
+    )
     .expect("AddEdge Use (initial binding)");
 
     let use_id_v1 = derive_edge_id(spec_src.node_id, spec_dst.node_id, "cypher.Use");
@@ -2160,10 +2167,13 @@ fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
         "initial Use edge must be present"
     );
 
-    gos_runtime::apply_cypher_mutation(CypherMutation::RebindUse {
-        from: spec_src.node_id,
-        new_target: spec_alt.node_id,
-    })
+    gos_runtime::apply_cypher_mutation(
+        CypherMutation::RebindUse {
+            from: spec_src.node_id,
+            new_target: spec_alt.node_id,
+        },
+        *b"TEST\0\0\0\0\0\0\0\0\0\0\0\0",
+    )
     .expect("RebindUse must succeed");
 
     // Old binding gone, new binding present.
@@ -2181,4 +2191,76 @@ fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
     let (total_final, _) = gos_runtime::edge_page::<8>(0, &mut page);
     assert_eq!(total_final, 1, "exactly one Use edge after RebindUse");
     assert_eq!(page[0].edge_id, use_id_v2);
+}
+
+// ── V2.1 audit-envelope golden test ──────────────────────────────────────────
+//
+// Every successful `apply_cypher_mutation` must emit a `MutationAudit`
+// control-plane envelope into the runtime queue.  This proves the fault-
+// attribution / audit path is live: the journal ring and the shell telemetry
+// stream can observe every Cypher write without polling the edge table.
+//
+// Exit criterion: "audit log has a record" (V2.1 spec §退出判据).
+#[test]
+fn v2_1_apply_cypher_mutation_emits_mutation_audit_envelope() {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    use gos_protocol::{ControlPlaneMessageKind, GraphNodeSummary};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    perf_install_plugin();
+
+    let spec_a = perf_node_spec("audit.a", RuntimeNodeType::Service);
+    let spec_b = perf_node_spec("audit.b", RuntimeNodeType::Service);
+    gos_runtime::register_node(PERF_PLUGIN_ID, VectorAddress::new(50, 0, 0, 0), spec_a)
+        .expect("audit.a");
+    gos_runtime::register_node(PERF_PLUGIN_ID, VectorAddress::new(51, 0, 0, 0), spec_b)
+        .expect("audit.b");
+
+    // Drain all pre-existing control-plane messages (NodeUpsert from register_node,
+    // PluginDiscovered from perf_install_plugin, etc.).
+    while gos_runtime::drain_control_plane().is_some() {}
+
+    let source = *b"K_SHELL\0\0\0\0\0\0\0\0\0";
+    let audited = gos_runtime::apply_cypher_mutation(
+        CypherMutation::AddEdge {
+            from: spec_a.node_id,
+            to: spec_b.node_id,
+            edge_kind: ReceptiveEdgeKind::Mount,
+        },
+        source,
+    )
+    .expect("AddEdge must succeed");
+
+    // Returned AuditedMutation carries the correct source tag.
+    assert_eq!(audited.source, source, "AuditedMutation source must match");
+
+    // The mutation path emits two envelopes in order:
+    //   1. EdgeUpsert  — emitted by register_edge() as structural telemetry
+    //   2. MutationAudit — emitted by apply_cypher_mutation() for audit/journal
+    // Drain them in order and verify the MutationAudit is present and correct.
+    let edge_upsert_env = gos_runtime::drain_control_plane()
+        .expect("EdgeUpsert envelope must be present");
+    assert_eq!(
+        edge_upsert_env.kind,
+        ControlPlaneMessageKind::EdgeUpsert,
+        "first envelope must be EdgeUpsert (structural telemetry)"
+    );
+
+    let audit_env = gos_runtime::drain_control_plane()
+        .expect("MutationAudit envelope must follow EdgeUpsert");
+    assert_eq!(
+        audit_env.kind,
+        ControlPlaneMessageKind::MutationAudit,
+        "second envelope must be MutationAudit (fault attribution)"
+    );
+    assert_eq!(audit_env.subject, source, "MutationAudit subject must carry the source tag");
+
+    // No further envelopes after a single mutation.
+    assert!(
+        gos_runtime::drain_control_plane().is_none(),
+        "no additional envelopes after a single mutation"
+    );
+
+    // Suppress unused import warning.
+    let _ = GraphNodeSummary::EMPTY;
 }

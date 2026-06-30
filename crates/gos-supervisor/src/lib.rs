@@ -2830,8 +2830,10 @@ pub fn service_system_cycle() {
         }
         iter = iter.wrapping_add(1);
         if iter >= MAX_CYCLE_ITERATIONS {
-            // Diagnostic break — leaves the runtime in whatever state
-            // it reached.  Steady-state shell pump will pick back up.
+            // Emit a CausalOverflow telemetry event so the shell `where`
+            // view and serial logs can surface deep chains or livelock
+            // candidates without silently truncating them.
+            gos_runtime::notify_causal_overflow(iter);
             break;
         }
     }
