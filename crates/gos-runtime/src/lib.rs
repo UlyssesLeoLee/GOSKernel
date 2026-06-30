@@ -6,12 +6,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use gos_protocol::{
     packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
     ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
-    EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphEdgeDirection,
-    GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket,
-    MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId,
-    NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId, PluginManifest, RoutePolicy,
-    RuntimeEdgeType, Signal, StateDelta, VectorAddress, derive_edge_vector,
-    CONTROL_PLANE_PROTOCOL_VERSION,
+    EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind,
+    GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
+    KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
+    NodeId, NodeInstanceId, NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId,
+    PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta, VectorAddress,
+    derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
 
@@ -27,6 +27,8 @@ pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
 pub const MAX_CONTROL_PLANE_MESSAGES: usize = 256;
 pub const NODE_ARENA_PAGES: usize = 64;
+/// Structural mutation ring capacity (wraps when full, oldest entries lost).
+pub const MAX_DIFF_RING: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -317,6 +319,12 @@ pub struct GraphRuntime {
     edge_order_len: usize,
     edge_order_epoch: u64,
     tick: u64,
+    /// Structural mutation changelog ring — one entry per node/edge add or remove.
+    /// Wraps around when full; head points to the next write slot.
+    diff_ring: [GraphDiffEntry; MAX_DIFF_RING],
+    diff_ring_head: usize,
+    /// Total structural mutations ever recorded (monotonic; used to detect wrap).
+    diff_total: u64,
 }
 
 impl Default for GraphRuntime {
@@ -353,6 +361,9 @@ impl GraphRuntime {
             edge_order_len: 0,
             edge_order_epoch: u64::MAX,
             tick: 0,
+            diff_ring: [GraphDiffEntry::EMPTY; MAX_DIFF_RING],
+            diff_ring_head: 0,
+            diff_total: 0,
         }
     }
 
@@ -484,6 +495,57 @@ impl GraphRuntime {
     /// every node/edge add or remove; stable across pure reads.
     pub fn graph_epoch(&self) -> u64 {
         self.graph_epoch
+    }
+
+    /// Push one entry into the structural mutation ring (overwrites oldest when full).
+    fn push_diff(&mut self, kind: GraphDiffKind, from_vec: VectorAddress, to_vec: VectorAddress, label: &[u8]) {
+        let mut lbl = [0u8; 16];
+        let n = label.len().min(16);
+        lbl[..n].copy_from_slice(&label[..n]);
+        self.diff_ring[self.diff_ring_head] = GraphDiffEntry {
+            epoch: self.graph_epoch,
+            kind,
+            from_vector: from_vec,
+            to_vector: to_vec,
+            label: lbl,
+        };
+        self.diff_ring_head = (self.diff_ring_head + 1) % MAX_DIFF_RING;
+        self.diff_total = self.diff_total.wrapping_add(1);
+    }
+
+    /// Return all diff entries recorded after `since_epoch`, filling `out`
+    /// in chronological order.  Returns `(total_matching, filled)`.
+    pub fn graph_diff_since<const N: usize>(
+        &self,
+        since_epoch: u64,
+        out: &mut [GraphDiffEntry; N],
+    ) -> (usize, usize) {
+        // Walk the ring in insertion order starting from the oldest live slot.
+        let count = self.diff_total.min(MAX_DIFF_RING as u64) as usize;
+        let oldest = if self.diff_total <= MAX_DIFF_RING as u64 {
+            0
+        } else {
+            self.diff_ring_head // head is the oldest when ring is full
+        };
+        let mut total = 0usize;
+        let mut filled = 0usize;
+        for i in 0..count {
+            let slot = (oldest + i) % MAX_DIFF_RING;
+            let entry = &self.diff_ring[slot];
+            if entry.epoch > since_epoch {
+                total += 1;
+                if filled < N {
+                    out[filled] = *entry;
+                    filled += 1;
+                }
+            }
+        }
+        (total, filled)
+    }
+
+    /// Total structural diff entries ever pushed (monotonic; wraps at u64::MAX).
+    pub fn diff_total(&self) -> u64 {
+        self.diff_total
     }
 
     /// Register a reactive Subscribe pair: whenever a structural mutation
@@ -646,6 +708,7 @@ impl GraphRuntime {
         self.state_delta(spec.node_id, NodeLifecycle::Registered);
         self.state_delta(spec.node_id, NodeLifecycle::Allocated);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        self.push_diff(GraphDiffKind::NodeAdded, vector, VectorAddress::new(0,0,0,0), spec.local_node_key.as_bytes());
         self.fire_subscribers(spec.node_id, self.graph_epoch);
         Ok(spec.node_id)
     }
@@ -663,6 +726,14 @@ impl GraphRuntime {
         });
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        let from_vec = self.node_slot_by_id(spec.from_node)
+            .and_then(|s| self.nodes[s].map(|r| r.vector))
+            .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+        let to_vec = self.node_slot_by_id(spec.to_node)
+            .and_then(|s| self.nodes[s].map(|r| r.vector))
+            .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+        let edge_label = spec.capability_binding.unwrap_or(spec.capability_namespace.unwrap_or("edge")).as_bytes();
+        self.push_diff(GraphDiffKind::EdgeAdded, from_vec, to_vec, edge_label);
         self.fire_subscribers(spec.from_node, self.graph_epoch);
         self.fire_subscribers(spec.to_node, self.graph_epoch);
         Ok(spec.edge_id)
@@ -695,9 +766,18 @@ impl GraphRuntime {
         let record = self.edges[slot].ok_or(RuntimeError::EdgeNotFound)?;
         let from_node = record.spec.from_node;
         let to_node = record.spec.to_node;
+        let from_vec = self.node_slot_by_id(from_node)
+            .and_then(|s| self.nodes[s].map(|r| r.vector))
+            .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+        let to_vec = self.node_slot_by_id(to_node)
+            .and_then(|s| self.nodes[s].map(|r| r.vector))
+            .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+        let edge_label = record.spec.capability_binding
+            .unwrap_or(record.spec.capability_namespace.unwrap_or("edge"));
         self.edges[slot] = None;
         self.adjacency_arena.release(edge_id);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        self.push_diff(GraphDiffKind::EdgeRemoved, from_vec, to_vec, edge_label.as_bytes());
         self.fire_subscribers(from_node, self.graph_epoch);
         self.fire_subscribers(to_node, self.graph_epoch);
         Ok(())
@@ -1820,6 +1900,25 @@ pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
 /// bridge can poll it to render only when the topology actually changed.
 pub fn graph_epoch() -> u64 {
     RUNTIME.lock().graph_epoch()
+}
+
+/// All structural diff entries recorded after `since_epoch`, filled into `out`
+/// in chronological order.  Returns `(total_matching, filled)`.
+///
+/// Call with `since_epoch = 0` to get all entries since boot.
+/// Call with `since_epoch = graph_epoch()` at time T1, then re-call later
+/// to see only the mutations that occurred between T1 and now.
+pub fn graph_diff_since<const N: usize>(
+    since_epoch: u64,
+    out: &mut [GraphDiffEntry; N],
+) -> (usize, usize) {
+    RUNTIME.lock().graph_diff_since(since_epoch, out)
+}
+
+/// Monotonic count of all structural diff entries ever pushed to the ring
+/// (wraps at u64::MAX; useful for detecting ring wrap-around).
+pub fn diff_total() -> u64 {
+    RUNTIME.lock().diff_total()
 }
 
 /// Register a reactive Subscribe pair.  Whenever a structural mutation

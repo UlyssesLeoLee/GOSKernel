@@ -1661,3 +1661,55 @@ pub struct ControlPlaneHint {
     pub arg0: u64,
     pub arg1: u64,
 }
+
+// ---------------------------------------------------------------------------
+// Graph diff types — structural mutation changelog (like `git log` for the graph)
+// ---------------------------------------------------------------------------
+
+/// What kind of structural change occurred at a given epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GraphDiffKind {
+    NodeAdded   = 0,
+    NodeRemoved = 1,
+    EdgeAdded   = 2,
+    EdgeRemoved = 3,
+}
+
+impl GraphDiffKind {
+    pub const fn is_addition(self) -> bool {
+        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::EdgeAdded)
+    }
+    pub const fn is_node(self) -> bool {
+        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::NodeRemoved)
+    }
+}
+
+/// One entry in the structural mutation ring — recorded on every node/edge add or remove.
+#[derive(Debug, Clone, Copy)]
+pub struct GraphDiffEntry {
+    /// Graph epoch immediately after this mutation.
+    pub epoch: u64,
+    pub kind: GraphDiffKind,
+    /// For node events: the node's VectorAddress. For edge events: the from-node vector.
+    pub from_vector: VectorAddress,
+    /// For edge events: the to-node vector. Zero for node events.
+    pub to_vector: VectorAddress,
+    /// Human-readable key (local_node_key or edge key), zero-padded to 16 bytes.
+    pub label: [u8; 16],
+}
+
+impl GraphDiffEntry {
+    pub const EMPTY: Self = Self {
+        epoch: 0,
+        kind: GraphDiffKind::NodeAdded,
+        from_vector: VectorAddress::new(0, 0, 0, 0),
+        to_vector: VectorAddress::new(0, 0, 0, 0),
+        label: [0u8; 16],
+    };
+
+    pub fn label_str(&self) -> &str {
+        let end = self.label.iter().position(|&b| b == 0).unwrap_or(16);
+        core::str::from_utf8(&self.label[..end]).unwrap_or("?")
+    }
+}

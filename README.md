@@ -35,6 +35,12 @@ The repository is no longer documented as a loader-first or procedure-first kern
 - Cypher v1 subset for graph browsing and controlled activation/routing
 - Host-backed CUDA bridge for graph-visible accelerator work
 - Native network status node exporting `net/uplink`
+- `nodes` / `nodes faulted` / `nodes summary` — live node introspection (ps-style)
+- `edges` / `edges count` / `edges <type>` — live edge introspection (ss-style)
+- `graph diff` / `graph diff pin` / `graph diff reset` — topology mutation changelog (git-diff-style)
+- `journal` — journal ring status and format info
+- `metrics export` — machine-parseable telemetry key=value dump
+- `boot verify` — boot manifest edge verification report
 
 See:
 

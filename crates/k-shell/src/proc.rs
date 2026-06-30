@@ -24,6 +24,8 @@ use gos_protocol::{
     RuntimeEdgeType,
 };
 
+use gos_runtime;
+
 use super::{
     pre::{DataSource, Input},
     CLIPBOARD_NODE_VEC, GRAPH_MODE_NONE, LIVE_SIGIL_FRAMES, MENU_MODE_AI_API, MENU_MODE_COMMAND,
@@ -520,6 +522,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
+        super::print_str(sink, "  graph diff         show topology changes since pinned epoch (like git diff)\n");
+        super::print_str(sink, "  graph diff pin     pin current epoch as diff baseline\n");
+        super::print_str(sink, "  graph diff reset   reset baseline to epoch 0 (show all since boot)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -688,6 +693,22 @@ fn dispatch_text_command(
             super::print_str(sink, " unknown edge type. Types: call spawn depend signal return mount sync stream use\n");
             super::set_color(sink, 7, 0);
         }
+    } else if cmd == "graph diff" || cmd == "diff" || cmd == "diff graph" {
+        let since = super::GRAPH_DIFF_PIN_EPOCH.load(core::sync::atomic::Ordering::SeqCst);
+        super::dispatch_graph_diff(sink, since);
+    } else if cmd == "graph diff pin" || cmd == "diff pin" {
+        let epoch = gos_runtime::graph_epoch();
+        super::GRAPH_DIFF_PIN_EPOCH.store(epoch, core::sync::atomic::Ordering::SeqCst);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " diff baseline pinned at epoch ");
+        super::print_num_inline(sink, epoch as usize);
+        super::print_str(sink, "\n");
+        super::set_color(sink, 7, 0);
+    } else if cmd == "graph diff reset" || cmd == "diff reset" {
+        super::GRAPH_DIFF_PIN_EPOCH.store(0, core::sync::atomic::Ordering::SeqCst);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " diff baseline reset to epoch 0 (showing all since boot)\n");
+        super::set_color(sink, 7, 0);
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);

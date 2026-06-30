@@ -60,7 +60,7 @@ use gos_protocol::{
     CYPHER_CONTROL_QUERY_BEGIN,
     CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
     DISPLAY_THEME_WABI, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
-    ExecutorId, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
+    ExecutorId, GraphDiffKind, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
     IME_CONTROL_SET_MODE, IME_MODE_ASCII, IME_MODE_ZH_PINYIN, INPUT_KEY_DOWN,
     INPUT_KEY_PAGE_DOWN, INPUT_KEY_PAGE_UP, INPUT_KEY_UP, KernelAbi,
     NodeEvent,
@@ -198,6 +198,9 @@ static CHAT_HTTP_MODE: AtomicU8 = AtomicU8::new(0);
 static NIM_TARGET: AtomicU64 = AtomicU64::new(0);
 /// 0 = normal shell, 1 = NIM inference mode.
 static NIM_MODE: AtomicU8 = AtomicU8::new(0);
+/// Pinned graph epoch for `graph diff` — 0 means "since boot", any other value
+/// means "since epoch N was pinned via `graph diff pin`".
+pub(crate) static GRAPH_DIFF_PIN_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -1423,6 +1426,103 @@ pub fn dispatch_edge_count(sink: &ConsoleSink) {
     } else {
         set_color(sink, 10, 0);
         print_str(sink, "edges active\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// `graph diff` — structural topology changelog since pinned epoch.
+///
+/// Like `git log` for the kernel graph: shows every node/edge add or remove
+/// recorded in the diff ring, color-coded green (+) / red (-) like a diff.
+///
+/// - `graph diff`        → show all mutations since the pinned epoch (or boot if never pinned)
+/// - `graph diff pin`    → pin the current epoch as the diff baseline
+/// - `graph diff reset`  → reset baseline to 0 (show all since boot)
+pub fn dispatch_graph_diff(sink: &ConsoleSink, since_epoch: u64) {
+    use gos_protocol::GraphDiffEntry;
+    const PAGE: usize = 16;
+    let mut entries = [GraphDiffEntry::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::graph_diff_since::<PAGE>(since_epoch, &mut entries);
+    let current_epoch = gos_runtime::graph_epoch();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph diff");
+    set_color(sink, 8, 0);
+    print_str(sink, " (epoch ");
+    print_num_inline(sink, since_epoch as usize);
+    print_str(sink, " -> ");
+    print_num_inline(sink, current_epoch as usize);
+    print_str(sink, ")\n");
+    set_color(sink, 7, 0);
+
+    for entry in entries.iter().take(filled) {
+        let (prefix, fg) = if entry.kind.is_addition() {
+            ("+", 10u8)
+        } else {
+            ("-", 12u8)
+        };
+        let kind_label = match entry.kind {
+            GraphDiffKind::NodeAdded   => "node+",
+            GraphDiffKind::NodeRemoved => "node-",
+            GraphDiffKind::EdgeAdded   => "edge+",
+            GraphDiffKind::EdgeRemoved => "edge-",
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, " ");
+        print_str(sink, prefix);
+        print_str(sink, " [");
+        print_str(sink, kind_label);
+        print_str(sink, "] ");
+        let mut vec_buf = LineBuf::<20>::new();
+        vec_buf.push_vector(entry.from_vector);
+        print_str(sink, core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?"));
+        if entry.kind.is_node() {
+            set_color(sink, 8, 0);
+            print_str(sink, "  ");
+            print_str(sink, entry.label_str());
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, " -[");
+            set_color(sink, fg, 0);
+            print_str(sink, entry.label_str());
+            set_color(sink, 8, 0);
+            print_str(sink, "]-> ");
+            set_color(sink, 7, 0);
+            let mut to_buf = LineBuf::<20>::new();
+            to_buf.push_vector(entry.to_vector);
+            print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  @epoch ");
+        print_num_inline(sink, entry.epoch as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no changes since epoch ");
+        print_num_inline(sink, since_epoch as usize);
+        print_str(sink, ")\n");
+        set_color(sink, 7, 0);
+    } else if total > filled {
+        set_color(sink, 8, 0);
+        print_str(sink, "  ... ");
+        print_num_inline(sink, total - filled);
+        print_str(sink, " more (ring capped at ");
+        print_num_inline(sink, PAGE);
+        print_str(sink, " per page)\n");
+        set_color(sink, 7, 0);
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " change(s)");
+    if total > 0 {
+        print_str(sink, "  |  use 'graph diff pin' to update baseline\n");
+    } else {
+        print_str(sink, "\n");
     }
     set_color(sink, 7, 0);
 }
