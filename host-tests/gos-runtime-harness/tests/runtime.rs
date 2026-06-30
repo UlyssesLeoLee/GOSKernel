@@ -2082,3 +2082,103 @@ fn edge_page_resolves_cached_endpoints() {
         }
     }
 }
+
+// ── V2.1 golden test ─────────────────────────────────────────────────────────
+//
+// `apply_cypher_mutation` must write through to the live runtime edge table.
+// The test proves:
+//   1. AddEdge → edge is visible in edge_page immediately after
+//   2. RemoveEdge → edge disappears
+//   3. RebindUse → old Use edge replaced atomically by new one
+//
+// This is the Phase V2.1 exit criterion: "1 NodeKind + 1 EdgeKind end-to-end:
+// CALL create_node → MutationDispatcher → edge table write → next snapshot()
+// visible".
+#[test]
+fn v2_1_cypher_mutation_writes_through_to_runtime_edge_table() {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    use gos_protocol::{derive_edge_id, GraphEdgeSummary};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    perf_install_plugin();
+
+    // Register two nodes that will serve as mutation endpoints.
+    let spec_src = perf_node_spec("mut.src", RuntimeNodeType::Service);
+    let spec_dst = perf_node_spec("mut.dst", RuntimeNodeType::Service);
+    let spec_alt = perf_node_spec("mut.alt", RuntimeNodeType::Service);
+    let v_src = VectorAddress::new(40, 0, 0, 0);
+    let v_dst = VectorAddress::new(41, 0, 0, 0);
+    let v_alt = VectorAddress::new(42, 0, 0, 0);
+    gos_runtime::register_node(PERF_PLUGIN_ID, v_src, spec_src).expect("src");
+    gos_runtime::register_node(PERF_PLUGIN_ID, v_dst, spec_dst).expect("dst");
+    gos_runtime::register_node(PERF_PLUGIN_ID, v_alt, spec_alt).expect("alt");
+
+    // ── 1. AddEdge Mount ─────────────────────────────────────────────────────
+    gos_runtime::apply_cypher_mutation(CypherMutation::AddEdge {
+        from: spec_src.node_id,
+        to: spec_dst.node_id,
+        edge_kind: ReceptiveEdgeKind::Mount,
+    })
+    .expect("AddEdge Mount must succeed");
+
+    let expected_mount_id = derive_edge_id(spec_src.node_id, spec_dst.node_id, "cypher.Mount");
+    let mount_vec = gos_runtime::edge_vector_for_id(expected_mount_id)
+        .expect("Mount edge must be visible after AddEdge");
+
+    // Confirm via edge_page that the edge really landed in the table.
+    let mut page = [GraphEdgeSummary::EMPTY; 8];
+    let (total, _) = gos_runtime::edge_page::<8>(0, &mut page);
+    assert_eq!(total, 1, "exactly one edge after AddEdge");
+    assert_eq!(page[0].edge_id, expected_mount_id);
+
+    // ── 2. RemoveEdge ────────────────────────────────────────────────────────
+    gos_runtime::apply_cypher_mutation(CypherMutation::RemoveEdge {
+        edge_id: expected_mount_id,
+    })
+    .expect("RemoveEdge must succeed");
+
+    let (total_after_remove, _) = gos_runtime::edge_page::<8>(0, &mut page);
+    assert_eq!(total_after_remove, 0, "edge table empty after RemoveEdge");
+    assert!(
+        gos_runtime::edge_vector_for_id(expected_mount_id).is_none(),
+        "edge vector must be gone after RemoveEdge"
+    );
+    let _ = mount_vec; // suppress unused warning
+
+    // ── 3. RebindUse ─────────────────────────────────────────────────────────
+    // First, insert a Use edge src→dst, then rebind to src→alt.
+    gos_runtime::apply_cypher_mutation(CypherMutation::AddEdge {
+        from: spec_src.node_id,
+        to: spec_dst.node_id,
+        edge_kind: ReceptiveEdgeKind::Use,
+    })
+    .expect("AddEdge Use (initial binding)");
+
+    let use_id_v1 = derive_edge_id(spec_src.node_id, spec_dst.node_id, "cypher.Use");
+    assert!(
+        gos_runtime::edge_vector_for_id(use_id_v1).is_some(),
+        "initial Use edge must be present"
+    );
+
+    gos_runtime::apply_cypher_mutation(CypherMutation::RebindUse {
+        from: spec_src.node_id,
+        new_target: spec_alt.node_id,
+    })
+    .expect("RebindUse must succeed");
+
+    // Old binding gone, new binding present.
+    assert!(
+        gos_runtime::edge_vector_for_id(use_id_v1).is_none(),
+        "old Use edge must be removed after RebindUse"
+    );
+    let use_id_v2 = derive_edge_id(spec_src.node_id, spec_alt.node_id, "cypher.Use");
+    assert!(
+        gos_runtime::edge_vector_for_id(use_id_v2).is_some(),
+        "new Use edge must be present after RebindUse"
+    );
+
+    // Exactly one edge survives — the rebound Use.
+    let (total_final, _) = gos_runtime::edge_page::<8>(0, &mut page);
+    assert_eq!(total_final, 1, "exactly one Use edge after RebindUse");
+    assert_eq!(page[0].edge_id, use_id_v2);
+}

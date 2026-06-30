@@ -2118,6 +2118,85 @@ impl IrqTable {
 
 static IRQ_TABLE: Mutex<IrqTable> = Mutex::new(IrqTable::new());
 
+// ── V2.1: MutationDispatcher wired to GraphRuntime ───────────────────────────
+
+impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
+    fn lookup_node(&self, id: NodeId) -> bool {
+        self.node_slot_by_id(id).is_some()
+    }
+
+    fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        kind: gos_cypher_mut::ReceptiveEdgeKind,
+    ) -> Result<(), u32> {
+        let (edge_type, edge_key) = match kind {
+            gos_cypher_mut::ReceptiveEdgeKind::Mount => (RuntimeEdgeType::Mount, "cypher.Mount"),
+            gos_cypher_mut::ReceptiveEdgeKind::Use   => (RuntimeEdgeType::Use,   "cypher.Use"),
+        };
+        let edge_id = gos_protocol::derive_edge_id(from, to, edge_key);
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: to,
+            edge_type,
+            weight: 1.0,
+            acl_mask: 0,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        self.register_edge(spec).map(|_| ()).map_err(|_| 1u32)
+    }
+
+    fn remove_edge(&mut self, id: EdgeId) -> Result<(), u32> {
+        self.unregister_edge(id).map_err(|_| 2u32)
+    }
+
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<(), u32> {
+        // Remove the existing exclusive Use edge originating from `from`, if any.
+        let old_id = self
+            .edges
+            .iter()
+            .filter_map(|slot| *slot)
+            .find(|rec| {
+                rec.spec.from_node == from && rec.spec.edge_type == RuntimeEdgeType::Use
+            })
+            .map(|rec| rec.spec.edge_id);
+        if let Some(old_id) = old_id {
+            self.unregister_edge(old_id).map_err(|_| 3u32)?;
+        }
+        let edge_id = gos_protocol::derive_edge_id(from, new_target, "cypher.Use");
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: new_target,
+            edge_type: RuntimeEdgeType::Use,
+            weight: 1.0,
+            acl_mask: 0,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        self.register_edge(spec).map(|_| ()).map_err(|_| 4u32)
+    }
+}
+
+/// Apply a Cypher mutation against the live runtime graph.
+///
+/// This is the V2.1 write path: every `CREATE EDGE`, `DELETE EDGE`, and
+/// `REBIND USE` issued by the Cypher shell or AI bridge flows through here.
+/// The mutation is validated by `gos-cypher-mut::apply_mutation` before
+/// any runtime state is touched.
+pub fn apply_cypher_mutation(
+    mutation: gos_cypher_mut::CypherMutation,
+) -> Result<(), gos_cypher_mut::MutationError> {
+    gos_cypher_mut::apply_mutation(&mut *RUNTIME.lock(), mutation)
+}
+
 /// Register a node vector as the handler for a particular IRQ number.
 ///
 /// Must be called before `x86_64::instructions::interrupts::enable()`.
