@@ -1305,6 +1305,128 @@ pub fn dispatch_journal_info(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Parse an edge-type filter word from the `edges <type>` command.
+fn parse_edge_type_filter(s: &str) -> Option<RuntimeEdgeType> {
+    match s.trim() {
+        "call"   => Some(RuntimeEdgeType::Call),
+        "spawn"  => Some(RuntimeEdgeType::Spawn),
+        "depend" => Some(RuntimeEdgeType::Depend),
+        "signal" => Some(RuntimeEdgeType::Signal),
+        "return" => Some(RuntimeEdgeType::Return),
+        "mount"  => Some(RuntimeEdgeType::Mount),
+        "sync"   => Some(RuntimeEdgeType::Sync),
+        "stream" => Some(RuntimeEdgeType::Stream),
+        "use"    => Some(RuntimeEdgeType::Use),
+        _ => None,
+    }
+}
+
+/// Text-mode listing of all live graph edges — the GOS equivalent of `ss -a` / `lsof`.
+///
+/// Prints each edge's from_vector, type, to_vector, and key to the scrolling console.
+/// When `filter_type` is `Some(t)`, only edges of that type are shown.
+/// Color-codes edge type: green = call, yellow = mount, cyan = use, blue = depend.
+pub fn dispatch_edges_list(sink: &ConsoleSink, filter_type: Option<RuntimeEdgeType>) {
+    const PAGE: usize = 8;
+    let mut items = [GraphEdgeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut printed = 0usize;
+
+    let title = match filter_type {
+        None                           => " live edges\n",
+        Some(RuntimeEdgeType::Call)    => " call edges\n",
+        Some(RuntimeEdgeType::Spawn)   => " spawn edges\n",
+        Some(RuntimeEdgeType::Depend)  => " depend edges\n",
+        Some(RuntimeEdgeType::Signal)  => " signal edges\n",
+        Some(RuntimeEdgeType::Return)  => " return edges\n",
+        Some(RuntimeEdgeType::Mount)   => " mount edges\n",
+        Some(RuntimeEdgeType::Sync)    => " sync edges\n",
+        Some(RuntimeEdgeType::Stream)  => " stream edges\n",
+        Some(RuntimeEdgeType::Use)     => " use edges\n",
+    };
+    set_color(sink, 11, 0);
+    print_str(sink, title);
+    set_color(sink, 7, 0);
+
+    loop {
+        let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            if let Some(ft) = filter_type {
+                if item.edge_type != ft {
+                    continue;
+                }
+            }
+            let fg: u8 = match item.edge_type {
+                RuntimeEdgeType::Call   => 10,
+                RuntimeEdgeType::Spawn  => 10,
+                RuntimeEdgeType::Mount  => 14,
+                RuntimeEdgeType::Use    => 11,
+                RuntimeEdgeType::Depend => 9,
+                RuntimeEdgeType::Sync   => 13,
+                RuntimeEdgeType::Signal => 12,
+                RuntimeEdgeType::Stream => 6,
+                RuntimeEdgeType::Return => 7,
+            };
+            set_color(sink, fg, 0);
+            print_str(sink, "  ");
+            let mut from_buf = LineBuf::<20>::new();
+            from_buf.push_vector(item.from_vector);
+            print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+            set_color(sink, 8, 0);
+            print_str(sink, " -[");
+            set_color(sink, fg, 0);
+            print_str(sink, edge_type_label(item.edge_type));
+            set_color(sink, 8, 0);
+            print_str(sink, "]-> ");
+            set_color(sink, 7, 0);
+            let mut to_buf = LineBuf::<20>::new();
+            to_buf.push_vector(item.to_vector);
+            print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+            if !item.from_key.is_empty() {
+                set_color(sink, 8, 0);
+                print_str(sink, "  ");
+                print_str(sink, item.from_key);
+            }
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            printed += 1;
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    if printed == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, if filter_type.is_some() { "  (no edges of that type)\n" } else { "  (no edges)\n" });
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Report total edge count — lightweight `edges count` variant.
+///
+/// Reads only the total from `edge_page` without enumerating all summaries.
+/// Analogous to `ss --summary` in Linux.
+pub fn dispatch_edge_count(sink: &ConsoleSink) {
+    let mut items = [GraphEdgeSummary::EMPTY; 1];
+    let (total, _) = gos_runtime::edge_page::<1>(0, &mut items);
+    set_color(sink, 11, 0);
+    print_str(sink, " edge count\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, "\n  status: ");
+    if total == 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "no edges (graph topology empty)\n");
+    } else {
+        set_color(sink, 10, 0);
+        print_str(sink, "edges active\n");
+    }
+    set_color(sink, 7, 0);
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",

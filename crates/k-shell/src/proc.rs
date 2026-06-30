@@ -517,6 +517,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  boot verify        boot manifest edge verification report\n");
         super::print_str(sink, "  metrics export     machine-parseable key=value telemetry dump\n");
         super::print_str(sink, "  journal            journal format info and replay status\n");
+        super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
+        super::print_str(sink, "  edges count        total edge count\n");
+        super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -673,6 +676,18 @@ fn dispatch_text_command(
         super::dispatch_metrics_export(sink);
     } else if cmd == "journal" || cmd == "journal status" || cmd == "journal info" {
         super::dispatch_journal_info(sink);
+    } else if cmd == "edges" || cmd == "edges all" {
+        super::dispatch_edges_list(sink, None);
+    } else if cmd == "edges count" || cmd == "edge count" {
+        super::dispatch_edge_count(sink);
+    } else if let Some(type_str) = cmd.strip_prefix("edges ") {
+        if let Some(et) = super::parse_edge_type_filter(type_str) {
+            super::dispatch_edges_list(sink, Some(et));
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " unknown edge type. Types: call spawn depend signal return mount sync stream use\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);
