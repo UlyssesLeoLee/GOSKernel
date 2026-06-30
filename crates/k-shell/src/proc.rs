@@ -504,6 +504,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
         super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  sup     supervisor internals (instances/resources/caps/lanes)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -647,6 +648,67 @@ fn dispatch_text_command(
                 super::print_str(sink, "  DEGRADED");
             }
             super::print_str(sink, "\n");
+        }
+    } else if cmd == "sup" || cmd == "supervisor" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " supervisor snapshot\n");
+        super::set_color(sink, 7, 0);
+        match gos_supervisor::snapshot() {
+            Ok(snap) => {
+                super::print_str(sink, "  modules    installed:");
+                super::print_num_inline(sink, snap.installed_modules);
+                super::print_str(sink, "  running:");
+                super::print_num_inline(sink, snap.running_modules);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  instances  live:");
+                super::print_num_inline(sink, snap.live_instances);
+                super::print_str(sink, "  ready:");
+                super::print_num_inline(sink, snap.ready_instances);
+                super::print_str(sink, "  waiting:");
+                super::print_num_inline(sink, snap.waiting_instances);
+                super::print_str(sink, "  suspended:");
+                super::print_num_inline(sink, snap.suspended_instances);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  templates  registered:");
+                super::print_num_inline(sink, snap.registered_templates);
+                super::print_str(sink, "  domains:");
+                super::print_num_inline(sink, snap.isolated_domains);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  resources  registered:");
+                super::print_num_inline(sink, snap.registered_resources);
+                super::print_str(sink, "  claims:");
+                super::print_num_inline(sink, snap.active_claims);
+                super::print_str(sink, "  revokes:");
+                super::print_num_inline(sink, snap.pending_revocations);
+                super::print_str(sink, "  restarts_q:");
+                super::print_num_inline(sink, snap.queued_restarts);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  memory     heap_grants:");
+                super::print_num_inline(sink, snap.heap_grants);
+                super::print_str(sink, "  heap_pages:");
+                super::print_num_inline(sink, snap.heap_pages_used);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  ipc        caps:");
+                super::print_num_inline(sink, snap.published_capabilities);
+                super::print_str(sink, "  endpoints:");
+                super::print_num_inline(sink, snap.endpoints);
+                super::print_str(sink, "  queued_msgs:");
+                super::print_num_inline(sink, snap.queued_messages);
+                super::print_str(sink, "\n");
+                super::print_str(sink, "  lanes      ctrl:");
+                super::print_num_inline(sink, snap.ready_control);
+                super::print_str(sink, "  io:");
+                super::print_num_inline(sink, snap.ready_io);
+                super::print_str(sink, "  compute:");
+                super::print_num_inline(sink, snap.ready_compute);
+                super::print_str(sink, "  bg:");
+                super::print_num_inline(sink, snap.ready_background);
+                super::print_str(sink, "\n");
+            }
+            Err(_) => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " supervisor not bootstrapped\n");
+            }
         }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
