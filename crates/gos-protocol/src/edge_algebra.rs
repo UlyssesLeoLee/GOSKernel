@@ -23,7 +23,7 @@
 //! (`lower(recognize(lower(e))) == lower(e)`) rather than identity for those
 //! three. The other six edges round-trip exactly.
 //!
-//! [`doc/ADR-001`]: ../../../doc/ADR-001-edge-algebra-constitution.md
+//! [`doc/ADR-001`]: ../../../doc/03_adr/ADR-001-edge-algebra-constitution.md
 //!
 //! ```cypher
 //! CREATE

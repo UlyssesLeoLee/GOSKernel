@@ -38,10 +38,10 @@ The repository is no longer documented as a loader-first or procedure-first kern
 
 See:
 
-- [doc/GOS_ARCH_v2.md](./doc/GOS_ARCH_v2.md)
-- [doc/GRAPH_CLI_COMMANDS_zh.md](./doc/GRAPH_CLI_COMMANDS_zh.md)
-- [doc/CYPHER_NODE_zh.md](./doc/CYPHER_NODE_zh.md)
-- [doc/NETWORK_NODE_zh.md](./doc/NETWORK_NODE_zh.md)
+- [doc/02_architecture/GOS_ARCH_v2.md](./doc/02_architecture/GOS_ARCH_v2.md)
+- [doc/05_reference/GRAPH_CLI_COMMANDS_zh.md](./doc/05_reference/GRAPH_CLI_COMMANDS_zh.md)
+- [doc/05_reference/CYPHER_NODE_zh.md](./doc/05_reference/CYPHER_NODE_zh.md)
+- [doc/05_reference/NETWORK_NODE_zh.md](./doc/05_reference/NETWORK_NODE_zh.md)
 
 ## Developer Quick Start
 
@@ -95,7 +95,7 @@ pwsh -File .\tools\write-usb-image.ps1 -List
 pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-installer.img -DiskNumber 3
 ```
 
-Detailed Chinese install instructions are in [doc/INSTALL_BARE_METAL_zh.md](./doc/INSTALL_BARE_METAL_zh.md).
+Detailed Chinese install instructions are in [doc/05_reference/INSTALL_BARE_METAL_zh.md](./doc/05_reference/INSTALL_BARE_METAL_zh.md).
 
 ## Current Development Priority
 

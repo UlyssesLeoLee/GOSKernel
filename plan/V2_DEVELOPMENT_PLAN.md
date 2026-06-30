@@ -1,6 +1,6 @@
 # GOS V2 分阶段开发计划 — 产品级涌现式图论 OS
 
-> 状态：提案 · 日期：2026-06-08 · 配套：[ADR-001 边代数宪法](../doc/ADR-001-edge-algebra-constitution.md)
+> 状态：提案 · 日期：2026-06-08 · 配套：[ADR-001 边代数宪法](../doc/03_adr/ADR-001-edge-algebra-constitution.md)
 >
 > 本计划把 GOS 从"图数据库 + capability + 软光栅的精致 hobbyist OS"推进到 **Plan 9 之后第二个提出新计算抽象的 OS**。Plan 9 的 *everything is a file* 在 GOS 等价于 ***everything is a graph rewrite***。
 >

@@ -1,7 +1,7 @@
 # GOS 优化计划
 
 > 起草：2026-04-25
-> 范围：在 Phase B.4（domain CR3 隔离，详见 [`doc/PHASE_B4_DOMAIN_ISOLATION.md`](../doc/PHASE_B4_DOMAIN_ISOLATION.md)）之外，把 GOS 从"graph runtime"补成真正"操作系统"的并行工作流。
+> 范围：在 Phase B.4（domain CR3 隔离，详见 [`doc/PHASE_B4_DOMAIN_ISOLATION.md`](../doc/02_architecture/PHASE_B4_DOMAIN_ISOLATION.md)）之外，把 GOS 从"graph runtime"补成真正"操作系统"的并行工作流。
 > 当前 main 已完成：Phase A、Phase B.1–B.3、Phase B.5。
 
 ---
