@@ -150,6 +150,10 @@ fn decode_kind(raw: u8) -> Result<ControlPlaneMessageKind, JournalError> {
         0x06 => SnapshotChunk,
         0x07 => Fault,
         0x08 => Metric,
+        0x09 => MutationAudit,
+        0x0A => CausalOverflow,
+        0x0B => RuleApplied,
+        0x0C => SubscribeTriggered,
         other => return Err(JournalError::UnknownKind(other)),
     })
 }

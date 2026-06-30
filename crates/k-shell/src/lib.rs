@@ -1273,6 +1273,38 @@ pub fn dispatch_metrics_export(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Report gos-journal on-disk format constants and capability summary.
+///
+/// Analogous to `journalctl --version`: confirms the magic, version, and record
+/// geometry that replay will expect.  Pure read — no runtime state is touched.
+pub fn dispatch_journal_info(sink: &ConsoleSink) {
+    set_color(sink, 11, 0);
+    print_str(sink, " journal format\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  envelope magic:      GOSJ\n");
+    print_str(sink, "  envelope version:    ");
+    print_num_inline(sink, gos_journal::JOURNAL_VERSION as usize);
+    print_str(sink, "\n  header_bytes:        ");
+    print_num_inline(sink, gos_journal::HEADER_BYTES);
+    print_str(sink, "\n  envelope_record:     ");
+    print_num_inline(sink, gos_journal::ENVELOPE_RECORD_BYTES);
+    print_str(sink, " bytes (fixed)\n");
+    print_str(sink, "  snapshot magic:      GOSS\n");
+    print_str(sink, "  snapshot version:    ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_VERSION as usize);
+    print_str(sink, "\n  snapshot_hdr:        ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_HEADER_BYTES);
+    print_str(sink, " bytes\n  node_record:         ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_NODE_BYTES);
+    print_str(sink, " bytes\n  edge_record:         ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_EDGE_BYTES);
+    print_str(sink, " bytes\n");
+    print_str(sink, "  kinds:               12 (Hello..SubscribeTriggered)\n");
+    set_color(sink, 10, 0);
+    print_str(sink, "  status:              F.4 control-plane journal -- replay-ready\n");
+    set_color(sink, 7, 0);
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",

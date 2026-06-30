@@ -388,6 +388,7 @@ name = "k-shell"
 version = "0.2.0"
 dependencies = [
  "gos-hal",
+ "gos-journal",
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
