@@ -162,7 +162,9 @@ dependencies = [
 name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
+ "gos-rewrite",
  "gos-runtime",
  "gos-sign",
  "k-vmm",

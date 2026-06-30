@@ -822,6 +822,12 @@ pub enum ControlPlaneMessageKind {
     /// `subject` = rule label ([u8;16]); `arg0` = rule index in the engine;
     /// `arg1` = graph epoch after the mutation.
     RuleApplied = 0x0B,
+    /// A reactive Subscribe pair was triggered: the observed node was
+    /// structurally mutated (graph_epoch bumped by register_node,
+    /// register_edge, or unregister_edge).  `subject` = observed NodeId
+    /// (16 bytes); `arg0` = lower 8 bytes of subscriber NodeId (LE u64);
+    /// `arg1` = new graph_epoch after the mutation.
+    SubscribeTriggered = 0x0C,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

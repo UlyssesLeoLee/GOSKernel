@@ -18,6 +18,7 @@ use spin::Mutex;
 pub const MAX_PLUGINS: usize = 32;
 pub const MAX_NODES: usize = 128;
 pub const MAX_EDGES: usize = 512;
+pub const MAX_SUBSCRIBE_PAIRS: usize = 64;
 pub const MAX_READY_QUEUE: usize = 256;
 pub const MAX_SIGNAL_QUEUE: usize = 512;
 pub const MAX_FAULT_QUEUE: usize = 32;
@@ -41,6 +42,7 @@ pub enum RuntimeError {
     EdgeNotFound,
     LegacyCellMissing,
     NativeExecutorMissing,
+    SubscribeTableFull,
     Fault(&'static str),
 }
 
@@ -299,6 +301,11 @@ pub struct GraphRuntime {
     /// epoch, and host bridges can read it to skip re-rendering an
     /// unchanged graph — the change-tracking primitive for live streaming.
     graph_epoch: u64,
+    /// V2.3 reactive Subscribe index: pairs of (observed_node, subscriber_node).
+    /// When a structural mutation bumps graph_epoch and touches observed_node,
+    /// the runtime emits a SubscribeTriggered control-plane envelope for each
+    /// matching subscriber — the propagation primitive for Demo #1 and #2.
+    subscribe_pairs: [Option<(NodeId, NodeId)>; MAX_SUBSCRIBE_PAIRS],
     /// Cached node enumeration order: storage-slot indices sorted by
     /// vector key, rebuilt lazily when `node_order_epoch != graph_epoch`.
     node_order: [u16; MAX_NODES],
@@ -334,6 +341,7 @@ impl GraphRuntime {
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             graph_epoch: 0,
+            subscribe_pairs: [None; MAX_SUBSCRIBE_PAIRS],
             node_order: [0u16; MAX_NODES],
             node_order_len: 0,
             node_order_epoch: u64::MAX,
@@ -478,6 +486,54 @@ impl GraphRuntime {
         self.graph_epoch
     }
 
+    /// Register a reactive Subscribe pair: whenever a structural mutation
+    /// touches `observed` (node/edge add or remove that bumps graph_epoch),
+    /// the runtime emits `SubscribeTriggered` for `subscriber`.  Idempotent:
+    /// registering the same pair twice is a no-op.
+    pub fn register_subscribe_pair(
+        &mut self,
+        observed: NodeId,
+        subscriber: NodeId,
+    ) -> Result<(), RuntimeError> {
+        for pair in self.subscribe_pairs.iter().flatten() {
+            if pair.0 == observed && pair.1 == subscriber {
+                return Ok(());
+            }
+        }
+        let slot = self
+            .subscribe_pairs
+            .iter_mut()
+            .find(|s| s.is_none())
+            .ok_or(RuntimeError::SubscribeTableFull)?;
+        *slot = Some((observed, subscriber));
+        Ok(())
+    }
+
+    /// Emit `SubscribeTriggered` for every subscriber of `changed`.
+    /// Called internally after any structural mutation that bumps graph_epoch.
+    fn fire_subscribers(&mut self, changed: NodeId, epoch: u64) {
+        let mut subs = [NodeId::ZERO; MAX_SUBSCRIBE_PAIRS];
+        let mut count = 0usize;
+        for pair in self.subscribe_pairs.iter().flatten() {
+            if pair.0 == changed && count < MAX_SUBSCRIBE_PAIRS {
+                subs[count] = pair.1;
+                count += 1;
+            }
+        }
+        for sub in subs[..count].iter().copied() {
+            let arg0 = u64::from_le_bytes([
+                sub.0[0], sub.0[1], sub.0[2], sub.0[3],
+                sub.0[4], sub.0[5], sub.0[6], sub.0[7],
+            ]);
+            self.emit_control_plane(
+                ControlPlaneMessageKind::SubscribeTriggered,
+                changed.0,
+                arg0,
+                epoch,
+            );
+        }
+    }
+
     /// Check whether a node identified by `NodeId` is present in the graph.
     /// Used by `RuntimeGraphView` in the supervisor so the rewrite engine
     /// can evaluate `NodePresent` and `EdgePresent` patterns without holding
@@ -571,6 +627,7 @@ impl GraphRuntime {
         self.state_delta(spec.node_id, NodeLifecycle::Registered);
         self.state_delta(spec.node_id, NodeLifecycle::Allocated);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        self.fire_subscribers(spec.node_id, self.graph_epoch);
         Ok(spec.node_id)
     }
 
@@ -587,6 +644,8 @@ impl GraphRuntime {
         });
         self.emit_control_plane(ControlPlaneMessageKind::EdgeUpsert, spec.edge_id.0, spec.from_node.0[0] as u64, spec.to_node.0[0] as u64);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        self.fire_subscribers(spec.from_node, self.graph_epoch);
+        self.fire_subscribers(spec.to_node, self.graph_epoch);
         Ok(spec.edge_id)
     }
 
@@ -614,9 +673,14 @@ impl GraphRuntime {
 
     pub fn unregister_edge(&mut self, edge_id: EdgeId) -> Result<(), RuntimeError> {
         let slot = self.edge_slot(edge_id).ok_or(RuntimeError::EdgeNotFound)?;
+        let record = self.edges[slot].ok_or(RuntimeError::EdgeNotFound)?;
+        let from_node = record.spec.from_node;
+        let to_node = record.spec.to_node;
         self.edges[slot] = None;
         self.adjacency_arena.release(edge_id);
         self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        self.fire_subscribers(from_node, self.graph_epoch);
+        self.fire_subscribers(to_node, self.graph_epoch);
         Ok(())
     }
 
@@ -1248,6 +1312,7 @@ fn control_plane_kind_from_u8(raw: u8) -> ControlPlaneMessageKind {
         x if x == ControlPlaneMessageKind::MutationAudit as u8 => ControlPlaneMessageKind::MutationAudit,
         x if x == ControlPlaneMessageKind::CausalOverflow as u8 => ControlPlaneMessageKind::CausalOverflow,
         x if x == ControlPlaneMessageKind::RuleApplied as u8 => ControlPlaneMessageKind::RuleApplied,
+        x if x == ControlPlaneMessageKind::SubscribeTriggered as u8 => ControlPlaneMessageKind::SubscribeTriggered,
         _ => ControlPlaneMessageKind::Metric,
     }
 }
@@ -1716,6 +1781,13 @@ pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
 /// bridge can poll it to render only when the topology actually changed.
 pub fn graph_epoch() -> u64 {
     RUNTIME.lock().graph_epoch()
+}
+
+/// Register a reactive Subscribe pair.  Whenever a structural mutation
+/// touches `observed` (register_node / register_edge / unregister_edge),
+/// the runtime emits `SubscribeTriggered` for `subscriber`.  Idempotent.
+pub fn register_subscribe(observed: NodeId, subscriber: NodeId) -> Result<(), RuntimeError> {
+    RUNTIME.lock().register_subscribe_pair(observed, subscriber)
 }
 
 /// Check whether a node with `id` is currently present in the live graph.

@@ -1,8 +1,6 @@
 #![cfg_attr(not(any(test, feature = "host-testing")), no_std)]
 
-use core::sync::atomic::{AtomicPtr, Ordering};
-#[cfg(any(test, feature = "host-testing"))]
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(test)]
 use core::sync::atomic::AtomicUsize;
 
@@ -2245,6 +2243,15 @@ static ACTIVE_SUPERVISOR: AtomicPtr<Supervisor> = AtomicPtr::new(core::ptr::null
 
 static REWRITE_ENGINE: Mutex<RewriteEngine> = Mutex::new(RewriteEngine::new());
 
+// V2.3 epoch-diff render skip: track the graph_epoch seen at end of each
+// service_system_cycle.  When the epoch is stable across cycles, no render
+// signal needs to be posted — this is the infrastructure for "idle = 0 frames"
+// (V2.3 Demo #2 pre-req).  Initialised to u64::MAX so the first cycle always
+// sees a change and does NOT skip.
+static LAST_RENDER_EPOCH: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Count of service_system_cycle calls where graph_epoch was unchanged.
+static IDLE_CYCLE_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Thin view adapter: bridges the `gos-rewrite::GraphView` trait to the
 /// module-level `gos_runtime::*` public API so the engine can evaluate
 /// structural predicates (node presence, edge existence, epoch) without
@@ -2903,6 +2910,16 @@ pub fn service_system_cycle() {
             gos_runtime::emit_rule_applied(action.source, rule_idx as u32, epoch_after);
         }
     }
+
+    // V2.3 epoch-diff render skip: compare current graph_epoch with the epoch
+    // recorded at the end of the previous cycle.  When the graph is structurally
+    // stable (no node/edge add/remove), we increment the idle counter instead of
+    // posting a render signal — the render node's Subscribe path handles wakeup.
+    let epoch_now = gos_runtime::graph_epoch();
+    let prev_epoch = LAST_RENDER_EPOCH.swap(epoch_now, Ordering::Relaxed);
+    if epoch_now == prev_epoch {
+        IDLE_CYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Register a rewrite rule in the engine.  Rules are evaluated in insertion
@@ -2916,6 +2933,20 @@ pub fn add_rewrite_rule(rule: RewriteRule) -> Result<usize, RewriteError> {
 /// Remove all registered rewrite rules and reset the fire counter.
 pub fn clear_rewrite_rules() {
     REWRITE_ENGINE.lock().clear();
+}
+
+/// The graph_epoch recorded at the end of the most recent service_system_cycle.
+/// V2.3 render nodes compare this against `gos_runtime::graph_epoch()` to
+/// decide whether a repaint is needed.
+pub fn render_epoch() -> u64 {
+    LAST_RENDER_EPOCH.load(Ordering::Relaxed)
+}
+
+/// Number of service_system_cycle calls where graph_epoch was unchanged since
+/// the previous call.  Rising value means the graph is quiescent (idle frames
+/// are being suppressed — V2.3 Demo #2 pre-req).
+pub fn idle_cycle_count() -> u64 {
+    IDLE_CYCLE_COUNT.load(Ordering::Relaxed)
 }
 
 pub fn claim_resource(
