@@ -509,6 +509,13 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// Number of active (non-None) subscribe pairs.  Callers can compare
+    /// this against `MAX_SUBSCRIBE_PAIRS` to check table headroom before
+    /// registering many pairs in a tight loop.
+    pub fn subscribe_pair_count(&self) -> usize {
+        self.subscribe_pairs.iter().filter(|s| s.is_some()).count()
+    }
+
     /// Remove an (observed, subscriber) pair from the subscribe table.
     /// No-ops silently when the pair is not present.
     pub fn unregister_subscribe_pair(&mut self, observed: NodeId, subscriber: NodeId) {
@@ -1806,6 +1813,12 @@ pub fn register_subscribe(observed: NodeId, subscriber: NodeId) -> Result<(), Ru
 /// in the subscribe table (which is a fixed-size 64-slot pool).
 pub fn unregister_subscribe(observed: NodeId, subscriber: NodeId) {
     RUNTIME.lock().unregister_subscribe_pair(observed, subscriber)
+}
+
+/// Current number of active subscribe pairs.  Compare against
+/// `MAX_SUBSCRIBE_PAIRS` (64) to check headroom before bulk registration.
+pub fn subscribe_pair_count() -> usize {
+    RUNTIME.lock().subscribe_pair_count()
 }
 
 /// Check whether a node with `id` is currently present in the live graph.

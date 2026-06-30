@@ -12,6 +12,7 @@
 //   7. causal_depth_max() stays at 0 during idle cycles (no dispatch work queued).
 //   8. unregister_subscribe removes the pair; subsequent mutations no longer fire.
 //   9. SubscribeTableFull is returned when all 64 slots are consumed.
+//  10. subscribe_pair_count() tracks active pair count (including after unregister).
 
 use std::sync::Mutex;
 
@@ -422,4 +423,33 @@ fn subscribe_table_full_error_after_64_pairs() {
         matches!(result, Err(gos_runtime::RuntimeError::SubscribeTableFull)),
         "expected SubscribeTableFull on 65th registration; got {result:?}"
     );
+}
+
+#[test]
+fn subscribe_pair_count_tracks_registrations_and_removals() {
+    let _g = TEST_LOCK.lock().unwrap();
+    setup();
+
+    let observed = node(KEY_OBSERVED);
+    let sub_a = node(KEY_SUBSCRIBER_A);
+    let sub_b = node(KEY_SUBSCRIBER_B);
+
+    let count_empty = gos_runtime::subscribe_pair_count();
+    assert_eq!(count_empty, 0, "count must be 0 after reset");
+
+    gos_runtime::register_subscribe(observed, sub_a).unwrap();
+    assert_eq!(gos_runtime::subscribe_pair_count(), 1, "count must be 1 after first register");
+
+    gos_runtime::register_subscribe(observed, sub_b).unwrap();
+    assert_eq!(gos_runtime::subscribe_pair_count(), 2, "count must be 2 after second register");
+
+    // Idempotent re-registration must NOT bump the count.
+    gos_runtime::register_subscribe(observed, sub_a).unwrap();
+    assert_eq!(gos_runtime::subscribe_pair_count(), 2, "idempotent re-register must not change count");
+
+    gos_runtime::unregister_subscribe(observed, sub_a);
+    assert_eq!(gos_runtime::subscribe_pair_count(), 1, "count must be 1 after unregister");
+
+    gos_runtime::unregister_subscribe(observed, sub_b);
+    assert_eq!(gos_runtime::subscribe_pair_count(), 0, "count must be 0 after all pairs removed");
 }
