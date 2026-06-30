@@ -818,6 +818,10 @@ pub enum ControlPlaneMessageKind {
     /// overflow.  Does NOT mean the system halted; the loop bails and steady-
     /// state picks back up on the next PIT tick.
     CausalOverflow = 0x0A,
+    /// A rewrite rule fired and its mutation was applied successfully.
+    /// `subject` = rule label ([u8;16]); `arg0` = rule index in the engine;
+    /// `arg1` = graph epoch after the mutation.
+    RuleApplied = 0x0B,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

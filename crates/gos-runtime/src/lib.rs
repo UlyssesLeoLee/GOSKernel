@@ -1219,6 +1219,7 @@ fn control_plane_kind_from_u8(raw: u8) -> ControlPlaneMessageKind {
         x if x == ControlPlaneMessageKind::Fault as u8 => ControlPlaneMessageKind::Fault,
         x if x == ControlPlaneMessageKind::MutationAudit as u8 => ControlPlaneMessageKind::MutationAudit,
         x if x == ControlPlaneMessageKind::CausalOverflow as u8 => ControlPlaneMessageKind::CausalOverflow,
+        x if x == ControlPlaneMessageKind::RuleApplied as u8 => ControlPlaneMessageKind::RuleApplied,
         _ => ControlPlaneMessageKind::Metric,
     }
 }
@@ -2231,6 +2232,16 @@ pub fn notify_causal_overflow(depth: u32) {
     RUNTIME
         .lock()
         .emit_control_plane(ControlPlaneMessageKind::CausalOverflow, [0u8; 16], depth as u64, 0);
+}
+
+/// Emit a `RuleApplied` control-plane event after a rewrite rule fires.
+/// `label` identifies the rule (e.g. b"K_REWRITE_RULE0\0"); `rule_idx` is
+/// the zero-based index in the `RewriteEngine`; `epoch_after` is the graph
+/// epoch immediately after the mutation so the shell can correlate telemetry.
+pub fn emit_rule_applied(label: [u8; 16], rule_idx: u32, epoch_after: u64) {
+    RUNTIME
+        .lock()
+        .emit_control_plane(ControlPlaneMessageKind::RuleApplied, label, rule_idx as u64, epoch_after);
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

@@ -134,6 +134,14 @@ name = "gos-protocol"
 version = "0.2.0"
 
 [[package]]
+name = "gos-rewrite"
+version = "0.1.0"
+dependencies = [
+ "gos-cypher-mut",
+ "gos-protocol",
+]
+
+[[package]]
 name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
