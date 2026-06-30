@@ -9,6 +9,7 @@
 //   4. Two subscribers to the same observed node both receive notification.
 //   5. The `arg1` field of SubscribeTriggered equals the new graph_epoch.
 //   6. Supervisor idle_cycle_count increments when epoch is stable across cycles.
+//   7. causal_depth_max() stays at 0 during idle cycles (no dispatch work queued).
 
 use std::sync::Mutex;
 
@@ -339,5 +340,25 @@ fn idle_cycle_count_increments_when_graph_stable() {
     assert!(
         idle_after >= idle_before + 2,
         "expected idle_cycle_count to grow by ≥2 over 3 stable cycles; before={idle_before} after={idle_after}"
+    );
+}
+
+#[test]
+fn causal_depth_max_is_zero_during_idle_cycles() {
+    let _g = TEST_LOCK.lock().unwrap();
+    setup();
+
+    // No instances are dispatched after setup, so the inner dispatch loop in
+    // service_system_cycle exits on the very first iteration (iter stays at 0).
+    // CAUSAL_DEPTH_MAX must therefore stay at 0, confirming the counter
+    // reflects real dispatch depth rather than a phantom non-zero value.
+    gos_supervisor::service_system_cycle();
+    gos_supervisor::service_system_cycle();
+    gos_supervisor::service_system_cycle();
+
+    let depth = gos_supervisor::causal_depth_max();
+    assert_eq!(
+        depth, 0,
+        "causal_depth_max must be 0 for idle cycles with no dispatched instances; got {depth}"
     );
 }

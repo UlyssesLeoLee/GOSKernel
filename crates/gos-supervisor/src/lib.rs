@@ -2251,6 +2251,10 @@ static REWRITE_ENGINE: Mutex<RewriteEngine> = Mutex::new(RewriteEngine::new());
 static LAST_RENDER_EPOCH: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Count of service_system_cycle calls where graph_epoch was unchanged.
 static IDLE_CYCLE_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Peak dispatch-loop iteration depth across all service_system_cycle calls.
+/// Lets operators see how far the system is from the MAX_CYCLE_ITERATIONS cap
+/// (2048) without waiting for a CausalOverflow event.
+static CAUSAL_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// Thin view adapter: bridges the `gos-rewrite::GraphView` trait to the
 /// module-level `gos_runtime::*` public API so the engine can evaluate
@@ -2883,6 +2887,8 @@ pub fn service_system_cycle() {
             break;
         }
     }
+    // Record peak dispatch depth for observability (V2.3 causal depth counter).
+    CAUSAL_DEPTH_MAX.fetch_max(iter as u64, Ordering::Relaxed);
 
     // ── V2.2: Rewrite pass ────────────────────────────────────────────────────
     // After the dispatch loop quiesces, evaluate every registered rewrite rule
@@ -2947,6 +2953,14 @@ pub fn render_epoch() -> u64 {
 /// are being suppressed — V2.3 Demo #2 pre-req).
 pub fn idle_cycle_count() -> u64 {
     IDLE_CYCLE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Peak dispatch-loop iteration depth seen across all service_system_cycle
+/// calls since boot.  Compared against MAX_CYCLE_ITERATIONS (2048) this gives
+/// operators a continuous margin-to-cap metric without waiting for a
+/// CausalOverflow event.
+pub fn causal_depth_max() -> u64 {
+    CAUSAL_DEPTH_MAX.load(Ordering::Relaxed)
 }
 
 pub fn claim_resource(
