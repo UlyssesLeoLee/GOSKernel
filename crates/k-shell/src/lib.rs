@@ -1068,6 +1068,140 @@ fn lifecycle_label(state: gos_protocol::NodeLifecycle) -> &'static str {
     }
 }
 
+/// Text-mode listing of all live graph nodes — the GOS equivalent of `ps`.
+///
+/// Prints each node's vector, plugin/key, and lifecycle to the scrolling console.
+/// When `faulted_only` is true, only nodes in `NodeLifecycle::Faulted` are shown.
+/// Color-codes lifecycle: green = ready/running, yellow = waiting/suspended,
+/// red = faulted, gray = boot-phase (discovered/loaded/registered/allocated).
+pub fn dispatch_nodes_list(sink: &ConsoleSink, faulted_only: bool) {
+    use gos_protocol::{GraphNodeSummary, NodeLifecycle};
+    const PAGE: usize = 8;
+    let mut items = [GraphNodeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut printed = 0usize;
+
+    set_color(sink, 11, 0);
+    print_str(sink, if faulted_only { " faulted nodes\n" } else { " live nodes\n" });
+    set_color(sink, 7, 0);
+
+    loop {
+        let (total, returned) = gos_runtime::node_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            if faulted_only && item.lifecycle != NodeLifecycle::Faulted {
+                continue;
+            }
+            let fg: u8 = match item.lifecycle {
+                NodeLifecycle::Ready | NodeLifecycle::Running => 10,
+                NodeLifecycle::Faulted => 12,
+                NodeLifecycle::Waiting | NodeLifecycle::Suspended => 14,
+                _ => 7,
+            };
+            set_color(sink, fg, 0);
+            print_str(sink, "  ");
+            let mut vec_buf = LineBuf::<20>::new();
+            vec_buf.push_vector(item.vector);
+            print_str(sink, core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?.?.?.?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "  ");
+            print_str(sink, item.plugin_name);
+            print_str(sink, "/");
+            print_str(sink, item.local_node_key);
+            print_str(sink, "  ");
+            set_color(sink, 8, 0);
+            print_str(sink, lifecycle_label(item.lifecycle));
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            printed += 1;
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+    if printed == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, if faulted_only { "  (no faulted nodes)\n" } else { "  (no nodes)\n" });
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Lifecycle distribution summary — counts per state, coloured for quick triage.
+/// Analogous to `ps aux | awk '{print $8}' | sort | uniq -c` in Linux.
+pub fn dispatch_lifecycle_summary(sink: &ConsoleSink) {
+    use gos_protocol::{GraphNodeSummary, NodeLifecycle};
+    const PAGE: usize = 8;
+    let mut items = [GraphNodeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut n_boot     = 0usize;  // Discovered | Loaded | Registered
+    let mut n_alloc    = 0usize;
+    let mut n_ready    = 0usize;
+    let mut n_run      = 0usize;
+    let mut n_wait     = 0usize;
+    let mut n_suspend  = 0usize;
+    let mut n_term     = 0usize;
+    let mut n_fault    = 0usize;
+
+    loop {
+        let (total, returned) = gos_runtime::node_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            match item.lifecycle {
+                NodeLifecycle::Discovered
+                | NodeLifecycle::Loaded
+                | NodeLifecycle::Registered => n_boot += 1,
+                NodeLifecycle::Allocated  => n_alloc += 1,
+                NodeLifecycle::Ready      => n_ready += 1,
+                NodeLifecycle::Running    => n_run += 1,
+                NodeLifecycle::Waiting    => n_wait += 1,
+                NodeLifecycle::Suspended  => n_suspend += 1,
+                NodeLifecycle::Terminated => n_term += 1,
+                NodeLifecycle::Faulted    => n_fault += 1,
+            }
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node lifecycle summary\n");
+    set_color(sink, 7, 0);
+
+    let total_live = n_boot + n_alloc + n_ready + n_run + n_wait + n_suspend + n_term + n_fault;
+    if total_live == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    macro_rules! print_count {
+        ($label:expr, $count:expr, $fg:expr) => {
+            if $count > 0 {
+                set_color(sink, $fg, 0);
+                print_str(sink, "  ");
+                print_str(sink, $label);
+                print_str(sink, ": ");
+                print_num_inline(sink, $count);
+                print_str(sink, "\n");
+            }
+        };
+    }
+    print_count!("boot-phase", n_boot,    7);
+    print_count!("alloc",      n_alloc,   7);
+    print_count!("ready",      n_ready,  10);
+    print_count!("running",    n_run,    10);
+    print_count!("waiting",    n_wait,   14);
+    print_count!("suspended",  n_suspend, 14);
+    print_count!("terminated", n_term,    8);
+    print_count!("faulted",    n_fault,  12);
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total_live);
+    print_str(sink, "\n");
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",

@@ -511,6 +511,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
         super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  nodes              list all live graph nodes (ps-style)\n");
+        super::print_str(sink, "  nodes faulted      list only faulted nodes\n");
+        super::print_str(sink, "  nodes summary      lifecycle distribution count\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -655,6 +658,12 @@ fn dispatch_text_command(
             }
             super::print_str(sink, "\n");
         }
+    } else if cmd == "nodes" || cmd == "nodes all" {
+        super::dispatch_nodes_list(sink, false);
+    } else if cmd == "nodes faulted" || cmd == "nodes fault" || cmd == "faults" {
+        super::dispatch_nodes_list(sink, true);
+    } else if cmd == "nodes summary" || cmd == "nodes stat" {
+        super::dispatch_lifecycle_summary(sink);
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);
