@@ -509,6 +509,17 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// Remove an (observed, subscriber) pair from the subscribe table.
+    /// No-ops silently when the pair is not present.
+    pub fn unregister_subscribe_pair(&mut self, observed: NodeId, subscriber: NodeId) {
+        for slot in self.subscribe_pairs.iter_mut() {
+            if *slot == Some((observed, subscriber)) {
+                *slot = None;
+                return;
+            }
+        }
+    }
+
     /// Emit `SubscribeTriggered` for every subscriber of `changed`.
     /// Called internally after any structural mutation that bumps graph_epoch.
     fn fire_subscribers(&mut self, changed: NodeId, epoch: u64) {
@@ -1788,6 +1799,13 @@ pub fn graph_epoch() -> u64 {
 /// the runtime emits `SubscribeTriggered` for `subscriber`.  Idempotent.
 pub fn register_subscribe(observed: NodeId, subscriber: NodeId) -> Result<(), RuntimeError> {
     RUNTIME.lock().register_subscribe_pair(observed, subscriber)
+}
+
+/// Remove a reactive Subscribe pair.  No-ops when the pair is not present.
+/// Must be called during module unload to prevent dead entries accumulating
+/// in the subscribe table (which is a fixed-size 64-slot pool).
+pub fn unregister_subscribe(observed: NodeId, subscriber: NodeId) {
+    RUNTIME.lock().unregister_subscribe_pair(observed, subscriber)
 }
 
 /// Check whether a node with `id` is currently present in the live graph.

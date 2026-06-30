@@ -10,6 +10,8 @@
 //   5. The `arg1` field of SubscribeTriggered equals the new graph_epoch.
 //   6. Supervisor idle_cycle_count increments when epoch is stable across cycles.
 //   7. causal_depth_max() stays at 0 during idle cycles (no dispatch work queued).
+//   8. unregister_subscribe removes the pair; subsequent mutations no longer fire.
+//   9. SubscribeTableFull is returned when all 64 slots are consumed.
 
 use std::sync::Mutex;
 
@@ -360,5 +362,64 @@ fn causal_depth_max_is_zero_during_idle_cycles() {
     assert_eq!(
         depth, 0,
         "causal_depth_max must be 0 for idle cycles with no dispatched instances; got {depth}"
+    );
+}
+
+#[test]
+fn unregister_subscribe_stops_future_notifications() {
+    let _g = TEST_LOCK.lock().unwrap();
+    setup();
+
+    let observed = node(KEY_OBSERVED);
+    let sub_a = node(KEY_SUBSCRIBER_A);
+    let target = node(KEY_TARGET);
+
+    gos_runtime::register_subscribe(observed, sub_a).unwrap();
+    // Confirm it fires before we unregister.
+    let e1 = make_edge_spec(observed, target, "unsub.e1");
+    gos_runtime::register_edge(e1).expect("register_edge e1");
+    let items = collect_control_plane();
+    let fired_before = items.iter().any(|(k, subj, _, _)| {
+        *k == ControlPlaneMessageKind::SubscribeTriggered && *subj == observed.0
+    });
+    assert!(fired_before, "must fire before unregister");
+
+    // Now unregister.
+    gos_runtime::unregister_subscribe(observed, sub_a);
+    while gos_runtime::drain_control_plane().is_some() {}
+
+    // A second mutation must NOT fire for sub_a.
+    let e2 = make_edge_spec(observed, node(KEY_UNRELATED), "unsub.e2");
+    gos_runtime::register_edge(e2).expect("register_edge e2");
+    let items_after = collect_control_plane();
+    let spurious = items_after.iter().any(|(k, subj, _, _)| {
+        *k == ControlPlaneMessageKind::SubscribeTriggered && *subj == observed.0
+    });
+    assert!(
+        !spurious,
+        "must NOT fire SubscribeTriggered after unregister; got {items_after:?}"
+    );
+}
+
+#[test]
+fn subscribe_table_full_error_after_64_pairs() {
+    let _g = TEST_LOCK.lock().unwrap();
+    setup();
+
+    // Fill all MAX_SUBSCRIBE_PAIRS slots.  We only have 5 nodes, so we use
+    // synthetic NodeId values for the subscriber slot — the table doesn't
+    // validate that subscriber nodes actually exist.
+    let observed = node(KEY_OBSERVED);
+    for i in 0u8..64 {
+        let fake_sub = NodeId([i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        gos_runtime::register_subscribe(observed, fake_sub)
+            .expect("slot {i} must succeed");
+    }
+    // The 65th registration must return SubscribeTableFull.
+    let overflow_sub = NodeId([255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let result = gos_runtime::register_subscribe(observed, overflow_sub);
+    assert!(
+        matches!(result, Err(gos_runtime::RuntimeError::SubscribeTableFull)),
+        "expected SubscribeTableFull on 65th registration; got {result:?}"
     );
 }
