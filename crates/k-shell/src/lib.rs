@@ -148,6 +148,7 @@ const GRAPH_CTX_NONE: u8 = 0;
 const GRAPH_CTX_OVERVIEW: u8 = 1;
 const GRAPH_CTX_NODE: u8 = 2;
 const GRAPH_CTX_EDGE: u8 = 3;
+const GRAPH_CTX_METRICS: u8 = 4;
 const MAX_IME_PREVIEW: usize = 24;
 const GRAPH_NAV_DEPTH: usize = 8;
 const COMMAND_HISTORY_ITEMS: usize = 16;
@@ -313,6 +314,9 @@ struct ShellState {
     net_target: u64,
     cuda_target: u64,
     clipboard_target: u64,
+    /// graph_epoch at the last draw_command_deck_panel call; enables the
+    /// V2.3 epoch-diff idle skip (zero unnecessary panel repaints).
+    last_rendered_epoch: u64,
     console_live: u8,
     sigil_frame: u8,
     heartbeat_divider: u8,
@@ -1133,6 +1137,7 @@ fn graph_context_label(context: u8) -> &'static str {
         GRAPH_CTX_OVERVIEW => "overview",
         GRAPH_CTX_NODE => "node",
         GRAPH_CTX_EDGE => "edge",
+        GRAPH_CTX_METRICS => "metrics",
         _ => "none",
     }
 }
@@ -1563,6 +1568,7 @@ fn draw_command_deck_panel(
     draw_badge(sink, 7, 24, WABI_MOON, WABI_TEA, "edge");
     draw_badge(sink, 7, 31, WABI_MOON, WABI_MOSS, "back");
     draw_badge(sink, 7, 38, WABI_MOON, WABI_STONE, "where");
+    draw_badge(sink, 7, 46, WABI_MOON, WABI_STONE, "metrics");
 
     draw_text(sink, 8, 4, WABI_STONE, WABI_INK, "query");
     draw_text(sink, 8, 11, WABI_PAPER, WABI_INK, "cypher MATCH ...");
@@ -2611,6 +2617,72 @@ fn render_nodes_for_selected_edge(sink: &ConsoleSink, state: &mut ShellState) {
     render_graph_footer(sink, state, "show toggles back to edge view  node <vec> selects");
 }
 
+fn render_metrics(sink: &ConsoleSink, state: &mut ShellState) {
+    clear_command_area(sink);
+    state.graph_mode = GRAPH_MODE_INFO;
+    state.graph_context = GRAPH_CTX_METRICS;
+    draw_text(sink, GRAPH_VIEW_TITLE_ROW, 4, 11, 0, "V2.3 RUNTIME METRICS  (refresh: metrics)");
+
+    let g_epoch = gos_runtime::graph_epoch();
+    let r_epoch = gos_supervisor::render_epoch();
+    let mut line = LineBuf::<72>::new();
+    line.push_str("graph_epoch: ");
+    line.push_dec(g_epoch);
+    line.push_str("  render_epoch: ");
+    line.push_dec(r_epoch);
+    let lag = g_epoch.saturating_sub(r_epoch);
+    if lag > 0 {
+        line.push_str("  lag: ");
+        line.push_dec(lag);
+    }
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("idle_cycles: ");
+    line.push_dec(gos_supervisor::idle_cycle_count());
+    line.push_str("  (quiescent service cycles)");
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 1, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("causal_depth_max: ");
+    line.push_dec(gos_supervisor::causal_depth_max());
+    line.push_str("  cap=2048");
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 2, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("subscribe_pairs: ");
+    line.push_dec(gos_runtime::subscribe_pair_count() as u64);
+    line.push_byte(b'/');
+    line.push_dec(gos_runtime::MAX_SUBSCRIBE_PAIRS as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 3, 4, 15, 0, &line);
+
+    let snap = gos_runtime::snapshot();
+    line = LineBuf::new();
+    line.push_str("tick: ");
+    line.push_dec(snap.tick);
+    line.push_str("  plugins: ");
+    line.push_dec(snap.plugin_count as u64);
+    line.push_str("  nodes: ");
+    line.push_dec(snap.node_count as u64);
+    line.push_str("  edges: ");
+    line.push_dec(snap.edge_count as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 4, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("domain_switches: ");
+    line.push_dec(gos_runtime::domain_switch_count());
+    line.push_str("  preemptions: ");
+    line.push_dec(gos_runtime::preempt_count());
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 5, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("boot_fallback_allocs: ");
+    line.push_dec(gos_runtime::boot_fallback_alloc_count());
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 6, 4, 8, 0, &line);
+
+    render_graph_footer(sink, state, "metrics  back  where");
+}
+
 fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     clear_command_area(sink);
     state.graph_mode = GRAPH_MODE_INFO;
@@ -2703,7 +2775,19 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
         );
     }
 
-    render_graph_footer(sink, state, "where  select clear");
+    // V2.3 epoch/idle/causal/subscribe telemetry — row +6 (last row in command area)
+    let mut v23 = LineBuf::<72>::new();
+    v23.push_str("ep:");
+    v23.push_dec(gos_runtime::graph_epoch());
+    v23.push_str("  idle:");
+    v23.push_dec(gos_supervisor::idle_cycle_count());
+    v23.push_str("  depth:");
+    v23.push_dec(gos_supervisor::causal_depth_max());
+    v23.push_str("  subs:");
+    v23.push_dec(gos_runtime::subscribe_pair_count() as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 6, 4, 8, 0, &v23);
+
+    render_graph_footer(sink, state, "where  select clear  metrics");
 }
 
 fn restore_graph_nav_state(sink: &ConsoleSink, state: &mut ShellState, snapshot: GraphNavState) {
@@ -2739,7 +2823,13 @@ fn restore_graph_nav_state(sink: &ConsoleSink, state: &mut ShellState, snapshot:
                 render_graph_overview(sink, state, 0);
             }
         }
-        GRAPH_MODE_INFO => render_where(sink, state),
+        GRAPH_MODE_INFO => {
+            if state.graph_context == GRAPH_CTX_METRICS {
+                render_metrics(sink, state);
+            } else {
+                render_where(sink, state);
+            }
+        }
         _ => {}
     }
 }
@@ -2958,6 +3048,12 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         begin_graph_command(sink, state);
         push_graph_nav_state(state);
         render_where(sink, state);
+        return true;
+    }
+    if cmd == "metrics" {
+        begin_graph_command(sink, state);
+        push_graph_nav_state(state);
+        render_metrics(sink, state);
         return true;
     }
     if cmd == "select clear" {
@@ -3965,6 +4061,7 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 } else {
                     clipboard_target
                 },
+                last_rendered_epoch: 0,
                 console_live: 0,
                 sigil_frame: 0,
                 heartbeat_divider: 0,

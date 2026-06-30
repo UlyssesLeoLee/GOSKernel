@@ -73,7 +73,15 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: Input) -> Option<Output>
             super::draw_ai_panel(&sink, state);
             super::draw_operator_band(&sink, state, snapshot);
             if state.heartbeat_divider % 4 == 0 {
-                super::draw_command_deck_panel(&sink, state, snapshot);
+                // V2.3 epoch-diff idle skip: only repaint the command-deck
+                // panel when the graph topology actually changed since the
+                // last repaint.  Directly implements Demo #2 zero-idle-frames
+                // for the shell panel without any special render bookkeeping.
+                let current_epoch = gos_runtime::graph_epoch();
+                if current_epoch != state.last_rendered_epoch {
+                    state.last_rendered_epoch = current_epoch;
+                    super::draw_command_deck_panel(&sink, state, snapshot);
+                }
                 super::redraw_footer(&sink, state, false);
             }
             super::restore_cursor(&sink, 0);
