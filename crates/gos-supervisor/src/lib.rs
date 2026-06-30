@@ -8,15 +8,17 @@ use core::sync::atomic::AtomicUsize;
 
 use gos_protocol::{
     fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy,
-    ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, HeapQuota,
-    ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
+    ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, GraphSnapshot,
+    HeapQuota, ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
     ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleLifecycle,
-    ModuleMessage, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
+    ModuleMessage, NodeId, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
     PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease, SpawnPolicy,
     RESOURCE_BLOCK_DEVICE, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FILE_HANDLE,
     RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_GPU_MEMORY,
     RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, RESOURCE_SOCKET, MODULE_ABI_VERSION,
 };
+use gos_cypher_mut::ReceptiveEdgeKind;
+use gos_rewrite::{GraphView, RewriteAction, RewriteEngine, RewriteRule, RewriteError, MAX_REWRITE_RULES};
 use spin::Mutex;
 
 pub const MAX_MODULES: usize = 32;
@@ -2230,6 +2232,43 @@ impl Supervisor {
 static SUPERVISOR: Mutex<Supervisor> = Mutex::new(Supervisor::new());
 static ACTIVE_SUPERVISOR: AtomicPtr<Supervisor> = AtomicPtr::new(core::ptr::null_mut());
 
+// ── V2.2 Rewrite Engine ──────────────────────────────────────────────────────
+//
+// A global `RewriteEngine` holds the set of active rewrite rules.  At the end
+// of each `service_system_cycle` the engine evaluates every rule against the
+// current graph topology via `RuntimeGraphView`, then applies each firing
+// rule's mutation through `gos_runtime::apply_cypher_mutation` and emits a
+// `RuleApplied` control-plane telemetry event.
+//
+// The engine is intentionally separate from `SUPERVISOR` so the two locks
+// can be acquired independently — no deadlock risk from concurrent reads.
+
+static REWRITE_ENGINE: Mutex<RewriteEngine> = Mutex::new(RewriteEngine::new());
+
+/// Thin view adapter: bridges the `gos-rewrite::GraphView` trait to the
+/// module-level `gos_runtime::*` public API so the engine can evaluate
+/// structural predicates (node presence, edge existence, epoch) without
+/// holding the runtime lock across the full rule-sweep.
+struct RuntimeGraphView;
+
+impl GraphView for RuntimeGraphView {
+    fn node_exists(&self, id: NodeId) -> bool {
+        gos_runtime::node_exists_by_id(id)
+    }
+
+    fn edge_exists(&self, from: NodeId, to: NodeId, kind: ReceptiveEdgeKind) -> bool {
+        gos_runtime::edge_exists_by_kind(from, to, kind)
+    }
+
+    fn epoch(&self) -> u64 {
+        gos_runtime::graph_epoch()
+    }
+
+    fn snapshot(&self) -> GraphSnapshot {
+        gos_runtime::snapshot()
+    }
+}
+
 fn with_supervisor<R>(f: impl FnOnce(&Supervisor) -> R) -> R {
     let active = ACTIVE_SUPERVISOR.load(Ordering::SeqCst);
     if !active.is_null() {
@@ -2837,6 +2876,46 @@ pub fn service_system_cycle() {
             break;
         }
     }
+
+    // ── V2.2: Rewrite pass ────────────────────────────────────────────────────
+    // After the dispatch loop quiesces, evaluate every registered rewrite rule
+    // against the current graph topology.  Each firing rule's mutation is
+    // applied via the audit path and a `RuleApplied` control-plane event is
+    // emitted so the shell and serial log can trace rule activity.
+    //
+    // The epoch snapshot after applying all mutations is used for the telemetry
+    // arg1, giving operators a stable reference point for "what epoch did this
+    // rule produce."
+    {
+        let sentinel = RewriteAction {
+            mutation: gos_cypher_mut::CypherMutation::AddEdge {
+                from: NodeId::ZERO,
+                to: NodeId::ZERO,
+                edge_kind: ReceptiveEdgeKind::Mount,
+            },
+            source: [0u8; 16],
+        };
+        let mut out = [(0usize, sentinel); MAX_REWRITE_RULES];
+        let fired = REWRITE_ENGINE.lock().apply_rules(&RuntimeGraphView, &mut out);
+        for (rule_idx, action) in out[..fired].iter().copied() {
+            let _ = gos_runtime::apply_cypher_mutation(action.mutation, action.source);
+            let epoch_after = gos_runtime::graph_epoch();
+            gos_runtime::emit_rule_applied(action.source, rule_idx as u32, epoch_after);
+        }
+    }
+}
+
+/// Register a rewrite rule in the engine.  Rules are evaluated in insertion
+/// order at the end of every `service_system_cycle`.  Returns the rule index
+/// (for telemetry correlation) or `RewriteError::RuleTableFull` when the
+/// 64-rule limit is reached.
+pub fn add_rewrite_rule(rule: RewriteRule) -> Result<usize, RewriteError> {
+    REWRITE_ENGINE.lock().add_rule(rule)
+}
+
+/// Remove all registered rewrite rules and reset the fire counter.
+pub fn clear_rewrite_rules() {
+    REWRITE_ENGINE.lock().clear();
 }
 
 pub fn claim_resource(

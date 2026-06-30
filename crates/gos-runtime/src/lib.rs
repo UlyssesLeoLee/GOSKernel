@@ -478,6 +478,34 @@ impl GraphRuntime {
         self.graph_epoch
     }
 
+    /// Check whether a node identified by `NodeId` is present in the graph.
+    /// Used by `RuntimeGraphView` in the supervisor so the rewrite engine
+    /// can evaluate `NodePresent` and `EdgePresent` patterns without holding
+    /// the runtime lock across the full apply-rules sweep.
+    pub fn node_exists_by_id(&self, id: NodeId) -> bool {
+        self.node_slot_by_id(id).is_some()
+    }
+
+    /// Check whether an edge of the given receptive kind exists between
+    /// `from` and `to`.  Used by `RuntimeGraphView` for `EdgePresent` /
+    /// `EdgeAbsent` pattern evaluation.
+    pub fn edge_exists_by_kind(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        kind: gos_cypher_mut::ReceptiveEdgeKind,
+    ) -> bool {
+        let edge_type = match kind {
+            gos_cypher_mut::ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
+            gos_cypher_mut::ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
+        };
+        self.edges.iter().flatten().any(|rec| {
+            rec.spec.from_node == from
+                && rec.spec.to_node == to
+                && rec.spec.edge_type == edge_type
+        })
+    }
+
     pub fn discover_plugin(&mut self, manifest: PluginManifest) -> Result<(), RuntimeError> {
         if self.plugin_slot(manifest.plugin_id).is_some() {
             return Ok(());
@@ -1688,6 +1716,24 @@ pub fn edge_summary(edge_vector: EdgeVector) -> Option<GraphEdgeSummary> {
 /// bridge can poll it to render only when the topology actually changed.
 pub fn graph_epoch() -> u64 {
     RUNTIME.lock().graph_epoch()
+}
+
+/// Check whether a node with `id` is currently present in the live graph.
+/// Used by the supervisor's `RuntimeGraphView` for rewrite-rule pattern
+/// evaluation.
+pub fn node_exists_by_id(id: NodeId) -> bool {
+    RUNTIME.lock().node_exists_by_id(id)
+}
+
+/// Check whether a receptive edge of `kind` exists from `from` to `to`.
+/// Used by the supervisor's `RuntimeGraphView` for rewrite-rule pattern
+/// evaluation.
+pub fn edge_exists_by_kind(
+    from: NodeId,
+    to: NodeId,
+    kind: gos_cypher_mut::ReceptiveEdgeKind,
+) -> bool {
+    RUNTIME.lock().edge_exists_by_kind(from, to, kind)
 }
 
 /// Current monotonic tick counter.  Bumped by `pump()` on every dispatch
