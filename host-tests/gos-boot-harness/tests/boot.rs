@@ -304,3 +304,47 @@ fn mount_and_use_kinds_unaffected_by_depend_extension() {
     );
     assert!(!depend_present, "Mount edge must not satisfy a Depend edge_exists query");
 }
+
+// ── Test 9: record_boot_manifest_report stores and reads back correctly ───────
+
+#[test]
+fn record_boot_manifest_report_stores_and_reads_back() {
+    // Round-trip: whatever we write via record_ we must read back via the
+    // corresponding reader functions.  Exercises the atomics added for the
+    // shell `boot verify` command without requiring a full boot sequence.
+    gos_runtime::record_boot_manifest_report(27, 0);
+    assert_eq!(gos_runtime::boot_manifest_rules_checked(), 27,
+        "rules_checked should equal the stored value");
+    assert_eq!(gos_runtime::boot_manifest_edges_healed(), 0,
+        "edges_healed should equal the stored value");
+
+    // Overwrite with a non-zero healed count to verify independent storage.
+    gos_runtime::record_boot_manifest_report(27, 3);
+    assert_eq!(gos_runtime::boot_manifest_rules_checked(), 27);
+    assert_eq!(gos_runtime::boot_manifest_edges_healed(), 3);
+}
+
+// ── Test 10: zero-rules report signals pending boot ──────────────────────────
+
+#[test]
+fn boot_manifest_report_zero_rules_indicates_pending() {
+    // A rules_checked count of 0 means record_boot_manifest_report was never
+    // called (boot not yet complete).  The shell `boot verify` command treats
+    // this as "pending" rather than "OK".
+    gos_runtime::record_boot_manifest_report(0, 0);
+    assert_eq!(gos_runtime::boot_manifest_rules_checked(), 0,
+        "zero rules signals boot has not yet recorded a report");
+    assert_eq!(gos_runtime::boot_manifest_edges_healed(), 0);
+}
+
+// ── Test 11: healthy report — rules > 0 and healed == 0 ─────────────────────
+
+#[test]
+fn boot_manifest_healthy_when_zero_healed_and_nonzero_rules() {
+    // Simulate a clean boot: all 27 rules checked, 0 edges needed self-healing.
+    gos_runtime::record_boot_manifest_report(27, 0);
+    let rules  = gos_runtime::boot_manifest_rules_checked();
+    let healed = gos_runtime::boot_manifest_edges_healed();
+    assert!(rules > 0,  "rules_checked must be > 0 after a completed boot");
+    assert_eq!(healed, 0, "edges_healed must be 0 in a clean boot");
+}

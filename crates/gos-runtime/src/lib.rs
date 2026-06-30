@@ -1371,6 +1371,26 @@ pub fn reset_boot_fallback_alloc_count() {
     BOOT_FALLBACK_ALLOC_COUNT.store(0, Ordering::Relaxed);
 }
 
+// Boot manifest verification report — written once at the end of the boot
+// sequence by `record_boot_manifest_report()`, which hypervisor calls after
+// `verify_boot_manifest_graph()` returns.  Shell's `boot verify` command reads
+// these to show the self-heal outcome without re-running the check.
+static BOOT_MANIFEST_RULES_CHECKED: AtomicU64 = AtomicU64::new(0);
+static BOOT_MANIFEST_EDGES_HEALED:  AtomicU64 = AtomicU64::new(0);
+
+pub fn record_boot_manifest_report(rules_checked: usize, edges_healed: usize) {
+    BOOT_MANIFEST_RULES_CHECKED.store(rules_checked as u64, Ordering::Relaxed);
+    BOOT_MANIFEST_EDGES_HEALED.store(edges_healed as u64, Ordering::Relaxed);
+}
+
+pub fn boot_manifest_rules_checked() -> usize {
+    BOOT_MANIFEST_RULES_CHECKED.load(Ordering::Relaxed) as usize
+}
+
+pub fn boot_manifest_edges_healed() -> usize {
+    BOOT_MANIFEST_EDGES_HEALED.load(Ordering::Relaxed) as usize
+}
+
 // Tracks the vector currently dispatching a native plugin so the heap ABI
 // can resolve the active instance.  The kernel is single-threaded, so a
 // plain Mutex<Option<_>> is sufficient.

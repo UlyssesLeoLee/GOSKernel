@@ -1645,6 +1645,10 @@ pub fn boot_builtin_graph(boot_payload: u64) -> Result<BuiltinBootReport, Builti
     // all edges already exist; edges_healed > 0 indicates a bug in the
     // imperative synchronize_manifest_graph pass.
     let manifest_report = verify_boot_manifest_graph();
+    gos_runtime::record_boot_manifest_report(
+        manifest_report.rules_checked,
+        manifest_report.edges_healed,
+    );
     crate::raw_serial_println(format_args!(
         "boot.manifest: checked={} healed={}{}",
         manifest_report.rules_checked,

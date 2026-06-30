@@ -1202,6 +1202,39 @@ pub fn dispatch_lifecycle_summary(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// Display the boot manifest verification report stored by hypervisor at boot.
+///
+/// Reads the two atomic counters written by `gos_runtime::record_boot_manifest_report`
+/// and formats them as a human-readable health check — the GOS equivalent of
+/// `systemctl status` for the dependency graph.
+pub fn dispatch_boot_verify(sink: &ConsoleSink) {
+    let rules  = gos_runtime::boot_manifest_rules_checked();
+    let healed = gos_runtime::boot_manifest_edges_healed();
+    set_color(sink, 11, 0);
+    print_str(sink, " boot manifest\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  rules checked: ");
+    print_num_inline(sink, rules);
+    print_str(sink, "\n  edges healed:  ");
+    print_num_inline(sink, healed);
+    print_str(sink, "\n  status:        ");
+    if rules == 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "pending (boot not yet completed)\n");
+    } else if healed == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "OK — all ");
+        print_num_inline(sink, rules);
+        print_str(sink, " depend edges present\n");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "WARNING — ");
+        print_num_inline(sink, healed);
+        print_str(sink, " edge(s) self-healed at boot (imperative pass missed edges)\n");
+    }
+    set_color(sink, 7, 0);
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",
