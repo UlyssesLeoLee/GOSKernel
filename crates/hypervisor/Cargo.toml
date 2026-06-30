@@ -10,6 +10,7 @@ gos-runtime = { path = "../gos-runtime" }
 gos-ai-bridge = { path = "../gos-ai-bridge" }
 gos-cluster = { path = "../gos-cluster" }
 gos-cypher-mut = { path = "../gos-cypher-mut" }
+gos-rewrite = { path = "../gos-rewrite" }
 gos-journal = { path = "../gos-journal" }
 gos-log = { path = "../gos-log" }
 gos-sign = { path = "../gos-sign" }

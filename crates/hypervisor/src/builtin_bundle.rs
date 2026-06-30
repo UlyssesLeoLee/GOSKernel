@@ -7,6 +7,8 @@ use gos_protocol::{
     MODULE_ABI_VERSION,
 };
 use gos_runtime::{self, RuntimeError};
+use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+use gos_rewrite::{RewriteAction, RewritePattern, RewriteRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinBootError {
@@ -1153,6 +1155,128 @@ const fn manifest_with_nodes(
     }
 }
 
+// ── V2.6 Boot Manifest Static Graph ──────────────────────────────────────────
+//
+// Each entry is an `EdgeAbsent(Depend)` rule.  The pattern fires when the
+// expected Depend edge is MISSING from the runtime graph.  The action is an
+// `AddEdge(Depend)` mutation that re-creates the missing edge.
+//
+// After `synchronize_manifest_graph` runs imperatively, ALL of these edges
+// should already be present.  `verify_boot_manifest_graph()` calls this array
+// as a self-healing safety net: any rule that fires means an edge was missed by
+// the imperative pass (a bug), and the rule auto-repairs it before the system
+// transitions to steady state.
+//
+// Rules also serve as the canonical machine-readable boot dependency spec:
+// scramble `BUILTIN_MODULES` order, the runtime graph must still converge to
+// the same edge set (tested by `gos-boot-harness`).
+
+const fn boot_dep_rule(from: gos_protocol::NodeId, to: gos_protocol::NodeId, label: [u8; 16]) -> RewriteRule {
+    RewriteRule {
+        pattern: RewritePattern::EdgeAbsent { from, to, kind: ReceptiveEdgeKind::Depend },
+        guard: None,
+        action: RewriteAction {
+            mutation: CypherMutation::AddEdge { from, to, edge_kind: ReceptiveEdgeKind::Depend },
+            source: *b"boot.manifest\0\0\0",
+        },
+        label,
+    }
+}
+
+pub const BOOT_MANIFEST_RULE_COUNT: usize = 27;
+
+static BOOT_MANIFEST_RULES: [RewriteRule; BOOT_MANIFEST_RULE_COUNT] = [
+    // PIT depends on PIC
+    boot_dep_rule(K_PIT_NODE_ID,    K_PIC_NODE_ID,    *b"dep.PIT.PIC\0\0\0\0\0"),
+    // PS2 depends on PIC
+    boot_dep_rule(K_PS2_NODE_ID,    K_PIC_NODE_ID,    *b"dep.PS2.PIC\0\0\0\0\0"),
+    // IDT depends on GDT, PIT, PS2
+    boot_dep_rule(K_IDT_NODE_ID,    K_GDT_NODE_ID,    *b"dep.IDT.GDT\0\0\0\0\0"),
+    boot_dep_rule(K_IDT_NODE_ID,    K_PIT_NODE_ID,    *b"dep.IDT.PIT\0\0\0\0\0"),
+    boot_dep_rule(K_IDT_NODE_ID,    K_PS2_NODE_ID,    *b"dep.IDT.PS2\0\0\0\0\0"),
+    // VMM depends on PMM
+    boot_dep_rule(K_VMM_NODE_ID,    K_PMM_NODE_ID,    *b"dep.VMM.PMM\0\0\0\0\0"),
+    // HEAP depends on PMM, VMM
+    boot_dep_rule(K_HEAP_NODE_ID,   K_PMM_NODE_ID,    *b"dep.HEAP.PMM\0\0\0\0"),
+    boot_dep_rule(K_HEAP_NODE_ID,   K_VMM_NODE_ID,    *b"dep.HEAP.VMM\0\0\0\0"),
+    // NET depends on VGA
+    boot_dep_rule(K_NET_NODE_ID,    K_VGA_NODE_ID,    *b"dep.NET.VGA\0\0\0\0\0"),
+    // MOUSE depends on VGA, PS2, IDT
+    boot_dep_rule(K_MOUSE_NODE_ID,  K_VGA_NODE_ID,    *b"dep.MOUSE.VGA\0\0\0"),
+    boot_dep_rule(K_MOUSE_NODE_ID,  K_PS2_NODE_ID,    *b"dep.MOUSE.PS2\0\0\0"),
+    boot_dep_rule(K_MOUSE_NODE_ID,  K_IDT_NODE_ID,    *b"dep.MOUSE.IDT\0\0\0"),
+    // CYPHER depends on VGA
+    boot_dep_rule(K_CYPHER_NODE_ID, K_VGA_NODE_ID,    *b"dep.CYPH.VGA\0\0\0\0"),
+    // CUDA depends on VGA, SERIAL
+    boot_dep_rule(K_CUDA_NODE_ID,   K_VGA_NODE_ID,    *b"dep.CUDA.VGA\0\0\0\0"),
+    boot_dep_rule(K_CUDA_NODE_ID,   K_SERIAL_NODE_ID, *b"dep.CUDA.SER\0\0\0\0"),
+    // SHELL depends on VGA, PS2, HEAP, IME, NET, CYPHER, CUDA
+    boot_dep_rule(K_SHELL_NODE_ID,  K_VGA_NODE_ID,    *b"dep.SHEL.VGA\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_PS2_NODE_ID,    *b"dep.SHEL.PS2\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_HEAP_NODE_ID,   *b"dep.SHEL.HEP\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_IME_NODE_ID,    *b"dep.SHEL.IME\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_NET_NODE_ID,    *b"dep.SHEL.NET\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_CYPHER_NODE_ID, *b"dep.SHEL.CYP\0\0\0\0"),
+    boot_dep_rule(K_SHELL_NODE_ID,  K_CUDA_NODE_ID,   *b"dep.SHEL.CUD\0\0\0\0"),
+    // CHAT depends on VGA, NET
+    boot_dep_rule(K_CHAT_NODE_ID,   K_VGA_NODE_ID,    *b"dep.CHAT.VGA\0\0\0\0"),
+    boot_dep_rule(K_CHAT_NODE_ID,   K_NET_NODE_ID,    *b"dep.CHAT.NET\0\0\0\0"),
+    // NIM depends on VGA, NET
+    boot_dep_rule(K_NIM_NODE_ID,    K_VGA_NODE_ID,    *b"dep.NIM.VGA\0\0\0\0\0"),
+    boot_dep_rule(K_NIM_NODE_ID,    K_NET_NODE_ID,    *b"dep.NIM.NET\0\0\0\0\0"),
+    // AI depends on SHELL
+    boot_dep_rule(K_AI_NODE_ID,     K_SHELL_NODE_ID,  *b"dep.AI.SHELL\0\0\0\0"),
+];
+
+/// Outcome of running `verify_boot_manifest_graph`.
+#[derive(Debug, Clone, Copy)]
+pub struct BootManifestReport {
+    /// Total number of expected Depend edges (= `BOOT_MANIFEST_RULE_COUNT`).
+    pub rules_checked: usize,
+    /// Number of edges that were missing and were auto-created by self-heal.
+    pub edges_healed: usize,
+}
+
+/// Verify (and self-heal) the boot manifest Depend-edge graph.
+///
+/// Iterates `BOOT_MANIFEST_RULES`, checks each expected `Depend` edge via
+/// `gos_runtime::edge_exists_by_kind`, and creates any missing edge through
+/// the audited `apply_cypher_mutation` path.  Returns a report suitable for
+/// serial logging.
+///
+/// Called from `boot_builtin_graph` after `synchronize_manifest_graph` so
+/// the normal imperative pass already created all edges.  In steady state
+/// `edges_healed` is 0.  A non-zero count signals a bug in the imperative
+/// pass and should be serialised as a warning.
+pub fn verify_boot_manifest_graph() -> BootManifestReport {
+    let mut healed = 0usize;
+    for rule in boot_manifest_rules() {
+        if let RewritePattern::EdgeAbsent { from, to, kind } = rule.pattern {
+            if !gos_runtime::edge_exists_by_kind(from, to, kind) {
+                let _ = gos_runtime::apply_cypher_mutation(rule.action.mutation, rule.action.source);
+                healed += 1;
+            }
+        }
+    }
+    BootManifestReport {
+        rules_checked: BOOT_MANIFEST_RULE_COUNT,
+        edges_healed: healed,
+    }
+}
+
+/// Return the boot manifest rules slice for inspection / testing.
+/// Also drives the internal verify pass via `verify_boot_manifest_graph`.
+pub fn boot_manifest_rules() -> &'static [RewriteRule] {
+    &BOOT_MANIFEST_RULES
+}
+
+/// Summarise the manifest report for serial logging.
+impl BootManifestReport {
+    pub fn is_healthy(&self) -> bool {
+        self.edges_healed == 0
+    }
+}
+
 const BUILTIN_MODULES: [BuiltinModule; 22] = [
     BuiltinModule::Native(NativeModule {
         manifest: PANIC_MANIFEST,
@@ -1517,6 +1641,16 @@ pub fn boot_builtin_graph(boot_payload: u64) -> Result<BuiltinBootReport, Builti
 
     synchronize_manifest_graph(&BUILTIN_MODULES)?;
     synchronize_clipboard_mount_graph()?;
+    // V2.6: verify (and self-heal) every expected Depend edge.  In normal boot
+    // all edges already exist; edges_healed > 0 indicates a bug in the
+    // imperative synchronize_manifest_graph pass.
+    let manifest_report = verify_boot_manifest_graph();
+    crate::raw_serial_println(format_args!(
+        "boot.manifest: checked={} healed={}{}",
+        manifest_report.rules_checked,
+        manifest_report.edges_healed,
+        if manifest_report.is_healthy() { "" } else { " [WARN: edges healed — imperative pass missed edges]" },
+    ));
     gos_supervisor::service_system_cycle();
 
     Ok(BuiltinBootReport {

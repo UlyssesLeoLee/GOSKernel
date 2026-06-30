@@ -572,6 +572,7 @@ impl GraphRuntime {
         let edge_type = match kind {
             gos_cypher_mut::ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
             gos_cypher_mut::ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
+            gos_cypher_mut::ReceptiveEdgeKind::Depend => RuntimeEdgeType::Depend,
         };
         self.edges.iter().flatten().any(|rec| {
             rec.spec.from_node == from
@@ -2291,8 +2292,9 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
         kind: gos_cypher_mut::ReceptiveEdgeKind,
     ) -> Result<(), u32> {
         let (edge_type, edge_key) = match kind {
-            gos_cypher_mut::ReceptiveEdgeKind::Mount => (RuntimeEdgeType::Mount, "cypher.Mount"),
-            gos_cypher_mut::ReceptiveEdgeKind::Use   => (RuntimeEdgeType::Use,   "cypher.Use"),
+            gos_cypher_mut::ReceptiveEdgeKind::Mount  => (RuntimeEdgeType::Mount,  "cypher.Mount"),
+            gos_cypher_mut::ReceptiveEdgeKind::Use    => (RuntimeEdgeType::Use,    "cypher.Use"),
+            gos_cypher_mut::ReceptiveEdgeKind::Depend => (RuntimeEdgeType::Depend, "manifest.depend"),
         };
         let edge_id = gos_protocol::derive_edge_id(from, to, edge_key);
         let spec = EdgeSpec {

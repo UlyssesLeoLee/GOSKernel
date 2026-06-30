@@ -82,6 +82,7 @@ dependencies = [
  "gos-journal",
  "gos-log",
  "gos-protocol",
+ "gos-rewrite",
  "gos-runtime",
  "gos-sign",
  "gos-supervisor",
