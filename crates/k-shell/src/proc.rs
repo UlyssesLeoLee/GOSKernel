@@ -515,6 +515,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  nodes faulted      list only faulted nodes\n");
         super::print_str(sink, "  nodes summary      lifecycle distribution count\n");
         super::print_str(sink, "  boot verify        boot manifest edge verification report\n");
+        super::print_str(sink, "  metrics export     machine-parseable key=value telemetry dump\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -667,6 +668,8 @@ fn dispatch_text_command(
         super::dispatch_lifecycle_summary(sink);
     } else if cmd == "boot" || cmd == "boot verify" || cmd == "boot status" {
         super::dispatch_boot_verify(sink);
+    } else if cmd == "metrics export" || cmd == "metrics dump" {
+        super::dispatch_metrics_export(sink);
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);

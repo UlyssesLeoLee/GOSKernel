@@ -1,6 +1,6 @@
-// gos-metrics-harness — V2.6 runtime telemetry API tests
+// gos-metrics-harness — V2.6/V2.10 runtime telemetry API tests
 //
-// Verifies that the V2.3/V2.6 observability metrics are coherent:
+// Verifies that the V2.3/V2.6/V2.10 observability metrics are coherent:
 //
 //   1. graph_epoch() starts at 0 after reset and increments on register_node.
 //   2. graph_epoch() is stable when no structural mutation occurs.
@@ -10,6 +10,9 @@
 //   5. render_epoch() matches graph_epoch() after a service_system_cycle.
 //   6. subscribe_pair_count() tracks the full register/unregister lifecycle.
 //   7. causal_depth_max() is cumulative (peak across all service cycles).
+//   8. domain_switch_count() is 0 after reset (V2.10 metrics export API).
+//   9. preempt_count() is 0 after reset (V2.10 metrics export API).
+//  10. boot_fallback_alloc_count() is 0 after reset (V2.10 metrics export API).
 
 use std::sync::Mutex;
 
@@ -257,5 +260,40 @@ fn causal_depth_max_is_cumulative_peak() {
     assert!(
         after >= before,
         "causal_depth_max must be monotonically non-decreasing: before={before} after={after}"
+    );
+}
+
+// ── V2.10: metrics export API coverage ────────────────────────────────────────
+
+#[test]
+fn domain_switch_count_starts_at_zero_after_reset() {
+    let _g = TEST_LOCK.lock().unwrap();
+    gos_runtime::reset();
+    gos_supervisor::clear_rewrite_rules();
+    assert_eq!(
+        gos_runtime::domain_switch_count(), 0,
+        "domain_switch_count must be 0 immediately after reset"
+    );
+}
+
+#[test]
+fn preempt_count_starts_at_zero_after_reset() {
+    let _g = TEST_LOCK.lock().unwrap();
+    gos_runtime::reset();
+    gos_supervisor::clear_rewrite_rules();
+    assert_eq!(
+        gos_runtime::preempt_count(), 0,
+        "preempt_count must be 0 immediately after reset"
+    );
+}
+
+#[test]
+fn boot_fallback_alloc_count_starts_at_zero_after_reset() {
+    let _g = TEST_LOCK.lock().unwrap();
+    gos_runtime::reset();
+    gos_supervisor::clear_rewrite_rules();
+    assert_eq!(
+        gos_runtime::boot_fallback_alloc_count(), 0,
+        "boot_fallback_alloc_count must be 0 immediately after reset"
     );
 }

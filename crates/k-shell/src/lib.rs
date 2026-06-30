@@ -1235,6 +1235,44 @@ pub fn dispatch_boot_verify(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Output all runtime telemetry metrics as `key=value\n` lines.
+///
+/// Machine-parseable counterpart to the `metrics` graph-panel view.
+/// Host-side serial scripts can collect these values without parsing TUI escape codes.
+pub fn dispatch_metrics_export(sink: &ConsoleSink) {
+    let g_epoch = gos_runtime::graph_epoch();
+    let r_epoch = gos_supervisor::render_epoch();
+    let snap    = gos_runtime::snapshot();
+    set_color(sink, 11, 0);
+    print_str(sink, " telemetry export\n");
+    set_color(sink, 7, 0);
+
+    macro_rules! kv {
+        ($key:expr, $val:expr) => {
+            print_str(sink, "  ");
+            print_str(sink, $key);
+            print_str(sink, "=");
+            print_num_inline(sink, $val as usize);
+            print_str(sink, "\n");
+        };
+    }
+    kv!("graph_epoch",          g_epoch);
+    kv!("render_epoch",         r_epoch);
+    kv!("idle_cycles",          gos_supervisor::idle_cycle_count());
+    kv!("causal_depth_max",     gos_supervisor::causal_depth_max());
+    kv!("subscribe_pairs",      gos_runtime::subscribe_pair_count());
+    kv!("tick",                 snap.tick);
+    kv!("plugins",              snap.plugin_count);
+    kv!("nodes",                snap.node_count);
+    kv!("edges",                snap.edge_count);
+    kv!("domain_switches",      gos_runtime::domain_switch_count());
+    kv!("preemptions",          gos_runtime::preempt_count());
+    kv!("boot_fallback_allocs", gos_runtime::boot_fallback_alloc_count());
+    kv!("boot_rules_checked",   gos_runtime::boot_manifest_rules_checked());
+    kv!("boot_edges_healed",    gos_runtime::boot_manifest_edges_healed());
+    set_color(sink, 7, 0);
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",
