@@ -17,8 +17,6 @@ use gos_protocol::{
     RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_GPU_MEMORY,
     RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, RESOURCE_SOCKET, MODULE_ABI_VERSION,
 };
-#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-use k_vmm;
 use spin::Mutex;
 
 pub const MAX_MODULES: usize = 32;

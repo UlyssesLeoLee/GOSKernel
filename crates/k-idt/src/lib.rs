@@ -97,6 +97,9 @@ fn is_cpu_fault(vector: u64) -> bool {
     matches!(vector, FAULT_PAGE_FAULT | FAULT_GP | FAULT_DOUBLE | FAULT_STACK_SEGMENT)
 }
 
+/// # Safety
+/// Called only from the kernel's naked assembly trampoline with a valid
+/// `TrapFrame` pointer on the interrupt stack; never called from Rust.
 #[no_mangle]
 pub unsafe extern "C" fn gos_trap_normalizer(frame: *mut TrapFrame) {
     let frame = &mut *frame;
@@ -284,34 +287,44 @@ pub fn idt() -> &'static InterruptDescriptorTable {
 /// below is a thin wrapper for the runtime-dispatch path; both end
 /// up calling this.  Idempotent: re-running with the same IDT layout
 /// is harmless because `lidt` just reloads.
+///
+/// # Safety
+/// Must be called with the GDT and TSS already loaded (GDT provides the
+/// code/stack selectors the IDT entries reference).  The node arena must
+/// have been initialised so `node_ptr()` returns a valid allocation large
+/// enough to hold the IDT.
+// The transmutes cast our naked-asm entry stubs to the handler-func types
+// expected by x86_64::idt.  Both sides are function-pointer-sized; the
+// destination types are x86_64 crate internals not re-exported for direct use.
+#[allow(clippy::missing_transmute_annotations)]
 pub unsafe fn init_idt() {
     let p = node_ptr();
     meta::burn_node_metadata(p, "HAL", "IDT");
 
     let mut idt = InterruptDescriptorTable::new();
 
-    idt.breakpoint.set_handler_fn(core::mem::transmute(handle_breakpoint as *const () as usize));
+    idt.breakpoint.set_handler_fn(core::mem::transmute::<*const (), _>(handle_breakpoint as *const ()));
     // Phase B.4.3: route the fault classes that may fire inside a native
     // dispatch onto dedicated IST stacks (allocated in k-gdt) so the
     // handler executes on a known-good stack regardless of the
     // interrupted code's stack state.
     idt.page_fault
-        .set_handler_fn(core::mem::transmute(handle_page_fault as *const () as usize))
+        .set_handler_fn(core::mem::transmute::<*const (), _>(handle_page_fault as *const ()))
         .set_stack_index(k_gdt::PAGE_FAULT_IST_INDEX);
     idt.general_protection_fault
-        .set_handler_fn(core::mem::transmute(handle_general_protection as *const () as usize))
+        .set_handler_fn(core::mem::transmute::<*const (), _>(handle_general_protection as *const ()))
         .set_stack_index(k_gdt::GENERAL_PROTECTION_IST_INDEX);
     idt.stack_segment_fault
-        .set_handler_fn(core::mem::transmute(handle_stack_segment as *const () as usize))
+        .set_handler_fn(core::mem::transmute::<*const (), _>(handle_stack_segment as *const ()))
         .set_stack_index(k_gdt::STACK_SEGMENT_IST_INDEX);
     idt.double_fault
-        .set_handler_fn(core::mem::transmute(handle_double_fault as *const () as usize))
+        .set_handler_fn(core::mem::transmute::<*const (), _>(handle_double_fault as *const ()))
         .set_stack_index(k_gdt::DOUBLE_FAULT_IST_INDEX);
 
-    idt[32].set_handler_fn(core::mem::transmute(handle_irq_timer as *const () as usize));
-    idt[33].set_handler_fn(core::mem::transmute(handle_irq_keyboard as *const () as usize));
-    idt[34].set_handler_fn(core::mem::transmute(handle_irq_cascade as *const () as usize));
-    idt[44].set_handler_fn(core::mem::transmute(handle_irq_mouse as *const () as usize));
+    idt[32].set_handler_fn(core::mem::transmute::<*const (), _>(handle_irq_timer as *const ()));
+    idt[33].set_handler_fn(core::mem::transmute::<*const (), _>(handle_irq_keyboard as *const ()));
+    idt[34].set_handler_fn(core::mem::transmute::<*const (), _>(handle_irq_cascade as *const ()));
+    idt[44].set_handler_fn(core::mem::transmute::<*const (), _>(handle_irq_mouse as *const ()));
 
     let state_ptr = p.add(1024) as *mut InterruptDescriptorTable;
     core::ptr::write(state_ptr, idt);

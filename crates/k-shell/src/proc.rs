@@ -168,10 +168,10 @@ fn process_data(
     }
 
     // --- zh-pinyin IME composition ----------------------------------------------
-    if state.input_lang == IME_MODE_ZH_PINYIN {
-        if let Some(status) = process_pinyin(sink, state, byte) {
-            return status;
-        }
+    if state.input_lang == IME_MODE_ZH_PINYIN
+        && let Some(status) = process_pinyin(sink, state, byte)
+    {
+        return status;
     }
 
     // --- Enter / Return — execute the buffered command --------------------------
@@ -184,12 +184,11 @@ fn process_data(
         0x03 => { let _ = super::clipboard_copy_active_input(sink, state); }
         0x16 => { let _ = super::clipboard_paste_active_input(sink, state); }
         0x18 => { let _ = super::clipboard_cut_active_input(sink, state); }
-        0x08 | 0x7F => {
-            if super::command_pop_scalar(state) {
-                super::reset_command_history_cursor(state);
-                super::redraw_footer(sink, state, false);
-            }
+        0x08 | 0x7F if super::command_pop_scalar(state) => {
+            super::reset_command_history_cursor(state);
+            super::redraw_footer(sink, state, false);
         }
+        0x08 | 0x7F => {}
         byte if byte >= 0x20 => {
             super::append_command_byte(sink, state, byte, false);
         }
@@ -1223,7 +1222,7 @@ fn dispatch_nim_port(
         return;
     }
     // Validate: must be ASCII digits only
-    if bytes.iter().any(|&b| b < b'0' || b > b'9') || bytes.is_empty() {
+    if bytes.is_empty() || bytes.iter().any(|b| !b.is_ascii_digit()) {
         super::set_color(sink, 12, 0);
         super::print_str(sink, " [nim] port must be decimal digits (e.g. 8000)\n");
         return;

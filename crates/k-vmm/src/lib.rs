@@ -53,12 +53,17 @@ pub struct VmmState {
     pub phys_offset: u64,
 }
 
+/// # Safety
+/// K_VMM node must have been initialised via `vmm_on_init` before calling.
 pub unsafe fn state() -> &'static VmmState {
     let p = node_ptr();
     if p.is_null() { panic!("K_VMM not initialized"); }
     &*(p.add(1024) as *const VmmState)
 }
 
+/// # Safety
+/// K_VMM must be initialised and `phys_offset` must match the identity
+/// offset established at boot; CR3 must contain the kernel's PML4.
 pub unsafe fn mapper() -> OffsetPageTable<'static> {
     let phys_offset = VirtAddr::new(state().phys_offset);
     let (level_4_frame, _) = Cr3::read();
@@ -135,6 +140,11 @@ unsafe fn allocate_zeroed_frame() -> Result<PhysFrame<Size4KiB>, &'static str> {
     Ok(frame)
 }
 
+/// # Safety
+/// All base/len pairs must be page-aligned; the PMM must have free frames;
+/// the caller must eventually call `destroy_isolated_address_space` to
+/// free the returned root frame.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn create_isolated_address_space(
     image_base: u64,
     image_len: u64,
@@ -177,6 +187,9 @@ pub unsafe fn create_isolated_address_space(
     Ok(frame.start_address().as_u64())
 }
 
+/// # Safety
+/// `root_table_phys` must point to a valid 4 KiB-aligned page table frame;
+/// `virt_base` and `byte_len` must be page-aligned.
 pub unsafe fn map_anonymous_window(
     root_table_phys: u64,
     virt_base: u64,
@@ -189,7 +202,7 @@ pub unsafe fn map_anonymous_window(
 
     let mut mapper = mapper_for_root(root_table_phys);
     let mut allocator = PmmFrameAllocatorEdge;
-    let page_count = ((byte_len + Size4KiB::SIZE - 1) / Size4KiB::SIZE) as usize;
+    let page_count = byte_len.div_ceil(Size4KiB::SIZE) as usize;
 
     for page_idx in 0..page_count {
         let page = Page::containing_address(VirtAddr::new(
@@ -215,6 +228,12 @@ pub unsafe fn map_anonymous_window(
 /// of bytes actually mapped via `map_anonymous_window` (the heap window
 /// is demand-mapped, unlike the other three), not the full reserved
 /// window — pages never mapped are silently skipped either way.
+///
+/// # Safety
+/// `root_table_phys` must be the frame returned by `create_isolated_address_space`.
+/// All base/len arguments must match what was originally mapped.  The domain
+/// must not be the active CR3 when this is called.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn destroy_isolated_address_space(
     root_table_phys: u64,
     image_base: u64,
@@ -240,13 +259,16 @@ pub unsafe fn destroy_isolated_address_space(
 /// page table rooted at `root_table_phys`, returning each backing frame
 /// to the PMM.  Pages that were never mapped (e.g. the unused tail of a
 /// demand-mapped heap window) are skipped rather than treated as errors.
+///
+/// # Safety
+/// `root_table_phys` must be a valid, frame-aligned page table root.
 unsafe fn unmap_window(root_table_phys: u64, virt_base: u64, byte_len: u64) -> Result<(), &'static str> {
     if byte_len == 0 {
         return Ok(());
     }
 
     let mut mapper = mapper_for_root(root_table_phys);
-    let page_count = ((byte_len + Size4KiB::SIZE - 1) / Size4KiB::SIZE) as usize;
+    let page_count = byte_len.div_ceil(Size4KiB::SIZE) as usize;
 
     for page_idx in 0..page_count {
         let page = Page::containing_address(VirtAddr::new(
@@ -261,6 +283,9 @@ unsafe fn unmap_window(root_table_phys: u64, virt_base: u64, byte_len: u64) -> R
     Ok(())
 }
 
+/// # Safety
+/// `page` must not already be mapped; `frame` must be a freshly allocated
+/// physical frame not aliased elsewhere.
 pub unsafe fn map_page(
     page: Page<Size4KiB>,
     frame: PhysFrame<Size4KiB>,
@@ -275,6 +300,9 @@ pub unsafe fn map_page(
     Ok(())
 }
 
+/// # Safety
+/// `page` must be currently mapped in the active address space; after
+/// unmapping the page is no longer accessible via the virtual address.
 pub unsafe fn unmap_page(page: Page<Size4KiB>) -> Result<(), &'static str> {
     let mut mapper = mapper();
     let (frame, flush) = mapper.unmap(page).map_err(|_| "unmap failed")?;
@@ -286,6 +314,10 @@ pub unsafe fn unmap_page(page: Page<Size4KiB>) -> Result<(), &'static str> {
 
 /// Return a physical frame to the PMM without unmapping.
 /// Useful when the caller manages its own page table entries.
+///
+/// # Safety
+/// `frame` must not be referenced by any live page table entry after this
+/// call; double-freeing the same frame causes allocator corruption.
 pub unsafe fn deallocate_frame(frame: PhysFrame<Size4KiB>) {
     k_pmm::allocator().lock().dealloc_frame(frame);
 }

@@ -1099,6 +1099,7 @@ const fn module_descriptor_app(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 const fn module_descriptor_with_flags(
     plugin_id: PluginId,
     name: &'static str,

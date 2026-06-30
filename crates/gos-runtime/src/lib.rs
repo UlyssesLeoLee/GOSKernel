@@ -312,6 +312,12 @@ pub struct GraphRuntime {
     tick: u64,
 }
 
+impl Default for GraphRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphRuntime {
     pub const fn new() -> Self {
         Self {
@@ -1006,8 +1012,8 @@ impl GraphRuntime {
                         }
                     }
                 }
-                for i in 0..target_count {
-                    let _ = self.post_signal(targets[i], signal);
+                for &v in targets.iter().take(target_count) {
+                    let _ = self.post_signal(v, signal);
                 }
             }
             RuntimeEdgeType::Depend => {

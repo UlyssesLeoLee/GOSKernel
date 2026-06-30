@@ -157,6 +157,12 @@ pub struct MutationGate {
     len: usize,
 }
 
+impl Default for MutationGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MutationGate {
     pub const fn new() -> Self {
         Self {

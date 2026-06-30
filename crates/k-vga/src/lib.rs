@@ -288,8 +288,7 @@ fn draw_header(state: &mut VgaState, title: &str, fg: Color, bg: Color) {
     state.color_code = ColorCode::new(fg, bg);
     clear_row(state, 0);
     let start = (BUFFER_WIDTH.saturating_sub(title.len())) / 2;
-    let mut col = start;
-    for byte in title.bytes() {
+    for (col, byte) in (start..).zip(title.bytes()) {
         if col >= BUFFER_WIDTH {
             break;
         }
@@ -297,7 +296,6 @@ fn draw_header(state: &mut VgaState, title: &str, fg: Color, bg: Color) {
             ascii: byte,
             color: state.color_code,
         };
-        col += 1;
     }
     render_row(state, 0);
     state.color_code = original;

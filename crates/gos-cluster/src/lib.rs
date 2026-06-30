@@ -108,13 +108,11 @@ pub fn announce_peer(host: HostId) -> Result<u32, ClusterError> {
         return Err(ClusterError::InvalidAddress);
     }
     let mut reg = REGISTRY.lock();
-    for slot in reg.peers.iter_mut() {
-        if let Some(record) = slot {
-            if record.host == host {
-                record.generation = record.generation.wrapping_add(1);
-                record.healthy = true;
-                return Ok(record.generation);
-            }
+    for record in reg.peers.iter_mut().flatten() {
+        if record.host == host {
+            record.generation = record.generation.wrapping_add(1);
+            record.healthy = true;
+            return Ok(record.generation);
         }
     }
     for slot in reg.peers.iter_mut() {

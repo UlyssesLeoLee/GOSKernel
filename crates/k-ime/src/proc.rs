@@ -63,18 +63,16 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: super::pre::Input) -> Op
 /// Pinyin composition state machine.
 fn process_pinyin(state: &mut super::ImeState, byte: u8, out: &mut Output) {
     match byte {
-        b'a'..=b'z' | b'A'..=b'Z' => {
-            if state.len < state.composing.len() {
-                state.composing[state.len] = super::normalize_letter(byte);
-                state.len += 1;
-            }
+        b'a'..=b'z' | b'A'..=b'Z' if state.len < state.composing.len() => {
+            state.composing[state.len] = super::normalize_letter(byte);
+            state.len += 1;
         }
-        0x08 | 0x7F => {
-            if state.len > 0 {
-                state.len -= 1;
-                state.composing[state.len] = 0;
-            }
+        b'a'..=b'z' | b'A'..=b'Z' => {}
+        0x08 | 0x7F if state.len > 0 => {
+            state.len -= 1;
+            state.composing[state.len] = 0;
         }
+        0x08 | 0x7F => {}
         0x1B | 0x03 => super::clear_composition(state),
         b'1'..=b'9' => commit_into(state, usize::from(byte - b'1'), out),
         b' ' | b'\n' | b'\r' => commit_into(state, 0, out),

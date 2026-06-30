@@ -100,7 +100,7 @@ pub fn parse(data: &[u8]) -> Result<ParsedElf<'_>, ElfError> {
     if data.len() < 64 {
         return Err(ElfError::TooSmall);
     }
-    if &data[..4] != &ELF_MAGIC {
+    if data[..4] != ELF_MAGIC {
         return Err(ElfError::BadMagic);
     }
     if data[4] != ELFCLASS64 {
@@ -322,10 +322,8 @@ impl<'a> ParsedElf<'a> {
             }
             cur += 16;
         }
-        if let Some(_) = table.rela_offset {
-            if table.rela_entry_size as usize != ELF64_RELA_SIZE {
-                return Err(ElfError::BadDynamic);
-            }
+        if table.rela_offset.is_some() && table.rela_entry_size as usize != ELF64_RELA_SIZE {
+            return Err(ElfError::BadDynamic);
         }
         if table.symtab_vaddr.is_some() && table.syment_size as usize != ELF64_SYM_SIZE {
             return Err(ElfError::BadDynamic);

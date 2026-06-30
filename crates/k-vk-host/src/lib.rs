@@ -103,7 +103,7 @@ fn com3_init() {
     unsafe {
         out8(COM3 + 1, 0x00); // disable interrupts
         out8(COM3 + 3, 0x80); // enable DLAB
-        out8(COM3 + 0, 0x01); // divisor LSB → 115200 baud
+        out8(COM3, 0x01); // divisor LSB → 115200 baud
         out8(COM3 + 1, 0x00); // divisor MSB
         out8(COM3 + 3, 0x03); // 8-N-1
         out8(COM3 + 2, 0xC7); // enable + clear FIFOs, 14-byte threshold
@@ -282,10 +282,10 @@ fn render_live_graph() {
     while cols * cols < total {
         cols += 1;
     }
-    let rows = (total + cols - 1) / cols;
+    let rows = total.div_ceil(cols);
     let cell_w = (CANVAS_W - 2 * MARGIN) / cols as u32;
     let cell_h = (CANVAS_H - 2 * MARGIN) / rows as u32;
-    let node_w = cell_w.saturating_sub(14).min(132).max(36);
+    let node_w = cell_w.saturating_sub(14).clamp(36, 132);
     let node_h = 40u32.min(cell_h.saturating_sub(6)).max(20);
 
     com3_emit(b"VKDIM:800x600\nVKCLR:101018\n");
@@ -322,9 +322,9 @@ fn render_live_graph() {
                 "node"
             };
             fb.reset();
-            let _ = write!(
+            let _ = writeln!(
                 fb,
-                "VKNOD:{}:{}:{}:{}:{}:{:06x}:{}\n",
+                "VKNOD:{}:{}:{}:{}:{}:{:06x}:{}",
                 gi + 1,
                 x,
                 y,
@@ -353,9 +353,9 @@ fn render_live_graph() {
             if let (Some(f), Some(t)) = (from, to) {
                 if f != t {
                     fb.reset();
-                    let _ = write!(
+                    let _ = writeln!(
                         fb,
-                        "VKEDG:{}:{}:{:06x}\n",
+                        "VKEDG:{}:{}:{:06x}",
                         f + 1,
                         t + 1,
                         edge_color(edge.edge_type)

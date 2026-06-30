@@ -190,6 +190,12 @@ pub struct JournalRing<const N: usize> {
     len: usize,
 }
 
+impl<const N: usize> Default for JournalRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> JournalRing<N> {
     pub const fn new() -> Self {
         Self {

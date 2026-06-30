@@ -1301,6 +1301,7 @@ fn fill_band(sink: &ConsoleSink, row: usize, left: usize, width: usize, fg: u8, 
     draw_repeat(sink, row, left, fg, bg, b' ', width);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_box(
     sink: &ConsoleSink,
     top: usize,
@@ -1477,7 +1478,7 @@ fn draw_runtime_gap_flux(sink: &ConsoleSink, state: &ShellState) {
         };
         let col = 49 + ((idx + phase) % 2);
         draw_byte(sink, row, col, fg, WABI_INK, glyph);
-        if (idx + phase) % 4 == 0 {
+        if (idx + phase).is_multiple_of(4) {
             draw_byte(sink, row, 50, WABI_STONE, WABI_INK, b'.');
         }
     }
@@ -1946,13 +1947,12 @@ fn draw_core_glyph(sink: &ConsoleSink, stage: usize, pulse: usize) {
     let wobble = frame % LIVE_SIGIL_FRAMES;
     let top = (4i32 + BOOT_WOBBLE_Y[wobble]).max(3) as usize;
     let left = (29i32 + BOOT_WOBBLE_X[wobble]).max(26) as usize;
-    let width = 23usize;
     let height = 11usize;
 
     for y in 0..height {
         let mut row = [b' '; 23];
         let dy = y as i32 - 5;
-        for x in 0..width {
+        for (x, cell) in row.iter_mut().enumerate() {
             let dx = x as i32 - 11;
             let ax = dx * 2;
             let ay = dy * 3;
@@ -1978,11 +1978,11 @@ fn draw_core_glyph(sink: &ConsoleSink, stage: usize, pulse: usize) {
                 byte = CP437_LIGHT;
             }
 
-            if byte != b' ' && ((x + frame + y) % 9 == 0) {
+            if byte != b' ' && (x + frame + y).is_multiple_of(9) {
                 byte = CP437_LIGHT;
             }
 
-            row[x] = byte;
+            *cell = byte;
         }
 
         let fg = if y == 5 || y == 6 {
@@ -2013,6 +2013,7 @@ fn draw_sigil_panel(sink: &ConsoleSink, stage: usize, pulse: usize) {
     draw_core_glyph(sink, stage, pulse);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_metric_line(
     sink: &ConsoleSink,
     row: usize,
@@ -2194,6 +2195,7 @@ fn render_graph_notice(sink: &ConsoleSink, state: &mut ShellState, title: &str, 
     render_graph_footer(sink, state, "graph notice");
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let mut nodes = [GraphNodeSummary::EMPTY; GRAPH_OVERVIEW_ITEMS];
     let mut edges = [GraphEdgeSummary::EMPTY; GRAPH_OVERVIEW_ITEMS];
@@ -2254,7 +2256,7 @@ fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_o
     footer.push_str("overview page ");
     footer.push_dec((offset / GRAPH_OVERVIEW_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_OVERVIEW_ITEMS - 1) / GRAPH_OVERVIEW_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_OVERVIEW_ITEMS).max(1) as u64);
     footer.push_str("  nodes ");
     footer.push_dec((offset + node_returned).min(node_total) as u64);
     footer.push_byte(b'/');
@@ -2270,6 +2272,7 @@ fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_o
     );
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_node_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let mut page = [GraphNodeSummary::EMPTY; GRAPH_PAGE_ITEMS];
     let (total, _) = gos_runtime::node_page(0, &mut page);
@@ -2311,7 +2314,7 @@ fn render_node_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset
     footer.push_str("  page ");
     footer.push_dec((offset / GRAPH_PAGE_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_PAGE_ITEMS - 1) / GRAPH_PAGE_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_PAGE_ITEMS).max(1) as u64);
     render_graph_footer(
         sink,
         state,
@@ -2383,6 +2386,7 @@ fn selected_edge_direction(state: &ShellState, edge: &GraphEdgeSummary) -> Graph
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_edge_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let Some(node_vec) = state.selected_node else {
         render_graph_notice(sink, state, "EDGE LIST", "no node selected", "use node <vector> first", 12);
@@ -2454,7 +2458,7 @@ fn render_edge_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset
     footer.push_str("  page ");
     footer.push_dec((offset / GRAPH_PAGE_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_PAGE_ITEMS - 1) / GRAPH_PAGE_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_PAGE_ITEMS).max(1) as u64);
     render_graph_footer(
         sink,
         state,
@@ -2678,27 +2682,25 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     // Phase B.4.1: domain PML4 root.  Non-zero confirms map_module ->
     // build_domain -> k_vmm::create_isolated_address_space ran for this
     // instance's owning module.
-    if let Some(vector) = state.selected_node {
-        if let Some(instance_id) = gos_runtime::instance_id_for_vec(vector) {
-            if instance_id.0 != 0 {
-                if let Some(root) = gos_supervisor::instance_domain_root(instance_id) {
-                    let mut domain_line = LineBuf::<72>::new();
-                    domain_line.push_str("domain root_phys=0x");
-                    domain_line.push_hex(root);
-                    if root == 0 {
-                        domain_line.push_str("  (UNMAPPED)");
-                    }
-                    draw_linebuf(
-                        sink,
-                        GRAPH_VIEW_FIRST_ITEM_ROW + 5,
-                        4,
-                        15,
-                        0,
-                        &domain_line,
-                    );
-                }
-            }
+    if let Some(vector) = state.selected_node
+        && let Some(instance_id) = gos_runtime::instance_id_for_vec(vector)
+        && instance_id.0 != 0
+        && let Some(root) = gos_supervisor::instance_domain_root(instance_id)
+    {
+        let mut domain_line = LineBuf::<72>::new();
+        domain_line.push_str("domain root_phys=0x");
+        domain_line.push_hex(root);
+        if root == 0 {
+            domain_line.push_str("  (UNMAPPED)");
         }
+        draw_linebuf(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW + 5,
+            4,
+            15,
+            0,
+            &domain_line,
+        );
     }
 
     render_graph_footer(sink, state, "where  select clear");
@@ -3039,7 +3041,7 @@ fn starts_with_ci(text: &str, needle: &str) -> bool {
         return false;
     }
     for idx in 0..needle.len() {
-        if text[idx].to_ascii_lowercase() != needle[idx].to_ascii_lowercase() {
+        if !text[idx].eq_ignore_ascii_case(&needle[idx]) {
             return false;
         }
     }
