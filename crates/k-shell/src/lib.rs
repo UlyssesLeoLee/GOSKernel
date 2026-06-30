@@ -1235,6 +1235,163 @@ pub fn dispatch_boot_verify(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+fn edge_type_color(ty: gos_protocol::RuntimeEdgeType) -> u8 {
+    use gos_protocol::RuntimeEdgeType;
+    match ty {
+        RuntimeEdgeType::Signal => 11,  // cyan
+        RuntimeEdgeType::Depend => 10,  // green
+        RuntimeEdgeType::Call   => 14,  // yellow
+        RuntimeEdgeType::Mount | RuntimeEdgeType::Use => 13, // magenta
+        _ => 7, // white
+    }
+}
+
+fn route_policy_label(policy: gos_protocol::RoutePolicy) -> &'static str {
+    use gos_protocol::RoutePolicy;
+    match policy {
+        RoutePolicy::Direct    => "direct",
+        RoutePolicy::Weighted  => "weighted",
+        RoutePolicy::Broadcast => "broadcast",
+        RoutePolicy::FailFast  => "failfast",
+    }
+}
+
+/// List all live graph edges — the structural view of the GOS graph.
+///
+/// Analogous to `ip link show` or `netstat` for the graph topology.
+/// Uses `gos_runtime::edge_page` (paged, sorted by edge_vector key) and
+/// renders each edge as:
+///   <edge_vector>  <from_key>─[<type>]─><to_key>  <route_policy>
+pub fn dispatch_edges_list(sink: &ConsoleSink) {
+    use gos_protocol::GraphEdgeSummary;
+    const PAGE: usize = 8;
+    let mut items = [GraphEdgeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut printed = 0usize;
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph edges\n");
+    set_color(sink, 7, 0);
+
+    loop {
+        let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            let fg = edge_type_color(item.edge_type);
+            // from_vector (VectorAddress) ─[type]─> to_vector
+            set_color(sink, fg, 0);
+            print_str(sink, "  ");
+            let mut from_buf = LineBuf::<20>::new();
+            from_buf.push_vector(item.from_vector);
+            print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+            set_color(sink, 8, 0);
+            print_str(sink, "-[");
+            print_str(sink, edge_type_label(item.edge_type));
+            print_str(sink, "]->");
+            set_color(sink, fg, 0);
+            let mut to_buf = LineBuf::<20>::new();
+            to_buf.push_vector(item.to_vector);
+            print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "  ");
+            set_color(sink, 8, 0);
+            print_str(sink, route_policy_label(item.route_policy));
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            printed += 1;
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+    if printed == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no edges)\n");
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Edge type distribution summary — counts per type, coloured for quick triage.
+///
+/// The graph-OS analogue of `ss -s` or `netstat -s`: aggregated topology health
+/// at a glance without iterating nodes manually.
+pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
+    use gos_protocol::{GraphEdgeSummary, RuntimeEdgeType};
+    const PAGE: usize = 8;
+    let mut items = [GraphEdgeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+
+    let mut n_call   = 0usize;
+    let mut n_spawn  = 0usize;
+    let mut n_depend = 0usize;
+    let mut n_signal = 0usize;
+    let mut n_return = 0usize;
+    let mut n_mount  = 0usize;
+    let mut n_sync   = 0usize;
+    let mut n_stream = 0usize;
+    let mut n_use    = 0usize;
+
+    loop {
+        let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            match item.edge_type {
+                RuntimeEdgeType::Call   => n_call   += 1,
+                RuntimeEdgeType::Spawn  => n_spawn  += 1,
+                RuntimeEdgeType::Depend => n_depend += 1,
+                RuntimeEdgeType::Signal => n_signal += 1,
+                RuntimeEdgeType::Return => n_return += 1,
+                RuntimeEdgeType::Mount  => n_mount  += 1,
+                RuntimeEdgeType::Sync   => n_sync   += 1,
+                RuntimeEdgeType::Stream => n_stream += 1,
+                RuntimeEdgeType::Use    => n_use    += 1,
+            }
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    set_color(sink, 11, 0);
+    print_str(sink, " edge type summary\n");
+    set_color(sink, 7, 0);
+
+    let total_edges = n_call + n_spawn + n_depend + n_signal + n_return
+        + n_mount + n_sync + n_stream + n_use;
+    if total_edges == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no edges)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    macro_rules! print_edge_count {
+        ($label:expr, $count:expr, $fg:expr) => {
+            if $count > 0 {
+                set_color(sink, $fg, 0);
+                print_str(sink, "  ");
+                print_str(sink, $label);
+                print_str(sink, ": ");
+                print_num_inline(sink, $count);
+                print_str(sink, "\n");
+            }
+        };
+    }
+    print_edge_count!("call",   n_call,   14);
+    print_edge_count!("spawn",  n_spawn,   7);
+    print_edge_count!("depend", n_depend, 10);
+    print_edge_count!("signal", n_signal, 11);
+    print_edge_count!("return", n_return,  7);
+    print_edge_count!("mount",  n_mount,  13);
+    print_edge_count!("sync",   n_sync,    7);
+    print_edge_count!("stream", n_stream,  7);
+    print_edge_count!("use",    n_use,    13);
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total_edges);
+    print_str(sink, "\n");
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",
