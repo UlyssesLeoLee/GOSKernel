@@ -179,7 +179,7 @@ pub fn idle_cycle_count() -> u64 { IDLE_CYCLE_COUNT.load(Ordering::Relaxed) }
 
 ---
 
-## 测试结果
+## 测试结果（初始交付）
 
 ```
 host-tests/gos-runtime-harness:              26 passed, 0 failed
@@ -192,6 +192,50 @@ cargo clippy --workspace:  0 warnings
 cargo check --workspace:   Finished (0 errors)
 
 总计：66 项测试全绿
+```
+
+---
+
+## 同次硬化追加交付
+
+### causal_depth_max — 峰值调度深度计量
+
+**提交**：`feat(v2.3): causal_depth_max — peak dispatch-loop depth metric`
+
+- `CAUSAL_DEPTH_MAX: AtomicU64` 静态，`service_system_cycle` 在 dispatch loop 退出后通过 `fetch_max(iter)` 记录本次循环深度
+- `pub fn causal_depth_max() -> u64` 公开访问器；在 CausalOverflow 事件（`iter ≥ 2048`）发生前即可持续观察"距上限的余量"
+- Subscribe 套件新增第7项测试：空闲周期的 `causal_depth_max` 必须为 0
+
+### unregister_subscribe — 模块卸载资源回收
+
+**提交**：`feat(v2.3): unregister_subscribe + SubscribeTableFull coverage`
+
+- `GraphRuntime::unregister_subscribe_pair`（缺席时静默返回）+ `pub fn unregister_subscribe()` 公开 API
+- 模块卸载时调用以释放固定大小 64 槽表中的占用；若不调用会导致僵尸 pair 累积
+- 新增两项测试（共9项）：
+  - `unregister_subscribe_stops_future_notifications` — 注销后的结构变更不再触发通知
+  - `subscribe_table_full_error_after_64_pairs` — 填满64槽后第65次注册返回 `SubscribeTableFull`
+
+### subscribe_pair_count — 配额观测
+
+**提交**：`feat(v2.3): subscribe_pair_count() occupancy metric`
+
+- `GraphRuntime::subscribe_pair_count() -> usize` + 公开模块 API
+- 允许调用方在批量注册前检查 headroom；验证幂等注册不会增加计数
+- 新增第10项测试：覆盖 注册 → 幂等重注册 → 注销 的完整生命周期
+
+### 最终测试结果
+
+```
+host-tests/gos-runtime-harness:              26 passed, 0 failed
+host-tests/gos-supervisor-harness:          16 passed, 0 failed
+host-tests/gos-rewrite-harness:             12 passed, 0 failed
+host-tests/gos-rewrite-integration-harness:  6 passed, 0 failed
+host-tests/gos-subscribe-harness:           10 passed, 0 failed  (+4 本次追加)
+
+cargo clippy --workspace:  0 warnings
+
+总计：70 项测试全绿
 ```
 
 ---
