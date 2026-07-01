@@ -1939,6 +1939,160 @@ impl GraphRuntime {
         (out_nodes, out_labels, out_len, scc_count)
     }
 
+    /// V2.35: Condensation DAG of the live node graph.
+    ///
+    /// Runs the same Kosaraju two-pass DFS as `graph_scc_inner`, then scans
+    /// all live edges to record which SCC pairs have at least one crossing edge.
+    /// Returns the same `(nodes, labels, total, scc_count)` view as SCC, plus:
+    /// - `adj[i]` — u128 bitmask: bit `j` set → condensation edge SCC i→SCC j.
+    /// - `cond_edges` — number of distinct condensation edges.
+    ///
+    /// The condensation is always a DAG (by definition of SCC).
+    pub fn graph_condensation_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u8; N], usize, usize, [u128; 128], usize) {
+        const UNSET: u16 = u16::MAX;
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Phase 1: forward DFS → finish-order stack (same as graph_scc_inner).
+        let mut visited      = [false; MAX_NODES];
+        let mut finish_stack = [0usize; MAX_NODES];
+        let mut finish_len   = 0usize;
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if visited[start_slot] { continue; }
+            visited[start_slot] = true;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+            while stack_top > 0 {
+                let fi = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None => { stack_top -= 1; continue; }
+                };
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.from_node != cur_id { ei += 1; continue; }
+                    dfs_stack[fi].1 = ei + 1;
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; }
+                    if !visited[nbr_slot] {
+                        visited[nbr_slot] = true;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+                if !pushed {
+                    if finish_len < MAX_NODES { finish_stack[finish_len] = cur_slot; finish_len += 1; }
+                    stack_top -= 1;
+                }
+            }
+        }
+
+        // Phase 2: transposed DFS in reverse finish order → assign SCC IDs.
+        let mut scc_id: [u16; MAX_NODES] = [UNSET; MAX_NODES];
+        let mut scc_count: usize = 0;
+
+        for fi in (0..finish_len).rev() {
+            let start_slot = finish_stack[fi];
+            if scc_id[start_slot] != UNSET { continue; }
+            let comp = scc_count as u16;
+            scc_id[start_slot] = comp;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+            while stack_top > 0 {
+                let frame = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[frame];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None => { stack_top -= 1; continue; }
+                };
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.to_node != cur_id { ei += 1; continue; }
+                    dfs_stack[frame].1 = ei + 1;
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; }
+                    if scc_id[nbr_slot] == UNSET {
+                        scc_id[nbr_slot] = comp;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+                if !pushed { stack_top -= 1; }
+            }
+            scc_count += 1;
+        }
+
+        // Phase 3: condensation adjacency — one bit per (from_scc, to_scc) pair.
+        let mut adj = [0u128; 128];
+        let mut cond_edges = 0usize;
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let from_slot = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let to_slot   = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            if from_slot == to_slot { continue; } // skip self-loops
+            let fs = scc_id[from_slot];
+            let ts = scc_id[to_slot];
+            if fs == UNSET || ts == UNSET || fs == ts { continue; } // intra-SCC or unassigned
+            let (fi, ti) = (fs as usize, ts as usize);
+            if fi < 128 && ti < 128 {
+                let bit = 1u128 << ti;
+                if adj[fi] & bit == 0 {
+                    adj[fi] |= bit;
+                    cond_edges += 1;
+                }
+            }
+        }
+
+        // Phase 4: pack output grouped by SCC ID (same as graph_scc_inner).
+        let mut out_nodes  = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_labels = [0u8; N];
+        let mut out_len    = 0usize;
+
+        for scc_idx in 0..scc_count {
+            for ki in 0..node_count {
+                let slot = node_slots[ki];
+                if scc_id[slot] as usize != scc_idx { continue; }
+                if out_len < N {
+                    out_nodes[out_len]  = self.nodes[slot]
+                        .map(|r| r.vector)
+                        .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                    out_labels[out_len] = scc_idx.min(254) as u8;
+                    out_len += 1;
+                }
+            }
+        }
+
+        (out_nodes, out_labels, out_len, scc_count, adj, cond_edges)
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -3628,6 +3782,24 @@ pub fn graph_toposort<const N: usize>() -> ([VectorAddress; N], usize, bool) {
 /// N controls the output buffer depth; cap at 128 (MAX_NODES) for full coverage.
 pub fn graph_scc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
     RUNTIME.lock().graph_scc_inner()
+}
+
+/// V2.35: Condensation DAG of the live node graph.
+///
+/// Returns `(nodes, labels, total, scc_count, adj, cond_edges)`:
+/// - `nodes[0..total]` / `labels[0..total]` — same layout as `graph_scc`:
+///   nodes packed by SCC ID (monotone non-decreasing labels).
+/// - `total` — number of live nodes.
+/// - `scc_count` — number of SCCs (super-nodes in the condensation DAG).
+/// - `adj` — condensation adjacency matrix: `(adj[i] >> j) & 1 == 1` means
+///   there is a condensation edge from SCC `i` to SCC `j`.
+/// - `cond_edges` — count of distinct inter-SCC edges.
+///
+/// The condensation is always a DAG regardless of cycles in the source graph.
+/// Analogous to `sccmap -F` (Graphviz) or the inter-package dependency view
+/// from `cargo tree`.  N controls the node buffer depth (cap at 128).
+pub fn graph_condensation<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize, [u128; 128], usize) {
+    RUNTIME.lock().graph_condensation_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

@@ -2808,6 +2808,134 @@ pub fn dispatch_graph_scc(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.35: `graph condensation` — condensation DAG of the live node graph.
+///
+/// Collapses each Strongly Connected Component into a single super-node
+/// (labelled C#N) and shows the inter-SCC edges as the condensation DAG.
+/// The condensation is always a DAG regardless of cycles in the source graph.
+/// Analogous to `sccmap -F` (Graphviz) or `cargo tree` inter-package deps.
+pub fn dispatch_graph_condensation(sink: &ConsoleSink) {
+    const MAX_C: usize = 128;
+    let (nodes, labels, total, scc_count, adj, cond_edges) =
+        gos_runtime::graph_condensation::<MAX_C>();
+
+    set_color(sink, 0, 11);
+    print_str(sink, " GRAPH CONDENSATION ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, scc_count);
+    set_color(sink, 7, 0);
+    print_str(sink, " components  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, cond_edges);
+    set_color(sink, 7, 0);
+    print_str(sink, " condensation edges  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, total);
+    set_color(sink, 7, 0);
+    print_str(sink, " nodes\n\n");
+
+    // Per-SCC block: members + outgoing condensation edges.
+    let mut pos = 0usize;
+    while pos < total {
+        let cur_label = labels[pos];
+        let mut end = pos;
+        while end < total && labels[end] == cur_label { end += 1; }
+        let size = end - pos;
+
+        set_color(sink, 0, 11);
+        print_str(sink, " C#");
+        print_num_inline(sink, cur_label as usize);
+        print_str(sink, " ");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        set_color(sink, 11, 0);
+        print_num_inline(sink, size);
+        set_color(sink, 7, 0);
+        if size == 1 {
+            print_str(sink, " node\n");
+        } else {
+            print_str(sink, " nodes");
+            set_color(sink, 12, 0);
+            print_str(sink, "  \u{25C6} cycle");
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+
+        // Member vectors.
+        let mut col = 0usize;
+        for i in pos..end {
+            if col == 0 { print_str(sink, "   "); }
+            let mut vbuf = LineBuf::<20>::new();
+            vbuf.push_vector(nodes[i]);
+            let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+            set_color(sink, 11, 0);
+            print_str(sink, vstr);
+            set_color(sink, 7, 0);
+            col += 1;
+            if col == 4 || i + 1 == end {
+                print_str(sink, "\n");
+                col = 0;
+            } else {
+                print_str(sink, "  ");
+            }
+        }
+
+        // Node keys.
+        for i in pos..end {
+            if let Some(summary) = gos_runtime::node_summary(nodes[i]) {
+                print_str(sink, "   ");
+                set_color(sink, 10, 0);
+                print_str(sink, summary.local_node_key);
+                set_color(sink, 8, 0);
+                print_str(sink, "  (");
+                print_str(sink, summary.plugin_name);
+                print_str(sink, ")");
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+        }
+
+        // Condensation edges from this super-node.
+        let ci = cur_label as usize;
+        if ci < 128 && adj[ci] != 0 {
+            print_str(sink, "   ");
+            set_color(sink, 14, 0);
+            print_str(sink, "\u{2192} ");
+            set_color(sink, 7, 0);
+            let mut first = true;
+            for j in 0..scc_count {
+                if (adj[ci] >> j) & 1 == 1 {
+                    if !first { print_str(sink, ", "); }
+                    set_color(sink, 11, 0);
+                    print_str(sink, "C#");
+                    print_num_inline(sink, j);
+                    set_color(sink, 7, 0);
+                    first = false;
+                }
+            }
+            print_str(sink, "\n");
+        }
+
+        print_str(sink, "\n");
+        pos = end;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  condensation is always a DAG  |  use 'graph scc' to see cycle details\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
