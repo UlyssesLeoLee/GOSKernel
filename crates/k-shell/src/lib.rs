@@ -2494,6 +2494,98 @@ pub fn dispatch_graph_path(sink: &ConsoleSink, from: VectorAddress, to: VectorAd
     print_str(sink, "\n");
 }
 
+/// V2.32: `graph cycles` / `cycles` — directed cycle detection in the live graph.
+///
+/// Analogous to `tsort` detecting circular dependencies, or `cargo`'s
+/// dependency-cycle error: scans every directed edge via iterative 3-color DFS and
+/// reports the first back-edge-closed cycle found.  If the graph is acyclic (a DAG)
+/// the command confirms this — useful for verifying that plugin dependency graphs,
+/// signal routing graphs, and causal chains remain deadlock-free.
+///
+/// Output shows each node on the cycle path from the entry node back to itself, so
+/// operators can see which plugins/nodes form the ring.
+pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
+    const MAX_CYCLE: usize = 32;
+    let (cycle, cycle_len) = gos_runtime::find_graph_cycle::<MAX_CYCLE>();
+
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH CYCLES ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if cycle_len == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  no cycles detected");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (directed acyclic graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 12, 0);
+    print_str(sink, "  CYCLE DETECTED  ");
+    set_color(sink, 8, 0);
+    print_num_inline(sink, cycle_len);
+    print_str(sink, " nodes\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    for i in 0..cycle_len {
+        let vec = cycle[i];
+        let is_closing = i + 1 == cycle_len;
+
+        // Indent + hop label
+        print_str(sink, "  ");
+        if is_closing {
+            set_color(sink, 12, 0);
+            print_str(sink, "\xE2\x86\xA9 "); // ↩ (back to cycle start)
+        } else {
+            set_color(sink, 14, 0);
+            print_str(sink, "  ");
+        }
+
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        set_color(sink, if is_closing { 12 } else { 11 }, 0);
+        print_str(sink, vstr);
+
+        // Pad vector to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_str(sink, "  ");
+
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            set_color(sink, if is_closing { 12 } else { 14 }, 0);
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+        }
+
+        if !is_closing && i + 2 < cycle_len {
+            // Arrow pointing to next
+            set_color(sink, 8, 0);
+            print_str(sink, "  \xE2\x86\x93"); // ↓
+        }
+
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    print_str(sink, "\n");
+    set_color(sink, 12, 0);
+    print_num_inline(sink, cycle_len - 1);
+    print_str(sink, "-node cycle");
+    set_color(sink, 8, 0);
+    print_str(sink, "  |  hint: graph path <from> <to> to trace a specific route\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

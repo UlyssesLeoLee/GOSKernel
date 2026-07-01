@@ -1580,6 +1580,120 @@ impl GraphRuntime {
         (out, copy_len)
     }
 
+    /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
+    ///
+    /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
+    /// `path[0] == path[length-1]` is the node where the back-edge closes the
+    /// cycle.  `length == 0` means no cycle exists (the graph is a DAG).
+    ///
+    /// Color semantics:
+    ///   0 = WHITE (unvisited)
+    ///   1 = GRAY  (on the current DFS path — ancestor)
+    ///   2 = BLACK (fully explored — no further cycles through here)
+    ///
+    /// A back edge (edge from a GRAY node to another GRAY node) signals a cycle.
+    /// The algorithm is O(V+E), no_std safe, and uses only stack arrays.
+    pub fn find_graph_cycle_inner<const N: usize>(&self) -> ([VectorAddress; N], usize) {
+        const WHITE: u8 = 0;
+        const GRAY:  u8 = 1;
+        const BLACK: u8 = 2;
+
+        let mut out   = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut color = [WHITE; MAX_NODES];
+
+        // DFS stack: (node_slot, resume_edge_array_index)
+        let mut stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for start_slot in 0..MAX_NODES {
+            if self.nodes[start_slot].is_none() { continue; }
+            if color[start_slot] != WHITE { continue; }
+
+            color[start_slot] = GRAY;
+            stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+
+            while stack_top > 0 {
+                let frame_idx = stack_top - 1;
+                let (cur_slot, scan_start) = stack[frame_idx];
+
+                let cur_node_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None => { color[cur_slot] = BLACK; stack_top -= 1; continue; }
+                };
+
+                let mut pushed_child = false;
+
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None => { ei += 1; continue; }
+                    };
+                    if edge.spec.from_node != cur_node_id {
+                        ei += 1;
+                        continue;
+                    }
+
+                    // Save resume position past this edge before acting on it.
+                    stack[frame_idx].1 = ei + 1;
+
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s,
+                        None => { ei += 1; continue; }
+                    };
+
+                    if color[nbr_slot] == GRAY {
+                        // Back edge → cycle detected.
+                        // Locate where nbr_slot appears on the current path.
+                        let mut cycle_start = frame_idx; // fallback to end
+                        for j in 0..stack_top {
+                            if stack[j].0 == nbr_slot {
+                                cycle_start = j;
+                                break;
+                            }
+                        }
+                        // Cycle path: stack[cycle_start..=frame_idx] then close back to nbr_slot.
+                        let cycle_len = (frame_idx - cycle_start + 1) + 1;
+                        let copy_len  = cycle_len.min(N);
+                        for k in 0..copy_len.saturating_sub(1) {
+                            let s = stack[cycle_start + k].0;
+                            out[k] = self.nodes[s].map(|r| r.vector)
+                                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                        }
+                        if copy_len > 0 {
+                            out[copy_len - 1] = self.nodes[nbr_slot]
+                                .map(|r| r.vector)
+                                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                        }
+                        return (out, copy_len);
+
+                    } else if color[nbr_slot] == WHITE {
+                        // Tree edge → descend into neighbor.
+                        color[nbr_slot] = GRAY;
+                        stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed_child = true;
+                        break;
+                    }
+                    // BLACK → already fully explored, no cycle this way.
+                    ei += 1;
+                }
+
+                if !pushed_child {
+                    color[cur_slot] = BLACK;
+                    stack_top -= 1;
+                }
+            }
+        }
+
+        (out, 0) // graph is a DAG
+    }
+
+    pub fn is_cyclic_inner(&self) -> bool {
+        let (_, len) = self.find_graph_cycle_inner::<2>();
+        len > 0
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -3212,6 +3326,30 @@ pub fn find_graph_path<const N: usize>(
     to: VectorAddress,
 ) -> ([VectorAddress; N], usize) {
     RUNTIME.lock().find_graph_path_inner(from, to)
+}
+
+/// V2.32: Directed cycle detection — finds the first cycle in the live graph via
+/// iterative DFS with 3-color marking (WHITE/GRAY/BLACK), analogous to
+/// `tsort` detecting circular dependencies or `cargo`'s dependency-cycle error.
+///
+/// Returns `(path, length)` where `path[0..length]` forms a closed walk:
+/// `path[0] == path[length-1]` is the node at which the back edge closes the cycle.
+/// `length == 0` means the graph is acyclic (a DAG).
+///
+/// Cap N at 32 for typical shell use.  The cycle will be truncated to N nodes
+/// but detection remains accurate — `is_cyclic()` is the canonical "any cycle?"
+/// query and is cheaper to call for that purpose alone.
+pub fn find_graph_cycle<const N: usize>() -> ([VectorAddress; N], usize) {
+    RUNTIME.lock().find_graph_cycle_inner()
+}
+
+/// Returns `true` if the live graph contains at least one directed cycle.
+///
+/// Cheaper than `find_graph_cycle` when you only need the boolean — it uses
+/// a cycle path buffer of length 2 so no extra stack cost beyond the DFS
+/// working arrays.  Analogous to `tsort … && echo "dag" || echo "cyclic"`.
+pub fn is_cyclic() -> bool {
+    RUNTIME.lock().is_cyclic_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

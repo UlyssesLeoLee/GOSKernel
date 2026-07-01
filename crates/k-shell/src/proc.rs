@@ -565,6 +565,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
         super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
         super::print_str(sink, "  graph path <A> <B> BFS shortest path from node A to node B (like traceroute)\n");
+        super::print_str(sink, "  graph cycles       detect directed cycles in the graph (like tsort cycle-check)\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -907,6 +908,8 @@ fn dispatch_text_command(
             super::print_str(sink, " graph path requires two vector addresses: graph path <from> <to>\n");
             super::set_color(sink, 7, 0);
         }
+    } else if cmd == "graph cycles" || cmd == "cycles" || cmd == "graph cyclic" || cmd == "cyclic" {
+        super::dispatch_graph_cycles(sink);
     } else if cmd == "graph topo" || cmd == "topo" {
         super::dispatch_graph_topo(sink, None);
     } else if let Some(l4_str) = cmd
