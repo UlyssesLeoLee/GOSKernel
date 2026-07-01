@@ -346,6 +346,9 @@ pub struct GraphRuntime {
     node_trace: [[NodeTraceEntry; MAX_NODE_TRACE]; MAX_NODES],
     /// Next write position in each node's trace ring.
     node_trace_head: [u8; MAX_NODES],
+    /// V2.27: Total trace entries ever written per node slot (monotonic; saturates at u32::MAX).
+    /// Separate from signal_count so node trace clear can reset it without affecting proc stats.
+    node_trace_count: [u32; MAX_NODES],
     /// V2.25 per-node lifecycle event log rings, indexed by node slot.
     /// Each ring records the most recent MAX_NODE_LOG lifecycle transitions.
     node_log: [[NodeLogEntry; MAX_NODE_LOG]; MAX_NODES],
@@ -395,6 +398,7 @@ impl GraphRuntime {
             diff_total: 0,
             node_trace: [[NodeTraceEntry::EMPTY; MAX_NODE_TRACE]; MAX_NODES],
             node_trace_head: [0u8; MAX_NODES],
+            node_trace_count: [0u32; MAX_NODES],
             node_log: [[NodeLogEntry::EMPTY; MAX_NODE_LOG]; MAX_NODES],
             node_log_head: [0u8; MAX_NODES],
             node_log_total: [0u16; MAX_NODES],
@@ -1364,6 +1368,7 @@ impl GraphRuntime {
         let head = self.node_trace_head[slot] as usize;
         self.node_trace[slot][head] = trace;
         self.node_trace_head[slot] = ((head + 1) % MAX_NODE_TRACE) as u8;
+        self.node_trace_count[slot] = self.node_trace_count[slot].saturating_add(1);
         record.signal_count = record.signal_count.saturating_add(1);
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Running);
@@ -1378,15 +1383,16 @@ impl GraphRuntime {
     }
 
     /// Return the signal trace ring for `vector` — most recent dispatch first.
-    /// Returns `(total_signals, entries_written)`.
+    /// Returns `(total_traced, entries_written)`.  `total_traced` resets to zero after
+    /// `clear_node_trace_inner()` and is independent of the cumulative `signal_count` used by proc.
     pub fn node_trace_page(
         &self,
         vector: VectorAddress,
         out: &mut [NodeTraceEntry; MAX_NODE_TRACE],
     ) -> Result<(u32, usize), RuntimeError> {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
-        let record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
-        let total = record.signal_count;
+        let _record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
+        let total = self.node_trace_count[slot];
         let ring_fill = (total as usize).min(MAX_NODE_TRACE);
         let head = self.node_trace_head[slot] as usize;
         let mut returned = 0usize;
@@ -1428,6 +1434,18 @@ impl GraphRuntime {
         self.node_log[slot] = [NodeLogEntry::EMPTY; MAX_NODE_LOG];
         self.node_log_head[slot] = 0;
         self.node_log_total[slot] = 0;
+        Ok(())
+    }
+
+    /// V2.27: Clear the per-node signal trace ring for `vector`.
+    /// Resets the ring, head pointer, and trace counter to zero.
+    /// `signal_count` (used by proc) is preserved — only the buffered trace history is discarded.
+    /// Returns `Err(RuntimeError::NodeNotFound)` if the node is not registered.
+    pub fn clear_node_trace_inner(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        self.node_trace[slot] = [NodeTraceEntry::EMPTY; MAX_NODE_TRACE];
+        self.node_trace_head[slot] = 0;
+        self.node_trace_count[slot] = 0;
         Ok(())
     }
 
@@ -2778,6 +2796,13 @@ pub fn node_log_page(
 /// Resets the ring to empty — subsequent node_log_page calls return 0 entries.
 pub fn clear_node_log(vec: VectorAddress) -> Result<(), RuntimeError> {
     RUNTIME.lock().clear_node_log_inner(vec)
+}
+
+/// V2.27: Clear the signal trace ring for `vec`.
+/// Resets the buffered trace history to empty — subsequent node_trace_page calls return 0 entries.
+/// The cumulative signal_count used by `proc` is not affected.
+pub fn clear_node_trace(vec: VectorAddress) -> Result<(), RuntimeError> {
+    RUNTIME.lock().clear_node_trace_inner(vec)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.
