@@ -567,6 +567,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph path <A> <B> BFS shortest path from node A to node B (like traceroute)\n");
         super::print_str(sink, "  graph cycles       detect directed cycles in the graph (like tsort cycle-check)\n");
         super::print_str(sink, "  graph toposort     topological dependency ordering of all nodes (like tsort)\n");
+        super::print_str(sink, "  graph reachable <V> all nodes reachable from V via directed edges (like systemctl list-dependencies --all)\n");
+        super::print_str(sink, "  reachable <V>      alias for graph reachable\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -917,6 +919,19 @@ fn dispatch_text_command(
         super::dispatch_graph_scc(sink);
     } else if cmd == "graph condensation" || cmd == "condensation" || cmd == "condense" || cmd == "graph condense" {
         super::dispatch_graph_condensation(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("graph reachable ")
+        .or_else(|| cmd.strip_prefix("reachable "))
+        .or_else(|| cmd.strip_prefix("reach "))
+        .or_else(|| cmd.strip_prefix("graph reach "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_graph_reachable(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph reachable requires a vector address (e.g. graph reachable 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "graph topo" || cmd == "topo" {
         super::dispatch_graph_topo(sink, None);
     } else if let Some(l4_str) = cmd

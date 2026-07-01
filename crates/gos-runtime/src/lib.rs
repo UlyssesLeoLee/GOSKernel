@@ -1580,6 +1580,97 @@ impl GraphRuntime {
         (out, copy_len)
     }
 
+    /// V2.36: Transitive reachability — all nodes reachable from `from` via
+    /// directed edges, excluding `from` itself.
+    ///
+    /// Uses iterative DFS with a visited bitmap.  Returns `(out, len)` where
+    /// `out[0..len]` is the reachable set sorted ascending by VectorAddress.
+    /// Returns `(out, 0)` when `from` is not registered or no outbound edges
+    /// lead to unvisited nodes.
+    ///
+    /// Complexity: O(V + E), no_std safe, stack arrays only.
+    /// Analogous to `systemctl list-dependencies --all`, `cargo tree -p`,
+    /// or `ldd --recursive`.
+    pub fn graph_reachable_inner<const N: usize>(
+        &self,
+        from: VectorAddress,
+    ) -> ([VectorAddress; N], usize) {
+        let mut out = [VectorAddress::new(0, 0, 0, 0); N];
+
+        let from_slot = match self.node_slot_by_vec(from) {
+            Some(s) => s,
+            None => return (out, 0),
+        };
+
+        let mut visited = [false; MAX_NODES];
+        visited[from_slot] = true;
+
+        // Iterative DFS stack — stores node slots.
+        let mut stack = [0usize; MAX_NODES];
+        let mut stack_top = 0usize;
+        stack[stack_top] = from_slot;
+        stack_top += 1;
+
+        // Collect reachable slots (excluding `from_slot`).
+        let mut reach_slots = [0usize; MAX_NODES];
+        let mut reach_len = 0usize;
+
+        while stack_top > 0 {
+            stack_top -= 1;
+            let cur_slot = stack[stack_top];
+
+            let cur_id = match self.nodes[cur_slot] {
+                Some(r) => r.spec.node_id,
+                None => continue,
+            };
+
+            // Enumerate outbound edges.
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if nbr_slot == cur_slot { continue; } // skip self-loops
+                if visited[nbr_slot] { continue; }
+                visited[nbr_slot] = true;
+                if reach_len < MAX_NODES {
+                    reach_slots[reach_len] = nbr_slot;
+                    reach_len += 1;
+                }
+                if stack_top < MAX_NODES {
+                    stack[stack_top] = nbr_slot;
+                    stack_top += 1;
+                }
+            }
+        }
+
+        // Sort reach_slots by vector address (ascending).
+        // Insertion sort — N ≤ 128, good enough.
+        for i in 1..reach_len {
+            let key = reach_slots[i];
+            let key_vec = self.nodes[key].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            let mut j = i;
+            while j > 0 {
+                let prev = reach_slots[j - 1];
+                let prev_vec = self.nodes[prev].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                if prev_vec.as_u64() <= key_vec.as_u64() { break; }
+                reach_slots[j] = reach_slots[j - 1];
+                j -= 1;
+            }
+            reach_slots[j] = key;
+        }
+
+        // Pack into output, capped at N.
+        let copy_len = reach_len.min(N);
+        for i in 0..copy_len {
+            let slot = reach_slots[i];
+            out[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+        }
+        (out, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -3800,6 +3891,23 @@ pub fn graph_scc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize
 /// from `cargo tree`.  N controls the node buffer depth (cap at 128).
 pub fn graph_condensation<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize, [u128; 128], usize) {
     RUNTIME.lock().graph_condensation_inner()
+}
+
+/// V2.36: Transitive reachability — all nodes reachable from `from` via
+/// directed edges in the live node graph, excluding `from` itself.
+///
+/// Returns `(out, len)` where `out[0..len]` are the reachable node vectors
+/// sorted in ascending order.  Returns `(out, 0)` when `from` is not
+/// registered or has no outbound paths to other registered nodes.
+///
+/// Algorithm: iterative DFS with a `[bool; MAX_NODES]` visited bitmap.
+/// O(V+E), no_std safe, fixed-size stack arrays.
+///
+/// OS analogy: `systemctl list-dependencies --all <svc>`,
+/// `cargo tree -p <crate>`, `ldd --recursive <bin>`.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_reachable<const N: usize>(from: VectorAddress) -> ([VectorAddress; N], usize) {
+    RUNTIME.lock().graph_reachable_inner(from)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

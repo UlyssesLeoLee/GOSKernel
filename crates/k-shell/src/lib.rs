@@ -2936,6 +2936,53 @@ pub fn dispatch_graph_condensation(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.36: `graph reachable <from>` — all nodes transitively reachable from
+/// a given node vector via directed edges.
+///
+/// Returns the reachable set sorted by vector address (ascending), excluding
+/// the source node itself.  An empty set means either the node is isolated
+/// or not registered.
+///
+/// OS analogy: `systemctl list-dependencies --all <svc>`,
+/// `cargo tree -p <crate>`, `ldd --recursive <bin>`.
+pub fn dispatch_graph_reachable(sink: &ConsoleSink, from: VectorAddress) {
+    const MAX_REACH: usize = 128;
+    let (nodes, reach_len) = gos_runtime::graph_reachable::<MAX_REACH>(from);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph reachable from ");
+    let mut from_line = LineBuf::<20>::new();
+    from_line.push_vector(from);
+    print_str(sink, core::str::from_utf8(from_line.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if reach_len == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no reachable nodes — isolated or not registered)\n");
+        set_color(sink, 7, 0);
+    } else {
+        for i in 0..reach_len {
+            let vec = nodes[i];
+            print_str(sink, "  ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vec);
+            print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+            print_str(sink, "\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        print_num_inline(sink, reach_len);
+        set_color(sink, 8, 0);
+        print_str(sink, " reachable  |  use 'graph path <from> <to>' to trace a specific route\n");
+        set_color(sink, 7, 0);
+    }
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -1,0 +1,12 @@
+[package]
+name = "gos-graph-reachable-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
+gos-runtime = { path = "../../crates/gos-runtime" }
+gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }
