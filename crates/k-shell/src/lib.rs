@@ -2684,6 +2684,130 @@ pub fn dispatch_graph_toposort(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.34: `graph scc` — strongly connected components via Kosaraju's algorithm.
+///
+/// Analogous to `scc(1)` (POSIX graph utilities), `sccmap` (Graphviz), or
+/// the condensation step in `cargo build`'s dependency resolver.
+///
+/// An SCC with > 1 node contains a directed cycle; an SCC with exactly 1 node
+/// is either isolated or connected only via forward edges (DAG edges).
+/// When scc_count == node_count the graph is a DAG — no directed cycles.
+pub fn dispatch_graph_scc(sink: &ConsoleSink) {
+    const MAX_SCC: usize = 128;
+    let (nodes, labels, total, scc_count) = gos_runtime::graph_scc::<MAX_SCC>();
+
+    // Header
+    set_color(sink, 0, 11);
+    print_str(sink, " GRAPH SCC ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Summary line
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, scc_count);
+    set_color(sink, 7, 0);
+    print_str(sink, " components  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, total);
+    set_color(sink, 7, 0);
+    print_str(sink, " nodes");
+    if scc_count == total {
+        set_color(sink, 10, 0);
+        print_str(sink, "   (graph is a DAG — no directed cycles)\n");
+        set_color(sink, 7, 0);
+    } else {
+        print_str(sink, "\n");
+    }
+    print_str(sink, "\n");
+
+    // Per-SCC display: walk through sorted nodes, detect label boundaries
+    let mut pos = 0usize;
+    while pos < total {
+        let cur_label = labels[pos];
+
+        // Count members of this SCC
+        let mut end = pos;
+        while end < total && labels[end] == cur_label {
+            end += 1;
+        }
+        let size = end - pos;
+
+        // SCC header
+        set_color(sink, 0, 11);
+        print_str(sink, " SCC #");
+        print_num_inline(sink, cur_label as usize);
+        print_str(sink, " ");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        set_color(sink, 11, 0);
+        print_num_inline(sink, size);
+        set_color(sink, 7, 0);
+        if size == 1 {
+            print_str(sink, " node");
+        } else {
+            print_str(sink, " nodes");
+            set_color(sink, 12, 0);
+            print_str(sink, "  \u{25C6} cycle");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+
+        // Node list (up to 8 per row for readability)
+        let mut col = 0usize;
+        for i in pos..end {
+            if col == 0 { print_str(sink, "   "); }
+            let mut vbuf = LineBuf::<20>::new();
+            vbuf.push_vector(nodes[i]);
+            let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+            set_color(sink, 11, 0);
+            print_str(sink, vstr);
+            set_color(sink, 7, 0);
+            col += 1;
+            if col == 4 || i + 1 == end {
+                print_str(sink, "\n");
+                col = 0;
+            } else {
+                print_str(sink, "  ");
+            }
+        }
+
+        // Node keys (one per line, indented)
+        for i in pos..end {
+            if let Some(summary) = gos_runtime::node_summary(nodes[i]) {
+                print_str(sink, "   ");
+                set_color(sink, 10, 0);
+                print_str(sink, summary.local_node_key);
+                set_color(sink, 8, 0);
+                print_str(sink, "  (");
+                print_str(sink, summary.plugin_name);
+                print_str(sink, ")");
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+        }
+        print_str(sink, "\n");
+
+        pos = end;
+    }
+
+    // Footer hint
+    set_color(sink, 8, 0);
+    if scc_count < total {
+        print_str(sink, "  hint: graph cycles to trace a specific cycle path\n");
+    } else {
+        print_str(sink, "  hint: graph toposort to compute the dependency order\n");
+    }
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

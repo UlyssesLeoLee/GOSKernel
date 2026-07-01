@@ -913,6 +913,8 @@ fn dispatch_text_command(
         super::dispatch_graph_cycles(sink);
     } else if cmd == "graph toposort" || cmd == "toposort" || cmd == "topo sort" || cmd == "graph tsort" || cmd == "tsort" {
         super::dispatch_graph_toposort(sink);
+    } else if cmd == "graph scc" || cmd == "scc" || cmd == "graph components" || cmd == "components" {
+        super::dispatch_graph_scc(sink);
     } else if cmd == "graph topo" || cmd == "topo" {
         super::dispatch_graph_topo(sink, None);
     } else if let Some(l4_str) = cmd

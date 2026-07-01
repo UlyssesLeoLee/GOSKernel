@@ -1778,6 +1778,167 @@ impl GraphRuntime {
         (out, out_len, is_dag)
     }
 
+    /// V2.34: Strongly Connected Components via Kosaraju's two-pass DFS.
+    ///
+    /// Returns `(nodes, labels, total, scc_count)`:
+    ///   - `nodes[0..total]` — all live nodes packed in SCC order (SCC 0 first,
+    ///     then SCC 1, …).
+    ///   - `labels[0..total]` — SCC index for the corresponding node (monotone
+    ///     non-decreasing, so label boundaries mark component splits).
+    ///   - `total` — number of live nodes.
+    ///   - `scc_count` — number of distinct strongly-connected components.
+    ///
+    /// An SCC with > 1 node is a true cycle in the directed graph.  An SCC with
+    /// exactly 1 node is either isolated or connected only via DAG edges.
+    /// When `scc_count == total` the graph has no directed cycles (it is a DAG).
+    ///
+    /// Self-loops do not merge an SCC with another — a single node with a
+    /// self-loop forms its own SCC of size 1.
+    ///
+    /// O(V+E), no_std safe, fixed stack arrays only.  N must be ≥ total live
+    /// nodes for complete output; results are silently truncated otherwise.
+    pub fn graph_scc_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, usize) {
+        const UNSET: u16 = u16::MAX;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // ── Phase 1: forward DFS → finish-order stack ─────────────────────────
+        let mut visited      = [false; MAX_NODES];
+        let mut finish_stack = [0usize; MAX_NODES]; // slots in finish order (earliest first)
+        let mut finish_len   = 0usize;
+
+        // Explicit DFS stack: (slot, next_edge_index_to_scan)
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if visited[start_slot] { continue; }
+
+            visited[start_slot] = true;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+
+            while stack_top > 0 {
+                let fi = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[fi];
+
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None => { stack_top -= 1; continue; }
+                };
+
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.from_node != cur_id { ei += 1; continue; }
+
+                    dfs_stack[fi].1 = ei + 1; // save resume point
+
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // skip self-loops
+
+                    if !visited[nbr_slot] {
+                        visited[nbr_slot] = true;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+
+                if !pushed {
+                    if finish_len < MAX_NODES { finish_stack[finish_len] = cur_slot; finish_len += 1; }
+                    stack_top -= 1;
+                }
+            }
+        }
+
+        // ── Phase 2: transposed DFS in reverse finish order → assign SCC IDs ──
+        let mut scc_id:    [u16; MAX_NODES] = [UNSET; MAX_NODES];
+        let mut scc_count: usize            = 0;
+
+        for fi in (0..finish_len).rev() {
+            let start_slot = finish_stack[fi];
+            if scc_id[start_slot] != UNSET { continue; }
+
+            let comp = scc_count as u16;
+            scc_id[start_slot] = comp;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+
+            while stack_top > 0 {
+                let frame = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[frame];
+
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None => { stack_top -= 1; continue; }
+                };
+
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    // Transposed graph: follow edges WHERE to_node == cur_id → move to from_node.
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.to_node != cur_id { ei += 1; continue; }
+
+                    dfs_stack[frame].1 = ei + 1;
+
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // skip self-loops
+
+                    if scc_id[nbr_slot] == UNSET {
+                        scc_id[nbr_slot] = comp;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+
+                if !pushed { stack_top -= 1; }
+            }
+
+            scc_count += 1;
+        }
+
+        // ── Phase 3: pack output grouped by SCC ID (0, 1, 2, …) ──────────────
+        let mut out_nodes  = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_labels = [0u8; N];
+        let mut out_len    = 0usize;
+
+        for scc_idx in 0..scc_count {
+            for ki in 0..node_count {
+                let slot = node_slots[ki];
+                if scc_id[slot] as usize != scc_idx { continue; }
+                if out_len < N {
+                    out_nodes[out_len]  = self.nodes[slot]
+                        .map(|r| r.vector)
+                        .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                    out_labels[out_len] = scc_idx.min(254) as u8;
+                    out_len += 1;
+                }
+            }
+        }
+
+        (out_nodes, out_labels, out_len, scc_count)
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -3449,6 +3610,24 @@ pub fn is_cyclic() -> bool {
 /// N controls the output buffer depth; cap at 128 (MAX_NODES) for full coverage.
 pub fn graph_toposort<const N: usize>() -> ([VectorAddress; N], usize, bool) {
     RUNTIME.lock().graph_toposort_inner()
+}
+
+/// V2.34: Strongly Connected Components of the live node graph (Kosaraju's algorithm).
+///
+/// Returns `(nodes, labels, total, scc_count)`:
+/// - `nodes[0..total]` — all live nodes packed in component order (SCC 0 first,
+///   then SCC 1, …).  Analogous to the component listing of `scc(1)` / Graphviz
+///   `sccmap`, or the "dependency island" report from `cargo graph`.
+/// - `labels[0..total]` — SCC index for the corresponding entry (monotone
+///   non-decreasing, so label changes mark SCC boundaries).
+/// - `total` — number of live nodes covered.
+/// - `scc_count` — number of distinct strongly-connected components.
+///
+/// An SCC with more than one node contains a directed cycle.
+/// When `scc_count == total` the graph is a DAG (no cycles).
+/// N controls the output buffer depth; cap at 128 (MAX_NODES) for full coverage.
+pub fn graph_scc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
+    RUNTIME.lock().graph_scc_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
