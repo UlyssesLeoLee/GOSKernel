@@ -1460,6 +1460,126 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// V2.31: BFS shortest-path search from `from` to `to` across registered edges.
+    ///
+    /// Returns `(path, length)` where `path[0..length]` is the ordered sequence of
+    /// VectorAddresses from `from` to `to` (inclusive at both ends).  `length == 0`
+    /// means no path exists (nodes unreachable or not found).  `length == 1` means
+    /// `from == to` (trivial self-path).
+    ///
+    /// Uses iterative BFS over the flat edge table.  Fixed-size stack arrays only —
+    /// no heap allocation, safe in `no_std` interrupt context.
+    pub fn find_graph_path_inner<const N: usize>(
+        &self,
+        from: VectorAddress,
+        to: VectorAddress,
+    ) -> ([VectorAddress; N], usize) {
+        const SENTINEL: usize = MAX_NODES; // "no predecessor"
+        let mut out = [VectorAddress::new(0, 0, 0, 0); N];
+
+        let from_slot = match self.node_slot_by_vec(from) {
+            Some(s) => s,
+            None => return (out, 0),
+        };
+        let to_slot = match self.node_slot_by_vec(to) {
+            Some(s) => s,
+            None => return (out, 0),
+        };
+
+        // Trivial self-path.
+        if from_slot == to_slot {
+            out[0] = from;
+            return (out, 1);
+        }
+
+        let mut visited  = [false;    MAX_NODES];
+        let mut prev     = [SENTINEL; MAX_NODES];
+        // Ring queue of node slots.
+        let mut q        = [0usize;   MAX_NODES];
+        let mut q_head   = 0usize;
+        let mut q_tail   = 0usize;
+
+        visited[from_slot] = true;
+        q[q_tail] = from_slot;
+        q_tail = (q_tail + 1) % MAX_NODES;
+
+        let mut found = false;
+
+        'bfs: while q_head != q_tail {
+            let cur_slot = q[q_head];
+            q_head = (q_head + 1) % MAX_NODES;
+
+            let cur_node_id = match self.nodes[cur_slot] {
+                Some(r) => r.spec.node_id,
+                None => continue,
+            };
+
+            // Enumerate all edges whose from_node == cur_node_id.
+            for edge_opt in &self.edges {
+                let edge = match edge_opt {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if edge.spec.from_node != cur_node_id {
+                    continue;
+                }
+                let next_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if visited[next_slot] {
+                    continue;
+                }
+                visited[next_slot] = true;
+                prev[next_slot] = cur_slot;
+                if next_slot == to_slot {
+                    found = true;
+                    break 'bfs;
+                }
+                let next_tail = (q_tail + 1) % MAX_NODES;
+                // If queue is full, stop exploring this branch (shouldn't happen with MAX_NODES).
+                if next_tail != q_head {
+                    q[q_tail] = next_slot;
+                    q_tail = next_tail;
+                }
+            }
+        }
+
+        if !found {
+            return (out, 0);
+        }
+
+        // Reconstruct path from to_slot back to from_slot via prev[].
+        let mut path_slots = [0usize; MAX_NODES];
+        let mut path_len   = 0usize;
+        let mut cur = to_slot;
+        while cur != SENTINEL && path_len < MAX_NODES {
+            path_slots[path_len] = cur;
+            path_len += 1;
+            if cur == from_slot {
+                break;
+            }
+            cur = prev[cur];
+        }
+
+        // path_slots[0..path_len] is currently [to .. from]; reverse it.
+        let mut lo = 0usize;
+        let mut hi = path_len.saturating_sub(1);
+        while lo < hi {
+            path_slots.swap(lo, hi);
+            lo += 1;
+            hi -= 1;
+        }
+
+        // Copy into output, capped at N.
+        let copy_len = path_len.min(N);
+        for i in 0..copy_len {
+            let slot = path_slots[i];
+            out[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0,0,0,0));
+        }
+        (out, copy_len)
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -3077,6 +3197,21 @@ pub fn emit_rule_applied(label: [u8; 16], rule_idx: u32, epoch_after: u64) {
     RUNTIME
         .lock()
         .emit_control_plane(ControlPlaneMessageKind::RuleApplied, label, rule_idx as u64, epoch_after);
+}
+
+/// V2.31: BFS shortest-path search from `from` to `to` across the live edge graph.
+///
+/// Returns `(path, length)` where `path[0..length]` is the ordered hop sequence
+/// (both endpoints included).  `length == 0` = no path or a node not found.
+/// `length == 1` = trivial self-path (`from == to`).
+///
+/// Analogous to `traceroute` / `pathping` — exposes graph connectivity through
+/// the shell surface without needing a separate query language.
+pub fn find_graph_path<const N: usize>(
+    from: VectorAddress,
+    to: VectorAddress,
+) -> ([VectorAddress; N], usize) {
+    RUNTIME.lock().find_graph_path_inner(from, to)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

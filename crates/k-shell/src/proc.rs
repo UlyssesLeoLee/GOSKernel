@@ -564,6 +564,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph topo         node count per l4 domain (like ip route show)\n");
         super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
         super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
+        super::print_str(sink, "  graph path <A> <B> BFS shortest path from node A to node B (like traceroute)\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -877,6 +878,35 @@ fn dispatch_text_command(
         super::dispatch_watch_stop(sink);
     } else if cmd == "graph health" || cmd == "health" {
         super::dispatch_graph_health(sink);
+    } else if let Some(pair_str) = cmd.strip_prefix("graph path ") {
+        // `graph path <from_vec> <to_vec>`
+        let trimmed = pair_str.trim();
+        // Find the space separating the two vector addresses.
+        // Vector addresses look like "1.2.3.4" — split at the first space.
+        if let Some(space) = trimmed.find(' ') {
+            let from_str = trimmed[..space].trim();
+            let to_str   = trimmed[space + 1..].trim();
+            match (
+                gos_protocol::VectorAddress::parse(from_str),
+                gos_protocol::VectorAddress::parse(to_str),
+            ) {
+                (Some(from), Some(to)) => super::dispatch_graph_path(sink, from, to),
+                (None, _) => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph path: invalid from-vector (e.g. 1.0.0.1)\n");
+                    super::set_color(sink, 7, 0);
+                }
+                (_, None) => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph path: invalid to-vector (e.g. 1.0.0.4)\n");
+                    super::set_color(sink, 7, 0);
+                }
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph path requires two vector addresses: graph path <from> <to>\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "graph topo" || cmd == "topo" {
         super::dispatch_graph_topo(sink, None);
     } else if let Some(l4_str) = cmd

@@ -2395,6 +2395,105 @@ pub fn dispatch_graph_health(sink: &ConsoleSink) {
     }
 }
 
+/// V2.31: `graph path <from> <to>` — BFS shortest-path trace between two nodes.
+///
+/// Analogous to `traceroute` on Linux / `pathping` on Windows: shows the sequence
+/// of graph hops from one node vector to another, following directed edges.
+/// Prints each hop's vector and node key so operators can trace data-flow paths
+/// through the graph topology at a glance.
+pub fn dispatch_graph_path(sink: &ConsoleSink, from: VectorAddress, to: VectorAddress) {
+    const MAX_PATH: usize = 32;
+    let mut path = [VectorAddress::new(0, 0, 0, 0); MAX_PATH];
+    let (filled_path, path_len) = gos_runtime::find_graph_path::<MAX_PATH>(from, to);
+    for i in 0..MAX_PATH {
+        path[i] = filled_path[i];
+    }
+
+    // Header banner
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH PATH ");
+    set_color(sink, 11, 0);
+    let mut from_buf = LineBuf::<20>::new();
+    from_buf.push_vector(from);
+    print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+    print_str(sink, " \xE2\x86\x92 "); // → (UTF-8)
+    let mut to_buf = LineBuf::<20>::new();
+    to_buf.push_vector(to);
+    print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+
+    if path_len == 0 {
+        set_color(sink, 12, 0);
+        print_str(sink, "  no path found (nodes unreachable or not registered)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Hop list
+    print_str(sink, "\n");
+    for i in 0..path_len {
+        let vec = path[i];
+        // hop number
+        print_str(sink, "  hop ");
+        if i + 1 < 10 {
+            print_str(sink, " ");
+        }
+        print_num_inline(sink, i + 1);
+        print_str(sink, "   ");
+
+        // vector address
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vstr);
+        // pad to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad {
+            print_str(sink, " ");
+        }
+        print_str(sink, "  ");
+
+        // node key + plugin name
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            // colour: first hop and last hop get accent colour
+            if i == 0 || i + 1 == path_len {
+                set_color(sink, 10, 0); // green = endpoints
+            } else {
+                set_color(sink, 14, 0); // yellow = intermediate
+            }
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+            set_color(sink, 7, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+    }
+
+    // Footer
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, path_len);
+    print_str(sink, " hop");
+    if path_len != 1 { print_str(sink, "s"); }
+    set_color(sink, 7, 0);
+    print_str(sink, "  |  from: ");
+    let mut fb2 = LineBuf::<20>::new();
+    fb2.push_vector(from);
+    print_str(sink, core::str::from_utf8(fb2.as_slice()).unwrap_or("?"));
+    print_str(sink, "  |  to: ");
+    let mut tb2 = LineBuf::<20>::new();
+    tb2.push_vector(to);
+    print_str(sink, core::str::from_utf8(tb2.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
