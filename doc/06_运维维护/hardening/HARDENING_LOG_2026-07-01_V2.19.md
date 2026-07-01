@@ -1,11 +1,11 @@
-# GOS 硬化日志 — V2.15
+# GOS 硬化日志 — V2.19
 
 | 项目 | 内容 |
 |---|---|
-| 版本 | V2.15 |
+| 版本 | V2.19 |
 | 日期 | 2026-07-01 |
 | 主题 | Theme Palette Nodes + Subscribe 自动重绘 |
-| 前置版本 | V2.14（proc/ps 命令 + 每节点信号计数器） |
+| 前置版本 | V2.18（graph health 命令 + faulted_node_count + diff_ring_fill） |
 | 测试套件 | gos-theme-node-harness（10 个 host 测试，全部通过） |
 | Demo 进度 | Demo C（Theme 0 行代码扩散）先决条件 ✓ |
 
@@ -13,13 +13,13 @@
 
 ## 1. 变更目标
 
-V2.15 解决 **Demo C（切 theme 0 行代码扩散）** 的核心技术缺口：
+V2.19 解决 **Demo C（切 theme 0 行代码扩散）** 的核心技术缺口：
 
 **变更前（V2.14）**：
 - `apply_theme_choice_raw` 在切主题时，`sync_theme_use_edges` 触发 `fire_subscribers` 发出控制面信封（仅限 supervisor 可见），同时**显式**调用 `emit_target_signal_raw(abi, VGA_VEC, Signal::Control { cmd: DISPLAY_CONTROL_THEME, val: theme })` 通知 k-vga 重绘。
 - Subscribe 机制（V2.5 已实现）只通知 supervisor 控制面，不直接触达 k-vga 的运行时信号队列。
 
-**变更后（V2.15）**：
+**变更后（V2.19）**：
 - `fire_subscribers` 在发出控制面信封的同时，**也向每个订阅者的运行时信号队列**投递 `Signal::Control { cmd: DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED, val }` — 使节点无须轮询控制面即可同步响应图结构变更。
 - `val` 字段通过 **node_prop_u8 存储**和 **Use 边目标查询**自动编码：k-shell 在初始化时注册 `THEME_WABI_NODE_ID → 0x00`、`THEME_SHOJI_NODE_ID → 0x01`，runtime 的 `fire_subscribers` 通过 `active_use_target(changed)` 找到当前活跃主题节点，再查 prop 得到 val。
 - k-shell 的 `apply_theme_choice_raw` 删除显式 VGA 信号，主题切换完全由 Subscribe 机制驱动。
@@ -95,13 +95,13 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 | 条件 | 状态 |
 |---|---|
 | V2.5 Subscribe 机制（控制面信封） | ✅ V2.5 已完成 |
-| fire_subscribers 向运行时队列投递 Signal | ✅ **V2.15 新增** |
-| k-vga 响应 SUBSCRIBE_TRIGGERED | ✅ **V2.15 新增** |
-| k-shell 删除显式 VGA 广播 | ✅ **V2.15 新增** |
-| node_prop_u8 encode 活跃主题 val | ✅ **V2.15 新增** |
+| fire_subscribers 向运行时队列投递 Signal | ✅ **V2.19 新增** |
+| k-vga 响应 SUBSCRIBE_TRIGGERED | ✅ **V2.19 新增** |
+| k-shell 删除显式 VGA 广播 | ✅ **V2.19 新增** |
+| node_prop_u8 encode 活跃主题 val | ✅ **V2.19 新增** |
 
 Demo C 定义：「切 theme → 所有渲染节点自动重绘，theme 切换代码 0 行扩散」  
-V2.15 后，`apply_theme_choice_raw` 中不再有任何向 k-vga 的显式信号，主题切换完全通过 Subscribe 边代数驱动。**Demo C 先决条件已全部满足。**
+V2.19 后，`apply_theme_choice_raw` 中不再有任何向 k-vga 的显式信号，主题切换完全通过 Subscribe 边代数驱动。**Demo C 先决条件已全部满足。**
 
 ### node_prop_u8 通用性
 
@@ -115,7 +115,7 @@ V2.15 后，`apply_theme_choice_raw` 中不再有任何向 k-vga 的显式信号
 
 | 套件 | 测试数 |
 |---|---|
-| V2.0~V2.7 各套件 | 43 |
+| V2.0~V2.18 各套件（含 gos-theme-node-harness 以外） | 183 |
 | gos-node-inspect-harness (V2.8) | 10 |
 | gos-boot-harness (V2.9) | 14 |
 | gos-metrics-harness (V2.10) | 10 |
@@ -123,5 +123,5 @@ V2.15 后，`apply_theme_choice_raw` 中不再有任何向 k-vga 的显式信号
 | gos-edge-inspect-harness (V2.12) | 10 |
 | gos-graph-diff-harness (V2.13) | 10 |
 | gos-proc-harness (V2.14) | 10 |
-| **gos-theme-node-harness (V2.15)** | **10** |
+| **gos-theme-node-harness (V2.19)** | **10** |
 | **合计** | **131** |

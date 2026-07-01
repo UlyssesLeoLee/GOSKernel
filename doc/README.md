@@ -101,8 +101,8 @@
 | [hardening/HARDENING_LOG_2026-07-01_V2.12.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.12.md) | MD | V2.12 — edges 命令 + gos-edge-inspect-harness 10 测试 |
 | [hardening/HARDENING_LOG_2026-07-01_V2.13.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.13.md) | MD | V2.13 — graph diff 命令 + 结构突变差分环 + 10 测试 |
 | [hardening/HARDENING_LOG_2026-07-01_V2.14.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.14.md) | MD | V2.14 — proc/ps 命令 + 每节点信号计数器 + gos-proc-harness 10 测试（原英文版已归位并中文化） |
-| [hardening/HARDENING_LOG_2026-07-01_V2.15.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.15.md) | MD | V2.15 — Theme Palette Nodes + Subscribe 自动重绘 + fire_subscribers Signal 投递 + gos-theme-node-harness 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-01_V2.19.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.19.md) | MD | V2.19 — Theme Palette Nodes + Subscribe 自动重绘 + fire_subscribers Signal 投递 + gos-theme-node-harness 10 测试 |
 
 ---
 
-*最终更新：2026-07-01 · GOS V2.15 · Demo C（Theme 0 行代码扩散）先决条件全部满足*
+*最终更新：2026-07-01 · GOS V2.19 · Demo C（Theme 0 行代码扩散）先决条件全部满足*
