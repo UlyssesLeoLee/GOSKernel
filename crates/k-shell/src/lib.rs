@@ -1969,6 +1969,53 @@ fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str 
     }
 }
 
+/// List all registered plugins — `lsmod`-style inventory.
+/// Shows name, version, load state, and node count per plugin.
+pub fn dispatch_plugin_list(sink: &ConsoleSink) {
+    use gos_protocol::PluginSummary;
+    const PAGE: usize = 32;
+    let mut summaries = [PluginSummary::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::plugin_page::<PAGE>(0, &mut summaries);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " plugins");
+    set_color(sink, 8, 0);
+    print_str(sink, "  name                 ver   state       nodes\n");
+    set_color(sink, 7, 0);
+
+    for summary in summaries.iter().take(filled) {
+        let fg: u8 = match summary.state {
+            gos_protocol::PluginState::Loaded     => 10,
+            gos_protocol::PluginState::Faulted    => 12,
+            gos_protocol::PluginState::Discovered => 8,
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+        let name = summary.name;
+        print_str(sink, name);
+        let pad = 22usize.saturating_sub(name.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_num_right4(sink, summary.version as usize);
+        print_str(sink, "  ");
+        let state_str = summary.state.as_str();
+        print_str(sink, state_str);
+        let state_pad = 12usize.saturating_sub(state_str.len());
+        for _ in 0..state_pad { print_str(sink, " "); }
+        print_num_right4(sink, summary.node_count);
+        print_str(sink, "\n");
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no plugins registered)\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " plugin(s)\n");
+    set_color(sink, 7, 0);
+}
+
 fn module_fault_policy_label(policy: gos_protocol::ModuleFaultPolicy) -> &'static str {
     match policy {
         gos_protocol::ModuleFaultPolicy::FaultKernelDegraded => "kernel-degrade",

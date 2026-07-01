@@ -1684,6 +1684,51 @@ impl GraphEdgeSummary {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Plugin inventory types — lsmod-style listing (V2.20)
+// ---------------------------------------------------------------------------
+
+/// Public load state for a graph plugin — returned in `PluginSummary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PluginState {
+    Discovered = 0x00,
+    Loaded     = 0x01,
+    Faulted    = 0xFF,
+}
+
+impl PluginState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PluginState::Discovered => "discovered",
+            PluginState::Loaded     => "loaded",
+            PluginState::Faulted    => "faulted",
+        }
+    }
+}
+
+/// One-row summary for a registered graph plugin.
+/// Returned by `gos_runtime::plugin_page()`, analogous to `lsmod` output.
+#[derive(Debug, Clone, Copy)]
+pub struct PluginSummary {
+    pub plugin_id:  PluginId,
+    pub name:       &'static str,
+    pub version:    u32,
+    pub state:      PluginState,
+    /// Number of nodes currently registered under this plugin.
+    pub node_count: usize,
+}
+
+impl PluginSummary {
+    pub const EMPTY: Self = Self {
+        plugin_id:  PluginId::ZERO,
+        name:       "",
+        version:    0,
+        state:      PluginState::Discovered,
+        node_count: 0,
+    };
+}
+
 
 #[derive(Debug, Clone, Copy)]
 pub struct ControlPlaneHint {

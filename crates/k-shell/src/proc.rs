@@ -681,6 +681,8 @@ fn dispatch_text_command(
         super::dispatch_nodes_list(sink, true);
     } else if cmd == "nodes summary" || cmd == "nodes stat" {
         super::dispatch_lifecycle_summary(sink);
+    } else if cmd == "plugins" || cmd == "lsmod" || cmd == "plugin list" {
+        super::dispatch_plugin_list(sink);
     } else if cmd == "boot" || cmd == "boot verify" || cmd == "boot status" {
         super::dispatch_boot_verify(sink);
     } else if cmd == "metrics export" || cmd == "metrics dump" {

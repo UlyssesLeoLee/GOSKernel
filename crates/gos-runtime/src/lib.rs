@@ -10,7 +10,8 @@ use gos_protocol::{
     GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
     KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
     NodeId, NodeInstanceId, NodeLifecycle, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry,
-    PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta, VectorAddress,
+    PluginId, PluginManifest, PluginState, PluginSummary, RoutePolicy, RuntimeEdgeType, Signal,
+    StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
 };
 use spin::Mutex;
@@ -558,6 +559,59 @@ impl GraphRuntime {
     /// Equals `min(diff_total, MAX_DIFF_RING)`.
     pub fn diff_ring_fill(&self) -> usize {
         self.diff_total.min(MAX_DIFF_RING as u64) as usize
+    }
+
+    // ── Plugin inventory API (V2.20) ──────────────────────────────────────────
+
+    fn plugin_summary_from_slot(&self, slot: usize) -> Option<PluginSummary> {
+        let record = self.plugins[slot]?;
+        let node_count = self
+            .nodes
+            .iter()
+            .filter(|s| s.map(|r| r.plugin_id == record.manifest.plugin_id).unwrap_or(false))
+            .count();
+        Some(PluginSummary {
+            plugin_id:  record.manifest.plugin_id,
+            name:       record.manifest.name,
+            version:    record.manifest.version,
+            state: match record.state {
+                PluginLoadState::Discovered => PluginState::Discovered,
+                PluginLoadState::Loaded     => PluginState::Loaded,
+                PluginLoadState::Faulted    => PluginState::Faulted,
+            },
+            node_count,
+        })
+    }
+
+    /// Return a page of `PluginSummary` in discovery order.
+    /// Returns `(total_plugins, filled)`.
+    pub fn plugin_page<const N: usize>(
+        &self,
+        offset: usize,
+        out: &mut [PluginSummary; N],
+    ) -> (usize, usize) {
+        let mut total = 0usize;
+        let mut returned = 0usize;
+        let mut cursor = 0usize;
+        for slot in 0..MAX_PLUGINS {
+            if self.plugins[slot].is_none() {
+                continue;
+            }
+            if cursor >= offset && returned < N {
+                if let Some(summary) = self.plugin_summary_from_slot(slot) {
+                    out[returned] = summary;
+                    returned += 1;
+                }
+            }
+            total += 1;
+            cursor += 1;
+        }
+        (total, returned)
+    }
+
+    /// Total number of registered (discovered) plugins.
+    pub fn plugin_count(&self) -> usize {
+        self.plugins.iter().filter(|s| s.is_some()).count()
     }
 
     fn edge_summary_from_slot(
@@ -2591,6 +2645,17 @@ pub fn faulted_node_count() -> usize {
 /// How many valid entries are in the structural diff ring (0–`MAX_DIFF_RING`).
 pub fn diff_ring_fill() -> usize {
     RUNTIME.lock().diff_ring_fill()
+}
+
+/// Return a page of `PluginSummary` in discovery order.
+/// Returns `(total_plugins, filled)`.
+pub fn plugin_page<const N: usize>(offset: usize, out: &mut [PluginSummary; N]) -> (usize, usize) {
+    RUNTIME.lock().plugin_page(offset, out)
+}
+
+/// Total number of registered (discovered) plugins.
+pub fn plugin_count() -> usize {
+    RUNTIME.lock().plugin_count()
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {
