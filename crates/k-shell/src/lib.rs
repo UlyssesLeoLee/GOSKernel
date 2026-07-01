@@ -1308,6 +1308,18 @@ pub fn dispatch_journal_info(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Parse a decimal string into a u64 epoch number, no_std-compatible.
+/// Returns None if the input is empty or contains any non-ASCII-digit character.
+pub(crate) fn parse_epoch_decimal(s: &str) -> Option<u64> {
+    if s.is_empty() { return None; }
+    let mut val: u64 = 0;
+    for b in s.bytes() {
+        if b < b'0' || b > b'9' { return None; }
+        val = val.saturating_mul(10).saturating_add((b - b'0') as u64);
+    }
+    Some(val)
+}
+
 /// Parse an edge-type filter word from the `edges <type>` command.
 fn parse_edge_type_filter(s: &str) -> Option<RuntimeEdgeType> {
     match s.trim() {

@@ -525,6 +525,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
         super::print_str(sink, "  graph diff         show topology changes since pinned epoch (like git diff)\n");
+        super::print_str(sink, "  graph diff <N>     show topology changes since epoch N (e.g. graph diff 42)\n");
         super::print_str(sink, "  graph diff pin     pin current epoch as diff baseline\n");
         super::print_str(sink, "  graph diff reset   reset baseline to epoch 0 (show all since boot)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
@@ -721,6 +722,21 @@ fn dispatch_text_command(
         super::set_color(sink, 10, 0);
         super::print_str(sink, " diff baseline reset to epoch 0 (showing all since boot)\n");
         super::set_color(sink, 7, 0);
+    } else if let Some(epoch_str) = cmd
+        .strip_prefix("graph diff ")
+        .or_else(|| cmd.strip_prefix("diff "))
+        .filter(|s| *s != "pin" && *s != "reset")
+    {
+        // `graph diff <N>` — show diff since a specific epoch number supplied inline.
+        // "graph diff pin" and "graph diff reset" are already matched above via exact branches.
+        let trimmed = epoch_str.trim();
+        if let Some(epoch) = super::parse_epoch_decimal(trimmed) {
+            super::dispatch_graph_diff(sink, epoch);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph diff <epoch>: epoch must be a decimal number (e.g. graph diff 42)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);
