@@ -9,8 +9,8 @@ use gos_protocol::{
     EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind,
     GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
     KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
-    NodeId, NodeInstanceId, NodeLifecycle, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry,
-    NodeTraceEntry,
+    NodeId, NodeInstanceId, NodeLifecycle, NodeLogEntry, NodeProcSummary, NodeSpec, NodeState,
+    NodeTelemetry, NodeTraceEntry,
     PluginId, PluginManifest, PluginState, PluginSummary, RoutePolicy, RuntimeEdgeType, Signal,
     StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
@@ -35,6 +35,8 @@ pub const MAX_DIFF_RING: usize = 128;
 pub const MAX_NODE_PROPS_U8: usize = 16;
 /// V2.24: per-node signal trace ring depth — most recent N dispatches.
 pub const MAX_NODE_TRACE: usize = 16;
+/// V2.25: per-node lifecycle event log depth — most recent N transitions.
+pub const MAX_NODE_LOG: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -344,6 +346,13 @@ pub struct GraphRuntime {
     node_trace: [[NodeTraceEntry; MAX_NODE_TRACE]; MAX_NODES],
     /// Next write position in each node's trace ring.
     node_trace_head: [u8; MAX_NODES],
+    /// V2.25 per-node lifecycle event log rings, indexed by node slot.
+    /// Each ring records the most recent MAX_NODE_LOG lifecycle transitions.
+    node_log: [[NodeLogEntry; MAX_NODE_LOG]; MAX_NODES],
+    /// Next write position in each node's log ring.
+    node_log_head: [u8; MAX_NODES],
+    /// Total lifecycle events ever logged per node slot (monotonic; saturates at u16::MAX).
+    node_log_total: [u16; MAX_NODES],
 }
 
 impl Default for GraphRuntime {
@@ -386,6 +395,9 @@ impl GraphRuntime {
             diff_total: 0,
             node_trace: [[NodeTraceEntry::EMPTY; MAX_NODE_TRACE]; MAX_NODES],
             node_trace_head: [0u8; MAX_NODES],
+            node_log: [[NodeLogEntry::EMPTY; MAX_NODE_LOG]; MAX_NODES],
+            node_log_head: [0u8; MAX_NODES],
+            node_log_total: [0u16; MAX_NODES],
         }
     }
 
@@ -670,6 +682,14 @@ impl GraphRuntime {
 
     fn state_delta(&mut self, node_id: NodeId, state: NodeLifecycle) {
         self.emit_control_plane(ControlPlaneMessageKind::StateDelta, node_id.0, state as u64, self.tick);
+        // V2.25: append lifecycle transition to the per-node log ring.
+        if let Some(slot) = self.node_slot_by_id(node_id) {
+            let entry = NodeLogEntry { tick: self.tick, lifecycle: state as u8, _pad: [0u8; 7] };
+            let head = self.node_log_head[slot] as usize;
+            self.node_log[slot][head] = entry;
+            self.node_log_head[slot] = ((head + 1) % MAX_NODE_LOG) as u8;
+            self.node_log_total[slot] = self.node_log_total[slot].saturating_add(1);
+        }
     }
 
     pub fn reset(&mut self) {
@@ -1376,6 +1396,26 @@ impl GraphRuntime {
             out[returned] = self.node_trace[slot][ring_pos];
             returned += 1;
             idx += 1;
+        }
+        Ok((total, returned))
+    }
+
+    /// Return the lifecycle event log for `vector` — most recent transition first.
+    /// Returns `(total_events, entries_written)`.
+    pub fn node_log_page(
+        &self,
+        vector: VectorAddress,
+        out: &mut [NodeLogEntry; MAX_NODE_LOG],
+    ) -> Result<(usize, usize), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let total = self.node_log_total[slot] as usize;
+        let ring_fill = total.min(MAX_NODE_LOG);
+        let head = self.node_log_head[slot] as usize;
+        let mut returned = 0usize;
+        for idx in 0..ring_fill {
+            let ring_pos = (head + MAX_NODE_LOG - 1 - idx) % MAX_NODE_LOG;
+            out[returned] = self.node_log[slot][ring_pos];
+            returned += 1;
         }
         Ok((total, returned))
     }
@@ -2712,6 +2752,15 @@ pub fn node_trace_page(
     out: &mut [NodeTraceEntry; MAX_NODE_TRACE],
 ) -> Result<(u32, usize), RuntimeError> {
     RUNTIME.lock().node_trace_page(vec, out)
+}
+
+/// V2.25: Return the lifecycle event log for `vec` — up to `MAX_NODE_LOG` most recent
+/// lifecycle transitions, newest first.  Returns `(total_events, entries_written)`.
+pub fn node_log_page(
+    vec: VectorAddress,
+    out: &mut [NodeLogEntry; MAX_NODE_LOG],
+) -> Result<(usize, usize), RuntimeError> {
+    RUNTIME.lock().node_log_page(vec, out)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

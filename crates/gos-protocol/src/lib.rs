@@ -1672,6 +1672,23 @@ impl NodeTraceEntry {
     pub const EMPTY: Self = Self { from: 0, serial: 0, kind: 0, cmd: 0 };
 }
 
+/// V2.25 — one entry in the per-node lifecycle event log (like `journalctl -u <service>`).
+///
+/// Records each `NodeLifecycle` state transition with the monotonic tick at
+/// which it occurred.  `tick == 0 && lifecycle == 0` is the EMPTY sentinel.
+#[derive(Clone, Copy)]
+pub struct NodeLogEntry {
+    /// Monotonic runtime tick when this lifecycle transition occurred.
+    pub tick:      u64,
+    /// New `NodeLifecycle` state, encoded as its `#[repr(u8)]` discriminant.
+    pub lifecycle: u8,
+    pub _pad:      [u8; 7],
+}
+
+impl NodeLogEntry {
+    pub const EMPTY: Self = Self { tick: 0, lifecycle: 0, _pad: [0u8; 7] };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GraphEdgeSummary {
     pub edge_vector: EdgeVector,

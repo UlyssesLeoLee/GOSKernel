@@ -1935,6 +1935,80 @@ fn signal_kind_entry(kind: u8) -> (&'static str, u8) {
     }
 }
 
+/// `node log <vec>` / `nlog <vec>` — per-node lifecycle event log.
+///
+/// Analogous to `journalctl -u <service>`: shows the most recent lifecycle
+/// state transitions for one node, newest first.
+/// Each row: tick | lifecycle state label.
+pub fn dispatch_node_log(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    let mut log = [gos_protocol::NodeLogEntry::EMPTY; gos_runtime::MAX_NODE_LOG];
+    match gos_runtime::node_log_page(vec, &mut log) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok((total, returned)) => {
+            set_color(sink, 11, 0);
+            print_str(sink, " node log  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "  total=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, total);
+            set_color(sink, 8, 0);
+            print_str(sink, "  showing=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, returned);
+            print_str(sink, "\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "    tick  lifecycle\n");
+            set_color(sink, 7, 0);
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "   (no lifecycle events recorded yet)\n");
+                set_color(sink, 7, 0);
+            }
+            for i in 0..returned {
+                let e = log[i];
+                print_num_right4(sink, e.tick as usize);
+                print_str(sink, "  ");
+                let (label, color) = lifecycle_log_entry(e.lifecycle);
+                set_color(sink, color, 0);
+                print_str(sink, label);
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: node trace <vec> for signal history | ninfo <vec> for full view\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+fn lifecycle_log_entry(lc: u8) -> (&'static str, u8) {
+    use gos_protocol::NodeLifecycle;
+    match lc {
+        x if x == NodeLifecycle::Discovered  as u8 => ("Discovered ", 8),
+        x if x == NodeLifecycle::Loaded      as u8 => ("Loaded     ", 7),
+        x if x == NodeLifecycle::Registered  as u8 => ("Registered ", 10),
+        x if x == NodeLifecycle::Allocated   as u8 => ("Allocated  ", 9),
+        x if x == NodeLifecycle::Ready       as u8 => ("Ready      ", 10),
+        x if x == NodeLifecycle::Running     as u8 => ("Running    ", 14),
+        x if x == NodeLifecycle::Waiting     as u8 => ("Waiting    ", 13),
+        x if x == NodeLifecycle::Suspended   as u8 => ("Suspended  ", 11),
+        x if x == NodeLifecycle::Terminated  as u8 => ("Terminated ", 8),
+        x if x == NodeLifecycle::Faulted     as u8 => ("Faulted    ", 12),
+        _                                          => ("?          ", 8),
+    }
+}
+
 /// `graph topo` — hierarchical L4-domain topology view.
 ///
 /// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are
