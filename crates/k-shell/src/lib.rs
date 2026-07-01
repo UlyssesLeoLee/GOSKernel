@@ -1649,6 +1649,35 @@ pub fn dispatch_node_stat(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// Forcibly fault the node at `vec` — the graph-OS equivalent of `kill -9`.
+/// Reports the faulted vector on success (green) or "not found" (red) when the
+/// vector is not registered.
+pub fn dispatch_node_kill(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+    match gos_runtime::fault_node(vec) {
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " kill: node faulted\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  vector:   ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n  lifecycle -> Faulted  |  fault queue enqueued\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: use `nodes faulted` to list faulted nodes\n");
+            set_color(sink, 7, 0);
+        }
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " kill: node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
 /// `graph topo` — hierarchical L4-domain topology view.
 ///
 /// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are

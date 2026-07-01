@@ -1537,6 +1537,22 @@ impl GraphRuntime {
         self.fault_queue.pop()
     }
 
+    /// Forcibly fault the node at `vector` — the graph-OS equivalent of
+    /// `kill -9 <pid>`.  Sets the node's lifecycle to `NodeLifecycle::Faulted`,
+    /// emits a `StateDelta` control-plane event, and enqueues the vector on the
+    /// fault queue so the supervisor's restart policy fires on the next pump tick.
+    /// Already-faulted nodes are re-enqueued without error.
+    /// Returns `Err(NodeNotFound)` when no registered node has that vector address.
+    pub fn fault_node(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
+        record.lifecycle = NodeLifecycle::Faulted;
+        self.nodes[slot] = Some(record);
+        self.state_delta(record.spec.node_id, NodeLifecycle::Faulted);
+        let _ = self.fault_queue.push(vector);
+        Ok(())
+    }
+
     pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
         self.node_slot_by_vec(vector)
             .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
@@ -2656,6 +2672,14 @@ pub fn plugin_page<const N: usize>(offset: usize, out: &mut [PluginSummary; N]) 
 /// Total number of registered (discovered) plugins.
 pub fn plugin_count() -> usize {
     RUNTIME.lock().plugin_count()
+}
+
+/// Forcibly fault the node at `vector` — graph-OS `kill -9` for graph nodes.
+/// Sets lifecycle to `NodeLifecycle::Faulted`, emits a StateDelta control-plane
+/// event, and enqueues the vector on the fault queue for supervisor restart
+/// handling.  Returns `Err(NodeNotFound)` when no node has that vector address.
+pub fn fault_node(vector: VectorAddress) -> Result<(), RuntimeError> {
+    RUNTIME.lock().fault_node(vector)
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {
