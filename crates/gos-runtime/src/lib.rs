@@ -1449,6 +1449,17 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// V2.28: Reset the cumulative signal_count for `vector` to zero.
+    /// Analogous to `perf stat reset` — zeroes the counter shown by `proc` and `stat`
+    /// without touching the trace ring or lifecycle log.
+    /// Returns `Err(RuntimeError::NodeNotFound)` if the node is not registered.
+    pub fn reset_node_stat_inner(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+        record.signal_count = 0;
+        Ok(())
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -2805,6 +2816,13 @@ pub fn clear_node_trace(vec: VectorAddress) -> Result<(), RuntimeError> {
     RUNTIME.lock().clear_node_trace_inner(vec)
 }
 
+/// V2.28: Reset the cumulative signal_count for `vec` to zero.
+/// Subsequent `proc` and `stat` commands will show 0 for this node until the next dispatch.
+/// The trace ring and lifecycle log are not affected.
+pub fn reset_node_stat(vec: VectorAddress) -> Result<(), RuntimeError> {
+    RUNTIME.lock().reset_node_stat_inner(vec)
+}
+
 /// Count registered nodes whose vector address has the given `l4` domain byte.
 pub fn node_count_for_l4(l4: u8) -> usize {
     RUNTIME.lock().node_count_for_l4(l4)
@@ -2859,6 +2877,48 @@ pub fn resume_node(vector: VectorAddress) -> Result<(), RuntimeError> {
 
 pub fn bootstrap_context(payload: u64) -> BootContext {
     BootContext::new(payload)
+}
+
+/// V2.28: compile-time capacity limits exposed as a typed struct.
+/// Analogous to `getrlimit` / `sysctl` on Linux — operators can query
+/// the maximum node, edge, and plugin counts without reading source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeCapacity {
+    pub max_nodes: usize,
+    pub max_edges: usize,
+    pub max_plugins: usize,
+    pub max_ready_queue: usize,
+    pub max_signal_queue: usize,
+    pub max_fault_queue: usize,
+    pub max_diff_ring: usize,
+    pub max_node_trace: usize,
+    pub max_node_log: usize,
+    pub max_subscribe_pairs: usize,
+    pub abi_major: u8,
+    pub abi_minor: u8,
+    pub abi_patch: u16,
+    pub protocol_version: u16,
+}
+
+/// Return the compile-time capacity limits of this GOS runtime instance.
+/// This is a pure constant read — no lock, no allocation.
+pub fn runtime_capacity() -> RuntimeCapacity {
+    RuntimeCapacity {
+        max_nodes: MAX_NODES,
+        max_edges: MAX_EDGES,
+        max_plugins: MAX_PLUGINS,
+        max_ready_queue: MAX_READY_QUEUE,
+        max_signal_queue: MAX_SIGNAL_QUEUE,
+        max_fault_queue: MAX_FAULT_QUEUE,
+        max_diff_ring: MAX_DIFF_RING,
+        max_node_trace: MAX_NODE_TRACE,
+        max_node_log: MAX_NODE_LOG,
+        max_subscribe_pairs: MAX_SUBSCRIBE_PAIRS,
+        abi_major: gos_protocol::GOS_ABI_MAJOR,
+        abi_minor: gos_protocol::GOS_ABI_MINOR,
+        abi_patch: gos_protocol::GOS_ABI_PATCH,
+        protocol_version: CONTROL_PLANE_PROTOCOL_VERSION,
+    }
 }
 
 // ── Hardware IRQ → Graph routing table ───────────────────────────────────────

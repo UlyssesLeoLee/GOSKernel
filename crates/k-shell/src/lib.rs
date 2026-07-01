@@ -2021,6 +2021,37 @@ pub fn dispatch_node_trace_clear(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// `node stat clear <vec>` / `nstat clear <vec>` — reset per-node signal_count to zero.
+///
+/// Analogous to `perf stat reset` or `echo 0 > /proc/<pid>/clear_refs`:
+/// zeroes the cumulative signal dispatch counter shown by `proc` and `stat`.
+/// Useful after node recovery or when starting a fresh measurement window.
+/// Does not affect the trace ring or lifecycle log.
+pub fn dispatch_node_stat_clear(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::reset_node_stat(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node stat cleared  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  signal_count -> 0  (trace ring and log unaffected)\n");
+        }
+    }
+}
+
 /// `node log clear <vec>` / `nlog clear <vec>` — clear per-node lifecycle event log.
 ///
 /// Analogous to `journalctl --vacuum-time` or `truncate -s0 /var/log/…`:
@@ -2341,6 +2372,60 @@ pub fn dispatch_graph_health(sink: &ConsoleSink) {
         print_str(sink, "  hint: run 'nodes faulted' for fault details\n");
         set_color(sink, 7, 0);
     }
+}
+
+/// V2.28: `uname` — kernel version and capacity limits.
+/// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
+/// Shows GOS version, ABI, capacity limits, and queue/ring depths.
+pub fn dispatch_uname(sink: &ConsoleSink) {
+    let cap = gos_runtime::runtime_capacity();
+    let snapshot = gos_runtime::snapshot();
+    set_color(sink, 11, 0);
+    print_str(sink, " kernel info\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  GOS v2.28 (graph-kernel)  abi: ");
+    print_num_inline(sink, cap.abi_major as usize);
+    print_str(sink, ".");
+    print_num_inline(sink, cap.abi_minor as usize);
+    print_str(sink, ".");
+    print_num_inline(sink, cap.abi_patch as usize);
+    print_str(sink, "  protocol: ");
+    print_num_inline(sink, cap.protocol_version as usize);
+    print_str(sink, "\n  capacity");
+    set_color(sink, 11, 0);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    nodes:          ");
+    print_num_inline(sink, snapshot.node_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_nodes);
+    print_str(sink, "\n    edges:          ");
+    print_num_inline(sink, snapshot.edge_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_edges);
+    print_str(sink, "\n    plugins:        ");
+    print_num_inline(sink, snapshot.plugin_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_plugins);
+    print_str(sink, "\n    ready-queue:    ");
+    print_num_inline(sink, cap.max_ready_queue);
+    print_str(sink, "  signal-queue: ");
+    print_num_inline(sink, cap.max_signal_queue);
+    print_str(sink, "  fault-queue: ");
+    print_num_inline(sink, cap.max_fault_queue);
+    print_str(sink, "\n    diff-ring:      ");
+    print_num_inline(sink, cap.max_diff_ring);
+    print_str(sink, "  subscribe-pairs: ");
+    print_num_inline(sink, cap.max_subscribe_pairs);
+    print_str(sink, "\n    node-trace:     ");
+    print_num_inline(sink, cap.max_node_trace);
+    print_str(sink, " (ring depth per node)");
+    print_str(sink, "\n    node-log:       ");
+    print_num_inline(sink, cap.max_node_log);
+    print_str(sink, " (ring depth per node)");
+    print_str(sink, "\n  arch: x86_64  no_std  tick: ");
+    print_num_inline(sink, snapshot.tick as usize);
+    print_str(sink, "\n");
 }
 
 /// Right-align a number in 4 columns (spaces then digits).

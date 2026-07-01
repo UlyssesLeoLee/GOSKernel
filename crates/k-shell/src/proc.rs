@@ -521,6 +521,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  journal            journal format info and replay status\n");
         super::print_str(sink, "  proc               ps-style table: node signal counts + edge out-degree\n");
         super::print_str(sink, "  stat <vector>      detailed stat for one node (like /proc/<pid>/status)\n");
+        super::print_str(sink, "  node stat clear <vector>  reset signal_count to 0 (like perf stat reset)\n");
+        super::print_str(sink, "  nstat clear <vector>      alias for node stat clear\n");
         super::print_str(sink, "  kill <vector>      fault a node by vector (like kill -9 <pid>)\n");
         super::print_str(sink, "  node fault <vector>  alias for kill\n");
         super::print_str(sink, "  resume <vector>    resume a faulted/suspended node (like systemctl restart)\n");
@@ -545,6 +547,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph topo         node count per l4 domain (like ip route show)\n");
         super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
         super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
+        super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
+        super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -705,6 +709,17 @@ fn dispatch_text_command(
         super::dispatch_journal_info(sink);
     } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
         super::dispatch_proc_list(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node stat clear ")
+        .or_else(|| cmd.strip_prefix("nstat clear "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_stat_clear(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node stat clear requires a vector address (e.g. node stat clear 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(vec_str) = cmd.strip_prefix("stat ").or_else(|| cmd.strip_prefix("node stat ")) {
         if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
             super::dispatch_node_stat(sink, vec);
@@ -834,6 +849,8 @@ fn dispatch_text_command(
             super::print_str(sink, " graph diff <epoch>: epoch must be a decimal number (e.g. graph diff 42)\n");
             super::set_color(sink, 7, 0);
         }
+    } else if cmd == "uname" || cmd == "uname -a" || cmd == "ver" || cmd == "version" {
+        super::dispatch_uname(sink);
     } else if cmd == "graph health" || cmd == "health" {
         super::dispatch_graph_health(sink);
     } else if cmd == "graph topo" || cmd == "topo" {
