@@ -530,6 +530,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph diff reset   reset baseline to epoch 0 (show all since boot)\n");
         super::print_str(sink, "  graph topo         node count per l4 domain (like ip route show)\n");
         super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
+        super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -739,6 +740,8 @@ fn dispatch_text_command(
             super::print_str(sink, " graph diff <epoch>: epoch must be a decimal number (e.g. graph diff 42)\n");
             super::set_color(sink, 7, 0);
         }
+    } else if cmd == "graph health" || cmd == "health" {
+        super::dispatch_graph_health(sink);
     } else if cmd == "graph topo" || cmd == "topo" {
         super::dispatch_graph_topo(sink, None);
     } else if let Some(l4_str) = cmd

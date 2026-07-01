@@ -537,6 +537,20 @@ impl GraphRuntime {
         (total, returned)
     }
 
+    /// Count nodes currently in `NodeLifecycle::Faulted` state.
+    pub fn faulted_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|s| s.map(|r| r.lifecycle == NodeLifecycle::Faulted).unwrap_or(false))
+            .count()
+    }
+
+    /// How many valid entries are currently in the structural diff ring.
+    /// Equals `min(diff_total, MAX_DIFF_RING)`.
+    pub fn diff_ring_fill(&self) -> usize {
+        self.diff_total.min(MAX_DIFF_RING as u64) as usize
+    }
+
     fn edge_summary_from_slot(
         &self,
         slot: usize,
@@ -2484,6 +2498,16 @@ pub fn node_page_l4<const N: usize>(
     out: &mut [GraphNodeSummary; N],
 ) -> (usize, usize) {
     RUNTIME.lock().node_page_l4(l4, offset, out)
+}
+
+/// Count of live nodes currently in the `Faulted` lifecycle state.
+pub fn faulted_node_count() -> usize {
+    RUNTIME.lock().faulted_node_count()
+}
+
+/// How many valid entries are in the structural diff ring (0–`MAX_DIFF_RING`).
+pub fn diff_ring_fill() -> usize {
+    RUNTIME.lock().diff_ring_fill()
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {

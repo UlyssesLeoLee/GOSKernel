@@ -1816,6 +1816,126 @@ pub fn dispatch_graph_topo(sink: &ConsoleSink, l4_filter: Option<u8>) {
     }
 }
 
+/// Holistic system health report — the GOS equivalent of `systemctl status`
+/// combined with `dmesg --level=err,warn`.
+///
+/// Aggregates node fault counts, diff ring saturation, subscription pairs,
+/// runtime preemptions, domain switches, and boot manifest results into a
+/// single colour-coded health banner + detail table.
+pub fn dispatch_graph_health(sink: &ConsoleSink) {
+    let total        = gos_runtime::proc_count();
+    let faulted      = gos_runtime::faulted_node_count();
+    let epoch        = gos_runtime::graph_epoch();
+    let diff_fill    = gos_runtime::diff_ring_fill();
+    let diff_tot     = gos_runtime::diff_total();
+    let sub_pairs    = gos_runtime::subscribe_pair_count();
+    let preempts     = gos_runtime::preempt_count();
+    let dom_sw       = gos_runtime::domain_switch_count();
+    let rules        = gos_runtime::boot_manifest_rules_checked();
+    let healed       = gos_runtime::boot_manifest_edges_healed();
+    let edge_count   = gos_runtime::snapshot().edge_count;
+
+    // Health classification: DEGRADED > WARNING > OK
+    // DEGRADED: faulted nodes exceed 25 % of total (or any fault when total < 4)
+    // WARNING:  any faulted node, or diff ring > 93 % full (>= 120/128)
+    let degraded = faulted > 0 && (total < 4 || faulted * 4 >= total);
+    let warning  = faulted > 0 || diff_fill >= 120;
+
+    // Banner
+    if degraded {
+        set_color(sink, 15, 4); // white on red
+        print_str(sink, " graph health  DEGRADED                                                     ");
+    } else if warning {
+        set_color(sink, 0, 14); // black on yellow
+        print_str(sink, " graph health  WARNING                                                      ");
+    } else {
+        set_color(sink, 0, 10); // black on green
+        print_str(sink, " graph health  OK                                                           ");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    // Nodes
+    set_color(sink, 11, 0);
+    print_str(sink, "  nodes\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    total:    ");
+    print_num_inline(sink, total);
+    print_str(sink, "\n");
+    print_str(sink, "    faulted:  ");
+    if faulted > 0 { set_color(sink, 12, 0); }
+    print_num_inline(sink, faulted);
+    if faulted > 0 {
+        print_str(sink, "  (!!)");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+    print_str(sink, "    edges:    ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, "\n");
+    print_str(sink, "    subs:     ");
+    print_num_inline(sink, sub_pairs);
+    print_str(sink, "  subscribe pairs\n");
+
+    // Graph mutation activity
+    set_color(sink, 11, 0);
+    print_str(sink, "  mutations\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    epoch:    ");
+    print_num_inline(sink, epoch as usize);
+    print_str(sink, "\n");
+    print_str(sink, "    total:    ");
+    print_num_inline(sink, diff_tot as usize);
+    print_str(sink, "  structural diffs ever pushed\n");
+    print_str(sink, "    ring:     ");
+    if diff_fill >= 120 { set_color(sink, 12, 0); }
+    print_num_inline(sink, diff_fill);
+    print_str(sink, " / 128");
+    if diff_fill >= 120 {
+        print_str(sink, "  (near full — oldest entries being overwritten)");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+
+    // Runtime metrics
+    set_color(sink, 11, 0);
+    print_str(sink, "  runtime\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    preempts: ");
+    print_num_inline(sink, preempts as usize);
+    print_str(sink, "  scheduler preemptions\n");
+    print_str(sink, "    dom-sw:   ");
+    print_num_inline(sink, dom_sw as usize);
+    print_str(sink, "  l4 domain switches\n");
+
+    // Boot manifest
+    set_color(sink, 11, 0);
+    print_str(sink, "  boot\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    rules:    ");
+    print_num_inline(sink, rules);
+    print_str(sink, "  manifest rules checked\n");
+    print_str(sink, "    healed:   ");
+    if healed > 0 { set_color(sink, 14, 0); }
+    print_num_inline(sink, healed);
+    if healed > 0 {
+        print_str(sink, "  edges auto-healed at boot");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+
+    // Advisory if not OK
+    if degraded {
+        set_color(sink, 12, 0);
+        print_str(sink, "  action: run 'nodes faulted' to inspect faulted nodes\n");
+        set_color(sink, 7, 0);
+    } else if faulted > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  hint: run 'nodes faulted' for fault details\n");
+        set_color(sink, 7, 0);
+    }
+}
+
 /// Right-align a number in 4 columns (spaces then digits).
 fn print_num_right4(sink: &ConsoleSink, n: usize) {
     if n >= 1000 {
