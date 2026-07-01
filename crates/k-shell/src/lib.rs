@@ -1527,6 +1527,108 @@ pub fn dispatch_graph_diff(sink: &ConsoleSink, since_epoch: u64) {
     set_color(sink, 7, 0);
 }
 
+/// Show a ps-style table of all live graph nodes with their cumulative signal
+/// counts and outbound edge counts — analogous to `ps aux` on Linux.
+pub fn dispatch_proc_list(sink: &ConsoleSink) {
+    use gos_protocol::NodeProcSummary;
+    const PAGE: usize = 32;
+    let mut summaries = [NodeProcSummary::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::proc_page::<PAGE>(0, &mut summaries);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " proc");
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              sig    out  state       plugin/key\n");
+    set_color(sink, 7, 0);
+
+    for summary in summaries.iter().take(filled) {
+        let fg: u8 = match summary.lifecycle {
+            gos_protocol::NodeLifecycle::Running    => 10,
+            gos_protocol::NodeLifecycle::Faulted    => 12,
+            gos_protocol::NodeLifecycle::Suspended  => 14,
+            _                                       => 7,
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+        let mut vec_buf = LineBuf::<20>::new();
+        vec_buf.push_vector(summary.vector);
+        let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        // pad to 20 chars
+        let pad = 20usize.saturating_sub(vec_str.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        set_color(sink, 11, 0);
+        print_num_right4(sink, summary.signal_count as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, summary.edge_out_count as usize);
+        print_str(sink, "  ");
+        set_color(sink, fg, 0);
+        let state_label = node_lifecycle_label(summary.lifecycle);
+        print_str(sink, state_label);
+        let state_pad = 12usize.saturating_sub(state_label.len());
+        for _ in 0..state_pad { print_str(sink, " "); }
+        set_color(sink, 8, 0);
+        print_str(sink, summary.plugin_name);
+        print_str(sink, "/");
+        print_str(sink, summary.local_node_key);
+        print_str(sink, "\n");
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+    } else if total > filled {
+        set_color(sink, 8, 0);
+        print_str(sink, "  ... ");
+        print_num_inline(sink, total - filled);
+        print_str(sink, " more (page capped at ");
+        print_num_inline(sink, PAGE);
+        print_str(sink, ")\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)");
+    if total > 0 {
+        print_str(sink, "  |  sig = cumulative signal dispatches\n");
+    } else {
+        print_str(sink, "\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// Right-align a number in 4 columns (spaces then digits).
+fn print_num_right4(sink: &ConsoleSink, n: usize) {
+    if n >= 1000 {
+        print_num_inline(sink, n);
+    } else if n >= 100 {
+        print_str(sink, " ");
+        print_num_inline(sink, n);
+    } else if n >= 10 {
+        print_str(sink, "  ");
+        print_num_inline(sink, n);
+    } else {
+        print_str(sink, "   ");
+        print_num_inline(sink, n);
+    }
+}
+
+fn node_lifecycle_label(lc: gos_protocol::NodeLifecycle) -> &'static str {
+    match lc {
+        gos_protocol::NodeLifecycle::Discovered  => "discovered",
+        gos_protocol::NodeLifecycle::Loaded      => "loaded",
+        gos_protocol::NodeLifecycle::Registered  => "registered",
+        gos_protocol::NodeLifecycle::Allocated   => "allocated",
+        gos_protocol::NodeLifecycle::Ready       => "ready",
+        gos_protocol::NodeLifecycle::Running     => "running",
+        gos_protocol::NodeLifecycle::Waiting     => "waiting",
+        gos_protocol::NodeLifecycle::Suspended   => "suspended",
+        gos_protocol::NodeLifecycle::Faulted     => "faulted",
+        gos_protocol::NodeLifecycle::Terminated  => "terminated",
+    }
+}
+
 fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
     match state {
         gos_protocol::ModuleLifecycle::Installed => "installed",

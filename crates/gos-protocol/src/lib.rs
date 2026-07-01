@@ -1618,6 +1618,32 @@ impl GraphNodeSummary {
     };
 }
 
+/// Process-table summary for one graph node — per-node signal activity and
+/// outbound edge count.  Returned by `gos_runtime::proc_page()` sorted by
+/// vector address, analogous to a `ps` listing.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeProcSummary {
+    pub vector: VectorAddress,
+    pub local_node_key: &'static str,
+    pub plugin_name: &'static str,
+    pub lifecycle: NodeLifecycle,
+    /// Cumulative signals dispatched to this node since registration.
+    pub signal_count: u32,
+    /// Number of outbound edges currently registered from this node.
+    pub edge_out_count: u16,
+}
+
+impl NodeProcSummary {
+    pub const EMPTY: Self = Self {
+        vector: VectorAddress::new(0, 0, 0, 0),
+        local_node_key: "",
+        plugin_name: "",
+        lifecycle: NodeLifecycle::Discovered,
+        signal_count: 0,
+        edge_out_count: 0,
+    };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GraphEdgeSummary {
     pub edge_vector: EdgeVector,

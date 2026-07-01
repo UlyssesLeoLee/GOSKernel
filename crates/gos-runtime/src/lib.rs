@@ -9,8 +9,8 @@ use gos_protocol::{
     EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind,
     GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
     KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
-    NodeId, NodeInstanceId, NodeLifecycle, NodeSpec, NodeState, NodeTelemetry, PluginId,
-    PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta, VectorAddress,
+    NodeId, NodeInstanceId, NodeLifecycle, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry,
+    PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
 };
 use spin::Mutex;
@@ -161,6 +161,8 @@ struct NodeRecord {
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
     route_count: u8,
+    /// Cumulative signal dispatches to this node since registration.
+    signal_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -439,6 +441,51 @@ impl GraphRuntime {
         })
     }
 
+    fn proc_summary_from_slot(&self, slot: usize) -> Option<NodeProcSummary> {
+        let record = self.nodes.get(slot).and_then(|s| *s)?;
+        let node_id = record.spec.node_id;
+        let edge_out_count = self
+            .edges
+            .iter()
+            .filter(|e| e.map(|r| r.spec.from_node == node_id).unwrap_or(false))
+            .count() as u16;
+        Some(NodeProcSummary {
+            vector: record.vector,
+            local_node_key: record.spec.local_node_key,
+            plugin_name: self.plugin_name(record.plugin_id),
+            lifecycle: record.lifecycle,
+            signal_count: record.signal_count,
+            edge_out_count,
+        })
+    }
+
+    /// Return a page of `NodeProcSummary` entries sorted by vector address.
+    /// Returns `(total_nodes, filled)`.
+    pub fn proc_page<const N: usize>(
+        &mut self,
+        offset: usize,
+        out: &mut [NodeProcSummary; N],
+    ) -> (usize, usize) {
+        self.refresh_node_order();
+        let total = self.node_order_len;
+        let mut returned = 0usize;
+        let mut cursor = offset.min(total);
+        while cursor < total && returned < N {
+            let slot = self.node_order[cursor] as usize;
+            if let Some(summary) = self.proc_summary_from_slot(slot) {
+                out[returned] = summary;
+                returned += 1;
+            }
+            cursor += 1;
+        }
+        (total, returned)
+    }
+
+    /// Total number of registered nodes (same as `node_page` total).
+    pub fn proc_count(&self) -> usize {
+        self.nodes.iter().filter(|s| s.is_some()).count()
+    }
+
     fn edge_summary_from_slot(
         &self,
         slot: usize,
@@ -702,6 +749,7 @@ impl GraphRuntime {
             instance_id: NodeInstanceId::ZERO,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
+            signal_count: 0,
         });
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
@@ -1098,6 +1146,7 @@ impl GraphRuntime {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
         let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
         record.lifecycle = NodeLifecycle::Running;
+        record.signal_count = record.signal_count.saturating_add(1);
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Running);
         Ok(PreparedDispatch {
@@ -2350,6 +2399,20 @@ pub fn enqueue_ready_for_plugin(plugin_id: PluginId) -> usize {
 pub fn with_runtime<R>(f: impl FnOnce(&mut GraphRuntime) -> R) -> R {
     let mut runtime = RUNTIME.lock();
     f(&mut runtime)
+}
+
+/// Process-table page: return up to `N` `NodeProcSummary` entries starting
+/// at `offset`, sorted by vector address.  Returns `(total_nodes, filled)`.
+pub fn proc_page<const N: usize>(
+    offset: usize,
+    out: &mut [NodeProcSummary; N],
+) -> (usize, usize) {
+    RUNTIME.lock().proc_page(offset, out)
+}
+
+/// Total number of live nodes (process count).
+pub fn proc_count() -> usize {
+    RUNTIME.lock().proc_count()
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {

@@ -519,6 +519,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  boot verify        boot manifest edge verification report\n");
         super::print_str(sink, "  metrics export     machine-parseable key=value telemetry dump\n");
         super::print_str(sink, "  journal            journal format info and replay status\n");
+        super::print_str(sink, "  proc               ps-style table: node signal counts + edge out-degree\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -681,6 +682,8 @@ fn dispatch_text_command(
         super::dispatch_metrics_export(sink);
     } else if cmd == "journal" || cmd == "journal status" || cmd == "journal info" {
         super::dispatch_journal_info(sink);
+    } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
+        super::dispatch_proc_list(sink);
     } else if cmd == "edges" || cmd == "edges all" {
         super::dispatch_edges_list(sink, None);
     } else if cmd == "edges count" || cmd == "edge count" {
