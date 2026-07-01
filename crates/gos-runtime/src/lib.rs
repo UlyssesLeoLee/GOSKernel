@@ -11,7 +11,7 @@ use gos_protocol::{
     KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
     NodeId, NodeInstanceId, NodeLifecycle, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry,
     PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType, Signal, StateDelta, VectorAddress,
-    derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION,
+    derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
 };
 use spin::Mutex;
 
@@ -29,6 +29,8 @@ pub const MAX_CONTROL_PLANE_MESSAGES: usize = 256;
 pub const NODE_ARENA_PAGES: usize = 64;
 /// Structural mutation ring capacity (wraps when full, oldest entries lost).
 pub const MAX_DIFF_RING: usize = 128;
+/// V2.15: per-node u8 property slots for reactive signal val encoding.
+pub const MAX_NODE_PROPS_U8: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -310,6 +312,12 @@ pub struct GraphRuntime {
     /// the runtime emits a SubscribeTriggered control-plane envelope for each
     /// matching subscriber — the propagation primitive for Demo #1 and #2.
     subscribe_pairs: [Option<(NodeId, NodeId)>; MAX_SUBSCRIBE_PAIRS],
+    /// V2.15 node property store: maps NodeId → u8 val embedded as the `val`
+    /// field of `Signal::Control { cmd: DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED }`.
+    /// Populated by plugins at boot to declare their reactive signal val so
+    /// `fire_subscribers` can encode the active Use-edge target without
+    /// hard-coding any theme knowledge inside the runtime.
+    node_props_u8: [(NodeId, u8); MAX_NODE_PROPS_U8],
     /// Cached node enumeration order: storage-slot indices sorted by
     /// vector key, rebuilt lazily when `node_order_epoch != graph_epoch`.
     node_order: [u16; MAX_NODES],
@@ -352,6 +360,7 @@ impl GraphRuntime {
             adjacency_arena: AdjacencyArena::new(),
             graph_epoch: 0,
             subscribe_pairs: [None; MAX_SUBSCRIBE_PAIRS],
+            node_props_u8: [(NodeId::ZERO, 0u8); MAX_NODE_PROPS_U8],
             node_order: [0u16; MAX_NODES],
             node_order_len: 0,
             node_order_epoch: u64::MAX,
@@ -701,8 +710,51 @@ impl GraphRuntime {
         }
     }
 
+    /// V2.15: Register a u8 property value for a node used as the reactive
+    /// signal val when that node is the active Use-edge target of an observed
+    /// node. Idempotent: re-registering the same NodeId overwrites the val.
+    /// Returns false when the table is full (MAX_NODE_PROPS_U8 slots).
+    pub fn register_node_prop_u8(&mut self, node_id: NodeId, val: u8) -> bool {
+        for slot in self.node_props_u8.iter_mut() {
+            if slot.0 == node_id {
+                slot.1 = val;
+                return true;
+            }
+        }
+        for slot in self.node_props_u8.iter_mut() {
+            if slot.0 == NodeId::ZERO {
+                *slot = (node_id, val);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn node_prop_u8(&self, node_id: NodeId) -> Option<u8> {
+        self.node_props_u8.iter().find_map(|&(id, val)| {
+            if id == node_id && id != NodeId::ZERO { Some(val) } else { None }
+        })
+    }
+
+    /// V2.15: Return the NodeId pointed to by the first Use edge originating
+    /// from `source`. Used by `fire_subscribers` to encode which variant of an
+    /// observed node is currently active as the reactive signal val.
+    pub fn active_use_target(&self, source: NodeId) -> Option<NodeId> {
+        self.edges.iter().flatten().find_map(|rec| {
+            if rec.spec.from_node == source && rec.spec.edge_type == RuntimeEdgeType::Use {
+                Some(rec.spec.to_node)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Emit `SubscribeTriggered` for every subscriber of `changed`.
     /// Called internally after any structural mutation that bumps graph_epoch.
+    /// V2.15: also posts `Signal::Control { cmd: DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED }`
+    /// directly to each subscriber's runtime queue so nodes can react synchronously
+    /// without polling the control-plane. The val encodes the active Use-edge
+    /// target's registered node property (e.g. the theme index for theme.current).
     fn fire_subscribers(&mut self, changed: NodeId, epoch: u64) {
         let mut subs = [NodeId::ZERO; MAX_SUBSCRIBE_PAIRS];
         let mut count = 0usize;
@@ -712,6 +764,10 @@ impl GraphRuntime {
                 count += 1;
             }
         }
+        let signal_val: u8 = self
+            .active_use_target(changed)
+            .and_then(|tid| self.node_prop_u8(tid))
+            .unwrap_or(0);
         for sub in subs[..count].iter().copied() {
             let arg0 = u64::from_le_bytes([
                 sub.0[0], sub.0[1], sub.0[2], sub.0[3],
@@ -723,6 +779,12 @@ impl GraphRuntime {
                 arg0,
                 epoch,
             );
+            if let Ok(sub_vec) = self.node_vector(sub) {
+                let _ = self.post_signal(sub_vec, Signal::Control {
+                    cmd: DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
+                    val: signal_val,
+                });
+            }
         }
     }
 
@@ -2053,6 +2115,27 @@ pub fn unregister_subscribe(observed: NodeId, subscriber: NodeId) {
 /// `MAX_SUBSCRIBE_PAIRS` (64) to check headroom before bulk registration.
 pub fn subscribe_pair_count() -> usize {
     RUNTIME.lock().subscribe_pair_count()
+}
+
+/// V2.15: Register a u8 property value for `node_id` used as the reactive signal
+/// val when that node is the active Use-edge target of an observed node.
+/// Returns false when the property table is full (MAX_NODE_PROPS_U8 = 16 slots).
+pub fn register_node_prop_u8(node_id: NodeId, val: u8) -> bool {
+    RUNTIME.lock().register_node_prop_u8(node_id, val)
+}
+
+/// V2.15: Return the NodeId of the first active Use-edge target from `source`,
+/// or None if no Use edge exists. Useful for theme-variant graph queries.
+pub fn active_use_target(source: NodeId) -> Option<NodeId> {
+    RUNTIME.lock().active_use_target(source)
+}
+
+/// V2.15: Drain one pending runtime Signal from the signal queue.
+/// Returns `(target_vector, signal)` or None when the queue is empty.
+/// Primarily for test harnesses that need to verify reactive signal delivery.
+pub fn drain_signal() -> Option<(VectorAddress, Signal)> {
+    let mut rt = RUNTIME.lock();
+    rt.signal_queue.pop().map(|rs| (rs.target, rs.signal))
 }
 
 /// Check whether a node with `id` is currently present in the live graph.

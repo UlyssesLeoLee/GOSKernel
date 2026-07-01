@@ -58,7 +58,7 @@ use gos_protocol::{
     CLIPBOARD_DATA_BEGIN, CLIPBOARD_DATA_CLEAR,
     CLIPBOARD_DATA_COMMIT, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,
     CYPHER_CONTROL_QUERY_BEGIN,
-    CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
+    CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_THEME_SHOJI,
     DISPLAY_THEME_WABI, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
     ExecutorId, GraphDiffKind, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
     IME_CONTROL_SET_MODE, IME_MODE_ASCII, IME_MODE_ZH_PINYIN, INPUT_KEY_DOWN,
@@ -797,26 +797,15 @@ fn sync_theme_use_edges(theme: u8) -> bool {
     gos_runtime::register_edge(spec).is_ok()
 }
 
-fn apply_theme_choice_raw(abi: &KernelAbi, from: u64, console_target: u64, theme: u8) -> bool {
+fn apply_theme_choice_raw(_abi: &KernelAbi, from: u64, _console_target: u64, theme: u8) -> bool {
+    // V2.15: sync_theme_use_edges triggers fire_subscribers → Subscribe signal
+    // delivered to k-vga automatically; explicit DISPLAY_CONTROL_THEME removed.
     let graph_ok = sync_theme_use_edges(theme);
-    let target = if console_target == 0 {
-        VGA_VEC.as_u64()
-    } else {
-        console_target
-    };
-    let visual_ok = emit_target_signal_raw(
-        abi,
-        target,
-        Signal::Control {
-            cmd: DISPLAY_CONTROL_THEME,
-            val: theme,
-        },
-    );
     ACTIVE_THEME.store(theme, Ordering::SeqCst);
     if from != 0 && from != NODE_VEC.as_u64() {
         let _ = gos_runtime::post_signal(NODE_VEC, Signal::Interrupt { irq: 32 });
     }
-    graph_ok && visual_ok
+    graph_ok
 }
 
 fn apply_theme_choice(sink: &ConsoleSink, theme: u8) -> bool {
@@ -4970,6 +4959,14 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
             },
         );
     }
+    // V2.15: register reactive node props so fire_subscribers encodes the active
+    // theme index in DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED signal val.
+    let _ = gos_runtime::register_node_prop_u8(THEME_WABI_NODE_ID, DISPLAY_THEME_WABI);
+    let _ = gos_runtime::register_node_prop_u8(THEME_SHOJI_NODE_ID, DISPLAY_THEME_SHOJI);
+    // Subscribe: k-vga auto-repaints when theme.current Use-edge changes.
+    let k_vga_node_id = derive_node_id(PluginId::from_ascii("K_VGA"), "vga.entry");
+    let _ = gos_runtime::register_subscribe(THEME_CURRENT_NODE_ID, k_vga_node_id);
+
     let sink = sink_from_ctx(ctx);
     let _ = apply_theme_choice(&sink, THEME_KIND_WABI);
     seed_ai_panel(unsafe { state_mut(ctx) });

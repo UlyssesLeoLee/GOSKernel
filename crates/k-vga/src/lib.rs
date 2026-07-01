@@ -439,6 +439,11 @@ fn handle_control(state: &mut VgaState, cmd: u8, val: u8) {
         11 => state.scroll_top = val.min((BUFFER_HEIGHT - 1) as u8),
         12 => state.scroll_bottom = val.min((BUFFER_HEIGHT - 1) as u8),
         DISPLAY_CONTROL_THEME => apply_theme_palette(val.min(DISPLAY_THEME_SHOJI)),
+        DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED => {
+            // V2.15: theme.current Use-edge changed; val encodes the new active
+            // theme index delivered by fire_subscribers via the Subscribe pair.
+            apply_theme_palette(val.min(DISPLAY_THEME_SHOJI))
+        }
         DISPLAY_CONTROL_POINTER_COL | DISPLAY_CONTROL_POINTER_ROW | DISPLAY_CONTROL_POINTER_VISIBLE => {
             handle_pointer_move(state, cmd, val)
         }

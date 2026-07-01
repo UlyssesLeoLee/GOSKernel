@@ -381,6 +381,11 @@ pub const DISPLAY_CONTROL_POINTER_COL: u8 = 0xC0;
 pub const DISPLAY_CONTROL_POINTER_ROW: u8 = 0xC1;
 pub const DISPLAY_CONTROL_POINTER_VISIBLE: u8 = 0xC2;
 pub const DISPLAY_CONTROL_THEME: u8 = 0xC3;
+/// V2.15: Subscribe-triggered reactive repaint. Delivered by the runtime to
+/// subscriber nodes when their observed node undergoes a structural mutation.
+/// `val` encodes the active Use-edge target's registered node property (e.g.
+/// the theme index for theme.current → DISPLAY_THEME_WABI / DISPLAY_THEME_SHOJI).
+pub const DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED: u8 = 0xC4;
 pub const DISPLAY_THEME_WABI: u8 = 0x00;
 pub const DISPLAY_THEME_SHOJI: u8 = 0x01;
 
