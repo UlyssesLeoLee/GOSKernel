@@ -79,8 +79,10 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: Input) -> Option<Output>
                 // panel when the graph topology actually changed since the
                 // last repaint.  Directly implements Demo #2 zero-idle-frames
                 // for the shell panel without any special render bookkeeping.
+                // V2.30: in watch mode, always repaint so tick counter updates.
                 let current_epoch = gos_runtime::graph_epoch();
-                if current_epoch != state.last_rendered_epoch {
+                let watch_active = super::WATCH_PROC_MODE.load(core::sync::atomic::Ordering::SeqCst) != 0;
+                if watch_active || current_epoch != state.last_rendered_epoch {
                     state.last_rendered_epoch = current_epoch;
                     super::draw_command_deck_panel(&sink, state, snapshot);
                 }
@@ -115,6 +117,21 @@ fn process_data(
     source: DataSource,
     byte: u8,
 ) -> ExecStatus {
+    // --- V2.30 watch mode: any keyboard key exits and restores normal deck --------
+    if source == DataSource::Keyboard
+        && super::WATCH_PROC_MODE.load(core::sync::atomic::Ordering::SeqCst) != 0
+    {
+        super::WATCH_PROC_MODE.store(0, core::sync::atomic::Ordering::SeqCst);
+        // Force deck repaint by invalidating the epoch cache.
+        state.last_rendered_epoch = u64::MAX;
+        super::restore_output_cursor(sink);
+        super::set_color(sink, 8, 0);
+        super::print_str(sink, " watch stopped\n");
+        super::save_output_cursor(sink);
+        super::redraw_footer(sink, state, false);
+        return ExecStatus::Done;
+    }
+
     // --- IME node forwarded a composed character ---------------------------------
     if source == DataSource::Ime {
         if state.menu_mode == MENU_MODE_COMMAND {
@@ -549,6 +566,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
+        super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
+        super::print_str(sink, "  graph watch        alias for watch\n");
+        super::print_str(sink, "  watch stop         exit watch mode\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -851,6 +871,10 @@ fn dispatch_text_command(
         }
     } else if cmd == "uname" || cmd == "uname -a" || cmd == "ver" || cmd == "version" {
         super::dispatch_uname(sink);
+    } else if cmd == "watch" || cmd == "graph watch" || cmd == "watch proc" || cmd == "watch nodes" {
+        super::dispatch_watch_proc(sink);
+    } else if cmd == "watch stop" || cmd == "watch exit" {
+        super::dispatch_watch_stop(sink);
     } else if cmd == "graph health" || cmd == "health" {
         super::dispatch_graph_health(sink);
     } else if cmd == "graph topo" || cmd == "topo" {

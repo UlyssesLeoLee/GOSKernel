@@ -201,6 +201,8 @@ static NIM_MODE: AtomicU8 = AtomicU8::new(0);
 /// Pinned graph epoch for `graph diff` — 0 means "since boot", any other value
 /// means "since epoch N was pinned via `graph diff pin`".
 pub(crate) static GRAPH_DIFF_PIN_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// 0 = normal VECTOR DECK view, 1 = live proc watch mode (like `watch -n1 proc`).
+pub(crate) static WATCH_PROC_MODE: AtomicU8 = AtomicU8::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -2052,6 +2054,25 @@ pub fn dispatch_node_stat_clear(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// `watch` / `graph watch` / `watch proc` / `watch nodes` — enter live proc watch mode.
+///
+/// Sets WATCH_PROC_MODE = 1 so the heartbeat repaints the VECTOR DECK panel with a
+/// live proc table on every tick (like `watch -n1 proc`).  Any key press exits watch mode.
+pub fn dispatch_watch_proc(sink: &ConsoleSink) {
+    WATCH_PROC_MODE.store(1, Ordering::SeqCst);
+    set_color(sink, 11, 0);
+    print_str(sink, " watch proc  (live view in VECTOR DECK — press any key to stop)\n");
+    set_color(sink, 7, 0);
+}
+
+/// `watch stop` / `watch exit` — exit live proc watch mode explicitly.
+pub fn dispatch_watch_stop(sink: &ConsoleSink) {
+    WATCH_PROC_MODE.store(0, Ordering::SeqCst);
+    set_color(sink, 8, 0);
+    print_str(sink, " watch stopped\n");
+    set_color(sink, 7, 0);
+}
+
 /// `node log clear <vec>` / `nlog clear <vec>` — clear per-node lifecycle event log.
 ///
 /// Analogous to `journalctl --vacuum-time` or `truncate -s0 /var/log/…`:
@@ -2928,11 +2949,87 @@ fn draw_runtime_gap_flux(sink: &ConsoleSink, state: &ShellState) {
     draw_byte(sink, 3 + (phase % 8), 50, WABI_PAPER, WABI_INK, b'.');
 }
 
+/// Render the VECTOR DECK panel in live proc watch mode (like `htop` or `watch -n1 proc`).
+///
+/// Shows the top 6 nodes sorted by vector address with cumulative signal count,
+/// outbound edge count, and lifecycle state.  Updated on every heartbeat tick while
+/// WATCH_PROC_MODE is set, giving a continuously-refreshing view without threads.
+fn draw_watch_proc_panel(sink: &ConsoleSink, snapshot: gos_protocol::GraphSnapshot) {
+    use gos_protocol::NodeProcSummary;
+    const WATCH_PAGE: usize = 6;
+    let mut summaries = [NodeProcSummary::EMPTY; WATCH_PAGE];
+    let (total, filled) = gos_runtime::proc_page::<WATCH_PAGE>(0, &mut summaries);
+
+    draw_box(
+        sink,
+        COMMAND_DECK_TOP,
+        COMMAND_DECK_LEFT,
+        COMMAND_DECK_WIDTH,
+        COMMAND_DECK_HEIGHT,
+        " PROC WATCH ",
+        WABI_TEA,
+        WABI_INK,
+    );
+
+    // Row 3 — status line: tick + nodes + hint
+    fill_band(sink, 3, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+    draw_text(sink, 3, 4, WABI_STONE, WABI_INK, "tick ");
+    draw_usize(sink, 3, 9, WABI_MOON, WABI_INK, snapshot.tick as usize);
+    draw_text(sink, 3, 20, WABI_STONE, WABI_INK, "nodes ");
+    draw_usize(sink, 3, 26, WABI_PAPER, WABI_INK, total);
+    draw_text(sink, 3, 33, WABI_STONE, WABI_INK, "any key stops");
+
+    // Row 4 — column header
+    fill_band(sink, 4, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+    draw_text(sink, 4, 4, WABI_STONE, WABI_INK, "vector           sig  out  lifecycle");
+
+    // Rows 5-10 — node rows (up to 6)
+    for i in 0..WATCH_PAGE {
+        let row = 5 + i;
+        fill_band(sink, row, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+        if i < filled {
+            let summary = &summaries[i];
+            let fg: u8 = match summary.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => WABI_SAGE,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => WABI_TEA,
+                _                                      => WABI_STONE,
+            };
+            set_color(sink, fg, WABI_INK);
+            goto(sink, row, 4);
+            let mut vec_buf = LineBuf::<16>::new();
+            vec_buf.push_vector(summary.vector);
+            let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            let pad = 16usize.saturating_sub(vec_str.len());
+            for _ in 0..pad { print_byte(sink, b' '); }
+            set_color(sink, WABI_MOON, WABI_INK);
+            print_num_right4(sink, summary.signal_count as usize);
+            set_color(sink, WABI_STONE, WABI_INK);
+            print_str(sink, " ");
+            print_num_right4(sink, summary.edge_out_count as usize);
+            set_color(sink, fg, WABI_INK);
+            print_str(sink, "  ");
+            print_str(sink, node_lifecycle_label(summary.lifecycle));
+        } else if i == filled && total > WATCH_PAGE {
+            set_color(sink, WABI_STONE, WABI_INK);
+            goto(sink, row, 4);
+            print_str(sink, "...");
+            print_num_inline(sink, total - WATCH_PAGE);
+            print_str(sink, " more");
+        }
+    }
+}
+
 fn draw_command_deck_panel(
     sink: &ConsoleSink,
     state: &ShellState,
     snapshot: gos_protocol::GraphSnapshot,
 ) {
+    if WATCH_PROC_MODE.load(Ordering::SeqCst) != 0 {
+        draw_watch_proc_panel(sink, snapshot);
+        return;
+    }
     let phase = (state.sigil_frame as usize) / 2;
     draw_box(
         sink,
