@@ -3078,6 +3078,126 @@ pub fn dispatch_graph_bipartite(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.38: `graph degree` — in/out degree census + hub identification.
+///
+/// Prints a table sorted by descending total degree.  Nodes are annotated:
+///   hub      — high connectivity (total ≥ 3 and ≥ half of max total degree)
+///   source   — no incoming edges (out > 0, in == 0)
+///   sink     — no outgoing edges (out == 0, in > 0)
+///   isolated — no edges at all (out == 0, in == 0)
+///
+/// OS analogy: `ip -s link show` / `netstat -s` per-interface TX/RX statistics.
+pub fn dispatch_graph_degree(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, out_degs, in_degs, total) = gos_runtime::graph_degree::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph degree\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 7, 0);
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Header row.
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector           out    in   total  role\n");
+    set_color(sink, 7, 0);
+
+    // Hub threshold: total_degree >= 3 AND >= ceil(max_total / 2).
+    let mut max_total = 0u32;
+    for i in 0..total {
+        let t = (out_degs[i] as u32) + (in_degs[i] as u32);
+        if t > max_total { max_total = t; }
+    }
+    let hub_thresh: u32 = if max_total >= 3 { (max_total + 1) / 2 } else { u32::MAX };
+    let mut hub_count = 0usize;
+
+    for i in 0..total {
+        let t     = (out_degs[i] as u32) + (in_degs[i] as u32);
+        let is_hub      = t >= 3 && t >= hub_thresh;
+        let is_isolated = out_degs[i] == 0 && in_degs[i] == 0;
+        let is_sink     = out_degs[i] == 0 && in_degs[i] > 0;
+        let is_source   = in_degs[i] == 0 && out_degs[i] > 0;
+        if is_hub { hub_count += 1; }
+
+        if is_hub {
+            set_color(sink, 14, 0); // bright yellow
+        } else if is_isolated {
+            set_color(sink, 8, 0);  // dark grey
+        } else {
+            set_color(sink, 7, 0);  // white
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        // Pad vector string to 14 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..14 { print_str(sink, " "); }
+
+        // out-degree (right-aligned, 4 wide, green)
+        set_color(sink, 10, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, out_degs[i] as usize);
+
+        // in-degree (right-aligned, 4 wide, red)
+        set_color(sink, 12, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, in_degs[i] as usize);
+
+        // total (right-aligned, 4 wide, white)
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, t as usize);
+        print_str(sink, "  ");
+
+        // role label
+        if is_hub {
+            set_color(sink, 14, 0);
+            print_str(sink, "hub");
+        } else if is_isolated {
+            set_color(sink, 8, 0);
+            print_str(sink, "isolated");
+        } else if is_sink {
+            set_color(sink, 11, 0);
+            print_str(sink, "sink");
+        } else if is_source {
+            set_color(sink, 10, 0);
+            print_str(sink, "source");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-total-degree: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_total as usize);
+    if hub_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  hubs: ");
+        print_num_inline(sink, hub_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

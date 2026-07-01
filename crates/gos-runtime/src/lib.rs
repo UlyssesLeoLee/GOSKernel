@@ -1789,6 +1789,83 @@ impl GraphRuntime {
         (out_vecs, out_colors, copy_len, is_bipartite)
     }
 
+    /// V2.38: In/out degree census — count directed edges incident on each live node.
+    ///
+    /// For every live node:
+    ///   out_degree = number of edges where `from_node == node_id`
+    ///   in_degree  = number of edges where `to_node  == node_id`
+    ///   total      = out_degree + in_degree
+    ///
+    /// Output arrays are sorted by descending total degree so hubs appear first.
+    /// Self-loops count once toward both in-degree and out-degree.
+    ///
+    /// Returns `(vecs, out_degrees, in_degrees, total)`:
+    ///   vecs[0..total]        — live node vectors, descending total-degree order.
+    ///   out_degrees[0..total] — directed out-degree per node.
+    ///   in_degrees[0..total]  — directed in-degree per node.
+    ///   total                 — number of live nodes packed into the output arrays.
+    ///
+    /// Algorithm: O(V × E) census — acceptable for V ≤ 128, E ≤ 512.
+    /// OS analogy: `ip -s link show` / `ss -s` — per-node TX/RX packet statistics.
+    pub fn graph_degree_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u16; N], [u16; N], usize) {
+        let mut out_vecs    = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_degrees = [0u16; N];
+        let mut in_degrees  = [0u16; N];
+
+        // Compact live-node slot list.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Per-slot degree accumulators.
+        let mut slot_out = [0u16; MAX_NODES];
+        let mut slot_in  = [0u16; MAX_NODES];
+
+        // Census: scan all edges once, resolving both endpoints.
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if let Some(from_slot) = self.node_slot_by_id(edge.spec.from_node) {
+                slot_out[from_slot] = slot_out[from_slot].saturating_add(1);
+            }
+            if let Some(to_slot) = self.node_slot_by_id(edge.spec.to_node) {
+                slot_in[to_slot] = slot_in[to_slot].saturating_add(1);
+            }
+        }
+
+        // Sort node_slots by descending total degree (insertion sort — N ≤ 128).
+        for i in 1..node_count {
+            let key_slot  = node_slots[i];
+            let key_total = (slot_out[key_slot] as u32) + (slot_in[key_slot] as u32);
+            let mut j = i;
+            while j > 0 {
+                let prev_slot  = node_slots[j - 1];
+                let prev_total = (slot_out[prev_slot] as u32) + (slot_in[prev_slot] as u32);
+                if prev_total >= key_total { break; }
+                node_slots[j] = node_slots[j - 1];
+                j -= 1;
+            }
+            node_slots[j] = key_slot;
+        }
+
+        // Pack into output arrays, capped at N.
+        let copy_len = node_count.min(N);
+        for i in 0..copy_len {
+            let slot = node_slots[i];
+            out_vecs[i]    = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_degrees[i] = slot_out[slot];
+            in_degrees[i]  = slot_in[slot];
+        }
+
+        (out_vecs, out_degrees, in_degrees, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4042,6 +4119,21 @@ pub fn graph_reachable<const N: usize>(from: VectorAddress) -> ([VectorAddress; 
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_bipartite<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, bool) {
     RUNTIME.lock().graph_bipartite_inner()
+}
+
+/// V2.38: In/out degree census for all live nodes, sorted by descending total degree.
+///
+/// Returns `(vecs, out_degrees, in_degrees, total)`:
+/// - `vecs[0..total]`        — live node vectors, descending total-degree order.
+/// - `out_degrees[0..total]` — directed out-degree (edges leaving each node).
+/// - `in_degrees[0..total]`  — directed in-degree (edges entering each node).
+/// - `total`                 — number of live nodes packed into the output arrays.
+///
+/// Algorithm: O(V × E) census, no_std safe, fixed-size stack arrays.
+/// OS analogy: `ip -s link show` or `netstat -s` — per-interface TX/RX statistics.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_degree<const N: usize>() -> ([VectorAddress; N], [u16; N], [u16; N], usize) {
+    RUNTIME.lock().graph_degree_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

@@ -569,6 +569,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph toposort     topological dependency ordering of all nodes (like tsort)\n");
         super::print_str(sink, "  graph reachable <V> all nodes reachable from V via directed edges (like systemctl list-dependencies --all)\n");
         super::print_str(sink, "  reachable <V>      alias for graph reachable\n");
+        super::print_str(sink, "  graph degree       in/out degree per node + hub identification (like ip -s link show)\n");
+        super::print_str(sink, "  degree / hub       aliases for graph degree\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -921,6 +923,8 @@ fn dispatch_text_command(
         super::dispatch_graph_condensation(sink);
     } else if cmd == "graph bipartite" || cmd == "bipartite" || cmd == "graph bip" || cmd == "bip" {
         super::dispatch_graph_bipartite(sink);
+    } else if cmd == "graph degree" || cmd == "degree" || cmd == "graph hub" || cmd == "hub" {
+        super::dispatch_graph_degree(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
