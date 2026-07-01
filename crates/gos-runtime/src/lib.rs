@@ -1553,6 +1553,21 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// Resume a node at `vector` — the graph-OS equivalent of `systemctl restart`
+    /// for faulted or suspended nodes.  Sets the node's lifecycle to
+    /// `NodeLifecycle::Ready` so it can receive signals again, and emits a
+    /// `StateDelta` control-plane event.  Does NOT bump `graph_epoch` (lifecycle
+    /// state is not a structural mutation) and does NOT touch the fault queue.
+    /// Returns `Err(NodeNotFound)` when no registered node has that vector address.
+    pub fn resume_node(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
+        record.lifecycle = NodeLifecycle::Ready;
+        self.nodes[slot] = Some(record);
+        self.state_delta(record.spec.node_id, NodeLifecycle::Ready);
+        Ok(())
+    }
+
     pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
         self.node_slot_by_vec(vector)
             .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
@@ -2680,6 +2695,14 @@ pub fn plugin_count() -> usize {
 /// handling.  Returns `Err(NodeNotFound)` when no node has that vector address.
 pub fn fault_node(vector: VectorAddress) -> Result<(), RuntimeError> {
     RUNTIME.lock().fault_node(vector)
+}
+
+/// Resume a node at `vector` — graph-OS `systemctl restart` for faulted or
+/// suspended nodes.  Sets lifecycle to `NodeLifecycle::Ready` and emits a
+/// StateDelta control-plane event.  Does not bump `graph_epoch` or touch the
+/// fault queue.  Returns `Err(NodeNotFound)` when no node has that vector address.
+pub fn resume_node(vector: VectorAddress) -> Result<(), RuntimeError> {
+    RUNTIME.lock().resume_node(vector)
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {

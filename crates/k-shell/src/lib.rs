@@ -1678,6 +1678,35 @@ pub fn dispatch_node_kill(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// Resume a faulted or suspended node at `vec` — graph-OS equivalent of
+/// `systemctl restart`.  Sets the node's lifecycle to `Ready` so it can
+/// receive signals again.  Reports success (green) or "not found" (red).
+pub fn dispatch_node_resume(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+    match gos_runtime::resume_node(vec) {
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " resume: node ready\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  vector:   ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n  lifecycle -> Ready  |  node may receive signals\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: use `proc` to verify new lifecycle state\n");
+            set_color(sink, 7, 0);
+        }
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " resume: node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
 /// `graph topo` — hierarchical L4-domain topology view.
 ///
 /// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are

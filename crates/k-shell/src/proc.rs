@@ -523,6 +523,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  stat <vector>      detailed stat for one node (like /proc/<pid>/status)\n");
         super::print_str(sink, "  kill <vector>      fault a node by vector (like kill -9 <pid>)\n");
         super::print_str(sink, "  node fault <vector>  alias for kill\n");
+        super::print_str(sink, "  resume <vector>    resume a faulted/suspended node (like systemctl restart)\n");
+        super::print_str(sink, "  node resume <vector>  alias for resume\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -711,6 +713,17 @@ fn dispatch_text_command(
         } else {
             super::set_color(sink, 12, 0);
             super::print_str(sink, " kill requires a vector address (e.g. kill 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("resume ")
+        .or_else(|| cmd.strip_prefix("node resume "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_resume(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " resume requires a vector address (e.g. resume 6.1.0.0)\n");
             super::set_color(sink, 7, 0);
         }
     } else if cmd == "edges" || cmd == "edges all" {
