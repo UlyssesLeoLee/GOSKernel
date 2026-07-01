@@ -919,6 +919,8 @@ fn dispatch_text_command(
         super::dispatch_graph_scc(sink);
     } else if cmd == "graph condensation" || cmd == "condensation" || cmd == "condense" || cmd == "graph condense" {
         super::dispatch_graph_condensation(sink);
+    } else if cmd == "graph bipartite" || cmd == "bipartite" || cmd == "graph bip" || cmd == "bip" {
+        super::dispatch_graph_bipartite(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))

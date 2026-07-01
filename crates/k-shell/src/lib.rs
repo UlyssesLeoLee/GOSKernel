@@ -2983,6 +2983,101 @@ pub fn dispatch_graph_reachable(sink: &ConsoleSink, from: VectorAddress) {
     }
 }
 
+/// V2.37: `graph bipartite` — 2-coloring check on the live directed graph.
+///
+/// A graph is bipartite iff it contains no odd-length cycle, i.e. every edge
+/// connects a node from set A to a node from set B (or vice versa).  The check
+/// is performed on the *undirected* projection of the directed live graph.
+///
+/// Output when bipartite:
+///   result:   bipartite
+///   set A:    <vec> <vec> ...
+///   set B:    <vec> <vec> ...
+///
+/// Output when not bipartite:
+///   result:   NOT bipartite  (odd-length cycle detected)
+///
+/// OS analogy: `bipartite_check` on a scheduling graph to verify that
+/// producers and consumers can be cleanly split into two non-conflicting tiers.
+pub fn dispatch_graph_bipartite(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, colors, total, is_bipartite) = gos_runtime::graph_bipartite::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph bipartite\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered — vacuously bipartite)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if is_bipartite {
+        set_color(sink, 10, 0);
+        print_str(sink, "  result:   bipartite\n");
+        set_color(sink, 7, 0);
+
+        // Print set A (color 0).
+        let mut count_a = 0usize;
+        for i in 0..total {
+            if colors[i] == 0 { count_a += 1; }
+        }
+        set_color(sink, 11, 0);
+        print_str(sink, "  set A (");
+        print_num_inline(sink, count_a);
+        print_str(sink, "):  ");
+        set_color(sink, 7, 0);
+        for i in 0..total {
+            if colors[i] == 0 {
+                let mut line = LineBuf::<20>::new();
+                line.push_vector(vecs[i]);
+                print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+                print_str(sink, "  ");
+            }
+        }
+        print_str(sink, "\n");
+
+        // Print set B (color 1).
+        let mut count_b = 0usize;
+        for i in 0..total {
+            if colors[i] == 1 { count_b += 1; }
+        }
+        set_color(sink, 11, 0);
+        print_str(sink, "  set B (");
+        print_num_inline(sink, count_b);
+        print_str(sink, "):  ");
+        set_color(sink, 7, 0);
+        for i in 0..total {
+            if colors[i] == 1 {
+                let mut line = LineBuf::<20>::new();
+                line.push_vector(vecs[i]);
+                print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+                print_str(sink, "  ");
+            }
+        }
+        print_str(sink, "\n");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "  result:   NOT bipartite  (odd-length cycle detected)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  hint: use 'graph cycles' to find the cycle, 'graph scc' for components\n");
+        set_color(sink, 7, 0);
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s) checked\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -1671,6 +1671,124 @@ impl GraphRuntime {
         (out, copy_len)
     }
 
+    /// V2.37: Bipartite-check via BFS 2-coloring on the undirected projection
+    /// of the live directed graph.
+    ///
+    /// A graph is bipartite iff it can be 2-coloured (set A / set B) such that
+    /// no two adjacent nodes share a colour.  Equivalently, a graph is bipartite
+    /// iff it contains no odd-length cycle.  The check is done on the undirected
+    /// projection — every directed edge is treated as undirected.
+    ///
+    /// Returns `(vecs, colors, total, is_bipartite)`:
+    /// - `vecs[0..total]`   — live node vectors (in slot order).
+    /// - `colors[0..total]` — 0 = set A, 1 = set B (valid only when is_bipartite).
+    /// - `total`            — number of live nodes packed into the output arrays.
+    /// - `is_bipartite`     — true iff the graph admits a valid 2-colouring.
+    ///
+    /// Algorithm: BFS 2-colouring.  O(V+E), no_std safe, fixed-size stack arrays.
+    /// OS analogy: `bipartite_check` in graph libraries, or testing whether a
+    /// dependency graph can be cleanly split into two non-conflicting sets.
+    pub fn graph_bipartite_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u8; N], usize, bool) {
+        const UNCOLORED: u8 = u8::MAX;
+
+        let mut out_vecs   = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_colors = [0u8; N];
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Per-slot colour: UNCOLORED | 0 (set A) | 1 (set B).
+        let mut slot_colors = [UNCOLORED; MAX_NODES];
+
+        // BFS queue holds node slots.
+        let mut queue = [0usize; MAX_NODES];
+
+        let mut is_bipartite = true;
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if slot_colors[start_slot] != UNCOLORED {
+                continue; // already coloured by a previous BFS component
+            }
+
+            // Seed BFS with colour 0.
+            slot_colors[start_slot] = 0;
+            queue[0] = start_slot;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let cur_slot  = queue[q_head];
+                q_head += 1;
+                let cur_color = slot_colors[cur_slot];
+                let next_color = 1 - cur_color; // flip: 0↔1
+
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                // Scan all edges; treat every edge as undirected.
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+
+                    // Resolve the neighbour: either forward or reverse direction.
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        continue
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => continue,
+                    };
+                    if nbr_slot == cur_slot { continue; } // ignore self-loops
+
+                    if slot_colors[nbr_slot] == UNCOLORED {
+                        slot_colors[nbr_slot] = next_color;
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = nbr_slot;
+                            q_tail += 1;
+                        }
+                    } else if slot_colors[nbr_slot] == cur_color {
+                        // Same colour on both endpoints → odd cycle → not bipartite.
+                        is_bipartite = false;
+                        // Continue colouring so every node gets a slot assignment
+                        // (useful for diagnostics even when not bipartite).
+                    }
+                }
+            }
+        }
+
+        // Pack output (slot order — same as graph_scc layout).
+        let copy_len = node_count.min(N);
+        for i in 0..copy_len {
+            let slot = node_slots[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_colors[i] = if slot_colors[slot] == UNCOLORED {
+                0
+            } else {
+                slot_colors[slot]
+            };
+        }
+
+        (out_vecs, out_colors, copy_len, is_bipartite)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -3908,6 +4026,22 @@ pub fn graph_condensation<const N: usize>() -> ([VectorAddress; N], [u8; N], usi
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_reachable<const N: usize>(from: VectorAddress) -> ([VectorAddress; N], usize) {
     RUNTIME.lock().graph_reachable_inner(from)
+}
+
+/// V2.37: Bipartite check on the live directed graph (undirected projection).
+///
+/// Returns `(vecs, colors, total, is_bipartite)`:
+/// - `vecs[0..total]`   — live node vectors in slot order.
+/// - `colors[0..total]` — 0 = set A, 1 = set B (meaningful only when is_bipartite).
+/// - `total`            — number of live nodes packed.
+/// - `is_bipartite`     — true iff the graph admits a valid 2-colouring (no odd cycle).
+///
+/// Algorithm: BFS 2-colouring on the undirected projection, O(V+E).
+/// OS analogy: checking whether a scheduling dependency graph can be split into
+/// two non-conflicting groups — e.g. producer/consumer tier separation.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_bipartite<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, bool) {
+    RUNTIME.lock().graph_bipartite_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
