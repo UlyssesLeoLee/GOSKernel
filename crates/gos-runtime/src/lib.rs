@@ -495,6 +495,48 @@ impl GraphRuntime {
         self.proc_summary_from_slot(slot)
     }
 
+    /// Count registered nodes whose vector address has the given `l4` domain byte.
+    pub fn node_count_for_l4(&self, l4: u8) -> usize {
+        self.nodes
+            .iter()
+            .filter(|s| s.map(|r| r.vector.l4 == l4).unwrap_or(false))
+            .count()
+    }
+
+    /// Return a page of `GraphNodeSummary` for nodes in the given l4 domain,
+    /// sorted by vector address.  Returns `(total_in_domain, filled)`.
+    pub fn node_page_l4<const N: usize>(
+        &mut self,
+        l4: u8,
+        offset: usize,
+        out: &mut [GraphNodeSummary; N],
+    ) -> (usize, usize) {
+        self.refresh_node_order();
+        let mut total = 0usize;
+        let mut returned = 0usize;
+        let mut cursor = 0usize;
+        for i in 0..self.node_order_len {
+            let slot = self.node_order[i] as usize;
+            let matches = self
+                .nodes
+                .get(slot)
+                .and_then(|s| *s)
+                .map(|r| r.vector.l4 == l4)
+                .unwrap_or(false);
+            if matches {
+                if cursor >= offset && returned < N {
+                    if let Some(summary) = self.node_summary_from_slot(slot) {
+                        out[returned] = summary;
+                        returned += 1;
+                    }
+                }
+                total += 1;
+                cursor += 1;
+            }
+        }
+        (total, returned)
+    }
+
     fn edge_summary_from_slot(
         &self,
         slot: usize,
@@ -2427,6 +2469,21 @@ pub fn proc_count() -> usize {
 /// Return `NodeProcSummary` for the node at `vec`, or `None` if not found.
 pub fn proc_stat_for_vector(vec: VectorAddress) -> Option<NodeProcSummary> {
     RUNTIME.lock().proc_stat_for_vector(vec)
+}
+
+/// Count registered nodes whose vector address has the given `l4` domain byte.
+pub fn node_count_for_l4(l4: u8) -> usize {
+    RUNTIME.lock().node_count_for_l4(l4)
+}
+
+/// Return a page of `GraphNodeSummary` for nodes in the given l4 domain,
+/// sorted by vector address.  Returns `(total_in_domain, filled)`.
+pub fn node_page_l4<const N: usize>(
+    l4: u8,
+    offset: usize,
+    out: &mut [GraphNodeSummary; N],
+) -> (usize, usize) {
+    RUNTIME.lock().node_page_l4(l4, offset, out)
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {

@@ -528,6 +528,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  graph diff <N>     show topology changes since epoch N (e.g. graph diff 42)\n");
         super::print_str(sink, "  graph diff pin     pin current epoch as diff baseline\n");
         super::print_str(sink, "  graph diff reset   reset baseline to epoch 0 (show all since boot)\n");
+        super::print_str(sink, "  graph topo         node count per l4 domain (like ip route show)\n");
+        super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -735,6 +737,26 @@ fn dispatch_text_command(
         } else {
             super::set_color(sink, 12, 0);
             super::print_str(sink, " graph diff <epoch>: epoch must be a decimal number (e.g. graph diff 42)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "graph topo" || cmd == "topo" {
+        super::dispatch_graph_topo(sink, None);
+    } else if let Some(l4_str) = cmd
+        .strip_prefix("graph topo ")
+        .or_else(|| cmd.strip_prefix("topo "))
+    {
+        let trimmed = l4_str.trim();
+        if let Some(epoch_val) = super::parse_epoch_decimal(trimmed) {
+            if epoch_val <= 255 {
+                super::dispatch_graph_topo(sink, Some(epoch_val as u8));
+            } else {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " graph topo <L4>: l4 domain must be 0-255\n");
+                super::set_color(sink, 7, 0);
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph topo <L4>: l4 must be a decimal number 0-255\n");
             super::set_color(sink, 7, 0);
         }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {

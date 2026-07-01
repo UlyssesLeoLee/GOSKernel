@@ -1660,6 +1660,162 @@ pub fn dispatch_node_stat(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// `graph topo` — hierarchical L4-domain topology view.
+///
+/// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are
+/// distributed across the l4 domain layer of the vector address space.
+///
+/// - `graph topo`      → count per l4 domain (overview, like `ip route`)
+/// - `graph topo <L4>` → list all nodes in that domain (like `ip link show`)
+pub fn dispatch_graph_topo(sink: &ConsoleSink, l4_filter: Option<u8>) {
+    use gos_protocol::GraphNodeSummary;
+
+    if let Some(l4) = l4_filter {
+        // Filtered detail view for a specific l4 domain.
+        const PAGE: usize = 16;
+        let mut items = [GraphNodeSummary::EMPTY; PAGE];
+        let mut offset = 0usize;
+        let mut printed = 0usize;
+
+        set_color(sink, 11, 0);
+        print_str(sink, " graph topology  l4=");
+        print_num_inline(sink, l4 as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+
+        loop {
+            let (total, returned) = gos_runtime::node_page_l4::<PAGE>(l4, offset, &mut items);
+            for item in items.iter().take(returned) {
+                let fg: u8 = match item.lifecycle {
+                    gos_protocol::NodeLifecycle::Ready | gos_protocol::NodeLifecycle::Running => 10,
+                    gos_protocol::NodeLifecycle::Faulted => 12,
+                    gos_protocol::NodeLifecycle::Waiting | gos_protocol::NodeLifecycle::Suspended => 14,
+                    _ => 7,
+                };
+                set_color(sink, fg, 0);
+                print_str(sink, "  ");
+                let mut vec_buf = LineBuf::<20>::new();
+                vec_buf.push_vector(item.vector);
+                let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+                print_str(sink, vec_str);
+                let pad = 16usize.saturating_sub(vec_str.len());
+                for _ in 0..pad { print_str(sink, " "); }
+                set_color(sink, 8, 0);
+                print_str(sink, lifecycle_label(item.lifecycle));
+                print_str(sink, "  ");
+                set_color(sink, 7, 0);
+                print_str(sink, item.plugin_name);
+                print_str(sink, "/");
+                print_str(sink, item.local_node_key);
+                print_str(sink, "\n");
+                printed += 1;
+            }
+            offset += returned;
+            if returned == 0 || offset >= total { break; }
+        }
+
+        if printed == 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  (no nodes in l4=");
+            print_num_inline(sink, l4 as usize);
+            print_str(sink, ")\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  total: ");
+        print_num_inline(sink, gos_runtime::node_count_for_l4(l4));
+        print_str(sink, " node(s) in l4=");
+        print_num_inline(sink, l4 as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+    } else {
+        // Overview: bucket all live nodes by l4 domain.
+        set_color(sink, 11, 0);
+        print_str(sink, " graph topology\n");
+        set_color(sink, 7, 0);
+
+        const MAX_DOMAINS: usize = 64;
+        let mut domain_l4s    = [0u8;    MAX_DOMAINS];
+        let mut domain_counts = [0usize; MAX_DOMAINS];
+        let mut num_domains   = 0usize;
+        let mut grand_total   = 0usize;
+
+        const SCAN: usize = 16;
+        let mut scan_items = [GraphNodeSummary::EMPTY; SCAN];
+        let mut scan_off   = 0usize;
+        loop {
+            let (total, returned) = gos_runtime::node_page::<SCAN>(scan_off, &mut scan_items);
+            for item in scan_items.iter().take(returned) {
+                let l4 = item.vector.l4;
+                let mut found = false;
+                for d in 0..num_domains {
+                    if domain_l4s[d] == l4 {
+                        domain_counts[d] += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found && num_domains < MAX_DOMAINS {
+                    domain_l4s[num_domains] = l4;
+                    domain_counts[num_domains] = 1;
+                    num_domains += 1;
+                }
+                grand_total += 1;
+            }
+            scan_off += returned;
+            if returned == 0 || scan_off >= total { break; }
+        }
+
+        // Insertion-sort domain_l4s/domain_counts by l4 value for stable output.
+        let mut i = 1usize;
+        while i < num_domains {
+            let key_l4  = domain_l4s[i];
+            let key_cnt = domain_counts[i];
+            let mut j = i;
+            while j > 0 && domain_l4s[j - 1] > key_l4 {
+                domain_l4s[j]    = domain_l4s[j - 1];
+                domain_counts[j] = domain_counts[j - 1];
+                j -= 1;
+            }
+            domain_l4s[j]    = key_l4;
+            domain_counts[j] = key_cnt;
+            i += 1;
+        }
+
+        for d in 0..num_domains {
+            let l4    = domain_l4s[d];
+            let count = domain_counts[d];
+            set_color(sink, 11, 0);
+            print_str(sink, "  [l4=");
+            print_num_inline(sink, l4 as usize);
+            print_str(sink, "]");
+            // Pad so node counts align at a consistent column.
+            let digits = if l4 < 10 { 1usize } else if l4 < 100 { 2 } else { 3 };
+            for _ in digits..3 { print_str(sink, " "); }
+            set_color(sink, 7, 0);
+            print_str(sink, "  ");
+            print_num_inline(sink, count);
+            print_str(sink, if count == 1 { " node\n" } else { " nodes\n" });
+        }
+
+        if num_domains == 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  (no nodes)\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  ");
+        print_num_inline(sink, num_domains);
+        print_str(sink, " domain(s)  |  ");
+        print_num_inline(sink, grand_total);
+        print_str(sink, " total node(s)");
+        if num_domains > 0 {
+            print_str(sink, "  |  use 'graph topo <l4>' to list a domain\n");
+        } else {
+            print_str(sink, "\n");
+        }
+        set_color(sink, 7, 0);
+    }
+}
+
 /// Right-align a number in 4 columns (spaces then digits).
 fn print_num_right4(sink: &ConsoleSink, n: usize) {
     if n >= 1000 {
