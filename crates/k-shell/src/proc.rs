@@ -520,6 +520,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  metrics export     machine-parseable key=value telemetry dump\n");
         super::print_str(sink, "  journal            journal format info and replay status\n");
         super::print_str(sink, "  proc               ps-style table: node signal counts + edge out-degree\n");
+        super::print_str(sink, "  stat <vector>      detailed stat for one node (like /proc/<pid>/status)\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -684,6 +685,14 @@ fn dispatch_text_command(
         super::dispatch_journal_info(sink);
     } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
         super::dispatch_proc_list(sink);
+    } else if let Some(vec_str) = cmd.strip_prefix("stat ").or_else(|| cmd.strip_prefix("node stat ")) {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_stat(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " stat requires a vector address (e.g. stat 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "edges" || cmd == "edges all" {
         super::dispatch_edges_list(sink, None);
     } else if cmd == "edges count" || cmd == "edge count" {

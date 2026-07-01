@@ -1598,6 +1598,56 @@ pub fn dispatch_proc_list(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Show a detailed stat block for the single node at `vec` — analogous to
+/// `cat /proc/<pid>/status` on Linux.  Shows vector, key, plugin, lifecycle,
+/// signal count, and outbound edge count.  Prints an error if the vector is
+/// not registered.
+pub fn dispatch_node_stat(sink: &ConsoleSink, vec: VectorAddress) {
+    set_color(sink, 11, 0);
+    print_str(sink, " node stat\n");
+    set_color(sink, 7, 0);
+    match gos_runtime::proc_stat_for_vector(vec) {
+        None => {
+            set_color(sink, 12, 0);
+            print_str(sink, "  not found: ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vec);
+            print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Some(s) => {
+            let fg: u8 = match s.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => 10,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => 14,
+                _                                      => 7,
+            };
+            print_str(sink, "  vector:        ");
+            let mut vec_line = LineBuf::<20>::new();
+            vec_line.push_vector(s.vector);
+            set_color(sink, fg, 0);
+            print_str(sink, core::str::from_utf8(vec_line.as_slice()).unwrap_or("?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  key:           ");
+            print_str(sink, s.local_node_key);
+            print_str(sink, "\n  plugin:        ");
+            print_str(sink, s.plugin_name);
+            print_str(sink, "\n  lifecycle:     ");
+            set_color(sink, fg, 0);
+            print_str(sink, node_lifecycle_label(s.lifecycle));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  signal_count:  ");
+            set_color(sink, 11, 0);
+            print_num_inline(sink, s.signal_count as usize);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  edge_out:      ");
+            print_num_inline(sink, s.edge_out_count as usize);
+            print_str(sink, "\n");
+        }
+    }
+}
+
 /// Right-align a number in 4 columns (spaces then digits).
 fn print_num_right4(sink: &ConsoleSink, n: usize) {
     if n >= 1000 {

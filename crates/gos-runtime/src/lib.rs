@@ -486,6 +486,15 @@ impl GraphRuntime {
         self.nodes.iter().filter(|s| s.is_some()).count()
     }
 
+    /// Return a `NodeProcSummary` for the single node whose vector matches `vec`.
+    /// Returns `None` if no registered node has that vector address.
+    pub fn proc_stat_for_vector(&self, vec: VectorAddress) -> Option<NodeProcSummary> {
+        let slot = self.nodes.iter().position(|s| {
+            s.map(|r| r.vector == vec).unwrap_or(false)
+        })?;
+        self.proc_summary_from_slot(slot)
+    }
+
     fn edge_summary_from_slot(
         &self,
         slot: usize,
@@ -2413,6 +2422,11 @@ pub fn proc_page<const N: usize>(
 /// Total number of live nodes (process count).
 pub fn proc_count() -> usize {
     RUNTIME.lock().proc_count()
+}
+
+/// Return `NodeProcSummary` for the node at `vec`, or `None` if not found.
+pub fn proc_stat_for_vector(vec: VectorAddress) -> Option<NodeProcSummary> {
+    RUNTIME.lock().proc_stat_for_vector(vec)
 }
 
 pub fn bootstrap_context(payload: u64) -> BootContext {
