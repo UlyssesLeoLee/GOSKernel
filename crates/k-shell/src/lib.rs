@@ -1707,6 +1707,143 @@ pub fn dispatch_node_resume(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// `node info <vec>` — comprehensive single-node status view.
+///
+/// The graph-OS analogue of `systemctl status <unit>`: shows a node's
+/// identity (vector, key, plugin), lifecycle, cumulative signal count, and
+/// a full inline listing of every edge that touches this node — both
+/// outbound (this node as source) and inbound (this node as target).
+///
+/// This is the single-pane-of-glass command: `stat` + `edges` for one node.
+pub fn dispatch_node_info(sink: &ConsoleSink, vec: VectorAddress) {
+    use gos_protocol::GraphEdgeSummary;
+
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node info\n");
+    set_color(sink, 7, 0);
+
+    match gos_runtime::proc_stat_for_vector(vec) {
+        None => {
+            set_color(sink, 12, 0);
+            print_str(sink, "  not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            return;
+        }
+        Some(s) => {
+            let fg: u8 = match s.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => 10,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => 14,
+                _                                      => 7,
+            };
+            print_str(sink, "  vector:        ");
+            set_color(sink, fg, 0);
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  key:           ");
+            print_str(sink, s.local_node_key);
+            print_str(sink, "\n  plugin:        ");
+            print_str(sink, s.plugin_name);
+            print_str(sink, "\n  lifecycle:     ");
+            set_color(sink, fg, 0);
+            print_str(sink, node_lifecycle_label(s.lifecycle));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  signal_count:  ");
+            set_color(sink, 11, 0);
+            print_num_inline(sink, s.signal_count as usize);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  edge_out:      ");
+            print_num_inline(sink, s.edge_out_count as usize);
+            print_str(sink, "\n");
+        }
+    }
+
+    // Edge listing — all edges touching this node.
+    const EDGE_PAGE: usize = 16;
+    let mut edges = [GraphEdgeSummary::EMPTY; EDGE_PAGE];
+    match gos_runtime::edge_page_for_node(vec, 0, &mut edges) {
+        Err(_) => {
+            set_color(sink, 8, 0);
+            print_str(sink, "  edges:         (unavailable)\n");
+            set_color(sink, 7, 0);
+        }
+        Ok((total, returned)) => {
+            print_str(sink, "  edges (");
+            print_num_inline(sink, total);
+            print_str(sink, "):\n");
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "    (none)\n");
+                set_color(sink, 7, 0);
+            } else {
+                for edge in edges.iter().take(returned) {
+                    let is_out = edge.from_vector == vec;
+                    let (dir_label, fg): (&str, u8) = if is_out {
+                        ("out", 10)
+                    } else {
+                        ("in ", 13)
+                    };
+                    set_color(sink, fg, 0);
+                    print_str(sink, "    ");
+                    print_str(sink, dir_label);
+                    set_color(sink, 8, 0);
+                    print_str(sink, "  ");
+                    if !is_out {
+                        let mut from_buf = LineBuf::<20>::new();
+                        from_buf.push_vector(edge.from_vector);
+                        set_color(sink, 7, 0);
+                        print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+                        set_color(sink, 8, 0);
+                        print_str(sink, " -[");
+                        set_color(sink, fg, 0);
+                        print_str(sink, edge_type_label(edge.edge_type));
+                        set_color(sink, 8, 0);
+                        print_str(sink, "]-> ");
+                        set_color(sink, 11, 0);
+                        print_str(sink, vec_str);
+                    } else {
+                        set_color(sink, 11, 0);
+                        print_str(sink, vec_str);
+                        set_color(sink, 8, 0);
+                        print_str(sink, " -[");
+                        set_color(sink, fg, 0);
+                        print_str(sink, edge_type_label(edge.edge_type));
+                        set_color(sink, 8, 0);
+                        print_str(sink, "]-> ");
+                        set_color(sink, 7, 0);
+                        let mut to_buf = LineBuf::<20>::new();
+                        to_buf.push_vector(edge.to_vector);
+                        print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+                    }
+                    if !edge.from_key.is_empty() {
+                        set_color(sink, 8, 0);
+                        print_str(sink, "  ");
+                        print_str(sink, edge.from_key);
+                    }
+                    print_str(sink, "\n");
+                    set_color(sink, 7, 0);
+                }
+                if total > returned {
+                    set_color(sink, 8, 0);
+                    print_str(sink, "    ... ");
+                    print_num_inline(sink, total - returned);
+                    print_str(sink, " more edges\n");
+                    set_color(sink, 7, 0);
+                }
+            }
+        }
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  hint: stat <vec> for counters | edges <type> for type filter\n");
+    set_color(sink, 7, 0);
+}
+
 /// `graph topo` — hierarchical L4-domain topology view.
 ///
 /// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are
