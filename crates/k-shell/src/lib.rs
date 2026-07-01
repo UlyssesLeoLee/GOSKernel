@@ -2586,6 +2586,104 @@ pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.33: `graph toposort` — topological ordering of the live node graph.
+///
+/// Uses Kahn's BFS algorithm (in-degree queue, O(V+E)) to produce a dependency
+/// ordering where every source (in-degree 0) precedes its successors.  Analogous
+/// to `tsort(1)` on POSIX, `cmake --build` dependency ordering, or `cargo build`'s
+/// crate graph resolution — exposes the boot/init ordering of the GOS graph at a glance.
+///
+/// If the graph contains cycles the command shows the partial sort and warns that
+/// cycle detection via `graph cycles` should be run first.
+pub fn dispatch_graph_toposort(sink: &ConsoleSink) {
+    const MAX_TOPO: usize = 128;
+    let (order, order_len, is_dag) = gos_runtime::graph_toposort::<MAX_TOPO>();
+    let total = gos_runtime::node_count();
+
+    // Header
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH TOPOSORT ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_dag {
+        set_color(sink, 12, 0);
+        print_str(sink, "  WARNING: graph contains cycles — toposort is incomplete\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  run 'graph cycles' to identify the cyclic component\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    // Ordered node list
+    print_str(sink, "\n");
+    for i in 0..order_len {
+        let vec = order[i];
+
+        // Rank number (1-based)
+        print_str(sink, "  ");
+        if i + 1 < 10  { print_str(sink, "  "); }
+        else if i + 1 < 100 { print_str(sink, " "); }
+        print_num_inline(sink, i + 1);
+        print_str(sink, "   ");
+
+        // Vector address
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        set_color(sink, 11, 0);
+        print_str(sink, vstr);
+        // Pad vector to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_str(sink, "  ");
+        set_color(sink, 7, 0);
+
+        // Node key + plugin
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            set_color(sink, 10, 0);
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+            set_color(sink, 7, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+    }
+
+    // Footer
+    print_str(sink, "\n");
+    if is_dag {
+        set_color(sink, 10, 0);
+        print_num_inline(sink, order_len);
+        print_str(sink, " nodes  ");
+        set_color(sink, 8, 0);
+        print_str(sink, "(complete DAG — dependency order is unique up to ties)\n");
+    } else {
+        set_color(sink, 14, 0);
+        print_num_inline(sink, order_len);
+        print_str(sink, "/");
+        print_num_inline(sink, total);
+        print_str(sink, " nodes sorted  ");
+        set_color(sink, 12, 0);
+        print_num_inline(sink, total - order_len);
+        print_str(sink, " in cyclic component (unsortable)\n");
+    }
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

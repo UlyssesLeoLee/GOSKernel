@@ -1694,6 +1694,90 @@ impl GraphRuntime {
         len > 0
     }
 
+    /// V2.33: Topological sort via Kahn's BFS algorithm (in-degree queue).
+    ///
+    /// Returns `(order, length, is_dag)`:
+    ///   - `order[0..length]` is the topological ordering of live nodes.
+    ///   - `is_dag` is `true` when the sort covers all nodes (no cycles).
+    ///   - When `is_dag` is `false` (`length < node_count`) cycles prevent a
+    ///     complete ordering; the partial prefix covers the nodes that CAN be
+    ///     sorted before the cyclic component is encountered.
+    ///
+    /// Self-loops are excluded from the in-degree computation so they do not
+    /// stall the queue — their host node is still emitted in dependency order.
+    /// O(V+E), no_std safe, fixed stack arrays only.
+    pub fn graph_toposort_inner<const N: usize>(&self) -> ([VectorAddress; N], usize, bool) {
+        // Collect live node slots into a compact list.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Compute in-degree for each slot (excluding self-loops).
+        let mut in_degree = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let from_slot = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let to_slot   = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            if from_slot != to_slot {
+                in_degree[to_slot] = in_degree[to_slot].saturating_add(1);
+            }
+        }
+
+        // Seed the BFS queue with all in-degree-0 nodes.
+        let mut queue   = [0usize; MAX_NODES];
+        let mut q_head  = 0usize;
+        let mut q_tail  = 0usize;
+        for k in 0..node_count {
+            let s = node_slots[k];
+            if in_degree[s] == 0 {
+                queue[q_tail] = s;
+                q_tail += 1;
+            }
+        }
+
+        // BFS — emit each zero-in-degree node and decrement its successors.
+        let mut out     = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_len = 0usize;
+
+        while q_head < q_tail {
+            let cur_slot = queue[q_head];
+            q_head += 1;
+
+            if out_len < N {
+                out[out_len] = self.nodes[cur_slot]
+                    .map(|r| r.vector)
+                    .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+                out_len += 1;
+            }
+
+            let cur_node_id = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_node_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; } // skip self-loops
+                if in_degree[nbr_slot] > 0 {
+                    in_degree[nbr_slot] -= 1;
+                    if in_degree[nbr_slot] == 0 {
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = nbr_slot;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_dag = out_len == node_count;
+        (out, out_len, is_dag)
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -3350,6 +3434,21 @@ pub fn find_graph_cycle<const N: usize>() -> ([VectorAddress; N], usize) {
 /// working arrays.  Analogous to `tsort … && echo "dag" || echo "cyclic"`.
 pub fn is_cyclic() -> bool {
     RUNTIME.lock().is_cyclic_inner()
+}
+
+/// V2.33: Topological sort of the live node graph (Kahn's BFS algorithm).
+///
+/// Returns `(order, length, is_dag)`:
+/// - `order[0..length]` — nodes in dependency order: sources (in-degree 0) first,
+///   sinks last.  Analogous to the output of `tsort(1)` on POSIX systems, or the
+///   build-order output of `cmake --build` / `cargo build` dependency resolution.
+/// - `is_dag` — `true` when ALL live nodes appear in `order[0..length]`.
+///   When `false`, at least one directed cycle prevents a complete ordering.
+///
+/// Self-loops are ignored in the in-degree calculation.
+/// N controls the output buffer depth; cap at 128 (MAX_NODES) for full coverage.
+pub fn graph_toposort<const N: usize>() -> ([VectorAddress; N], usize, bool) {
+    RUNTIME.lock().graph_toposort_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
