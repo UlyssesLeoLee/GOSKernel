@@ -1420,6 +1420,17 @@ impl GraphRuntime {
         Ok((total, returned))
     }
 
+    /// V2.26: Clear the per-node lifecycle log ring for `vector`.
+    /// Resets the ring, head pointer, and total counter to zero.
+    /// Returns `Err(RuntimeError::NodeNotFound)` if the node is not registered.
+    pub fn clear_node_log_inner(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        self.node_log[slot] = [NodeLogEntry::EMPTY; MAX_NODE_LOG];
+        self.node_log_head[slot] = 0;
+        self.node_log_total[slot] = 0;
+        Ok(())
+    }
+
     pub fn bind_instance(
         &mut self,
         vector: VectorAddress,
@@ -2761,6 +2772,12 @@ pub fn node_log_page(
     out: &mut [NodeLogEntry; MAX_NODE_LOG],
 ) -> Result<(usize, usize), RuntimeError> {
     RUNTIME.lock().node_log_page(vec, out)
+}
+
+/// V2.26: Clear the lifecycle event log for `vec`.
+/// Resets the ring to empty — subsequent node_log_page calls return 0 entries.
+pub fn clear_node_log(vec: VectorAddress) -> Result<(), RuntimeError> {
+    RUNTIME.lock().clear_node_log_inner(vec)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

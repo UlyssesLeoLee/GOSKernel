@@ -1992,6 +1992,35 @@ pub fn dispatch_node_log(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// `node log clear <vec>` / `nlog clear <vec>` — clear per-node lifecycle event log.
+///
+/// Analogous to `journalctl --vacuum-time` or `truncate -s0 /var/log/…`:
+/// discards the stored lifecycle history for one node.  Useful after node
+/// recovery to obtain a clean-slate log for subsequent monitoring.
+pub fn dispatch_node_log_clear(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::clear_node_log(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node log cleared  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
 fn lifecycle_log_entry(lc: u8) -> (&'static str, u8) {
     use gos_protocol::NodeLifecycle;
     match lc {
