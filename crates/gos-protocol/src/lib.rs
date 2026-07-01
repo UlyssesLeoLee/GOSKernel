@@ -1649,6 +1649,29 @@ impl NodeProcSummary {
     };
 }
 
+/// V2.24 — one entry in the per-node signal trace ring (like `strace -p <pid>`).
+///
+/// `kind == 0` is the EMPTY sentinel: `KernelSignalKind` values start at 0x01,
+/// so zero is never a real signal.  Use this to detect unfilled ring slots.
+#[derive(Clone, Copy)]
+pub struct NodeTraceEntry {
+    /// Sender's raw vector address (`VectorAddress::from_u64(self.from)` to decode).
+    /// `0` for kernel-initiated signals (Spawn, Interrupt, Terminate).
+    pub from:   u64,
+    /// Value of `signal_count` just *before* this dispatch (monotonically increasing).
+    pub serial: u32,
+    /// Signal kind discriminant — matches `KernelSignalKind` u8 values.
+    /// `0` = EMPTY (no signal recorded in this ring slot yet).
+    pub kind:   u8,
+    /// For `Control`: cmd byte.  For `Interrupt`: irq byte.  For `Data`: the data byte.
+    /// `0` for all other kinds.
+    pub cmd:    u8,
+}
+
+impl NodeTraceEntry {
+    pub const EMPTY: Self = Self { from: 0, serial: 0, kind: 0, cmd: 0 };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GraphEdgeSummary {
     pub edge_vector: EdgeVector,

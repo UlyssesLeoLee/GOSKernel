@@ -10,6 +10,7 @@ use gos_protocol::{
     GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
     KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
     NodeId, NodeInstanceId, NodeLifecycle, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry,
+    NodeTraceEntry,
     PluginId, PluginManifest, PluginState, PluginSummary, RoutePolicy, RuntimeEdgeType, Signal,
     StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
@@ -32,6 +33,8 @@ pub const NODE_ARENA_PAGES: usize = 64;
 pub const MAX_DIFF_RING: usize = 128;
 /// V2.15: per-node u8 property slots for reactive signal val encoding.
 pub const MAX_NODE_PROPS_U8: usize = 16;
+/// V2.24: per-node signal trace ring depth — most recent N dispatches.
+pub const MAX_NODE_TRACE: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -336,6 +339,11 @@ pub struct GraphRuntime {
     diff_ring_head: usize,
     /// Total structural mutations ever recorded (monotonic; used to detect wrap).
     diff_total: u64,
+    /// V2.24 per-node signal trace rings, indexed by node slot.
+    /// Each ring holds the most recent MAX_NODE_TRACE signal dispatches for that node.
+    node_trace: [[NodeTraceEntry; MAX_NODE_TRACE]; MAX_NODES],
+    /// Next write position in each node's trace ring.
+    node_trace_head: [u8; MAX_NODES],
 }
 
 impl Default for GraphRuntime {
@@ -376,6 +384,8 @@ impl GraphRuntime {
             diff_ring: [GraphDiffEntry::EMPTY; MAX_DIFF_RING],
             diff_ring_head: 0,
             diff_total: 0,
+            node_trace: [[NodeTraceEntry::EMPTY; MAX_NODE_TRACE]; MAX_NODES],
+            node_trace_head: [0u8; MAX_NODES],
         }
     }
 
@@ -1323,10 +1333,17 @@ impl GraphRuntime {
     fn prepare_signal_dispatch(
         &mut self,
         vector: VectorAddress,
+        signal: Signal,
     ) -> Result<PreparedDispatch, RuntimeError> {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
         let mut record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
         record.lifecycle = NodeLifecycle::Running;
+        // Record trace entry before incrementing so serial == index of this dispatch.
+        let (kind, from, cmd) = signal_trace_fields(signal);
+        let trace = NodeTraceEntry { from, serial: record.signal_count, kind, cmd };
+        let head = self.node_trace_head[slot] as usize;
+        self.node_trace[slot][head] = trace;
+        self.node_trace_head[slot] = ((head + 1) % MAX_NODE_TRACE) as u8;
         record.signal_count = record.signal_count.saturating_add(1);
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Running);
@@ -1338,6 +1355,29 @@ impl GraphRuntime {
             binding: record.binding,
             instance_id: record.instance_id,
         })
+    }
+
+    /// Return the signal trace ring for `vector` — most recent dispatch first.
+    /// Returns `(total_signals, entries_written)`.
+    pub fn node_trace_page(
+        &self,
+        vector: VectorAddress,
+        out: &mut [NodeTraceEntry; MAX_NODE_TRACE],
+    ) -> Result<(u32, usize), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        let record = self.nodes[slot].ok_or(RuntimeError::NodeNotFound)?;
+        let total = record.signal_count;
+        let ring_fill = (total as usize).min(MAX_NODE_TRACE);
+        let head = self.node_trace_head[slot] as usize;
+        let mut returned = 0usize;
+        let mut idx = 0usize;
+        while idx < ring_fill {
+            let ring_pos = (head + MAX_NODE_TRACE - 1 - idx) % MAX_NODE_TRACE;
+            out[returned] = self.node_trace[slot][ring_pos];
+            returned += 1;
+            idx += 1;
+        }
+        Ok((total, returned))
     }
 
     pub fn bind_instance(
@@ -2079,6 +2119,18 @@ static KERNEL_ABI: KernelAbi = KernelAbi {
     emit_control_plane: Some(kernel_emit_control_plane),
 };
 
+/// Decompose a `Signal` into the (kind, from, cmd) triple stored in a `NodeTraceEntry`.
+fn signal_trace_fields(signal: Signal) -> (u8, u64, u8) {
+    match signal {
+        Signal::Call { from }               => (0x01, from, 0),
+        Signal::Spawn { payload }           => (0x02, payload, 0),
+        Signal::Interrupt { irq }           => (0x03, 0, irq),
+        Signal::Data { from, byte }         => (0x04, from, byte),
+        Signal::Control { cmd, val: _ }     => (0x05, 0, cmd),
+        Signal::Terminate                   => (0xFF, 0, 0),
+    }
+}
+
 static RUNTIME: Mutex<GraphRuntime> = Mutex::new(GraphRuntime::new());
 
 pub fn reset() {
@@ -2298,7 +2350,7 @@ pub fn post_signal(target: VectorAddress, signal: Signal) -> Result<(), RuntimeE
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {
     let dispatch = {
         let mut runtime = RUNTIME.lock();
-        runtime.prepare_signal_dispatch(target)?
+        runtime.prepare_signal_dispatch(target, signal)?
     };
 
     match dispatch.binding {
@@ -2651,6 +2703,15 @@ pub fn proc_count() -> usize {
 /// Return `NodeProcSummary` for the node at `vec`, or `None` if not found.
 pub fn proc_stat_for_vector(vec: VectorAddress) -> Option<NodeProcSummary> {
     RUNTIME.lock().proc_stat_for_vector(vec)
+}
+
+/// Return the signal trace ring for `vec` — up to `MAX_NODE_TRACE` most recent dispatches,
+/// newest first.  Returns `(total_signals, entries_written)`.
+pub fn node_trace_page(
+    vec: VectorAddress,
+    out: &mut [NodeTraceEntry; MAX_NODE_TRACE],
+) -> Result<(u32, usize), RuntimeError> {
+    RUNTIME.lock().node_trace_page(vec, out)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

@@ -1844,6 +1844,97 @@ pub fn dispatch_node_info(sink: &ConsoleSink, vec: VectorAddress) {
     set_color(sink, 7, 0);
 }
 
+/// `node trace <vec>` / `ntrace <vec>` — per-node signal dispatch history.
+///
+/// Analogous to `strace -p <pid>`: shows the most recent signals dispatched
+/// to a single node, most recent first.  Each row: seq | kind | cmd | from.
+pub fn dispatch_node_trace(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    let mut ring = [gos_protocol::NodeTraceEntry::EMPTY; gos_runtime::MAX_NODE_TRACE];
+    match gos_runtime::node_trace_page(vec, &mut ring) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            return;
+        }
+        Ok((total, returned)) => {
+            set_color(sink, 11, 0);
+            print_str(sink, " node trace  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "  total=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, total as usize);
+            set_color(sink, 8, 0);
+            print_str(sink, "  showing=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, returned);
+            print_str(sink, "\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "   seq  kind      cmd  from\n");
+            set_color(sink, 7, 0);
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "   (no signals dispatched yet)\n");
+                set_color(sink, 7, 0);
+            }
+            for i in 0..returned {
+                let e = ring[i];
+                if e.kind == 0 { continue; } // EMPTY sentinel
+                print_num_right4(sink, e.serial as usize);
+                print_str(sink, "  ");
+                let (kind_label, kind_color) = signal_kind_entry(e.kind);
+                set_color(sink, kind_color, 0);
+                print_str(sink, kind_label);
+                set_color(sink, 7, 0);
+                print_str(sink, "  ");
+                if e.cmd != 0 {
+                    set_color(sink, 14, 0);
+                    print_num_right4(sink, e.cmd as usize);
+                    set_color(sink, 7, 0);
+                } else {
+                    print_str(sink, "   0");
+                }
+                print_str(sink, "  ");
+                if e.from != 0 {
+                    let from_vec = VectorAddress::from_u64(e.from);
+                    let mut from_buf = LineBuf::<20>::new();
+                    from_buf.push_vector(from_vec);
+                    set_color(sink, 11, 0);
+                    print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+                    set_color(sink, 7, 0);
+                } else {
+                    set_color(sink, 8, 0);
+                    print_str(sink, "kernel");
+                    set_color(sink, 7, 0);
+                }
+                print_str(sink, "\n");
+            }
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: node info <vec> for static view | proc for all nodes\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+fn signal_kind_entry(kind: u8) -> (&'static str, u8) {
+    match kind {
+        0x01 => ("call    ", 10),
+        0x02 => ("spawn   ", 13),
+        0x03 => ("irq     ", 9),
+        0x04 => ("data    ", 7),
+        0x05 => ("control ", 14),
+        0xFF => ("term    ", 12),
+        _    => ("?       ", 8),
+    }
+}
+
 /// `graph topo` — hierarchical L4-domain topology view.
 ///
 /// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are

@@ -527,6 +527,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  node resume <vector>  alias for resume\n");
         super::print_str(sink, "  node info <vector> comprehensive node view: stat + edges (like systemctl status)\n");
         super::print_str(sink, "  ninfo <vector>     alias for node info\n");
+        super::print_str(sink, "  node trace <vector> signal dispatch history for one node (like strace -p <pid>)\n");
+        super::print_str(sink, "  ntrace <vector>    alias for node trace\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -737,6 +739,17 @@ fn dispatch_text_command(
         } else {
             super::set_color(sink, 12, 0);
             super::print_str(sink, " node info requires a vector address (e.g. node info 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node trace ")
+        .or_else(|| cmd.strip_prefix("ntrace "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_trace(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node trace requires a vector address (e.g. node trace 6.1.0.0)\n");
             super::set_color(sink, 7, 0);
         }
     } else if cmd == "edges" || cmd == "edges all" {
