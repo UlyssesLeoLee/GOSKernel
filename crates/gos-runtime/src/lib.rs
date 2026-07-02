@@ -2401,6 +2401,117 @@ impl GraphRuntime {
         (out_vecs, out_katz, copy_len)
     }
 
+    /// V2.43: PageRank centrality (random-walk stationary distribution).
+    ///
+    /// Classical PageRank with damping factor d = 0.85:
+    ///
+    ///   PR[v] = (1-d) × SCALE + d × Σ_{u→v, outdeg(u)>0} PR[u] / outdeg(u)
+    ///
+    /// Dangling nodes (out-degree = 0) absorb their rank (do not redistribute it)
+    /// — they are treated as "signal drains": they receive walk-mass but never
+    /// forward it.  This is the correct GOS semantic: a node that emits no edges
+    /// is a terminal consumer, not a relay.
+    ///
+    /// SCALE = 1_000_000.  Initial rank = SCALE per node.  20 iterations.
+    /// Output is sorted descending (highest PageRank first).
+    pub fn graph_pagerank_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE:    u64   = 1_000_000;
+        const DAMP_NUM: u64   = 85;   // d = 0.85
+        const DAMP_DEN: u64   = 100;
+        const TELE:     u64   = SCALE * (DAMP_DEN - DAMP_NUM) / DAMP_DEN; // 150_000
+        const PR_ITERS: usize = 20;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return ([VectorAddress::new(0, 0, 0, 0); N], [0u32; N], 0);
+        }
+
+        // Out-degree per slot (count edges where from_node == node_id).
+        let mut out_deg = [0u32; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if let Some(u) = self.node_slot_by_id(edge.spec.from_node) {
+                out_deg[u] = out_deg[u].saturating_add(1);
+            }
+        }
+
+        // Initial PageRank: SCALE per node.
+        let mut pr0 = [0u64; MAX_NODES];
+        let mut pr1 = [0u64; MAX_NODES];
+        for si in 0..node_count {
+            pr0[node_slots[si]] = SCALE;
+        }
+
+        for _iter in 0..PR_ITERS {
+            // Seed pr1 with the teleportation floor.
+            for si in 0..node_count {
+                pr1[node_slots[si]] = TELE;
+            }
+
+            // Accumulate link contributions: for each v, sum from all u→v edges.
+            for vi in 0..node_count {
+                let v = node_slots[vi];
+                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.to_node != v_id { continue; }
+
+                    let u = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(slot) => slot, None => continue,
+                    };
+                    let od = out_deg[u] as u64;
+                    if od == 0 { continue; } // dangling — skip
+
+                    // contrib = d × PR[u] / outdeg(u)
+                    let contrib = pr0[u].saturating_mul(DAMP_NUM) / (od * DAMP_DEN);
+                    pr1[v] = pr1[v].saturating_add(contrib);
+                }
+            }
+
+            // Swap buffers.
+            for si in 0..node_count {
+                pr0[node_slots[si]] = pr1[node_slots[si]];
+            }
+        }
+
+        // Sort descending by PageRank (insertion sort — N ≤ 128).
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_val  = pr0[key_slot];
+            let mut j    = i;
+            while j > 0 && pr0[sorted[j - 1]] < key_val {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // Pack output arrays (cap at N).
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_pr   = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_pr[i] = pr0[slot].min(u32::MAX as u64) as u32;
+        }
+
+        (out_vecs, out_pr, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4732,6 +4843,28 @@ pub fn graph_eccentricity<const N: usize>() -> ([VectorAddress; N], [u32; N], us
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_katz<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_katz_inner()
+}
+
+/// V2.43: PageRank centrality for all live nodes (random-walk stationary distribution).
+///
+/// Returns `(vecs, pr, total)`:
+/// - `vecs[0..total]`  — live node vectors, descending PageRank order.
+/// - `pr[0..total]`    — PageRank score × 1_000_000 per node (capped at u32::MAX).
+/// - `total`           — number of live nodes packed into the output arrays.
+///
+/// Classical PageRank: PR[v] = (1-d)×SCALE + d × Σ_{u→v} PR[u]/outdeg(u),  d=0.85.
+/// Dangling nodes (out-degree = 0) absorb rank (no redistribution — they are
+/// signal drains, not relays).  20 fixed-point iterations; O(K × V × E).
+///
+/// Score interpretation (×10⁻⁶):
+///   PR ≥ 1_000_000   → authority (disproportionate random-walk traffic)
+///   300_000 < PR < 1M → relay    (above-floor link contribution)
+///   PR ≤ 300_000      → sink     (≈ teleportation floor only, few inbound links)
+///
+/// OS analogy: `top` sorted by incoming-signal weight — which kernel nodes
+/// dominate the random walk over the live graph topology?
+pub fn graph_pagerank<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_pagerank_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

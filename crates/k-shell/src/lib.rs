@@ -3638,6 +3638,119 @@ pub fn dispatch_graph_katz(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.43: `graph pagerank` — PageRank centrality per node (random-walk stationary distribution).
+///
+/// Classical PageRank (d = 0.85) answers: "which node would a random walker
+/// following directed signal edges land on most often?"  Unlike Katz centrality
+/// (which counts all walks equally) PageRank normalises each node's contribution
+/// by its out-degree, so high-degree hubs dilute their vote.
+///
+///   PR[v] = (1−d) × SCALE + d × Σ_{u→v, outdeg(u)>0} PR[u] / outdeg(u)
+///
+/// Score interpretation (×10⁻⁶):
+///   PR ≥ 1_000_000     → authority  (dominates random-walk traffic)
+///   300_000 < PR < 1M  → relay      (above-floor, some inbound link mass)
+///   PR ≤ 300_000        → sink       (≈ teleportation floor, few/no inbound links)
+///
+/// Output sorted descending: highest-authority nodes first.
+/// OS analogy: `top` by incoming-signal weight — structural importance of each
+/// kernel node to the overall random-walk flow.
+pub fn dispatch_graph_pagerank(sink: &ConsoleSink) {
+    const MAX_N:      usize = 128;
+    const SCALE:      usize = 1_000_000;
+    const AUTHORITY:  usize = SCALE;          // ≥ 1_000_000
+    const RELAY_FLOOR: usize = 300_000;       // > 300_000
+
+    let (vecs, pr, total) = gos_runtime::graph_pagerank::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph pagerank\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector           pagerank  role\n");
+    set_color(sink, 7, 0);
+
+    let mut auth_count = 0usize;
+
+    for i in 0..total {
+        let score = pr[i] as usize;
+        let is_authority = score >= AUTHORITY;
+        let is_sink      = score <= RELAY_FLOOR;
+
+        if is_authority {
+            set_color(sink, 14, 0); // bright yellow
+        } else if !is_sink {
+            set_color(sink, 11, 0); // cyan
+        } else {
+            set_color(sink, 8, 0);  // dark grey
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector column to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // PageRank score (right-aligned, 9 wide).
+        set_color(sink, if is_authority { 14 } else if !is_sink { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score / 1000); // show as integer (÷1000 for display)
+        print_str(sink, "k ");
+
+        // Role label.
+        if is_authority {
+            set_color(sink, 14, 0);
+            print_str(sink, "authority");
+            auth_count += 1;
+        } else if !is_sink {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "sink");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    let max_pr = if total > 0 { pr[0] as usize } else { 0 };
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  d=0.85  max-pr: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_pr / 1000);
+    set_color(sink, 8, 0);
+    print_str(sink, "k (×1e-3)");
+    if auth_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  authorities: ");
+        print_num_inline(sink, auth_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
