@@ -1,142 +1,142 @@
-# GOS Hardening Log — V2.40 (2026-07-02)
+# GOS 硬化日志 — V2.40（2026-07-02）
 
-## Feature: `graph closeness` — Outgoing Closeness Centrality
+## 特性：`graph closeness` —— 出向接近中心性
 
-**Branch:** feat/vk-auto-live-surface  
-**Commit scope:** feat(v2.40): graph closeness / closeness — outgoing closeness centrality  
-**Test suite added:** gos-graph-closeness-harness (10 tests)  
-**Total host-test count after this slice:** 403
+**分支：** feat/vk-auto-live-surface
+**提交范围：** feat(v2.40): graph closeness / closeness — outgoing closeness centrality
+**新增测试套件：** gos-graph-closeness-harness（10 个测试）
+**本次切片后累计 host 测试数：** 403
 
 ---
 
-## What Was Built
+## 本次构建内容
 
-### Shell Command Surface
+### Shell 命令一览
 
-| Command | Aliases | Description |
+| 命令 | 别名 | 说明 |
 |---------|---------|-------------|
-| `graph closeness` | `closeness`, `graph close`, `close centrality`, `cc` | Outgoing closeness centrality per node, sorted descending |
+| `graph closeness` | `closeness`, `graph close`, `close centrality`, `cc` | 每个节点的出向接近中心性，按降序排列 |
 
-### Algorithm: Outgoing Closeness Centrality (BFS per source)
+### 算法：出向接近中心性（每个源节点执行一次 BFS）
 
-**Definition:**
+**定义：**
 
-For each live node v, the outgoing closeness centrality is:
+对每个存活节点 v，其出向接近中心性为：
 
-```
+```text
 CC[v] = r_v × SCALE / Σ_{u reachable from v, u≠v} d(v,u)
 ```
 
-Where:
-- `r_v` = number of nodes reachable from `v` via directed edges (excluding `v` itself)
-- `d(v,u)` = BFS shortest-path distance from `v` to `u`
-- `SCALE` = 1,000,000 (fixed-point, avoids floating-point in `no_std`)
-- Isolated nodes (`r_v = 0`): `CC[v] = 0`
+其中：
+- `r_v` = 通过有向边可从 `v` 到达的节点数量（不含 `v` 自身）
+- `d(v,u)` = 从 `v` 到 `u` 的 BFS 最短路径距离
+- `SCALE` = 1,000,000（定点数缩放，避免在 `no_std` 中使用浮点数）
+- 孤立节点（`r_v = 0`）：`CC[v] = 0`
 
-**Complexity:** O(V × (V + E)) — one BFS per source node.
+**复杂度：** O(V × (V + E)) —— 每个源节点执行一次 BFS。
 
-**Output:** Sorted descending by CC score. Role annotations:
-- `central` — highest CC score: node that can broadcast to all others most efficiently
-- `relay` — moderate CC: reaches others, but not at maximum efficiency
-- `peripheral` — CC = 0: isolated, pure sink, or disconnected from any reachable subgraph
+**输出：** 按 CC 分值降序排列。角色标注：
+- `central` —— CC 分值最高：能以最高效率向所有其他节点广播的节点
+- `relay` —— CC 处于中等水平：能到达其他节点，但效率并非最高
+- `peripheral` —— CC = 0：孤立节点、纯汇点，或与任何可达子图都不连通
 
-**Fixed-point note:** CC scores are reported as integers × 10⁻⁶. For example:
-- CC = 1,000,000 → exact closeness = 1.0 (reaches all reachable nodes in exactly 1 hop)
-- CC = 666,666 → exact closeness ≈ 0.6667 (average 1.5 hops to reachable nodes)
-- CC = 500,000 → exact closeness = 0.5 (average 2 hops)
+**定点数说明：** CC 分值以整数 × 10⁻⁶ 的形式报告。例如：
+- CC = 1,000,000 → 精确接近度 = 1.0（恰好 1 跳即可到达所有可达节点）
+- CC = 666,666 → 精确接近度 ≈ 0.6667（到可达节点的平均跳数为 1.5）
+- CC = 500,000 → 精确接近度 = 0.5（平均 2 跳）
 
-**Disconnected graph handling:** The formula uses `r_v` (reachable count) in the numerator, which naturally gives credit to nodes that reach many nodes even if the graph is partitioned. Nodes that cannot reach any other node get CC = 0.
+**不连通图的处理：** 该公式在分子中使用 `r_v`（可达节点数），即使图被分割成多个部分，也能自然地给予能到达许多节点的节点相应的分值。无法到达任何其他节点的节点 CC = 0。
 
-### Comparison with Betweenness Centrality (V2.39)
+### 与介数中心性（V2.39）的比较
 
-| Dimension | Betweenness (V2.39) | Closeness (V2.40) |
+| 维度 | 介数中心性（V2.39） | 接近中心性（V2.40） |
 |-----------|--------------------|--------------------|
-| Question | "Which nodes sit on the most shortest paths?" | "Which nodes can reach all others fastest?" |
-| Algorithm | Brandes 2001 (O(V×E)) | BFS per source (O(V×(V+E))) |
-| High score means | Critical routing bottleneck | Efficient broadcaster / broadcaster hub |
-| Zero score | Never an intermediary (leaf/isolated) | Cannot reach any other node (sink/isolated) |
-| OS analogy | `traceroute` hop frequency | `ping` RTT average |
+| 回答的问题 | "哪些节点处于最多最短路径之上？" | "哪些节点能最快地到达所有其他节点？" |
+| 算法 | Brandes 2001（O(V×E)） | 每源节点 BFS（O(V×(V+E))） |
+| 高分含义 | 关键路由瓶颈 | 高效的广播者 / 广播枢纽 |
+| 零分含义 | 从不作为中介（叶子节点/孤立节点） | 无法到达任何其他节点（汇点/孤立节点） |
+| 操作系统类比 | `traceroute` 跳数频率 | `ping` 平均往返时延 |
 
-Together, betweenness + closeness centrality complete a "structural bottleneck + reach efficiency" analysis pair:
-- Betweenness answers **dependency risk**: removing a high-BC node breaks many paths.
-- Closeness answers **latency reach**: a high-CC node disseminates signals most quickly.
+介数中心性与接近中心性共同构成"结构性瓶颈 + 到达效率"这一分析对：
+- 介数中心性回答**依赖风险**问题：移除一个高 BC 值节点会破坏许多路径。
+- 接近中心性回答**延迟到达**问题：高 CC 值节点能最快地传播信号。
 
 ---
 
-## Files Modified
+## 修改文件
 
 ### `crates/gos-runtime/src/lib.rs`
-- Added `graph_closeness_inner<const N>(&self)` method on `GosRuntime` struct
-- Added `pub fn graph_closeness<const N>()` public wrapper (acquires `RUNTIME` lock)
+- 在 `GosRuntime` 结构体上新增 `graph_closeness_inner<const N>(&self)` 方法
+- 新增 `pub fn graph_closeness<const N>()` 公开包装函数（获取 `RUNTIME` 锁）
 
 ### `crates/k-shell/src/lib.rs`
-- Added `pub fn dispatch_graph_closeness(sink: &ConsoleSink)` with full color-coded table output
+- 新增 `pub fn dispatch_graph_closeness(sink: &ConsoleSink)`，包含完整的彩色表格输出
 
 ### `crates/k-shell/src/proc.rs`
-- Added routing: `"graph closeness" || "closeness" || "graph close" || "close centrality" || "cc"`
-- Added help-text entries for `graph closeness` and `closeness / cc`
+- 新增路由：`"graph closeness" || "closeness" || "graph close" || "close centrality" || "cc"`
+- 为 `graph closeness` 和 `closeness / cc` 新增帮助文本条目
 
-### `host-tests/gos-graph-closeness-harness/` (new)
-- `Cargo.toml` — workspace-isolated harness crate
-- `.cargo/config.toml` — `target = "x86_64-pc-windows-msvc"`, `build-std = ["std", "panic_abort"]`
-- `tests/graph_closeness.rs` — 10 tests
+### `host-tests/gos-graph-closeness-harness/`（新建）
+- `Cargo.toml` —— 与工作区隔离的 harness crate
+- `.cargo/config.toml` —— `target = "x86_64-pc-windows-msvc"`，`build-std = ["std", "panic_abort"]`
+- `tests/graph_closeness.rs` —— 10 个测试
 
 ---
 
-## Test Coverage (10 tests)
+## 测试覆盖（10 个测试）
 
-| # | Test | Assertion |
+| # | 测试 | 断言 |
 |---|------|-----------|
-| 1 | Empty graph | `total=0`, no panics |
-| 2 | Single isolated node | `CC[A]=0, total=1` |
-| 3 | Two-node A→B | `CC[A]=1_000_000, CC[B]=0` |
-| 4 | Path A→B→C | `CC[B]=1_000_000, CC[A]=666_666, CC[C]=0`; B first |
-| 5 | Star A→{B,C,D} | `CC[A]=1_000_000`, leaves `=0`; A first |
-| 6 | Directed 3-cycle A→B→C→A | All equal `666_666` (rotational symmetry) |
-| 7 | Diamond A→{B,C}→D | `CC[B]=CC[C]=1_000_000, CC[A]=750_000, CC[D]=0` |
-| 8 | Linear 5-node chain A→B→C→D→E | D>C>B>A>E order; exact values asserted |
-| 9 | Disconnected {A→B} ∥ {C→D} | `CC[A]=CC[C]=1_000_000`, sinks `=0` |
-| 10 | Self-loop A→A + B→C | `CC[A]=0` (self-loop = no external reach) |
+| 1 | 空图 | `total=0`，不发生 panic |
+| 2 | 单个孤立节点 | `CC[A]=0, total=1` |
+| 3 | 两节点 A→B | `CC[A]=1_000_000, CC[B]=0` |
+| 4 | 路径 A→B→C | `CC[B]=1_000_000, CC[A]=666_666, CC[C]=0`；B 排最前 |
+| 5 | 星形 A→{B,C,D} | `CC[A]=1_000_000`，叶节点 `=0`；A 排最前 |
+| 6 | 有向 3 元环 A→B→C→A | 全部相等，均为 `666_666`（旋转对称性） |
+| 7 | 菱形 A→{B,C}→D | `CC[B]=CC[C]=1_000_000, CC[A]=750_000, CC[D]=0` |
+| 8 | 线性 5 节点链 A→B→C→D→E | 顺序为 D>C>B>A>E；断言精确数值 |
+| 9 | 不连通 {A→B} ∥ {C→D} | `CC[A]=CC[C]=1_000_000`，汇点 `=0` |
+| 10 | 自环 A→A + B→C | `CC[A]=0`（自环 = 无外部可达性） |
 
-All 10 tests: **PASS** (verified locally via `cargo +nightly test`).
+全部 10 个测试：**通过**（已在本地通过 `cargo +nightly test` 验证）。
 
 ---
 
-## OS Analogy
+## 操作系统类比
 
-**`graph closeness`** ↔ **`ping` RTT average census**
+**`graph closeness`** ↔ **`ping` 平均往返时延统计**
 
-Just as `ping -c 100 <host>` measures the average latency to a remote endpoint, closeness centrality measures how quickly a kernel service node can "reach" all other nodes in the service graph via directed signal edges. A high-CC node is like a core routing daemon with sub-millisecond RTT to all peers — it can propagate signals to the widest set of nodes in the fewest hops.
+正如 `ping -c 100 <host>` 测量到某个远程端点的平均延迟一样，接近中心性测量一个内核服务节点通过有向信号边"到达"服务图中所有其他节点的速度。高 CC 值节点就像一个核心路由守护进程，与所有对等节点的往返时延都在亚毫秒级 —— 它能以最少的跳数将信号传播到最广泛的一批节点。
 
-```
-# Equivalent conceptual operation in a POSIX OS:
+```bash
+# 在 POSIX 操作系统中的等价概念操作：
 for host in $(hosts); do
     avg_rtt=$(ping -c 10 $host | awk '/avg/{print $4}' | cut -d/ -f2)
     echo "$host: avg_rtt=$avg_rtt"
 done | sort -t= -k2 -n
 
-# GOS equivalent:
+# GOS 中的等价命令：
 graph closeness
 ```
 
 ---
 
-## Graph Algorithm Suite — Status After V2.40
+## 图算法套件 —— V2.40 后的状态
 
-| Version | Command | Algorithm | Complexity |
+| 版本 | 命令 | 算法 | 复杂度 |
 |---------|---------|-----------|------------|
-| V2.32 | `graph cycles` | DFS 3-color | O(V+E) |
+| V2.32 | `graph cycles` | DFS 三色标记 | O(V+E) |
 | V2.33 | `graph toposort` | Kahn BFS | O(V+E) |
 | V2.34 | `graph scc` | Kosaraju | O(V+E) |
-| V2.35 | `graph condensation` | Kosaraju+adj | O(V+E+V²) |
-| V2.36 | `graph reachable <V>` | Iterative DFS | O(V+E) |
-| V2.37 | `graph bipartite` | BFS 2-coloring | O(V+E) |
-| V2.38 | `graph degree` | Edge census | O(V×E) |
+| V2.35 | `graph condensation` | Kosaraju+邻接 | O(V+E+V²) |
+| V2.36 | `graph reachable <V>` | 迭代式 DFS | O(V+E) |
+| V2.37 | `graph bipartite` | BFS 二染色 | O(V+E) |
+| V2.38 | `graph degree` | 边统计 | O(V×E) |
 | V2.39 | `graph centrality` | Brandes BC | O(V×E) |
-| **V2.40** | **`graph closeness`** | **BFS per source** | **O(V×(V+E))** |
+| **V2.40** | **`graph closeness`** | **每源节点 BFS** | **O(V×(V+E))** |
 
-**Next candidates:**
-- `graph eccentricity` — max shortest-path distance from each node (graph radius/diameter)
-- `node checkpoint <vec>` — snapshot node state to diff ring
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- PAL_U32 → attribute node refactor (Demo A prerequisite)
+**下一步候选项：**
+- `graph eccentricity` —— 每个节点的最大最短路径距离（图半径/直径）
+- `node checkpoint <vec>` —— 将节点状态快照到 diff ring
+- `journal ring <N>` —— 运行时可配置的 JournalRing 容量
+- PAL_U32 → attribute node 重构（Demo A 前置条件）

@@ -30,7 +30,7 @@ In a graph OS, community detection answers operational questions like:
 
 ## Algorithm: Asynchronous Label Propagation (LPA)
 
-```
+```text
 Initialize: label[v] = slot_index(v)   // each node in its own community
 
 For iter in 0..20:
@@ -116,7 +116,7 @@ Output: nodes sorted by (community_id asc, slot asc) for grouped display
 
 ## Shell Command Surface
 
-```
+```text
 graph community         label-propagation community detection
 community               alias
 lpa                     alias (Label Propagation Algorithm)
@@ -127,7 +127,7 @@ cluster                 alias
 
 Example output (two sub-systems, one isolated service):
 
-```
+```text
  graph community
  ───────────────────────────────────────────────────────────
   [C0]  3 nodes  major-community

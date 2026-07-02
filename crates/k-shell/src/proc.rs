@@ -573,6 +573,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  degree / hub       aliases for graph degree\n");
         super::print_str(sink, "  graph closeness    outgoing closeness centrality per node (like ping avg RTT census)\n");
         super::print_str(sink, "  closeness / cc     aliases for graph closeness\n");
+        super::print_str(sink, "  graph eccentricity radius/diameter per node (BFS eccentricity, like traceroute hop bound)\n");
+        super::print_str(sink, "  eccentricity / ecc / radius  aliases for graph eccentricity\n");
         super::print_str(sink, "  graph katz         incoming Katz centrality per node (walk-count influence, like netstat -s)\n");
         super::print_str(sink, "  katz / kz          aliases for graph katz\n");
         super::print_str(sink, "  graph pagerank     PageRank per node (random-walk authority, like top by signal weight)\n");

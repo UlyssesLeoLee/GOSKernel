@@ -295,6 +295,31 @@ struct EdgeOrderEntry {
     to_slot: u16,
 }
 
+/// Compact read-only snapshot of live graph topology.
+/// Built under RUNTIME lock; analytics run on this copy so the lock
+/// is released before the O(V×E) iteration begins, preventing deadlock
+/// with interrupt-context callers such as `post_irq_signal`.
+struct GraphTopologySnapshot {
+    node_slots: [usize; MAX_NODES],
+    node_count: usize,
+    slot_live:  [bool; MAX_NODES],
+    slot_id:    [NodeId; MAX_NODES],
+    slot_vec:   [VectorAddress; MAX_NODES],
+    edge_live:  [bool; MAX_EDGES],
+    edge_from:  [NodeId; MAX_EDGES],
+    edge_to:    [NodeId; MAX_EDGES],
+}
+
+impl GraphTopologySnapshot {
+    fn node_slot_by_id(&self, id: NodeId) -> Option<usize> {
+        for si in 0..self.node_count {
+            let s = self.node_slots[si];
+            if self.slot_id[s] == id { return Some(s); }
+        }
+        None
+    }
+}
+
 pub struct GraphRuntime {
     plugins: [Option<PluginRecord>; MAX_PLUGINS],
     nodes: [Option<NodeRecord>; MAX_NODES],
@@ -439,6 +464,38 @@ impl GraphRuntime {
         self.nodes.iter().position(|slot| {
             slot.map(|record| record.vector == vector).unwrap_or(false)
         })
+    }
+
+    fn topology_snapshot(&self) -> GraphTopologySnapshot {
+        const ZERO_ID:  NodeId        = NodeId([0u8; 16]);
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        let mut snap = GraphTopologySnapshot {
+            node_slots: [0usize; MAX_NODES],
+            node_count: 0,
+            slot_live:  [false; MAX_NODES],
+            slot_id:    [ZERO_ID;  MAX_NODES],
+            slot_vec:   [ZERO_VEC; MAX_NODES],
+            edge_live:  [false; MAX_EDGES],
+            edge_from:  [ZERO_ID;  MAX_EDGES],
+            edge_to:    [ZERO_ID;  MAX_EDGES],
+        };
+        for i in 0..MAX_NODES {
+            if let Some(r) = self.nodes[i] {
+                snap.node_slots[snap.node_count] = i;
+                snap.node_count += 1;
+                snap.slot_live[i] = true;
+                snap.slot_id[i]   = r.spec.node_id;
+                snap.slot_vec[i]  = r.vector;
+            }
+        }
+        for i in 0..MAX_EDGES {
+            if let Some(e) = self.edges[i] {
+                snap.edge_live[i] = true;
+                snap.edge_from[i] = e.spec.from_node;
+                snap.edge_to[i]   = e.spec.to_node;
+            }
+        }
+        snap
     }
 
     fn edge_slot(&self, edge_id: EdgeId) -> Option<usize> {
@@ -2316,64 +2373,39 @@ impl GraphRuntime {
     /// Output sorted descending by Katz score.
     /// OS analogy: `netstat -s` hop weight — which kernel service receives the
     /// most signal traffic summed across all walk lengths?
-    pub fn graph_katz_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+    fn graph_katz_inner<const N: usize>(snap: &GraphTopologySnapshot) -> ([VectorAddress; N], [u32; N], usize) {
         const SCALE:     u64   = 1_000_000;
         const ALPHA_DEN: u64   = 8;
         const K_ITERS:   usize = 20;
 
-        // Compact list of live node slots.
-        let mut node_slots = [0usize; MAX_NODES];
-        let mut node_count = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                node_slots[node_count] = i;
-                node_count += 1;
-            }
-        }
+        let node_slots = snap.node_slots;
+        let node_count = snap.node_count;
 
         // Double-buffer: x0 = current iteration, x1 = scratch for next.
         let mut x0 = [0u64; MAX_NODES];
         let mut x1 = [0u64; MAX_NODES];
 
         for _iter in 0..K_ITERS {
-            // Reset x1 for this pass.
-            for si in 0..node_count {
-                x1[node_slots[si]] = 0;
-            }
+            for si in 0..node_count { x1[node_slots[si]] = 0; }
 
-            // For each live node v, accumulate contributions from all u→v edges.
             for vi in 0..node_count {
-                let v = node_slots[vi];
-                let v_id = match self.nodes[v] {
-                    Some(r) => r.spec.node_id,
-                    None    => continue,
-                };
+                let v    = node_slots[vi];
+                let v_id = snap.slot_id[v];
 
                 for ei in 0..MAX_EDGES {
-                    let edge = match self.edges[ei] {
-                        Some(e) => e,
-                        None    => continue,
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_to[ei] != v_id { continue; }
+                    let u = match snap.node_slot_by_id(snap.edge_from[ei]) {
+                        Some(slot) => slot, None => continue,
                     };
-                    if edge.spec.to_node != v_id { continue; }
-
-                    let u = match self.node_slot_by_id(edge.spec.from_node) {
-                        Some(slot) => slot,
-                        None       => continue,
-                    };
-
-                    // Edge u→v contributes (SCALE + x0[u]) / ALPHA_DEN to v's score.
                     let contrib = SCALE.saturating_add(x0[u]) / ALPHA_DEN;
                     x1[v] = x1[v].saturating_add(contrib);
                 }
             }
 
-            // Swap buffers.
-            for si in 0..node_count {
-                x0[node_slots[si]] = x1[node_slots[si]];
-            }
+            for si in 0..node_count { x0[node_slots[si]] = x1[node_slots[si]]; }
         }
 
-        // Sort descending by Katz score (insertion sort — N ≤ 128).
         let mut sorted = node_slots;
         for i in 1..node_count {
             let key_slot = sorted[i];
@@ -2386,15 +2418,12 @@ impl GraphRuntime {
             sorted[j] = key_slot;
         }
 
-        // Pack output arrays (cap at N).
         let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
         let mut out_katz = [0u32; N];
         let copy_len     = node_count.min(N);
         for i in 0..copy_len {
             let slot    = sorted[i];
-            out_vecs[i] = self.nodes[slot]
-                .map(|r| r.vector)
-                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_vecs[i] = snap.slot_vec[slot];
             out_katz[i] = x0[slot].min(u32::MAX as u64) as u32;
         }
 
@@ -2414,77 +2443,55 @@ impl GraphRuntime {
     ///
     /// SCALE = 1_000_000.  Initial rank = SCALE per node.  20 iterations.
     /// Output is sorted descending (highest PageRank first).
-    pub fn graph_pagerank_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+    fn graph_pagerank_inner<const N: usize>(snap: &GraphTopologySnapshot) -> ([VectorAddress; N], [u32; N], usize) {
         const SCALE:    u64   = 1_000_000;
-        const DAMP_NUM: u64   = 85;   // d = 0.85
+        const DAMP_NUM: u64   = 85;
         const DAMP_DEN: u64   = 100;
-        const TELE:     u64   = SCALE * (DAMP_DEN - DAMP_NUM) / DAMP_DEN; // 150_000
+        const TELE:     u64   = SCALE * (DAMP_DEN - DAMP_NUM) / DAMP_DEN;
         const PR_ITERS: usize = 20;
 
-        // Compact list of live node slots.
-        let mut node_slots = [0usize; MAX_NODES];
-        let mut node_count = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                node_slots[node_count] = i;
-                node_count += 1;
-            }
-        }
+        let node_slots = snap.node_slots;
+        let node_count = snap.node_count;
 
         if node_count == 0 {
             return ([VectorAddress::new(0, 0, 0, 0); N], [0u32; N], 0);
         }
 
-        // Out-degree per slot (count edges where from_node == node_id).
         let mut out_deg = [0u32; MAX_NODES];
         for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            if let Some(u) = self.node_slot_by_id(edge.spec.from_node) {
+            if !snap.edge_live[ei] { continue; }
+            if let Some(u) = snap.node_slot_by_id(snap.edge_from[ei]) {
                 out_deg[u] = out_deg[u].saturating_add(1);
             }
         }
 
-        // Initial PageRank: SCALE per node.
         let mut pr0 = [0u64; MAX_NODES];
         let mut pr1 = [0u64; MAX_NODES];
-        for si in 0..node_count {
-            pr0[node_slots[si]] = SCALE;
-        }
+        for si in 0..node_count { pr0[node_slots[si]] = SCALE; }
 
         for _iter in 0..PR_ITERS {
-            // Seed pr1 with the teleportation floor.
-            for si in 0..node_count {
-                pr1[node_slots[si]] = TELE;
-            }
+            for si in 0..node_count { pr1[node_slots[si]] = TELE; }
 
-            // Accumulate link contributions: for each v, sum from all u→v edges.
             for vi in 0..node_count {
-                let v = node_slots[vi];
-                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                let v    = node_slots[vi];
+                let v_id = snap.slot_id[v];
 
                 for ei in 0..MAX_EDGES {
-                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
-                    if edge.spec.to_node != v_id { continue; }
-
-                    let u = match self.node_slot_by_id(edge.spec.from_node) {
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_to[ei] != v_id { continue; }
+                    let u = match snap.node_slot_by_id(snap.edge_from[ei]) {
                         Some(slot) => slot, None => continue,
                     };
                     let od = out_deg[u] as u64;
-                    if od == 0 { continue; } // dangling — skip
-
-                    // contrib = d × PR[u] / outdeg(u)
+                    if od == 0 { continue; }
                     let contrib = pr0[u].saturating_mul(DAMP_NUM) / (od * DAMP_DEN);
                     pr1[v] = pr1[v].saturating_add(contrib);
                 }
             }
 
-            // Swap buffers.
-            for si in 0..node_count {
-                pr0[node_slots[si]] = pr1[node_slots[si]];
-            }
+            for si in 0..node_count { pr0[node_slots[si]] = pr1[node_slots[si]]; }
         }
 
-        // Sort descending by PageRank (insertion sort — N ≤ 128).
         let mut sorted = node_slots;
         for i in 1..node_count {
             let key_slot = sorted[i];
@@ -2497,16 +2504,13 @@ impl GraphRuntime {
             sorted[j] = key_slot;
         }
 
-        // Pack output arrays (cap at N).
         let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
         let mut out_pr   = [0u32; N];
         let copy_len     = node_count.min(N);
         for i in 0..copy_len {
             let slot    = sorted[i];
-            out_vecs[i] = self.nodes[slot]
-                .map(|r| r.vector)
-                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
-            out_pr[i] = pr0[slot].min(u32::MAX as u64) as u32;
+            out_vecs[i] = snap.slot_vec[slot];
+            out_pr[i]   = pr0[slot].min(u32::MAX as u64) as u32;
         }
 
         (out_vecs, out_pr, copy_len)
@@ -2527,18 +2531,12 @@ impl GraphRuntime {
     /// 20 fixed-point iterations — convergence verified by harness tests.
     ///
     /// Returns `(vecs, hub, auth, total)` sorted descending by authority score.
-    pub fn graph_hits_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
+    fn graph_hits_inner<const N: usize>(snap: &GraphTopologySnapshot) -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
         const SCALE: u64   = 1_000_000;
         const ITERS: usize = 20;
 
-        let mut node_slots = [0usize; MAX_NODES];
-        let mut node_count = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                node_slots[node_count] = i;
-                node_count += 1;
-            }
-        }
+        let node_slots = snap.node_slots;
+        let node_count = snap.node_count;
 
         if node_count == 0 {
             return ([VectorAddress::new(0, 0, 0, 0); N], [0u32; N], [0u32; N], 0);
@@ -2560,50 +2558,36 @@ impl GraphRuntime {
                 new_auth[node_slots[si]] = 0;
             }
 
-            // new_a[v] = Σ_{u→v} h[u]  (using old hub)
+            // new_a[v] = Σ_{u→v} h[u]
             for vi in 0..node_count {
                 let v    = node_slots[vi];
-                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                let v_id = snap.slot_id[v];
                 for ei in 0..MAX_EDGES {
-                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
-                    if edge.spec.to_node != v_id { continue; }
-                    let u = match self.node_slot_by_id(edge.spec.from_node) {
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_to[ei] != v_id { continue; }
+                    let u = match snap.node_slot_by_id(snap.edge_from[ei]) {
                         Some(s) => s, None => continue,
                     };
                     new_auth[v] = new_auth[v].saturating_add(hub[u]);
                 }
             }
 
-            // new_h[v] = Σ_{v→w} a[w]  (using old auth)
+            // new_h[v] = Σ_{v→w} a[w]
             for vi in 0..node_count {
                 let v    = node_slots[vi];
-                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                let v_id = snap.slot_id[v];
                 for ei in 0..MAX_EDGES {
-                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
-                    if edge.spec.from_node != v_id { continue; }
-                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_from[ei] != v_id { continue; }
+                    let w = match snap.node_slot_by_id(snap.edge_to[ei]) {
                         Some(s) => s, None => continue,
                     };
                     new_hub[v] = new_hub[v].saturating_add(auth[w]);
                 }
             }
 
-            let max_auth = {
-                let mut m = 0u64;
-                for si in 0..node_count {
-                    let v = node_slots[si];
-                    if new_auth[v] > m { m = new_auth[v]; }
-                }
-                m
-            };
-            let max_hub = {
-                let mut m = 0u64;
-                for si in 0..node_count {
-                    let v = node_slots[si];
-                    if new_hub[v] > m { m = new_hub[v]; }
-                }
-                m
-            };
+            let max_auth = { let mut m = 0u64; for si in 0..node_count { let v = node_slots[si]; if new_auth[v] > m { m = new_auth[v]; } } m };
+            let max_hub  = { let mut m = 0u64; for si in 0..node_count { let v = node_slots[si]; if new_hub[v]  > m { m = new_hub[v];  } } m };
 
             for si in 0..node_count {
                 let v = node_slots[si];
@@ -2612,7 +2596,6 @@ impl GraphRuntime {
             }
         }
 
-        // Sort descending by authority score (insertion sort).
         let mut sorted = node_slots;
         for i in 1..node_count {
             let key_slot = sorted[i];
@@ -2631,9 +2614,7 @@ impl GraphRuntime {
         let copy_len     = node_count.min(N);
         for i in 0..copy_len {
             let slot    = sorted[i];
-            out_vecs[i] = self.nodes[slot]
-                .map(|r| r.vector)
-                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_vecs[i] = snap.slot_vec[slot];
             out_auth[i] = auth[slot].min(u32::MAX as u64) as u32;
             out_hub[i]  = hub[slot].min(u32::MAX as u64) as u32;
         }
@@ -2646,10 +2627,11 @@ impl GraphRuntime {
     /// Treats directed edges as undirected (combines in-edges and out-edges)
     /// so that the strongly connected kernel sub-systems form natural clusters.
     ///
-    /// Algorithm (synchronous, 20 iterations):
+    /// Algorithm (asynchronous, 20 iterations):
     ///   1. Initialize: each node is in its own community (label = slot index).
-    ///   2. Each iteration: every node adopts the most-frequent label seen among
-    ///      all its neighbors (both in- and out-neighbors).
+    ///   2. Each iteration: every node immediately adopts the most-frequent label
+    ///      seen among all its neighbors (both in- and out-neighbors); later nodes
+    ///      in the same round already see updated labels (asynchronous update).
     ///      Tie-break: smallest label value (deterministic, avoids oscillation).
     ///   3. After 20 iterations the labels are relabelled 0, 1, 2... sorted by
     ///      community size descending (largest community gets id=0).
@@ -2662,19 +2644,13 @@ impl GraphRuntime {
     ///   major-community — the largest community
     ///   minor-community — smaller but multi-node community
     ///   isolated        — single-node community (no undirected neighbors)
-    pub fn graph_community_inner<const N: usize>(
-        &self,
+    fn graph_community_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
     ) -> ([VectorAddress; N], [u8; N], usize, usize) {
         const ITERS: usize = 20;
 
-        let mut node_slots = [0usize; MAX_NODES];
-        let mut node_count = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                node_slots[node_count] = i;
-                node_count += 1;
-            }
-        }
+        let node_slots = snap.node_slots;
+        let node_count = snap.node_count;
 
         if node_count == 0 {
             return ([VectorAddress::new(0, 0, 0, 0); N], [0u8; N], 0, 0);
@@ -2694,20 +2670,20 @@ impl GraphRuntime {
         for _iter in 0..ITERS {
             for si in 0..node_count {
                 let v    = node_slots[si];
-                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                let v_id = snap.slot_id[v];
 
                 // Frequency table: freq[label] = how many neighbors carry that label.
                 let mut freq = [0u8; MAX_NODES];
                 for ei in 0..MAX_EDGES {
-                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
-                    let nb_id = if edge.spec.from_node == v_id {
-                        edge.spec.to_node
-                    } else if edge.spec.to_node == v_id {
-                        edge.spec.from_node
+                    if !snap.edge_live[ei] { continue; }
+                    let nb_id = if snap.edge_from[ei] == v_id {
+                        snap.edge_to[ei]
+                    } else if snap.edge_to[ei] == v_id {
+                        snap.edge_from[ei]
                     } else {
                         continue;
                     };
-                    if let Some(nb) = self.node_slot_by_id(nb_id) {
+                    if let Some(nb) = snap.node_slot_by_id(nb_id) {
                         let l = label[nb] as usize;
                         if l < MAX_NODES { freq[l] = freq[l].saturating_add(1); }
                     }
@@ -2790,9 +2766,7 @@ impl GraphRuntime {
         let copy_len     = node_count.min(N);
         for i in 0..copy_len {
             let slot    = sorted[i];
-            out_vecs[i] = self.nodes[slot]
-                .map(|r| r.vector)
-                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_vecs[i] = snap.slot_vec[slot];
             out_comm[i] = lbl_to_comm[label[slot] as usize];
         }
 
@@ -5129,7 +5103,8 @@ pub fn graph_eccentricity<const N: usize>() -> ([VectorAddress; N], [u32; N], us
 /// signal traffic summed across all path lengths?
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_katz<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
-    RUNTIME.lock().graph_katz_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_katz_inner::<N>(&snap)
 }
 
 /// V2.43: PageRank centrality for all live nodes (random-walk stationary distribution).
@@ -5151,7 +5126,8 @@ pub fn graph_katz<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
 /// OS analogy: `top` sorted by incoming-signal weight — which kernel nodes
 /// dominate the random walk over the live graph topology?
 pub fn graph_pagerank<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
-    RUNTIME.lock().graph_pagerank_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_pagerank_inner::<N>(&snap)
 }
 
 /// V2.44: HITS hub and authority scores for all live nodes.
@@ -5175,7 +5151,8 @@ pub fn graph_pagerank<const N: usize>() -> ([VectorAddress; N], [u32; N], usize)
 /// OS analogy: `vmstat` + `top` bipartite — which kernel nodes are the best
 /// signal-forwarders (hub) vs the most-cited destinations (authority)?
 pub fn graph_hits<const N: usize>() -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
-    RUNTIME.lock().graph_hits_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_hits_inner::<N>(&snap)
 }
 
 /// V2.45: Label Propagation community detection over the live kernel graph.
@@ -5189,7 +5166,8 @@ pub fn graph_hits<const N: usize>() -> ([VectorAddress; N], [u32; N], [u32; N], 
 /// are sorted so that all members of the same community are contiguous
 /// and communities are ordered by size descending (largest = id 0).
 pub fn graph_community<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
-    RUNTIME.lock().graph_community_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_community_inner::<N>(&snap)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

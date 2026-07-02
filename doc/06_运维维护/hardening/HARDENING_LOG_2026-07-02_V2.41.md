@@ -1,23 +1,23 @@
-# GOS Hardening Log — V2.41
+# GOS 硬化日志 — V2.41
 
-**Date:** 2026-07-02  
-**Branch:** feat/vk-auto-live-surface  
-**Author:** Scheduled hardening task (automated)  
-**Scope:** Graph eccentricity — per-node worst-case hop count + graph radius / diameter
+**日期：** 2026-07-02
+**分支：** feat/vk-auto-live-surface
+**作者：** 计划性硬化任务（自动化）
+**范围：** 图偏心率 —— 每节点最坏情况跳数 + 图半径/直径
 
 ---
 
-## 1. What was added
+## 1. 本次新增内容
 
-### Shell command surface
+### Shell 命令一览
 
-| Command aliases | Description |
+| 命令别名 | 说明 |
 |---|---|
-| `graph eccentricity` / `eccentricity` / `graph ecc` / `ecc` / `graph radius` / `radius` | Per-node directed eccentricity, graph radius, graph diameter |
+| `graph eccentricity` / `eccentricity` / `graph ecc` / `ecc` / `graph radius` / `radius` | 每节点有向偏心率、图半径、图直径 |
 
-Output format (sorted ascending by eccentricity, centre nodes first):
+输出格式（按偏心率升序排列，中心节点排最前）：
 
-```
+```text
  graph eccentricity
  ───────────────────────────────────────────────────────────
   vector              ecc   role
@@ -29,98 +29,98 @@ Output format (sorted ascending by eccentricity, centre nodes first):
   4 node(s)  radius: 1  diameter: 4  center: 1
 ```
 
-**Role classification:**
+**角色分类：**
 
-| Role | Condition | Colour |
+| 角色 | 条件 | 颜色 |
 |---|---|---|
-| `center` | ecc == radius (and radius > 0) | Bright yellow |
-| `relay` | 0 < ecc < diameter, ecc ≠ radius | Cyan |
-| `periphery` | ecc == diameter (and diameter ≠ radius) | Red |
-| `isolated` | ecc == 0 (no reachable out-neighbours) | Dark grey |
+| `center` | ecc == radius（且 radius > 0） | 亮黄色 |
+| `relay` | 0 < ecc < diameter，且 ecc ≠ radius | 青色 |
+| `periphery` | ecc == diameter（且 diameter ≠ radius） | 红色 |
+| `isolated` | ecc == 0（没有可达的出邻居） | 深灰色 |
 
-When radius == diameter (e.g. a directed cycle), all non-isolated nodes are labelled `center`.
-
----
-
-## 2. Algorithm — `graph_eccentricity_inner<const N>`
-
-**Definition:**
-```
-ecc[v] = max d(v, u)   for all u reachable from v (u ≠ v, via directed edges)
-ecc[v] = 0             if no u is reachable (isolated / pure sink)
-
-radius   = min ecc[v]  for v with ecc[v] > 0   (0 if all nodes isolated)
-diameter = max ecc[v]                            (0 if all nodes isolated)
-```
-
-**Approach:** One BFS per source node following outgoing directed edges.  
-**Complexity:** O(V × (V+E)), no_std safe, static arrays only.
-
-**OS analogy:** Like `traceroute` worst-case hop count — which kernel node guarantees the tightest maximum latency to all its reachable peers?
-
-**Sort order:** Ascending eccentricity so centre nodes appear first. Isolated nodes (ecc=0) use u32::MAX as sort sentinel, placing them last in the output.
+当 radius == diameter 时（例如一个有向环），所有非孤立节点都标注为 `center`。
 
 ---
 
-## 3. Files changed
+## 2. 算法 —— `graph_eccentricity_inner<const N>`
 
-| File | Change |
+**定义：**
+```text
+ecc[v] = max d(v, u)   对所有从 v 可达的 u（u ≠ v，经由有向边）
+ecc[v] = 0             若没有任何 u 可达（孤立节点 / 纯汇点）
+
+radius   = min ecc[v]  对 ecc[v] > 0 的 v（若所有节点均孤立则为 0）
+diameter = max ecc[v]                            （若所有节点均孤立则为 0）
+```
+
+**方法：** 对每个源节点沿出向有向边执行一次 BFS。
+**复杂度：** O(V × (V+E))，no_std 安全，仅使用静态数组。
+
+**操作系统类比：** 类似于 `traceroute` 的最坏情况跳数 —— 哪个内核节点能保证到其所有可达对等节点的最大延迟最紧凑？
+
+**排序方式：** 按偏心率升序排列，使中心节点排在最前。孤立节点（ecc=0）使用 u32::MAX 作为排序哨兵值，使其排在输出末尾。
+
+---
+
+## 3. 修改文件
+
+| 文件 | 修改内容 |
 |---|---|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_eccentricity_inner<N>` (impl method) + `graph_eccentricity<N>` (public fn) |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_eccentricity` |
-| `crates/k-shell/src/proc.rs` | Added dispatch clause for `graph eccentricity` / `eccentricity` / `graph ecc` / `ecc` / `graph radius` / `radius` |
-| `host-tests/gos-graph-eccentricity-harness/` | New harness crate (10 tests, all green) |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_eccentricity_inner<N>`（impl 方法）+ `graph_eccentricity<N>`（公开函数） |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_eccentricity` |
+| `crates/k-shell/src/proc.rs` | 为 `graph eccentricity` / `eccentricity` / `graph ecc` / `ecc` / `graph radius` / `radius` 新增调度分支 |
+| `host-tests/gos-graph-eccentricity-harness/` | 新建 harness crate（10 个测试，全部通过） |
 
 ---
 
-## 4. Test harness — gos-graph-eccentricity-harness (10 tests)
+## 4. 测试套件 —— gos-graph-eccentricity-harness（10 个测试）
 
-All 10 tests pass: `test result: ok. 10 passed; 0 failed`
+全部 10 个测试通过：`test result: ok. 10 passed; 0 failed`
 
-| # | Test | Key assertion |
+| # | 测试 | 关键断言 |
 |---|---|---|
 | 1 | `empty_graph_eccentricity_total_is_zero` | total=0, radius=0, diameter=0 |
 | 2 | `isolated_node_has_zero_eccentricity` | ecc[A]=0, radius=0, diameter=0 |
 | 3 | `two_node_edge_eccentricity` | ecc[A]=1, ecc[B]=0; radius=diameter=1 |
-| 4 | `path_abc_eccentricity` | ecc[A]=2, ecc[B]=1, ecc[C]=0; radius=1, diameter=2; sort order B,A,C |
-| 5 | `star_center_eccentricity` | ecc[A]=1, leaves=0; radius=diameter=1 |
-| 6 | `directed_cycle_all_nodes_same_eccentricity` | all ecc=2; radius=diameter=2 |
+| 4 | `path_abc_eccentricity` | ecc[A]=2, ecc[B]=1, ecc[C]=0; radius=1, diameter=2; 排序为 B,A,C |
+| 5 | `star_center_eccentricity` | ecc[A]=1, 叶节点=0; radius=diameter=1 |
+| 6 | `directed_cycle_all_nodes_same_eccentricity` | 所有 ecc=2; radius=diameter=2 |
 | 7 | `diamond_eccentricity` | ecc[A]=2, ecc[B/C]=1, ecc[D]=0; radius=1, diameter=2 |
-| 8 | `linear_five_node_chain_eccentricity_ordering` | ecc[D]=1..ecc[A]=4; sort D,C,B,A,E |
-| 9 | `disconnected_pairs_eccentricity` | ecc[A]=ecc[C]=1, sinks=0; radius=diameter=1 |
-| 10 | `self_loop_does_not_contribute_to_eccentricity` | ecc[A]=0, ecc[B]=1, ecc[C]=0; B first |
+| 8 | `linear_five_node_chain_eccentricity_ordering` | ecc[D]=1..ecc[A]=4; 排序为 D,C,B,A,E |
+| 9 | `disconnected_pairs_eccentricity` | ecc[A]=ecc[C]=1, 汇点=0; radius=diameter=1 |
+| 10 | `self_loop_does_not_contribute_to_eccentricity` | ecc[A]=0, ecc[B]=1, ecc[C]=0; B 排最前 |
 
 ---
 
-## 5. Invariants preserved
+## 5. 保持的不变式
 
-- All dispatch functions are pure reads — no epoch bump, no write operations.
-- New harness uses `TEST_LOCK: Mutex<()>` + `reset()` with `unwrap_or_else(|e| e.into_inner())`.
-- Harness has its own `.cargo/config.toml` with `target = "x86_64-pc-windows-msvc"` and `build-std`.
-- Version sequence: V2.40=closeness → **V2.41=eccentricity**. Next: V2.42.
+- 所有调度函数均为纯读取操作 —— 不产生 epoch 递增，不涉及写操作。
+- 新 harness 使用 `TEST_LOCK: Mutex<()>` + `reset()`，配合 `unwrap_or_else(|e| e.into_inner())`。
+- Harness 拥有自己的 `.cargo/config.toml`，设置 `target = "x86_64-pc-windows-msvc"` 及 `build-std`。
+- 版本序列：V2.40=closeness → **V2.41=eccentricity**。下一版本：V2.42。
 
 ---
 
-## 6. Graph algorithm suite status (V2.32–V2.41)
+## 6. 图算法套件状态（V2.32–V2.41）
 
-| Version | Command | Algorithm |
+| 版本 | 命令 | 算法 |
 |---|---|---|
-| V2.32 | `graph cycles` | DFS 3-color cycle detection |
-| V2.33 | `graph toposort` | Kahn's BFS topological ordering |
-| V2.34 | `graph scc` | Kosaraju 2-pass DFS |
-| V2.35 | `graph condensation` | SCC condensation DAG |
-| V2.36 | `graph reachable <vec>` | Iterative DFS reachability |
-| V2.37 | `graph bipartite` | BFS 2-coloring |
-| V2.38 | `graph degree` | In/out degree census |
-| V2.39 | `graph centrality` | Brandes betweenness centrality |
-| V2.40 | `graph closeness` | BFS outgoing closeness centrality |
-| **V2.41** | **`graph eccentricity`** | **BFS eccentricity + radius/diameter** |
+| V2.32 | `graph cycles` | DFS 三色标记环检测 |
+| V2.33 | `graph toposort` | Kahn BFS 拓扑排序 |
+| V2.34 | `graph scc` | Kosaraju 两遍 DFS |
+| V2.35 | `graph condensation` | SCC 缩点 DAG |
+| V2.36 | `graph reachable <vec>` | 迭代式 DFS 可达性 |
+| V2.37 | `graph bipartite` | BFS 二染色 |
+| V2.38 | `graph degree` | 入/出度统计 |
+| V2.39 | `graph centrality` | Brandes 介数中心性 |
+| V2.40 | `graph closeness` | BFS 出向接近中心性 |
+| **V2.41** | **`graph eccentricity`** | **BFS 偏心率 + 半径/直径** |
 
 ---
 
-## 7. Next candidates (V2.42+)
+## 7. 下一步候选项（V2.42+）
 
-- `node checkpoint <vec>` — snapshot node state to diff ring (observability)
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- `graph katz` — Katz centrality (attenuation factor α, walk-length weights)
-- PAL_U32 → attribute node refactor (Demo A prerequisite)
+- `node checkpoint <vec>` —— 将节点状态快照到 diff ring（可观测性）
+- `journal ring <N>` —— 运行时可配置的 JournalRing 容量
+- `graph katz` —— Katz 中心性（衰减因子 α，游走长度加权）
+- PAL_U32 → attribute node 重构（Demo A 前置条件）

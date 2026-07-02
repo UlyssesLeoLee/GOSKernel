@@ -1,4 +1,4 @@
-# GOS Hardening Log — V2.42 (2026-07-02)
+# GOS 硬化日志 — V2.42（2026-07-02）
 
 ## 版本号: V2.42
 ## 功能: `graph katz` — 入向 Katz 中心性 (Incoming Katz Centrality)
@@ -19,7 +19,7 @@ Katz 中心性通过对所有长度的有向游走计数，比传统最短路径
 
 **入向 Katz 中心性 (Incoming Katz Centrality)**：
 
-```
+```text
 KC[v] = Σ_{k=1}^{∞} α^k × (从任意节点出发、长度为 k 且终止于 v 的有向游走数)
 ```
 
@@ -27,7 +27,7 @@ KC[v] = Σ_{k=1}^{∞} α^k × (从任意节点出发、长度为 k 且终止于
 
 ### 迭代计算（固定点法，20步，整数算术）
 
-```
+```text
 x^(0)[v]   = 0
 x^(t+1)[v] = Σ_{u: u→v 边} (SCALE + x^(t)[u]) / ALPHA_DEN
 ```
@@ -71,7 +71,7 @@ x^(t+1)[v] = Σ_{u: u→v 边} (SCALE + x^(t)[u]) / ALPHA_DEN
 
 ### Shell 命令别名
 
-```
+```text
 graph katz      — 完整命令
 katz            — 简写
 kz              — 最短别名
@@ -139,7 +139,7 @@ influence       — 语义简写
 
 ## 测试执行记录
 
-```
+```text
 running 10 tests
 test chain_katz_descending_ordering ... ok
 test directed_cycle_all_nodes_same_katz ... ok

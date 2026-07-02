@@ -32,7 +32,7 @@ OS analogy: `vmstat` / `top` bipartite — which kernel nodes are the best signa
 
 Kleinberg's HITS with L∞ normalization:
 
-```
+```text
 Initialise: h[v] = a[v] = SCALE for all live nodes
 
 For each iteration (20 total):
@@ -118,7 +118,7 @@ New harness crate (isolated `[workspace]`, own `.cargo/config.toml`):
 
 ## Shell 命令 / Shell Commands
 
-```
+```text
 graph hits          HITS hub+authority bipartite decomposition
 hits                alias
 graph ha            alias
@@ -128,7 +128,7 @@ hub authority       alias
 
 ### 示例输出 / Example Output
 
-```
+```text
  graph hits
  ─────────────────────────────────────────────────────────
   vector             hub   authority  role
@@ -171,7 +171,7 @@ hub authority       alias
 
 **Host test suite total: 443 tests** (was 433, +10)
 
-```
+```text
 gos-graph-hits-harness: 10/10 ✓
 ```
 

@@ -31,7 +31,7 @@ OS analogy: **`top` sorted by incoming-signal weight** — which kernel nodes do
 
 Classical PageRank with absorbing dangling nodes:
 
-```
+```text
 PR[v] = (1-d) × SCALE + d × Σ_{u→v, outdeg(u)>0}  PR[u] / outdeg(u)
 ```
 
@@ -99,7 +99,7 @@ New harness crate (isolated `[workspace]`, own `.cargo/config.toml`):
 
 ## Shell 命令 / Shell Commands
 
-```
+```text
 graph pagerank          PageRank per node (random-walk stationary distribution)
 pagerank                alias
 pr                      alias
@@ -109,7 +109,7 @@ rank                    alias
 
 ### 示例输出 / Example Output
 
-```
+```text
  graph pagerank
  ─────────────────────────────────────────────────────────
   vector           pagerank  role
@@ -149,7 +149,7 @@ rank                    alias
 
 **Host test suite total: 433 tests** (was 423, +10)
 
-```
+```text
 gos-graph-pagerank-harness: 10/10 ✓
 ```
 
