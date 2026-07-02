@@ -925,6 +925,8 @@ fn dispatch_text_command(
         super::dispatch_graph_bipartite(sink);
     } else if cmd == "graph degree" || cmd == "degree" || cmd == "graph hub" || cmd == "hub" {
         super::dispatch_graph_degree(sink);
+    } else if cmd == "graph centrality" || cmd == "centrality" || cmd == "graph central" || cmd == "central" || cmd == "betweenness" {
+        super::dispatch_graph_centrality(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))

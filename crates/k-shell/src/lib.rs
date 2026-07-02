@@ -3198,6 +3198,116 @@ pub fn dispatch_graph_degree(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.39: `graph centrality` — betweenness centrality per node (Brandes, directed).
+///
+/// Identifies nodes that sit on the most shortest paths between other nodes.
+/// Betweenness centrality BC[v] = Σ_{s≠v≠t} σ(s,t,v)/σ(s,t) — the fraction
+/// of all-pairs shortest paths that pass through v, summed over all pairs.
+///
+/// High BC → critical routing bottleneck (removing it disrupts most paths).
+/// BC = 0  → node is never an intermediary (leaf, isolated, or parallel routes).
+///
+/// Output: table sorted descending by BC score, annotated with role:
+///   bottleneck — BC > 0, most critical intermediary in the graph
+///   relay      — BC > 0, carries some cross-node traffic
+///   endpoint   — BC = 0 (leaf / source / sink with no intermediary role)
+///
+/// OS analogy: `ip route show` + `traceroute` hop-frequency analysis — which
+/// kernel service node lies on the most inter-service communication paths?
+pub fn dispatch_graph_centrality(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, bc, total) = gos_runtime::graph_centrality::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph centrality\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              bc    role\n");
+    set_color(sink, 7, 0);
+
+    // Find max BC for relative annotation.
+    let mut max_bc = 0u32;
+    for i in 0..total {
+        if bc[i] > max_bc { max_bc = bc[i]; }
+    }
+
+    let mut bottleneck_count = 0usize;
+
+    for i in 0..total {
+        let score   = bc[i];
+        let is_top  = max_bc > 0 && score == max_bc;
+        let is_relay = score > 0 && !is_top;
+
+        if is_top {
+            set_color(sink, 14, 0); // bright yellow — top bottleneck
+        } else if is_relay {
+            set_color(sink, 11, 0); // cyan — relay
+        } else {
+            set_color(sink, 8, 0);  // dark grey — endpoint
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // BC score (right-aligned, 6 wide).
+        set_color(sink, if is_top { 14 } else if is_relay { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score as usize);
+        print_str(sink, "  ");
+
+        // Role label.
+        if is_top {
+            set_color(sink, 14, 0);
+            print_str(sink, "bottleneck");
+            bottleneck_count += 1;
+        } else if is_relay {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "endpoint");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-bc: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_bc as usize);
+    if bottleneck_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  bottlenecks: ");
+        print_num_inline(sink, bottleneck_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
@@ -3264,6 +3374,28 @@ fn print_num_right4(sink: &ConsoleSink, n: usize) {
         print_num_inline(sink, n);
     } else {
         print_str(sink, "   ");
+        print_num_inline(sink, n);
+    }
+}
+
+/// Right-align a number in 6 columns (spaces then digits).
+fn print_num_right6(sink: &ConsoleSink, n: usize) {
+    if n >= 100_000 {
+        print_num_inline(sink, n);
+    } else if n >= 10_000 {
+        print_str(sink, " ");
+        print_num_inline(sink, n);
+    } else if n >= 1_000 {
+        print_str(sink, "  ");
+        print_num_inline(sink, n);
+    } else if n >= 100 {
+        print_str(sink, "   ");
+        print_num_inline(sink, n);
+    } else if n >= 10 {
+        print_str(sink, "    ");
+        print_num_inline(sink, n);
+    } else {
+        print_str(sink, "     ");
         print_num_inline(sink, n);
     }
 }

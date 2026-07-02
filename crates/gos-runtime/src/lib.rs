@@ -1866,6 +1866,174 @@ impl GraphRuntime {
         (out_vecs, out_degrees, in_degrees, copy_len)
     }
 
+    /// V2.39: Betweenness centrality via Brandes' algorithm (directed, unweighted).
+    ///
+    /// For each live node v, computes the raw betweenness centrality:
+    ///   BC[v] = Σ_{s≠v≠t} σ(s,t,v) / σ(s,t)
+    /// where σ(s,t) = number of shortest paths from s to t, and
+    ///       σ(s,t,v) = number of those paths passing through v.
+    ///
+    /// Implementation uses fixed-point scaling (SCALE = 1_000_000) internally so
+    /// that fractional path ratios are preserved during accumulation.  The output
+    /// `bc[i]` is the truncated integer part of BC[v] (i.e., raw_scaled / SCALE).
+    ///
+    /// Returns `(vecs, bc, total)`:
+    ///   vecs[0..total] — live node vectors, descending betweenness order.
+    ///   bc[0..total]   — truncated betweenness score per node.
+    ///   total          — number of live nodes packed into the output arrays.
+    ///
+    /// Algorithm: Brandes 2001, O(V × E) for unweighted directed graphs.
+    /// Fixed-point accumulation avoids floating-point in no_std context.
+    /// OS analogy: `traceroute` hop popularity stats — which kernel service node
+    /// sits on the most inter-node communication paths?
+    pub fn graph_centrality_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE: u64 = 1_000_000;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Scaled betweenness accumulator per slot.
+        let mut bc_scaled = [0u64; MAX_NODES];
+
+        // ── Brandes' algorithm — one BFS per source ──────────────────────────
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+            let _ = s_id; // s_id used implicitly via BFS below
+
+            // BFS data structures (stack arrays, slot-indexed).
+            let mut dist    = [u32::MAX; MAX_NODES]; // shortest-path distance from s
+            let mut sigma   = [0u32;     MAX_NODES]; // # shortest paths from s to v
+            let mut queue   = [0usize;   MAX_NODES]; // BFS queue (slot indices)
+            let mut bfs_ord = [0usize;   MAX_NODES]; // BFS traversal order for back-prop
+
+            dist[s]  = 0;
+            sigma[s] = 1;
+            queue[0] = s;
+            let mut q_head  = 0usize;
+            let mut q_tail  = 1usize;
+            let mut bfs_len = 0usize;
+
+            // ── Forward BFS phase ────────────────────────────────────────────
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                if bfs_len < MAX_NODES {
+                    bfs_ord[bfs_len] = v;
+                    bfs_len += 1;
+                }
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+
+                    // Discover w for the first time.
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                    // w is on a shortest path from s through v.
+                    if dist[w] == dist[v].saturating_add(1) {
+                        sigma[w] = sigma[w].saturating_add(sigma[v]);
+                    }
+                }
+            }
+
+            // ── Back-propagation phase (reverse BFS order) ───────────────────
+            // delta[v] accumulates the pair-dependency of v, scaled by SCALE.
+            let mut delta = [0u64; MAX_NODES];
+
+            for bi in (0..bfs_len).rev() {
+                let w = bfs_ord[bi];
+                if w == s || sigma[w] == 0 { continue; }
+
+                let w_id = match self.nodes[w] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                // Sum contributions from all in-neighbors v of w that are
+                // predecessors in the shortest-path DAG (dist[w] == dist[v]+1).
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.to_node != w_id { continue; }
+
+                    let v = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[v] == u32::MAX { continue; }
+                    if dist[w] != dist[v].saturating_add(1) { continue; }
+                    if sigma[w] == 0 { continue; }
+
+                    // δ[v] += (σ[v] / σ[w]) × (SCALE + δ[w])
+                    let contribution = (sigma[v] as u64)
+                        .saturating_mul(SCALE.saturating_add(delta[w]))
+                        / (sigma[w] as u64);
+                    delta[v] = delta[v].saturating_add(contribution);
+                }
+
+                // Accumulate into betweenness for w (≠ source s).
+                bc_scaled[w] = bc_scaled[w].saturating_add(delta[w]);
+            }
+        }
+
+        // ── Sort node_slots by descending betweenness (insertion sort) ────────
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_bc   = bc_scaled[key_slot];
+            let mut j    = i;
+            while j > 0 && bc_scaled[sorted[j - 1]] < key_bc {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // ── Pack output arrays (cap at N) ────────────────────────────────────
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_bc   = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot       = sorted[i];
+            out_vecs[i]    = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_bc[i]      = (bc_scaled[slot] / SCALE) as u32;
+        }
+
+        (out_vecs, out_bc, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4134,6 +4302,23 @@ pub fn graph_bipartite<const N: usize>() -> ([VectorAddress; N], [u8; N], usize,
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_degree<const N: usize>() -> ([VectorAddress; N], [u16; N], [u16; N], usize) {
     RUNTIME.lock().graph_degree_inner()
+}
+
+/// V2.39: Betweenness centrality for all live nodes (Brandes' algorithm, directed).
+///
+/// Returns `(vecs, bc, total)`:
+/// - `vecs[0..total]` — live node vectors, descending betweenness order.
+/// - `bc[0..total]`   — truncated betweenness score (raw_scaled / 1_000_000).
+/// - `total`          — number of live nodes packed into the output arrays.
+///
+/// Algorithm: Brandes 2001, O(V × E) for unweighted directed graphs.
+/// Fixed-point scaling (1_000_000) preserves fractional path ratios during
+/// accumulation; output is the integer truncation of the exact value.
+/// OS analogy: `traceroute` hop-popularity — which node sits on the most
+/// shortest paths between other nodes in the kernel service graph?
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_centrality<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_centrality_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
