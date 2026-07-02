@@ -3991,6 +3991,154 @@ pub fn dispatch_graph_community(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.46: `graph spanning` — BFS spanning forest over the undirected kernel graph.
+///
+/// Covers all live nodes; treats every directed edge as undirected.  Roots are
+/// chosen in ascending slot order — each new unvisited node starts a new tree.
+/// Output is shown in BFS visit order: root (depth 0), then level-1 children,
+/// then level-2 grandchildren, etc., tree by tree.
+///
+/// Node roles:
+///   root     — depth 0; the BFS root of a spanning tree
+///   branch   — depth ≥ 1 and has children in the spanning tree
+///   leaf     — depth ≥ 1 and has no children in the spanning tree
+///
+/// OS analogy: `ip route show` / STP spanning-tree protocol — the minimal
+/// backbone connecting all kernel sub-systems without redundant cross-links.
+pub fn dispatch_graph_spanning(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+
+    let (vecs, parents, depths, total, tree_count) = gos_runtime::graph_spanning::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph spanning\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Compute which nodes are children (have at least one child in the spanning tree).
+    // A node is a branch if some other node has it as parent (and that node isn't itself).
+    let mut has_child = [false; 128usize];
+    for i in 0..total {
+        if depths[i] > 0 {
+            // Find the parent index so we can mark it.
+            for j in 0..total {
+                if vecs[j] == parents[i] {
+                    has_child[j] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Walk through output, detecting tree boundaries (depth resets to 0).
+    let mut tree_idx = 0usize;
+    let mut i = 0usize;
+    while i < total {
+        // Each tree starts at depth 0.
+        let root_vec = vecs[i];
+
+        // Count nodes in this tree.
+        let mut tree_end = i;
+        while tree_end < total && (tree_end == i || depths[tree_end] > 0) {
+            tree_end += 1;
+        }
+        let tree_size = tree_end - i;
+
+        // Tree header.
+        set_color(sink, 13, 0);
+        print_str(sink, "  [T");
+        print_num_inline(sink, tree_idx);
+        print_str(sink, "]  root: ");
+        set_color(sink, 11, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(root_vec);
+        print_str(sink, core::str::from_utf8(vbuf.as_slice()).unwrap_or("?"));
+        set_color(sink, 7, 0);
+        print_str(sink, "  \u{2500}\u{2500}  ");
+        print_num_inline(sink, tree_size);
+        print_str(sink, if tree_size == 1 { " node\n" } else { " nodes\n" });
+
+        // Column header.
+        set_color(sink, 8, 0);
+        print_str(sink, "    depth  vector           parent           role\n");
+        set_color(sink, 7, 0);
+
+        for k in i..tree_end {
+            let d    = depths[k];
+            let is_root   = d == 0;
+            let is_branch = !is_root && has_child[k];
+            let role_col  = if is_root { 13u8 } else if is_branch { 11 } else { 7 };
+
+            // depth column (5 chars wide)
+            print_str(sink, "    ");
+            print_num_inline(sink, d as usize);
+            print_str(sink, "      ");
+
+            // vector column
+            let mut vbuf2 = LineBuf::<20>::new();
+            vbuf2.push_vector(vecs[k]);
+            set_color(sink, role_col, 0);
+            let vs = core::str::from_utf8(vbuf2.as_slice()).unwrap_or("?");
+            print_str(sink, vs);
+            // pad to 17 chars
+            let pad = 17usize.saturating_sub(vs.len());
+            for _ in 0..pad { print_str(sink, " "); }
+            set_color(sink, 7, 0);
+
+            // parent column
+            if is_root {
+                set_color(sink, 8, 0);
+                print_str(sink, "(root)           ");
+                set_color(sink, 7, 0);
+            } else {
+                let mut pbuf = LineBuf::<20>::new();
+                pbuf.push_vector(parents[k]);
+                let ps = core::str::from_utf8(pbuf.as_slice()).unwrap_or("?");
+                print_str(sink, ps);
+                let ppad = 17usize.saturating_sub(ps.len());
+                for _ in 0..ppad { print_str(sink, " "); }
+            }
+
+            // role column
+            set_color(sink, role_col, 0);
+            if is_root {
+                print_str(sink, "root");
+            } else if is_branch {
+                print_str(sink, "branch");
+            } else {
+                print_str(sink, "leaf");
+            }
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+
+        tree_idx += 1;
+        i = tree_end;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  BFS spanning-forest  trees: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, tree_count);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

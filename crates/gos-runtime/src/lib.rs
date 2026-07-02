@@ -2773,6 +2773,123 @@ impl GraphRuntime {
         (out_vecs, out_comm, copy_len, comm_count)
     }
 
+    /// V2.46: BFS spanning forest over the undirected projection of the live graph.
+    ///
+    /// Treats every directed edge as undirected (combines in-edges and out-edges)
+    /// so the forest covers all live nodes regardless of edge direction.
+    ///
+    /// Algorithm (BFS spanning forest):
+    ///   1. Iterate over live nodes in ascending slot order.
+    ///   2. For each unvisited node start a new BFS tree (it becomes the root).
+    ///   3. At each BFS step visit all undirected neighbors; record parent and depth.
+    ///   4. Accumulate output in BFS visit order (root first, then level 1, etc.)
+    ///      across all trees.
+    ///
+    /// Returns `(vecs, parents, depths, node_count, tree_count)`:
+    ///   vecs[0..node_count]    — node vectors in BFS order
+    ///   parents[0..node_count] — parent vector per node (same as vecs[i] for roots)
+    ///   depths[0..node_count]  — BFS depth (0 = root)
+    ///   node_count             — total live nodes packed into the arrays
+    ///   tree_count             — number of BFS trees (= undirected connected components)
+    ///
+    /// O(V+E); no_std safe; fixed-size stack arrays only.
+    fn graph_spanning_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        let node_count = snap.node_count;
+
+        if node_count == 0 {
+            return ([ZERO_VEC; N], [ZERO_VEC; N], [0u8; N], 0, 0);
+        }
+
+        // Per-slot BFS state.
+        let mut visited     = [false; MAX_NODES];
+        let mut parent_slot = [0usize; MAX_NODES]; // self = root
+        let mut depth_arr   = [0u8;    MAX_NODES];
+
+        // Output slots in BFS visit order across all trees.
+        let mut out_slots  = [0usize; MAX_NODES];
+        let mut out_len    = 0usize;
+        let mut tree_count = 0usize;
+
+        // BFS queue — slots only.
+        let mut queue = [0usize; MAX_NODES];
+
+        // Visit each live node in ascending slot order; unvisited nodes become roots.
+        for si in 0..node_count {
+            let root = snap.node_slots[si];
+            if visited[root] { continue; }
+
+            tree_count          += 1;
+            visited[root]        = true;
+            parent_slot[root]    = root; // root is its own parent
+            depth_arr[root]      = 0;
+
+            // Reset and seed queue for this tree.
+            let mut q_head = 0usize;
+            let mut q_tail = 0usize;
+            queue[q_tail] = root;
+            q_tail += 1;
+
+            while q_head < q_tail {
+                let cur      = queue[q_head];
+                q_head += 1;
+
+                if out_len < MAX_NODES {
+                    out_slots[out_len] = cur;
+                    out_len += 1;
+                }
+
+                let cur_id    = snap.slot_id[cur];
+                let cur_depth = depth_arr[cur];
+
+                // Enumerate undirected neighbors (out-edges + in-edges).
+                for ei in 0..MAX_EDGES {
+                    if !snap.edge_live[ei] { continue; }
+                    let nb_id = if snap.edge_from[ei] == cur_id {
+                        snap.edge_to[ei]
+                    } else if snap.edge_to[ei] == cur_id {
+                        snap.edge_from[ei]
+                    } else {
+                        continue;
+                    };
+
+                    let nb = match snap.node_slot_by_id(nb_id) {
+                        Some(s) => s,
+                        None    => continue,
+                    };
+                    if nb == cur    { continue; } // skip self-loops
+                    if visited[nb]  { continue; }
+
+                    visited[nb]     = true;
+                    parent_slot[nb] = cur;
+                    depth_arr[nb]   = cur_depth.saturating_add(1);
+
+                    if q_tail < MAX_NODES {
+                        queue[q_tail] = nb;
+                        q_tail += 1;
+                    }
+                }
+            }
+        }
+
+        let mut out_vecs    = [ZERO_VEC; N];
+        let mut out_parents = [ZERO_VEC; N];
+        let mut out_depths  = [0u8; N];
+        let copy_len = out_len.min(N);
+
+        for i in 0..copy_len {
+            let slot      = out_slots[i];
+            out_vecs[i]    = snap.slot_vec[slot];
+            out_parents[i] = snap.slot_vec[parent_slot[slot]];
+            out_depths[i]  = depth_arr[slot];
+        }
+
+        (out_vecs, out_parents, out_depths, copy_len, tree_count)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -5168,6 +5285,26 @@ pub fn graph_hits<const N: usize>() -> ([VectorAddress; N], [u32; N], [u32; N], 
 pub fn graph_community<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_community_inner::<N>(&snap)
+}
+
+/// V2.46: BFS spanning forest over the undirected projection of the live kernel graph.
+///
+/// Treats every directed edge as undirected so the forest covers all live nodes.
+/// Roots are chosen in ascending slot order; each unvisited node starts a new tree.
+///
+/// Returns `(vecs, parents, depths, node_count, tree_count)`:
+/// - `vecs[0..node_count]`    — node vectors in BFS order (tree 0 first).
+/// - `parents[0..node_count]` — parent vector per node (same as vecs[i] for roots).
+/// - `depths[0..node_count]`  — BFS depth (0 = root).
+/// - `node_count`             — total live nodes packed into the arrays.
+/// - `tree_count`             — number of BFS trees (= undirected connected components).
+///
+/// OS analogy: `ip route show` / spanning-tree protocol — the minimal backbone
+/// that connects all kernel subsystems without redundant cross-links.
+pub fn graph_spanning<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, usize) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_spanning_inner::<N>(&snap)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

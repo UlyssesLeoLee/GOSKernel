@@ -583,6 +583,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  hits / ha          aliases for graph hits\n");
         super::print_str(sink, "  graph community    label-propagation community detection (subsystem clustering)\n");
         super::print_str(sink, "  community / lpa    aliases for graph community\n");
+        super::print_str(sink, "  graph spanning     BFS spanning forest over all live nodes (minimal backbone)\n");
+        super::print_str(sink, "  spanning / span    aliases for graph spanning\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -951,6 +953,8 @@ fn dispatch_text_command(
         super::dispatch_graph_hits(sink);
     } else if cmd == "graph community" || cmd == "community" || cmd == "lpa" || cmd == "graph lpa" || cmd == "graph cluster" || cmd == "cluster" {
         super::dispatch_graph_community(sink);
+    } else if cmd == "graph spanning" || cmd == "spanning" || cmd == "span" || cmd == "graph span" || cmd == "graph tree" || cmd == "gtree" {
+        super::dispatch_graph_spanning(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
