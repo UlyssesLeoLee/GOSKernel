@@ -12,6 +12,8 @@ host-testing = []
 gos-protocol = { path = "../gos-protocol" }
 gos-runtime = { path = "../gos-runtime" }
 gos-sign = { path = "../gos-sign" }
+gos-rewrite = { path = "../gos-rewrite" }
+gos-cypher-mut = { path = "../gos-cypher-mut" }
 k-vmm = { path = "../k-vmm", optional = true }
 spin = "0.9"
 x86_64 = "0.14"

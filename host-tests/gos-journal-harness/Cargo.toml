@@ -1,0 +1,10 @@
+[package]
+name = "gos-journal-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-journal = { path = "../../crates/gos-journal" }

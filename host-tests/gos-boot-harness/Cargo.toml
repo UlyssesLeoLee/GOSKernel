@@ -1,0 +1,14 @@
+[package]
+name = "gos-boot-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
+gos-rewrite = { path = "../../crates/gos-rewrite" }
+gos-runtime = { path = "../../crates/gos-runtime" }
+gos-sign = { path = "../../crates/gos-sign" }
+gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }

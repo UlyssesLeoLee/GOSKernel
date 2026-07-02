@@ -60,11 +60,20 @@ pub enum CypherMutation {
 /// The narrow set of edge types Cypher mutations are allowed to
 /// touch.  Spawn / Call / Return / Sync / Stream are runtime-internal
 /// and never user-mutable.
+///
+/// `Depend` (= 3) is restricted to the boot manifest self-repair path.
+/// It allows the rewrite engine to create missing dependency edges
+/// discovered at boot time via `EdgeAbsent` rules.  General Cypher
+/// shell input that tries to create a Depend edge is still rejected by
+/// `pre_validate` in the shell gate — the boot path bypasses that gate
+/// by calling `gos_runtime::apply_cypher_mutation` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReceptiveEdgeKind {
     Mount = 1,
     Use = 2,
+    /// Boot-manifest self-repair only.  Maps to `RuntimeEdgeType::Depend`.
+    Depend = 3,
 }
 
 /// Every accepted mutation produces one of these.  Caller writes it
@@ -98,7 +107,7 @@ impl AuditedMutation {
         };
         ControlPlaneEnvelope {
             version: 1,
-            kind: ControlPlaneMessageKind::EdgeUpsert,
+            kind: ControlPlaneMessageKind::MutationAudit,
             subject: self.source,
             arg0,
             arg1,
@@ -124,7 +133,7 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
             edge_kind,
             ..
         } => match edge_kind {
-            ReceptiveEdgeKind::Mount | ReceptiveEdgeKind::Use => Ok(()),
+            ReceptiveEdgeKind::Mount | ReceptiveEdgeKind::Use | ReceptiveEdgeKind::Depend => Ok(()),
         },
         CypherMutation::RemoveEdge { .. } | CypherMutation::RebindUse { .. } => Ok(()),
     }

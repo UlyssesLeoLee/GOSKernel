@@ -58,9 +58,9 @@ use gos_protocol::{
     CLIPBOARD_DATA_BEGIN, CLIPBOARD_DATA_CLEAR,
     CLIPBOARD_DATA_COMMIT, CUDA_CONTROL_JOB_BEGIN, CUDA_CONTROL_JOB_COMMIT,
     CYPHER_CONTROL_QUERY_BEGIN,
-    CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_CONTROL_THEME, DISPLAY_THEME_SHOJI,
+    CYPHER_CONTROL_QUERY_COMMIT, DISPLAY_THEME_SHOJI,
     DISPLAY_THEME_WABI, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
-    ExecutorId, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
+    ExecutorId, GraphDiffKind, GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary,
     IME_CONTROL_SET_MODE, IME_MODE_ASCII, IME_MODE_ZH_PINYIN, INPUT_KEY_DOWN,
     INPUT_KEY_PAGE_DOWN, INPUT_KEY_PAGE_UP, INPUT_KEY_UP, KernelAbi,
     NodeEvent,
@@ -148,6 +148,7 @@ const GRAPH_CTX_NONE: u8 = 0;
 const GRAPH_CTX_OVERVIEW: u8 = 1;
 const GRAPH_CTX_NODE: u8 = 2;
 const GRAPH_CTX_EDGE: u8 = 3;
+const GRAPH_CTX_METRICS: u8 = 4;
 const MAX_IME_PREVIEW: usize = 24;
 const GRAPH_NAV_DEPTH: usize = 8;
 const COMMAND_HISTORY_ITEMS: usize = 16;
@@ -197,6 +198,11 @@ static CHAT_HTTP_MODE: AtomicU8 = AtomicU8::new(0);
 static NIM_TARGET: AtomicU64 = AtomicU64::new(0);
 /// 0 = normal shell, 1 = NIM inference mode.
 static NIM_MODE: AtomicU8 = AtomicU8::new(0);
+/// Pinned graph epoch for `graph diff` — 0 means "since boot", any other value
+/// means "since epoch N was pinned via `graph diff pin`".
+pub(crate) static GRAPH_DIFF_PIN_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// 0 = normal VECTOR DECK view, 1 = live proc watch mode (like `watch -n1 proc`).
+pub(crate) static WATCH_PROC_MODE: AtomicU8 = AtomicU8::new(0);
 
 const BOOT_PHASES: [&str; STAGE_COUNT] = [
     "DISCOVER",
@@ -313,6 +319,9 @@ struct ShellState {
     net_target: u64,
     cuda_target: u64,
     clipboard_target: u64,
+    /// graph_epoch at the last draw_command_deck_panel call; enables the
+    /// V2.3 epoch-diff idle skip (zero unnecessary panel repaints).
+    last_rendered_epoch: u64,
     console_live: u8,
     sigil_frame: u8,
     heartbeat_divider: u8,
@@ -790,26 +799,15 @@ fn sync_theme_use_edges(theme: u8) -> bool {
     gos_runtime::register_edge(spec).is_ok()
 }
 
-fn apply_theme_choice_raw(abi: &KernelAbi, from: u64, console_target: u64, theme: u8) -> bool {
+fn apply_theme_choice_raw(_abi: &KernelAbi, from: u64, _console_target: u64, theme: u8) -> bool {
+    // V2.15: sync_theme_use_edges triggers fire_subscribers → Subscribe signal
+    // delivered to k-vga automatically; explicit DISPLAY_CONTROL_THEME removed.
     let graph_ok = sync_theme_use_edges(theme);
-    let target = if console_target == 0 {
-        VGA_VEC.as_u64()
-    } else {
-        console_target
-    };
-    let visual_ok = emit_target_signal_raw(
-        abi,
-        target,
-        Signal::Control {
-            cmd: DISPLAY_CONTROL_THEME,
-            val: theme,
-        },
-    );
     ACTIVE_THEME.store(theme, Ordering::SeqCst);
     if from != 0 && from != NODE_VEC.as_u64() {
         let _ = gos_runtime::post_signal(NODE_VEC, Signal::Interrupt { irq: 32 });
     }
-    graph_ok && visual_ok
+    graph_ok
 }
 
 fn apply_theme_choice(sink: &ConsoleSink, theme: u8) -> bool {
@@ -1064,6 +1062,2428 @@ fn lifecycle_label(state: gos_protocol::NodeLifecycle) -> &'static str {
     }
 }
 
+/// Text-mode listing of all live graph nodes — the GOS equivalent of `ps`.
+///
+/// Prints each node's vector, plugin/key, and lifecycle to the scrolling console.
+/// When `faulted_only` is true, only nodes in `NodeLifecycle::Faulted` are shown.
+/// Color-codes lifecycle: green = ready/running, yellow = waiting/suspended,
+/// red = faulted, gray = boot-phase (discovered/loaded/registered/allocated).
+pub fn dispatch_nodes_list(sink: &ConsoleSink, faulted_only: bool) {
+    use gos_protocol::{GraphNodeSummary, NodeLifecycle};
+    const PAGE: usize = 8;
+    let mut items = [GraphNodeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut printed = 0usize;
+
+    set_color(sink, 11, 0);
+    print_str(sink, if faulted_only { " faulted nodes\n" } else { " live nodes\n" });
+    set_color(sink, 7, 0);
+
+    loop {
+        let (total, returned) = gos_runtime::node_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            if faulted_only && item.lifecycle != NodeLifecycle::Faulted {
+                continue;
+            }
+            let fg: u8 = match item.lifecycle {
+                NodeLifecycle::Ready | NodeLifecycle::Running => 10,
+                NodeLifecycle::Faulted => 12,
+                NodeLifecycle::Waiting | NodeLifecycle::Suspended => 14,
+                _ => 7,
+            };
+            set_color(sink, fg, 0);
+            print_str(sink, "  ");
+            let mut vec_buf = LineBuf::<20>::new();
+            vec_buf.push_vector(item.vector);
+            print_str(sink, core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?.?.?.?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "  ");
+            print_str(sink, item.plugin_name);
+            print_str(sink, "/");
+            print_str(sink, item.local_node_key);
+            print_str(sink, "  ");
+            set_color(sink, 8, 0);
+            print_str(sink, lifecycle_label(item.lifecycle));
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            printed += 1;
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+    if printed == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, if faulted_only { "  (no faulted nodes)\n" } else { "  (no nodes)\n" });
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Lifecycle distribution summary — counts per state, coloured for quick triage.
+/// Analogous to `ps aux | awk '{print $8}' | sort | uniq -c` in Linux.
+pub fn dispatch_lifecycle_summary(sink: &ConsoleSink) {
+    use gos_protocol::{GraphNodeSummary, NodeLifecycle};
+    const PAGE: usize = 8;
+    let mut items = [GraphNodeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut n_boot     = 0usize;  // Discovered | Loaded | Registered
+    let mut n_alloc    = 0usize;
+    let mut n_ready    = 0usize;
+    let mut n_run      = 0usize;
+    let mut n_wait     = 0usize;
+    let mut n_suspend  = 0usize;
+    let mut n_term     = 0usize;
+    let mut n_fault    = 0usize;
+
+    loop {
+        let (total, returned) = gos_runtime::node_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            match item.lifecycle {
+                NodeLifecycle::Discovered
+                | NodeLifecycle::Loaded
+                | NodeLifecycle::Registered => n_boot += 1,
+                NodeLifecycle::Allocated  => n_alloc += 1,
+                NodeLifecycle::Ready      => n_ready += 1,
+                NodeLifecycle::Running    => n_run += 1,
+                NodeLifecycle::Waiting    => n_wait += 1,
+                NodeLifecycle::Suspended  => n_suspend += 1,
+                NodeLifecycle::Terminated => n_term += 1,
+                NodeLifecycle::Faulted    => n_fault += 1,
+            }
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node lifecycle summary\n");
+    set_color(sink, 7, 0);
+
+    let total_live = n_boot + n_alloc + n_ready + n_run + n_wait + n_suspend + n_term + n_fault;
+    if total_live == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    macro_rules! print_count {
+        ($label:expr, $count:expr, $fg:expr) => {
+            if $count > 0 {
+                set_color(sink, $fg, 0);
+                print_str(sink, "  ");
+                print_str(sink, $label);
+                print_str(sink, ": ");
+                print_num_inline(sink, $count);
+                print_str(sink, "\n");
+            }
+        };
+    }
+    print_count!("boot-phase", n_boot,    7);
+    print_count!("alloc",      n_alloc,   7);
+    print_count!("ready",      n_ready,  10);
+    print_count!("running",    n_run,    10);
+    print_count!("waiting",    n_wait,   14);
+    print_count!("suspended",  n_suspend, 14);
+    print_count!("terminated", n_term,    8);
+    print_count!("faulted",    n_fault,  12);
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total_live);
+    print_str(sink, "\n");
+}
+
+/// Display the boot manifest verification report stored by hypervisor at boot.
+///
+/// Reads the two atomic counters written by `gos_runtime::record_boot_manifest_report`
+/// and formats them as a human-readable health check — the GOS equivalent of
+/// `systemctl status` for the dependency graph.
+pub fn dispatch_boot_verify(sink: &ConsoleSink) {
+    let rules  = gos_runtime::boot_manifest_rules_checked();
+    let healed = gos_runtime::boot_manifest_edges_healed();
+    set_color(sink, 11, 0);
+    print_str(sink, " boot manifest\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  rules checked: ");
+    print_num_inline(sink, rules);
+    print_str(sink, "\n  edges healed:  ");
+    print_num_inline(sink, healed);
+    print_str(sink, "\n  status:        ");
+    if rules == 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "pending (boot not yet completed)\n");
+    } else if healed == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "OK — all ");
+        print_num_inline(sink, rules);
+        print_str(sink, " depend edges present\n");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "WARNING — ");
+        print_num_inline(sink, healed);
+        print_str(sink, " edge(s) self-healed at boot (imperative pass missed edges)\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// Output all runtime telemetry metrics as `key=value\n` lines.
+///
+/// Machine-parseable counterpart to the `metrics` graph-panel view.
+/// Host-side serial scripts can collect these values without parsing TUI escape codes.
+pub fn dispatch_metrics_export(sink: &ConsoleSink) {
+    let g_epoch = gos_runtime::graph_epoch();
+    let r_epoch = gos_supervisor::render_epoch();
+    let snap    = gos_runtime::snapshot();
+    set_color(sink, 11, 0);
+    print_str(sink, " telemetry export\n");
+    set_color(sink, 7, 0);
+
+    macro_rules! kv {
+        ($key:expr, $val:expr) => {
+            print_str(sink, "  ");
+            print_str(sink, $key);
+            print_str(sink, "=");
+            print_num_inline(sink, $val as usize);
+            print_str(sink, "\n");
+        };
+    }
+    kv!("graph_epoch",          g_epoch);
+    kv!("render_epoch",         r_epoch);
+    kv!("idle_cycles",          gos_supervisor::idle_cycle_count());
+    kv!("causal_depth_max",     gos_supervisor::causal_depth_max());
+    kv!("subscribe_pairs",      gos_runtime::subscribe_pair_count());
+    kv!("tick",                 snap.tick);
+    kv!("plugins",              snap.plugin_count);
+    kv!("nodes",                snap.node_count);
+    kv!("edges",                snap.edge_count);
+    kv!("domain_switches",      gos_runtime::domain_switch_count());
+    kv!("preemptions",          gos_runtime::preempt_count());
+    kv!("boot_fallback_allocs", gos_runtime::boot_fallback_alloc_count());
+    kv!("boot_rules_checked",   gos_runtime::boot_manifest_rules_checked());
+    kv!("boot_edges_healed",    gos_runtime::boot_manifest_edges_healed());
+    set_color(sink, 7, 0);
+}
+
+/// Report gos-journal on-disk format constants and capability summary.
+///
+/// Analogous to `journalctl --version`: confirms the magic, version, and record
+/// geometry that replay will expect.  Pure read — no runtime state is touched.
+pub fn dispatch_journal_info(sink: &ConsoleSink) {
+    set_color(sink, 11, 0);
+    print_str(sink, " journal format\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  envelope magic:      GOSJ\n");
+    print_str(sink, "  envelope version:    ");
+    print_num_inline(sink, gos_journal::JOURNAL_VERSION as usize);
+    print_str(sink, "\n  header_bytes:        ");
+    print_num_inline(sink, gos_journal::HEADER_BYTES);
+    print_str(sink, "\n  envelope_record:     ");
+    print_num_inline(sink, gos_journal::ENVELOPE_RECORD_BYTES);
+    print_str(sink, " bytes (fixed)\n");
+    print_str(sink, "  snapshot magic:      GOSS\n");
+    print_str(sink, "  snapshot version:    ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_VERSION as usize);
+    print_str(sink, "\n  snapshot_hdr:        ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_HEADER_BYTES);
+    print_str(sink, " bytes\n  node_record:         ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_NODE_BYTES);
+    print_str(sink, " bytes\n  edge_record:         ");
+    print_num_inline(sink, gos_journal::SNAPSHOT_EDGE_BYTES);
+    print_str(sink, " bytes\n");
+    print_str(sink, "  kinds:               12 (Hello..SubscribeTriggered)\n");
+    set_color(sink, 10, 0);
+    print_str(sink, "  status:              F.4 control-plane journal -- replay-ready\n");
+    set_color(sink, 7, 0);
+}
+
+/// Parse a decimal string into a u64 epoch number, no_std-compatible.
+/// Returns None if the input is empty or contains any non-ASCII-digit character.
+pub(crate) fn parse_epoch_decimal(s: &str) -> Option<u64> {
+    if s.is_empty() { return None; }
+    let mut val: u64 = 0;
+    for b in s.bytes() {
+        if b < b'0' || b > b'9' { return None; }
+        val = val.saturating_mul(10).saturating_add((b - b'0') as u64);
+    }
+    Some(val)
+}
+
+/// Parse an edge-type filter word from the `edges <type>` command.
+fn parse_edge_type_filter(s: &str) -> Option<RuntimeEdgeType> {
+    match s.trim() {
+        "call"   => Some(RuntimeEdgeType::Call),
+        "spawn"  => Some(RuntimeEdgeType::Spawn),
+        "depend" => Some(RuntimeEdgeType::Depend),
+        "signal" => Some(RuntimeEdgeType::Signal),
+        "return" => Some(RuntimeEdgeType::Return),
+        "mount"  => Some(RuntimeEdgeType::Mount),
+        "sync"   => Some(RuntimeEdgeType::Sync),
+        "stream" => Some(RuntimeEdgeType::Stream),
+        "use"    => Some(RuntimeEdgeType::Use),
+        _ => None,
+    }
+}
+
+/// Text-mode listing of all live graph edges — the GOS equivalent of `ss -a` / `lsof`.
+///
+/// Prints each edge's from_vector, type, to_vector, and key to the scrolling console.
+/// When `filter_type` is `Some(t)`, only edges of that type are shown.
+/// Color-codes edge type: green = call, yellow = mount, cyan = use, blue = depend.
+pub fn dispatch_edges_list(sink: &ConsoleSink, filter_type: Option<RuntimeEdgeType>) {
+    const PAGE: usize = 8;
+    let mut items = [GraphEdgeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+    let mut printed = 0usize;
+
+    let title = match filter_type {
+        None                           => " live edges\n",
+        Some(RuntimeEdgeType::Call)    => " call edges\n",
+        Some(RuntimeEdgeType::Spawn)   => " spawn edges\n",
+        Some(RuntimeEdgeType::Depend)  => " depend edges\n",
+        Some(RuntimeEdgeType::Signal)  => " signal edges\n",
+        Some(RuntimeEdgeType::Return)  => " return edges\n",
+        Some(RuntimeEdgeType::Mount)   => " mount edges\n",
+        Some(RuntimeEdgeType::Sync)    => " sync edges\n",
+        Some(RuntimeEdgeType::Stream)  => " stream edges\n",
+        Some(RuntimeEdgeType::Use)     => " use edges\n",
+    };
+    set_color(sink, 11, 0);
+    print_str(sink, title);
+    set_color(sink, 7, 0);
+
+    loop {
+        let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            if let Some(ft) = filter_type {
+                if item.edge_type != ft {
+                    continue;
+                }
+            }
+            let fg: u8 = match item.edge_type {
+                RuntimeEdgeType::Call   => 10,
+                RuntimeEdgeType::Spawn  => 10,
+                RuntimeEdgeType::Mount  => 14,
+                RuntimeEdgeType::Use    => 11,
+                RuntimeEdgeType::Depend => 9,
+                RuntimeEdgeType::Sync   => 13,
+                RuntimeEdgeType::Signal => 12,
+                RuntimeEdgeType::Stream => 6,
+                RuntimeEdgeType::Return => 7,
+            };
+            set_color(sink, fg, 0);
+            print_str(sink, "  ");
+            let mut from_buf = LineBuf::<20>::new();
+            from_buf.push_vector(item.from_vector);
+            print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+            set_color(sink, 8, 0);
+            print_str(sink, " -[");
+            set_color(sink, fg, 0);
+            print_str(sink, edge_type_label(item.edge_type));
+            set_color(sink, 8, 0);
+            print_str(sink, "]-> ");
+            set_color(sink, 7, 0);
+            let mut to_buf = LineBuf::<20>::new();
+            to_buf.push_vector(item.to_vector);
+            print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+            if !item.from_key.is_empty() {
+                set_color(sink, 8, 0);
+                print_str(sink, "  ");
+                print_str(sink, item.from_key);
+            }
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            printed += 1;
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    if printed == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, if filter_type.is_some() { "  (no edges of that type)\n" } else { "  (no edges)\n" });
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Report total edge count — lightweight `edges count` variant.
+///
+/// Reads only the total from `edge_page` without enumerating all summaries.
+/// Analogous to `ss --summary` in Linux.
+pub fn dispatch_edge_count(sink: &ConsoleSink) {
+    let mut items = [GraphEdgeSummary::EMPTY; 1];
+    let (total, _) = gos_runtime::edge_page::<1>(0, &mut items);
+    set_color(sink, 11, 0);
+    print_str(sink, " edge count\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, "\n  status: ");
+    if total == 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "no edges (graph topology empty)\n");
+    } else {
+        set_color(sink, 10, 0);
+        print_str(sink, "edges active\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// `graph diff` — structural topology changelog since pinned epoch.
+///
+/// Like `git log` for the kernel graph: shows every node/edge add or remove
+/// recorded in the diff ring, color-coded green (+) / red (-) like a diff.
+///
+/// - `graph diff`        → show all mutations since the pinned epoch (or boot if never pinned)
+/// - `graph diff pin`    → pin the current epoch as the diff baseline
+/// - `graph diff reset`  → reset baseline to 0 (show all since boot)
+pub fn dispatch_graph_diff(sink: &ConsoleSink, since_epoch: u64) {
+    use gos_protocol::GraphDiffEntry;
+    const PAGE: usize = 16;
+    let mut entries = [GraphDiffEntry::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::graph_diff_since::<PAGE>(since_epoch, &mut entries);
+    let current_epoch = gos_runtime::graph_epoch();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph diff");
+    set_color(sink, 8, 0);
+    print_str(sink, " (epoch ");
+    print_num_inline(sink, since_epoch as usize);
+    print_str(sink, " -> ");
+    print_num_inline(sink, current_epoch as usize);
+    print_str(sink, ")\n");
+    set_color(sink, 7, 0);
+
+    for entry in entries.iter().take(filled) {
+        let (prefix, fg) = if entry.kind.is_addition() {
+            ("+", 10u8)
+        } else {
+            ("-", 12u8)
+        };
+        let kind_label = match entry.kind {
+            GraphDiffKind::NodeAdded   => "node+",
+            GraphDiffKind::NodeRemoved => "node-",
+            GraphDiffKind::EdgeAdded   => "edge+",
+            GraphDiffKind::EdgeRemoved => "edge-",
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, " ");
+        print_str(sink, prefix);
+        print_str(sink, " [");
+        print_str(sink, kind_label);
+        print_str(sink, "] ");
+        let mut vec_buf = LineBuf::<20>::new();
+        vec_buf.push_vector(entry.from_vector);
+        print_str(sink, core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?"));
+        if entry.kind.is_node() {
+            set_color(sink, 8, 0);
+            print_str(sink, "  ");
+            print_str(sink, entry.label_str());
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, " -[");
+            set_color(sink, fg, 0);
+            print_str(sink, entry.label_str());
+            set_color(sink, 8, 0);
+            print_str(sink, "]-> ");
+            set_color(sink, 7, 0);
+            let mut to_buf = LineBuf::<20>::new();
+            to_buf.push_vector(entry.to_vector);
+            print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  @epoch ");
+        print_num_inline(sink, entry.epoch as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no changes since epoch ");
+        print_num_inline(sink, since_epoch as usize);
+        print_str(sink, ")\n");
+        set_color(sink, 7, 0);
+    } else if total > filled {
+        set_color(sink, 8, 0);
+        print_str(sink, "  ... ");
+        print_num_inline(sink, total - filled);
+        print_str(sink, " more (ring capped at ");
+        print_num_inline(sink, PAGE);
+        print_str(sink, " per page)\n");
+        set_color(sink, 7, 0);
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " change(s)");
+    if total > 0 {
+        print_str(sink, "  |  use 'graph diff pin' to update baseline\n");
+    } else {
+        print_str(sink, "\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// Show a ps-style table of all live graph nodes with their cumulative signal
+/// counts and outbound edge counts — analogous to `ps aux` on Linux.
+pub fn dispatch_proc_list(sink: &ConsoleSink) {
+    use gos_protocol::NodeProcSummary;
+    const PAGE: usize = 32;
+    let mut summaries = [NodeProcSummary::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::proc_page::<PAGE>(0, &mut summaries);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " proc");
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              sig    out  state       plugin/key\n");
+    set_color(sink, 7, 0);
+
+    for summary in summaries.iter().take(filled) {
+        let fg: u8 = match summary.lifecycle {
+            gos_protocol::NodeLifecycle::Running    => 10,
+            gos_protocol::NodeLifecycle::Faulted    => 12,
+            gos_protocol::NodeLifecycle::Suspended  => 14,
+            _                                       => 7,
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+        let mut vec_buf = LineBuf::<20>::new();
+        vec_buf.push_vector(summary.vector);
+        let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        // pad to 20 chars
+        let pad = 20usize.saturating_sub(vec_str.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        set_color(sink, 11, 0);
+        print_num_right4(sink, summary.signal_count as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, summary.edge_out_count as usize);
+        print_str(sink, "  ");
+        set_color(sink, fg, 0);
+        let state_label = node_lifecycle_label(summary.lifecycle);
+        print_str(sink, state_label);
+        let state_pad = 12usize.saturating_sub(state_label.len());
+        for _ in 0..state_pad { print_str(sink, " "); }
+        set_color(sink, 8, 0);
+        print_str(sink, summary.plugin_name);
+        print_str(sink, "/");
+        print_str(sink, summary.local_node_key);
+        print_str(sink, "\n");
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+    } else if total > filled {
+        set_color(sink, 8, 0);
+        print_str(sink, "  ... ");
+        print_num_inline(sink, total - filled);
+        print_str(sink, " more (page capped at ");
+        print_num_inline(sink, PAGE);
+        print_str(sink, ")\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)");
+    if total > 0 {
+        print_str(sink, "  |  sig = cumulative signal dispatches\n");
+    } else {
+        print_str(sink, "\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// Show a detailed stat block for the single node at `vec` — analogous to
+/// `cat /proc/<pid>/status` on Linux.  Shows vector, key, plugin, lifecycle,
+/// signal count, and outbound edge count.  Prints an error if the vector is
+/// not registered.
+pub fn dispatch_node_stat(sink: &ConsoleSink, vec: VectorAddress) {
+    set_color(sink, 11, 0);
+    print_str(sink, " node stat\n");
+    set_color(sink, 7, 0);
+    match gos_runtime::proc_stat_for_vector(vec) {
+        None => {
+            set_color(sink, 12, 0);
+            print_str(sink, "  not found: ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vec);
+            print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Some(s) => {
+            let fg: u8 = match s.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => 10,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => 14,
+                _                                      => 7,
+            };
+            print_str(sink, "  vector:        ");
+            let mut vec_line = LineBuf::<20>::new();
+            vec_line.push_vector(s.vector);
+            set_color(sink, fg, 0);
+            print_str(sink, core::str::from_utf8(vec_line.as_slice()).unwrap_or("?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  key:           ");
+            print_str(sink, s.local_node_key);
+            print_str(sink, "\n  plugin:        ");
+            print_str(sink, s.plugin_name);
+            print_str(sink, "\n  lifecycle:     ");
+            set_color(sink, fg, 0);
+            print_str(sink, node_lifecycle_label(s.lifecycle));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  signal_count:  ");
+            set_color(sink, 11, 0);
+            print_num_inline(sink, s.signal_count as usize);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  edge_out:      ");
+            print_num_inline(sink, s.edge_out_count as usize);
+            print_str(sink, "\n");
+        }
+    }
+}
+
+/// Forcibly fault the node at `vec` — the graph-OS equivalent of `kill -9`.
+/// Reports the faulted vector on success (green) or "not found" (red) when the
+/// vector is not registered.
+pub fn dispatch_node_kill(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+    match gos_runtime::fault_node(vec) {
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " kill: node faulted\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  vector:   ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n  lifecycle -> Faulted  |  fault queue enqueued\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: use `nodes faulted` to list faulted nodes\n");
+            set_color(sink, 7, 0);
+        }
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " kill: node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+/// Resume a faulted or suspended node at `vec` — graph-OS equivalent of
+/// `systemctl restart`.  Sets the node's lifecycle to `Ready` so it can
+/// receive signals again.  Reports success (green) or "not found" (red).
+pub fn dispatch_node_resume(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+    match gos_runtime::resume_node(vec) {
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " resume: node ready\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  vector:   ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n  lifecycle -> Ready  |  node may receive signals\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: use `proc` to verify new lifecycle state\n");
+            set_color(sink, 7, 0);
+        }
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " resume: node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+/// `node info <vec>` — comprehensive single-node status view.
+///
+/// The graph-OS analogue of `systemctl status <unit>`: shows a node's
+/// identity (vector, key, plugin), lifecycle, cumulative signal count, and
+/// a full inline listing of every edge that touches this node — both
+/// outbound (this node as source) and inbound (this node as target).
+///
+/// This is the single-pane-of-glass command: `stat` + `edges` for one node.
+pub fn dispatch_node_info(sink: &ConsoleSink, vec: VectorAddress) {
+    use gos_protocol::GraphEdgeSummary;
+
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node info\n");
+    set_color(sink, 7, 0);
+
+    match gos_runtime::proc_stat_for_vector(vec) {
+        None => {
+            set_color(sink, 12, 0);
+            print_str(sink, "  not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            return;
+        }
+        Some(s) => {
+            let fg: u8 = match s.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => 10,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => 14,
+                _                                      => 7,
+            };
+            print_str(sink, "  vector:        ");
+            set_color(sink, fg, 0);
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  key:           ");
+            print_str(sink, s.local_node_key);
+            print_str(sink, "\n  plugin:        ");
+            print_str(sink, s.plugin_name);
+            print_str(sink, "\n  lifecycle:     ");
+            set_color(sink, fg, 0);
+            print_str(sink, node_lifecycle_label(s.lifecycle));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  signal_count:  ");
+            set_color(sink, 11, 0);
+            print_num_inline(sink, s.signal_count as usize);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  edge_out:      ");
+            print_num_inline(sink, s.edge_out_count as usize);
+            print_str(sink, "\n");
+        }
+    }
+
+    // Edge listing — all edges touching this node.
+    const EDGE_PAGE: usize = 16;
+    let mut edges = [GraphEdgeSummary::EMPTY; EDGE_PAGE];
+    match gos_runtime::edge_page_for_node(vec, 0, &mut edges) {
+        Err(_) => {
+            set_color(sink, 8, 0);
+            print_str(sink, "  edges:         (unavailable)\n");
+            set_color(sink, 7, 0);
+        }
+        Ok((total, returned)) => {
+            print_str(sink, "  edges (");
+            print_num_inline(sink, total);
+            print_str(sink, "):\n");
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "    (none)\n");
+                set_color(sink, 7, 0);
+            } else {
+                for edge in edges.iter().take(returned) {
+                    let is_out = edge.from_vector == vec;
+                    let (dir_label, fg): (&str, u8) = if is_out {
+                        ("out", 10)
+                    } else {
+                        ("in ", 13)
+                    };
+                    set_color(sink, fg, 0);
+                    print_str(sink, "    ");
+                    print_str(sink, dir_label);
+                    set_color(sink, 8, 0);
+                    print_str(sink, "  ");
+                    if !is_out {
+                        let mut from_buf = LineBuf::<20>::new();
+                        from_buf.push_vector(edge.from_vector);
+                        set_color(sink, 7, 0);
+                        print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+                        set_color(sink, 8, 0);
+                        print_str(sink, " -[");
+                        set_color(sink, fg, 0);
+                        print_str(sink, edge_type_label(edge.edge_type));
+                        set_color(sink, 8, 0);
+                        print_str(sink, "]-> ");
+                        set_color(sink, 11, 0);
+                        print_str(sink, vec_str);
+                    } else {
+                        set_color(sink, 11, 0);
+                        print_str(sink, vec_str);
+                        set_color(sink, 8, 0);
+                        print_str(sink, " -[");
+                        set_color(sink, fg, 0);
+                        print_str(sink, edge_type_label(edge.edge_type));
+                        set_color(sink, 8, 0);
+                        print_str(sink, "]-> ");
+                        set_color(sink, 7, 0);
+                        let mut to_buf = LineBuf::<20>::new();
+                        to_buf.push_vector(edge.to_vector);
+                        print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+                    }
+                    if !edge.from_key.is_empty() {
+                        set_color(sink, 8, 0);
+                        print_str(sink, "  ");
+                        print_str(sink, edge.from_key);
+                    }
+                    print_str(sink, "\n");
+                    set_color(sink, 7, 0);
+                }
+                if total > returned {
+                    set_color(sink, 8, 0);
+                    print_str(sink, "    ... ");
+                    print_num_inline(sink, total - returned);
+                    print_str(sink, " more edges\n");
+                    set_color(sink, 7, 0);
+                }
+            }
+        }
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  hint: stat <vec> for counters | edges <type> for type filter\n");
+    set_color(sink, 7, 0);
+}
+
+/// `node trace <vec>` / `ntrace <vec>` — per-node signal dispatch history.
+///
+/// Analogous to `strace -p <pid>`: shows the most recent signals dispatched
+/// to a single node, most recent first.  Each row: seq | kind | cmd | from.
+pub fn dispatch_node_trace(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    let mut ring = [gos_protocol::NodeTraceEntry::EMPTY; gos_runtime::MAX_NODE_TRACE];
+    match gos_runtime::node_trace_page(vec, &mut ring) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            return;
+        }
+        Ok((total, returned)) => {
+            set_color(sink, 11, 0);
+            print_str(sink, " node trace  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "  total=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, total as usize);
+            set_color(sink, 8, 0);
+            print_str(sink, "  showing=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, returned);
+            print_str(sink, "\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "   seq  kind      cmd  from\n");
+            set_color(sink, 7, 0);
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "   (no signals dispatched yet)\n");
+                set_color(sink, 7, 0);
+            }
+            for i in 0..returned {
+                let e = ring[i];
+                if e.kind == 0 { continue; } // EMPTY sentinel
+                print_num_right4(sink, e.serial as usize);
+                print_str(sink, "  ");
+                let (kind_label, kind_color) = signal_kind_entry(e.kind);
+                set_color(sink, kind_color, 0);
+                print_str(sink, kind_label);
+                set_color(sink, 7, 0);
+                print_str(sink, "  ");
+                if e.cmd != 0 {
+                    set_color(sink, 14, 0);
+                    print_num_right4(sink, e.cmd as usize);
+                    set_color(sink, 7, 0);
+                } else {
+                    print_str(sink, "   0");
+                }
+                print_str(sink, "  ");
+                if e.from != 0 {
+                    let from_vec = VectorAddress::from_u64(e.from);
+                    let mut from_buf = LineBuf::<20>::new();
+                    from_buf.push_vector(from_vec);
+                    set_color(sink, 11, 0);
+                    print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+                    set_color(sink, 7, 0);
+                } else {
+                    set_color(sink, 8, 0);
+                    print_str(sink, "kernel");
+                    set_color(sink, 7, 0);
+                }
+                print_str(sink, "\n");
+            }
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: node info <vec> for static view | proc for all nodes\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+fn signal_kind_entry(kind: u8) -> (&'static str, u8) {
+    match kind {
+        0x01 => ("call    ", 10),
+        0x02 => ("spawn   ", 13),
+        0x03 => ("irq     ", 9),
+        0x04 => ("data    ", 7),
+        0x05 => ("control ", 14),
+        0xFF => ("term    ", 12),
+        _    => ("?       ", 8),
+    }
+}
+
+/// `node log <vec>` / `nlog <vec>` — per-node lifecycle event log.
+///
+/// Analogous to `journalctl -u <service>`: shows the most recent lifecycle
+/// state transitions for one node, newest first.
+/// Each row: tick | lifecycle state label.
+pub fn dispatch_node_log(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    let mut log = [gos_protocol::NodeLogEntry::EMPTY; gos_runtime::MAX_NODE_LOG];
+    match gos_runtime::node_log_page(vec, &mut log) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok((total, returned)) => {
+            set_color(sink, 11, 0);
+            print_str(sink, " node log  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "  total=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, total);
+            set_color(sink, 8, 0);
+            print_str(sink, "  showing=");
+            set_color(sink, 7, 0);
+            print_num_inline(sink, returned);
+            print_str(sink, "\n");
+            set_color(sink, 8, 0);
+            print_str(sink, "    tick  lifecycle\n");
+            set_color(sink, 7, 0);
+            if returned == 0 {
+                set_color(sink, 8, 0);
+                print_str(sink, "   (no lifecycle events recorded yet)\n");
+                set_color(sink, 7, 0);
+            }
+            for i in 0..returned {
+                let e = log[i];
+                print_num_right4(sink, e.tick as usize);
+                print_str(sink, "  ");
+                let (label, color) = lifecycle_log_entry(e.lifecycle);
+                set_color(sink, color, 0);
+                print_str(sink, label);
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+            set_color(sink, 8, 0);
+            print_str(sink, "  hint: node trace <vec> for signal history | ninfo <vec> for full view\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+/// `node trace clear <vec>` / `ntrace clear <vec>` — clear per-node signal trace ring.
+///
+/// Analogous to `perf trace --no-inherit` reset or `truncate -s0 /var/log/strace.log`:
+/// discards the buffered signal dispatch history for one node.  The cumulative
+/// signal_count shown by `proc` is not affected — only the trace ring is cleared.
+pub fn dispatch_node_trace_clear(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::clear_node_trace(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node trace cleared  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+/// `node stat clear <vec>` / `nstat clear <vec>` — reset per-node signal_count to zero.
+///
+/// Analogous to `perf stat reset` or `echo 0 > /proc/<pid>/clear_refs`:
+/// zeroes the cumulative signal dispatch counter shown by `proc` and `stat`.
+/// Useful after node recovery or when starting a fresh measurement window.
+/// Does not affect the trace ring or lifecycle log.
+pub fn dispatch_node_stat_clear(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::reset_node_stat(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node stat cleared  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  signal_count -> 0  (trace ring and log unaffected)\n");
+        }
+    }
+}
+
+/// `watch` / `graph watch` / `watch proc` / `watch nodes` — enter live proc watch mode.
+///
+/// Sets WATCH_PROC_MODE = 1 so the heartbeat repaints the VECTOR DECK panel with a
+/// live proc table on every tick (like `watch -n1 proc`).  Any key press exits watch mode.
+pub fn dispatch_watch_proc(sink: &ConsoleSink) {
+    WATCH_PROC_MODE.store(1, Ordering::SeqCst);
+    set_color(sink, 11, 0);
+    print_str(sink, " watch proc  (live view in VECTOR DECK — press any key to stop)\n");
+    set_color(sink, 7, 0);
+}
+
+/// `watch stop` / `watch exit` — exit live proc watch mode explicitly.
+pub fn dispatch_watch_stop(sink: &ConsoleSink) {
+    WATCH_PROC_MODE.store(0, Ordering::SeqCst);
+    set_color(sink, 8, 0);
+    print_str(sink, " watch stopped\n");
+    set_color(sink, 7, 0);
+}
+
+/// `node log clear <vec>` / `nlog clear <vec>` — clear per-node lifecycle event log.
+///
+/// Analogous to `journalctl --vacuum-time` or `truncate -s0 /var/log/…`:
+/// discards the stored lifecycle history for one node.  Useful after node
+/// recovery to obtain a clean-slate log for subsequent monitoring.
+pub fn dispatch_node_log_clear(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::clear_node_log(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node log cleared  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+    }
+}
+
+fn lifecycle_log_entry(lc: u8) -> (&'static str, u8) {
+    use gos_protocol::NodeLifecycle;
+    match lc {
+        x if x == NodeLifecycle::Discovered  as u8 => ("Discovered ", 8),
+        x if x == NodeLifecycle::Loaded      as u8 => ("Loaded     ", 7),
+        x if x == NodeLifecycle::Registered  as u8 => ("Registered ", 10),
+        x if x == NodeLifecycle::Allocated   as u8 => ("Allocated  ", 9),
+        x if x == NodeLifecycle::Ready       as u8 => ("Ready      ", 10),
+        x if x == NodeLifecycle::Running     as u8 => ("Running    ", 14),
+        x if x == NodeLifecycle::Waiting     as u8 => ("Waiting    ", 13),
+        x if x == NodeLifecycle::Suspended   as u8 => ("Suspended  ", 11),
+        x if x == NodeLifecycle::Terminated  as u8 => ("Terminated ", 8),
+        x if x == NodeLifecycle::Faulted     as u8 => ("Faulted    ", 12),
+        _                                          => ("?          ", 8),
+    }
+}
+
+/// `graph topo` — hierarchical L4-domain topology view.
+///
+/// Analogous to `ip route show` / `lshw -short`: reveals how live nodes are
+/// distributed across the l4 domain layer of the vector address space.
+///
+/// - `graph topo`      → count per l4 domain (overview, like `ip route`)
+/// - `graph topo <L4>` → list all nodes in that domain (like `ip link show`)
+pub fn dispatch_graph_topo(sink: &ConsoleSink, l4_filter: Option<u8>) {
+    use gos_protocol::GraphNodeSummary;
+
+    if let Some(l4) = l4_filter {
+        // Filtered detail view for a specific l4 domain.
+        const PAGE: usize = 16;
+        let mut items = [GraphNodeSummary::EMPTY; PAGE];
+        let mut offset = 0usize;
+        let mut printed = 0usize;
+
+        set_color(sink, 11, 0);
+        print_str(sink, " graph topology  l4=");
+        print_num_inline(sink, l4 as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+
+        loop {
+            let (total, returned) = gos_runtime::node_page_l4::<PAGE>(l4, offset, &mut items);
+            for item in items.iter().take(returned) {
+                let fg: u8 = match item.lifecycle {
+                    gos_protocol::NodeLifecycle::Ready | gos_protocol::NodeLifecycle::Running => 10,
+                    gos_protocol::NodeLifecycle::Faulted => 12,
+                    gos_protocol::NodeLifecycle::Waiting | gos_protocol::NodeLifecycle::Suspended => 14,
+                    _ => 7,
+                };
+                set_color(sink, fg, 0);
+                print_str(sink, "  ");
+                let mut vec_buf = LineBuf::<20>::new();
+                vec_buf.push_vector(item.vector);
+                let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+                print_str(sink, vec_str);
+                let pad = 16usize.saturating_sub(vec_str.len());
+                for _ in 0..pad { print_str(sink, " "); }
+                set_color(sink, 8, 0);
+                print_str(sink, lifecycle_label(item.lifecycle));
+                print_str(sink, "  ");
+                set_color(sink, 7, 0);
+                print_str(sink, item.plugin_name);
+                print_str(sink, "/");
+                print_str(sink, item.local_node_key);
+                print_str(sink, "\n");
+                printed += 1;
+            }
+            offset += returned;
+            if returned == 0 || offset >= total { break; }
+        }
+
+        if printed == 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  (no nodes in l4=");
+            print_num_inline(sink, l4 as usize);
+            print_str(sink, ")\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  total: ");
+        print_num_inline(sink, gos_runtime::node_count_for_l4(l4));
+        print_str(sink, " node(s) in l4=");
+        print_num_inline(sink, l4 as usize);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+    } else {
+        // Overview: bucket all live nodes by l4 domain.
+        set_color(sink, 11, 0);
+        print_str(sink, " graph topology\n");
+        set_color(sink, 7, 0);
+
+        const MAX_DOMAINS: usize = 64;
+        let mut domain_l4s    = [0u8;    MAX_DOMAINS];
+        let mut domain_counts = [0usize; MAX_DOMAINS];
+        let mut num_domains   = 0usize;
+        let mut grand_total   = 0usize;
+
+        const SCAN: usize = 16;
+        let mut scan_items = [GraphNodeSummary::EMPTY; SCAN];
+        let mut scan_off   = 0usize;
+        loop {
+            let (total, returned) = gos_runtime::node_page::<SCAN>(scan_off, &mut scan_items);
+            for item in scan_items.iter().take(returned) {
+                let l4 = item.vector.l4;
+                let mut found = false;
+                for d in 0..num_domains {
+                    if domain_l4s[d] == l4 {
+                        domain_counts[d] += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found && num_domains < MAX_DOMAINS {
+                    domain_l4s[num_domains] = l4;
+                    domain_counts[num_domains] = 1;
+                    num_domains += 1;
+                }
+                grand_total += 1;
+            }
+            scan_off += returned;
+            if returned == 0 || scan_off >= total { break; }
+        }
+
+        // Insertion-sort domain_l4s/domain_counts by l4 value for stable output.
+        let mut i = 1usize;
+        while i < num_domains {
+            let key_l4  = domain_l4s[i];
+            let key_cnt = domain_counts[i];
+            let mut j = i;
+            while j > 0 && domain_l4s[j - 1] > key_l4 {
+                domain_l4s[j]    = domain_l4s[j - 1];
+                domain_counts[j] = domain_counts[j - 1];
+                j -= 1;
+            }
+            domain_l4s[j]    = key_l4;
+            domain_counts[j] = key_cnt;
+            i += 1;
+        }
+
+        for d in 0..num_domains {
+            let l4    = domain_l4s[d];
+            let count = domain_counts[d];
+            set_color(sink, 11, 0);
+            print_str(sink, "  [l4=");
+            print_num_inline(sink, l4 as usize);
+            print_str(sink, "]");
+            // Pad so node counts align at a consistent column.
+            let digits = if l4 < 10 { 1usize } else if l4 < 100 { 2 } else { 3 };
+            for _ in digits..3 { print_str(sink, " "); }
+            set_color(sink, 7, 0);
+            print_str(sink, "  ");
+            print_num_inline(sink, count);
+            print_str(sink, if count == 1 { " node\n" } else { " nodes\n" });
+        }
+
+        if num_domains == 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  (no nodes)\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, "  ");
+        print_num_inline(sink, num_domains);
+        print_str(sink, " domain(s)  |  ");
+        print_num_inline(sink, grand_total);
+        print_str(sink, " total node(s)");
+        if num_domains > 0 {
+            print_str(sink, "  |  use 'graph topo <l4>' to list a domain\n");
+        } else {
+            print_str(sink, "\n");
+        }
+        set_color(sink, 7, 0);
+    }
+}
+
+/// Holistic system health report — the GOS equivalent of `systemctl status`
+/// combined with `dmesg --level=err,warn`.
+///
+/// Aggregates node fault counts, diff ring saturation, subscription pairs,
+/// runtime preemptions, domain switches, and boot manifest results into a
+/// single colour-coded health banner + detail table.
+pub fn dispatch_graph_health(sink: &ConsoleSink) {
+    let total        = gos_runtime::proc_count();
+    let faulted      = gos_runtime::faulted_node_count();
+    let epoch        = gos_runtime::graph_epoch();
+    let diff_fill    = gos_runtime::diff_ring_fill();
+    let diff_tot     = gos_runtime::diff_total();
+    let sub_pairs    = gos_runtime::subscribe_pair_count();
+    let preempts     = gos_runtime::preempt_count();
+    let dom_sw       = gos_runtime::domain_switch_count();
+    let rules        = gos_runtime::boot_manifest_rules_checked();
+    let healed       = gos_runtime::boot_manifest_edges_healed();
+    let edge_count   = gos_runtime::snapshot().edge_count;
+
+    // Health classification: DEGRADED > WARNING > OK
+    // DEGRADED: faulted nodes exceed 25 % of total (or any fault when total < 4)
+    // WARNING:  any faulted node, or diff ring > 93 % full (>= 120/128)
+    let degraded = faulted > 0 && (total < 4 || faulted * 4 >= total);
+    let warning  = faulted > 0 || diff_fill >= 120;
+
+    // Banner
+    if degraded {
+        set_color(sink, 15, 4); // white on red
+        print_str(sink, " graph health  DEGRADED                                                     ");
+    } else if warning {
+        set_color(sink, 0, 14); // black on yellow
+        print_str(sink, " graph health  WARNING                                                      ");
+    } else {
+        set_color(sink, 0, 10); // black on green
+        print_str(sink, " graph health  OK                                                           ");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    // Nodes
+    set_color(sink, 11, 0);
+    print_str(sink, "  nodes\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    total:    ");
+    print_num_inline(sink, total);
+    print_str(sink, "\n");
+    print_str(sink, "    faulted:  ");
+    if faulted > 0 { set_color(sink, 12, 0); }
+    print_num_inline(sink, faulted);
+    if faulted > 0 {
+        print_str(sink, "  (!!)");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+    print_str(sink, "    edges:    ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, "\n");
+    print_str(sink, "    subs:     ");
+    print_num_inline(sink, sub_pairs);
+    print_str(sink, "  subscribe pairs\n");
+
+    // Graph mutation activity
+    set_color(sink, 11, 0);
+    print_str(sink, "  mutations\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    epoch:    ");
+    print_num_inline(sink, epoch as usize);
+    print_str(sink, "\n");
+    print_str(sink, "    total:    ");
+    print_num_inline(sink, diff_tot as usize);
+    print_str(sink, "  structural diffs ever pushed\n");
+    print_str(sink, "    ring:     ");
+    if diff_fill >= 120 { set_color(sink, 12, 0); }
+    print_num_inline(sink, diff_fill);
+    print_str(sink, " / 128");
+    if diff_fill >= 120 {
+        print_str(sink, "  (near full — oldest entries being overwritten)");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+
+    // Runtime metrics
+    set_color(sink, 11, 0);
+    print_str(sink, "  runtime\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    preempts: ");
+    print_num_inline(sink, preempts as usize);
+    print_str(sink, "  scheduler preemptions\n");
+    print_str(sink, "    dom-sw:   ");
+    print_num_inline(sink, dom_sw as usize);
+    print_str(sink, "  l4 domain switches\n");
+
+    // Boot manifest
+    set_color(sink, 11, 0);
+    print_str(sink, "  boot\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    rules:    ");
+    print_num_inline(sink, rules);
+    print_str(sink, "  manifest rules checked\n");
+    print_str(sink, "    healed:   ");
+    if healed > 0 { set_color(sink, 14, 0); }
+    print_num_inline(sink, healed);
+    if healed > 0 {
+        print_str(sink, "  edges auto-healed at boot");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+
+    // Advisory if not OK
+    if degraded {
+        set_color(sink, 12, 0);
+        print_str(sink, "  action: run 'nodes faulted' to inspect faulted nodes\n");
+        set_color(sink, 7, 0);
+    } else if faulted > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  hint: run 'nodes faulted' for fault details\n");
+        set_color(sink, 7, 0);
+    }
+}
+
+/// V2.31: `graph path <from> <to>` — BFS shortest-path trace between two nodes.
+///
+/// Analogous to `traceroute` on Linux / `pathping` on Windows: shows the sequence
+/// of graph hops from one node vector to another, following directed edges.
+/// Prints each hop's vector and node key so operators can trace data-flow paths
+/// through the graph topology at a glance.
+pub fn dispatch_graph_path(sink: &ConsoleSink, from: VectorAddress, to: VectorAddress) {
+    const MAX_PATH: usize = 32;
+    let mut path = [VectorAddress::new(0, 0, 0, 0); MAX_PATH];
+    let (filled_path, path_len) = gos_runtime::find_graph_path::<MAX_PATH>(from, to);
+    for i in 0..MAX_PATH {
+        path[i] = filled_path[i];
+    }
+
+    // Header banner
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH PATH ");
+    set_color(sink, 11, 0);
+    let mut from_buf = LineBuf::<20>::new();
+    from_buf.push_vector(from);
+    print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
+    print_str(sink, " \xE2\x86\x92 "); // → (UTF-8)
+    let mut to_buf = LineBuf::<20>::new();
+    to_buf.push_vector(to);
+    print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+
+    if path_len == 0 {
+        set_color(sink, 12, 0);
+        print_str(sink, "  no path found (nodes unreachable or not registered)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Hop list
+    print_str(sink, "\n");
+    for i in 0..path_len {
+        let vec = path[i];
+        // hop number
+        print_str(sink, "  hop ");
+        if i + 1 < 10 {
+            print_str(sink, " ");
+        }
+        print_num_inline(sink, i + 1);
+        print_str(sink, "   ");
+
+        // vector address
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vstr);
+        // pad to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad {
+            print_str(sink, " ");
+        }
+        print_str(sink, "  ");
+
+        // node key + plugin name
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            // colour: first hop and last hop get accent colour
+            if i == 0 || i + 1 == path_len {
+                set_color(sink, 10, 0); // green = endpoints
+            } else {
+                set_color(sink, 14, 0); // yellow = intermediate
+            }
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+            set_color(sink, 7, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+    }
+
+    // Footer
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, path_len);
+    print_str(sink, " hop");
+    if path_len != 1 { print_str(sink, "s"); }
+    set_color(sink, 7, 0);
+    print_str(sink, "  |  from: ");
+    let mut fb2 = LineBuf::<20>::new();
+    fb2.push_vector(from);
+    print_str(sink, core::str::from_utf8(fb2.as_slice()).unwrap_or("?"));
+    print_str(sink, "  |  to: ");
+    let mut tb2 = LineBuf::<20>::new();
+    tb2.push_vector(to);
+    print_str(sink, core::str::from_utf8(tb2.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+}
+
+/// V2.32: `graph cycles` / `cycles` — directed cycle detection in the live graph.
+///
+/// Analogous to `tsort` detecting circular dependencies, or `cargo`'s
+/// dependency-cycle error: scans every directed edge via iterative 3-color DFS and
+/// reports the first back-edge-closed cycle found.  If the graph is acyclic (a DAG)
+/// the command confirms this — useful for verifying that plugin dependency graphs,
+/// signal routing graphs, and causal chains remain deadlock-free.
+///
+/// Output shows each node on the cycle path from the entry node back to itself, so
+/// operators can see which plugins/nodes form the ring.
+pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
+    const MAX_CYCLE: usize = 32;
+    let (cycle, cycle_len) = gos_runtime::find_graph_cycle::<MAX_CYCLE>();
+
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH CYCLES ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if cycle_len == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  no cycles detected");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (directed acyclic graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 12, 0);
+    print_str(sink, "  CYCLE DETECTED  ");
+    set_color(sink, 8, 0);
+    print_num_inline(sink, cycle_len);
+    print_str(sink, " nodes\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    for i in 0..cycle_len {
+        let vec = cycle[i];
+        let is_closing = i + 1 == cycle_len;
+
+        // Indent + hop label
+        print_str(sink, "  ");
+        if is_closing {
+            set_color(sink, 12, 0);
+            print_str(sink, "\xE2\x86\xA9 "); // ↩ (back to cycle start)
+        } else {
+            set_color(sink, 14, 0);
+            print_str(sink, "  ");
+        }
+
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        set_color(sink, if is_closing { 12 } else { 11 }, 0);
+        print_str(sink, vstr);
+
+        // Pad vector to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_str(sink, "  ");
+
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            set_color(sink, if is_closing { 12 } else { 14 }, 0);
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+        }
+
+        if !is_closing && i + 2 < cycle_len {
+            // Arrow pointing to next
+            set_color(sink, 8, 0);
+            print_str(sink, "  \xE2\x86\x93"); // ↓
+        }
+
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    print_str(sink, "\n");
+    set_color(sink, 12, 0);
+    print_num_inline(sink, cycle_len - 1);
+    print_str(sink, "-node cycle");
+    set_color(sink, 8, 0);
+    print_str(sink, "  |  hint: graph path <from> <to> to trace a specific route\n");
+    set_color(sink, 7, 0);
+}
+
+/// V2.33: `graph toposort` — topological ordering of the live node graph.
+///
+/// Uses Kahn's BFS algorithm (in-degree queue, O(V+E)) to produce a dependency
+/// ordering where every source (in-degree 0) precedes its successors.  Analogous
+/// to `tsort(1)` on POSIX, `cmake --build` dependency ordering, or `cargo build`'s
+/// crate graph resolution — exposes the boot/init ordering of the GOS graph at a glance.
+///
+/// If the graph contains cycles the command shows the partial sort and warns that
+/// cycle detection via `graph cycles` should be run first.
+pub fn dispatch_graph_toposort(sink: &ConsoleSink) {
+    const MAX_TOPO: usize = 128;
+    let (order, order_len, is_dag) = gos_runtime::graph_toposort::<MAX_TOPO>();
+    let total = gos_runtime::node_count();
+
+    // Header
+    set_color(sink, 0, 11); // black on cyan
+    print_str(sink, " GRAPH TOPOSORT ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_dag {
+        set_color(sink, 12, 0);
+        print_str(sink, "  WARNING: graph contains cycles — toposort is incomplete\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  run 'graph cycles' to identify the cyclic component\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    // Ordered node list
+    print_str(sink, "\n");
+    for i in 0..order_len {
+        let vec = order[i];
+
+        // Rank number (1-based)
+        print_str(sink, "  ");
+        if i + 1 < 10  { print_str(sink, "  "); }
+        else if i + 1 < 100 { print_str(sink, " "); }
+        print_num_inline(sink, i + 1);
+        print_str(sink, "   ");
+
+        // Vector address
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        set_color(sink, 11, 0);
+        print_str(sink, vstr);
+        // Pad vector to 12 chars
+        let pad = 12usize.saturating_sub(vstr.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_str(sink, "  ");
+        set_color(sink, 7, 0);
+
+        // Node key + plugin
+        if let Some(summary) = gos_runtime::node_summary(vec) {
+            set_color(sink, 10, 0);
+            print_str(sink, summary.local_node_key);
+            set_color(sink, 8, 0);
+            print_str(sink, "  (");
+            print_str(sink, summary.plugin_name);
+            print_str(sink, ")");
+            set_color(sink, 7, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unregistered)");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+    }
+
+    // Footer
+    print_str(sink, "\n");
+    if is_dag {
+        set_color(sink, 10, 0);
+        print_num_inline(sink, order_len);
+        print_str(sink, " nodes  ");
+        set_color(sink, 8, 0);
+        print_str(sink, "(complete DAG — dependency order is unique up to ties)\n");
+    } else {
+        set_color(sink, 14, 0);
+        print_num_inline(sink, order_len);
+        print_str(sink, "/");
+        print_num_inline(sink, total);
+        print_str(sink, " nodes sorted  ");
+        set_color(sink, 12, 0);
+        print_num_inline(sink, total - order_len);
+        print_str(sink, " in cyclic component (unsortable)\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// V2.34: `graph scc` — strongly connected components via Kosaraju's algorithm.
+///
+/// Analogous to `scc(1)` (POSIX graph utilities), `sccmap` (Graphviz), or
+/// the condensation step in `cargo build`'s dependency resolver.
+///
+/// An SCC with > 1 node contains a directed cycle; an SCC with exactly 1 node
+/// is either isolated or connected only via forward edges (DAG edges).
+/// When scc_count == node_count the graph is a DAG — no directed cycles.
+pub fn dispatch_graph_scc(sink: &ConsoleSink) {
+    const MAX_SCC: usize = 128;
+    let (nodes, labels, total, scc_count) = gos_runtime::graph_scc::<MAX_SCC>();
+
+    // Header
+    set_color(sink, 0, 11);
+    print_str(sink, " GRAPH SCC ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Summary line
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, scc_count);
+    set_color(sink, 7, 0);
+    print_str(sink, " components  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, total);
+    set_color(sink, 7, 0);
+    print_str(sink, " nodes");
+    if scc_count == total {
+        set_color(sink, 10, 0);
+        print_str(sink, "   (graph is a DAG — no directed cycles)\n");
+        set_color(sink, 7, 0);
+    } else {
+        print_str(sink, "\n");
+    }
+    print_str(sink, "\n");
+
+    // Per-SCC display: walk through sorted nodes, detect label boundaries
+    let mut pos = 0usize;
+    while pos < total {
+        let cur_label = labels[pos];
+
+        // Count members of this SCC
+        let mut end = pos;
+        while end < total && labels[end] == cur_label {
+            end += 1;
+        }
+        let size = end - pos;
+
+        // SCC header
+        set_color(sink, 0, 11);
+        print_str(sink, " SCC #");
+        print_num_inline(sink, cur_label as usize);
+        print_str(sink, " ");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        set_color(sink, 11, 0);
+        print_num_inline(sink, size);
+        set_color(sink, 7, 0);
+        if size == 1 {
+            print_str(sink, " node");
+        } else {
+            print_str(sink, " nodes");
+            set_color(sink, 12, 0);
+            print_str(sink, "  \u{25C6} cycle");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+
+        // Node list (up to 8 per row for readability)
+        let mut col = 0usize;
+        for i in pos..end {
+            if col == 0 { print_str(sink, "   "); }
+            let mut vbuf = LineBuf::<20>::new();
+            vbuf.push_vector(nodes[i]);
+            let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+            set_color(sink, 11, 0);
+            print_str(sink, vstr);
+            set_color(sink, 7, 0);
+            col += 1;
+            if col == 4 || i + 1 == end {
+                print_str(sink, "\n");
+                col = 0;
+            } else {
+                print_str(sink, "  ");
+            }
+        }
+
+        // Node keys (one per line, indented)
+        for i in pos..end {
+            if let Some(summary) = gos_runtime::node_summary(nodes[i]) {
+                print_str(sink, "   ");
+                set_color(sink, 10, 0);
+                print_str(sink, summary.local_node_key);
+                set_color(sink, 8, 0);
+                print_str(sink, "  (");
+                print_str(sink, summary.plugin_name);
+                print_str(sink, ")");
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+        }
+        print_str(sink, "\n");
+
+        pos = end;
+    }
+
+    // Footer hint
+    set_color(sink, 8, 0);
+    if scc_count < total {
+        print_str(sink, "  hint: graph cycles to trace a specific cycle path\n");
+    } else {
+        print_str(sink, "  hint: graph toposort to compute the dependency order\n");
+    }
+    set_color(sink, 7, 0);
+}
+
+/// V2.35: `graph condensation` — condensation DAG of the live node graph.
+///
+/// Collapses each Strongly Connected Component into a single super-node
+/// (labelled C#N) and shows the inter-SCC edges as the condensation DAG.
+/// The condensation is always a DAG regardless of cycles in the source graph.
+/// Analogous to `sccmap -F` (Graphviz) or `cargo tree` inter-package deps.
+pub fn dispatch_graph_condensation(sink: &ConsoleSink) {
+    const MAX_C: usize = 128;
+    let (nodes, labels, total, scc_count, adj, cond_edges) =
+        gos_runtime::graph_condensation::<MAX_C>();
+
+    set_color(sink, 0, 11);
+    print_str(sink, " GRAPH CONDENSATION ");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  no nodes registered\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    print_str(sink, "\n");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, scc_count);
+    set_color(sink, 7, 0);
+    print_str(sink, " components  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, cond_edges);
+    set_color(sink, 7, 0);
+    print_str(sink, " condensation edges  /  ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, total);
+    set_color(sink, 7, 0);
+    print_str(sink, " nodes\n\n");
+
+    // Per-SCC block: members + outgoing condensation edges.
+    let mut pos = 0usize;
+    while pos < total {
+        let cur_label = labels[pos];
+        let mut end = pos;
+        while end < total && labels[end] == cur_label { end += 1; }
+        let size = end - pos;
+
+        set_color(sink, 0, 11);
+        print_str(sink, " C#");
+        print_num_inline(sink, cur_label as usize);
+        print_str(sink, " ");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        set_color(sink, 11, 0);
+        print_num_inline(sink, size);
+        set_color(sink, 7, 0);
+        if size == 1 {
+            print_str(sink, " node\n");
+        } else {
+            print_str(sink, " nodes");
+            set_color(sink, 12, 0);
+            print_str(sink, "  \u{25C6} cycle");
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+
+        // Member vectors.
+        let mut col = 0usize;
+        for i in pos..end {
+            if col == 0 { print_str(sink, "   "); }
+            let mut vbuf = LineBuf::<20>::new();
+            vbuf.push_vector(nodes[i]);
+            let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+            set_color(sink, 11, 0);
+            print_str(sink, vstr);
+            set_color(sink, 7, 0);
+            col += 1;
+            if col == 4 || i + 1 == end {
+                print_str(sink, "\n");
+                col = 0;
+            } else {
+                print_str(sink, "  ");
+            }
+        }
+
+        // Node keys.
+        for i in pos..end {
+            if let Some(summary) = gos_runtime::node_summary(nodes[i]) {
+                print_str(sink, "   ");
+                set_color(sink, 10, 0);
+                print_str(sink, summary.local_node_key);
+                set_color(sink, 8, 0);
+                print_str(sink, "  (");
+                print_str(sink, summary.plugin_name);
+                print_str(sink, ")");
+                set_color(sink, 7, 0);
+                print_str(sink, "\n");
+            }
+        }
+
+        // Condensation edges from this super-node.
+        let ci = cur_label as usize;
+        if ci < 128 && adj[ci] != 0 {
+            print_str(sink, "   ");
+            set_color(sink, 14, 0);
+            print_str(sink, "\u{2192} ");
+            set_color(sink, 7, 0);
+            let mut first = true;
+            for j in 0..scc_count {
+                if (adj[ci] >> j) & 1 == 1 {
+                    if !first { print_str(sink, ", "); }
+                    set_color(sink, 11, 0);
+                    print_str(sink, "C#");
+                    print_num_inline(sink, j);
+                    set_color(sink, 7, 0);
+                    first = false;
+                }
+            }
+            print_str(sink, "\n");
+        }
+
+        print_str(sink, "\n");
+        pos = end;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  condensation is always a DAG  |  use 'graph scc' to see cycle details\n");
+    set_color(sink, 7, 0);
+}
+
+/// V2.36: `graph reachable <from>` — all nodes transitively reachable from
+/// a given node vector via directed edges.
+///
+/// Returns the reachable set sorted by vector address (ascending), excluding
+/// the source node itself.  An empty set means either the node is isolated
+/// or not registered.
+///
+/// OS analogy: `systemctl list-dependencies --all <svc>`,
+/// `cargo tree -p <crate>`, `ldd --recursive <bin>`.
+pub fn dispatch_graph_reachable(sink: &ConsoleSink, from: VectorAddress) {
+    const MAX_REACH: usize = 128;
+    let (nodes, reach_len) = gos_runtime::graph_reachable::<MAX_REACH>(from);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph reachable from ");
+    let mut from_line = LineBuf::<20>::new();
+    from_line.push_vector(from);
+    print_str(sink, core::str::from_utf8(from_line.as_slice()).unwrap_or("?"));
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if reach_len == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no reachable nodes — isolated or not registered)\n");
+        set_color(sink, 7, 0);
+    } else {
+        for i in 0..reach_len {
+            let vec = nodes[i];
+            print_str(sink, "  ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vec);
+            print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+            print_str(sink, "\n");
+        }
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        print_num_inline(sink, reach_len);
+        set_color(sink, 8, 0);
+        print_str(sink, " reachable  |  use 'graph path <from> <to>' to trace a specific route\n");
+        set_color(sink, 7, 0);
+    }
+}
+
+/// V2.37: `graph bipartite` — 2-coloring check on the live directed graph.
+///
+/// A graph is bipartite iff it contains no odd-length cycle, i.e. every edge
+/// connects a node from set A to a node from set B (or vice versa).  The check
+/// is performed on the *undirected* projection of the directed live graph.
+///
+/// Output when bipartite:
+///   result:   bipartite
+///   set A:    <vec> <vec> ...
+///   set B:    <vec> <vec> ...
+///
+/// Output when not bipartite:
+///   result:   NOT bipartite  (odd-length cycle detected)
+///
+/// OS analogy: `bipartite_check` on a scheduling graph to verify that
+/// producers and consumers can be cleanly split into two non-conflicting tiers.
+pub fn dispatch_graph_bipartite(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, colors, total, is_bipartite) = gos_runtime::graph_bipartite::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph bipartite\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered — vacuously bipartite)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if is_bipartite {
+        set_color(sink, 10, 0);
+        print_str(sink, "  result:   bipartite\n");
+        set_color(sink, 7, 0);
+
+        // Print set A (color 0).
+        let mut count_a = 0usize;
+        for i in 0..total {
+            if colors[i] == 0 { count_a += 1; }
+        }
+        set_color(sink, 11, 0);
+        print_str(sink, "  set A (");
+        print_num_inline(sink, count_a);
+        print_str(sink, "):  ");
+        set_color(sink, 7, 0);
+        for i in 0..total {
+            if colors[i] == 0 {
+                let mut line = LineBuf::<20>::new();
+                line.push_vector(vecs[i]);
+                print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+                print_str(sink, "  ");
+            }
+        }
+        print_str(sink, "\n");
+
+        // Print set B (color 1).
+        let mut count_b = 0usize;
+        for i in 0..total {
+            if colors[i] == 1 { count_b += 1; }
+        }
+        set_color(sink, 11, 0);
+        print_str(sink, "  set B (");
+        print_num_inline(sink, count_b);
+        print_str(sink, "):  ");
+        set_color(sink, 7, 0);
+        for i in 0..total {
+            if colors[i] == 1 {
+                let mut line = LineBuf::<20>::new();
+                line.push_vector(vecs[i]);
+                print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("?"));
+                print_str(sink, "  ");
+            }
+        }
+        print_str(sink, "\n");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "  result:   NOT bipartite  (odd-length cycle detected)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  hint: use 'graph cycles' to find the cycle, 'graph scc' for components\n");
+        set_color(sink, 7, 0);
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s) checked\n");
+    set_color(sink, 7, 0);
+}
+
+/// V2.38: `graph degree` — in/out degree census + hub identification.
+///
+/// Prints a table sorted by descending total degree.  Nodes are annotated:
+///   hub      — high connectivity (total ≥ 3 and ≥ half of max total degree)
+///   source   — no incoming edges (out > 0, in == 0)
+///   sink     — no outgoing edges (out == 0, in > 0)
+///   isolated — no edges at all (out == 0, in == 0)
+///
+/// OS analogy: `ip -s link show` / `netstat -s` per-interface TX/RX statistics.
+pub fn dispatch_graph_degree(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, out_degs, in_degs, total) = gos_runtime::graph_degree::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph degree\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 7, 0);
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Header row.
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector           out    in   total  role\n");
+    set_color(sink, 7, 0);
+
+    // Hub threshold: total_degree >= 3 AND >= ceil(max_total / 2).
+    let mut max_total = 0u32;
+    for i in 0..total {
+        let t = (out_degs[i] as u32) + (in_degs[i] as u32);
+        if t > max_total { max_total = t; }
+    }
+    let hub_thresh: u32 = if max_total >= 3 { (max_total + 1) / 2 } else { u32::MAX };
+    let mut hub_count = 0usize;
+
+    for i in 0..total {
+        let t     = (out_degs[i] as u32) + (in_degs[i] as u32);
+        let is_hub      = t >= 3 && t >= hub_thresh;
+        let is_isolated = out_degs[i] == 0 && in_degs[i] == 0;
+        let is_sink     = out_degs[i] == 0 && in_degs[i] > 0;
+        let is_source   = in_degs[i] == 0 && out_degs[i] > 0;
+        if is_hub { hub_count += 1; }
+
+        if is_hub {
+            set_color(sink, 14, 0); // bright yellow
+        } else if is_isolated {
+            set_color(sink, 8, 0);  // dark grey
+        } else {
+            set_color(sink, 7, 0);  // white
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        // Pad vector string to 14 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..14 { print_str(sink, " "); }
+
+        // out-degree (right-aligned, 4 wide, green)
+        set_color(sink, 10, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, out_degs[i] as usize);
+
+        // in-degree (right-aligned, 4 wide, red)
+        set_color(sink, 12, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, in_degs[i] as usize);
+
+        // total (right-aligned, 4 wide, white)
+        set_color(sink, 7, 0);
+        print_str(sink, "  ");
+        print_num_right4(sink, t as usize);
+        print_str(sink, "  ");
+
+        // role label
+        if is_hub {
+            set_color(sink, 14, 0);
+            print_str(sink, "hub");
+        } else if is_isolated {
+            set_color(sink, 8, 0);
+            print_str(sink, "isolated");
+        } else if is_sink {
+            set_color(sink, 11, 0);
+            print_str(sink, "sink");
+        } else if is_source {
+            set_color(sink, 10, 0);
+            print_str(sink, "source");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-total-degree: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_total as usize);
+    if hub_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  hubs: ");
+        print_num_inline(sink, hub_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
+/// V2.39: `graph centrality` — betweenness centrality per node (Brandes, directed).
+///
+/// Identifies nodes that sit on the most shortest paths between other nodes.
+/// Betweenness centrality BC[v] = Σ_{s≠v≠t} σ(s,t,v)/σ(s,t) — the fraction
+/// of all-pairs shortest paths that pass through v, summed over all pairs.
+///
+/// High BC → critical routing bottleneck (removing it disrupts most paths).
+/// BC = 0  → node is never an intermediary (leaf, isolated, or parallel routes).
+///
+/// Output: table sorted descending by BC score, annotated with role:
+///   bottleneck — BC > 0, most critical intermediary in the graph
+///   relay      — BC > 0, carries some cross-node traffic
+///   endpoint   — BC = 0 (leaf / source / sink with no intermediary role)
+///
+/// OS analogy: `ip route show` + `traceroute` hop-frequency analysis — which
+/// kernel service node lies on the most inter-service communication paths?
+pub fn dispatch_graph_centrality(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, bc, total) = gos_runtime::graph_centrality::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph centrality\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              bc    role\n");
+    set_color(sink, 7, 0);
+
+    // Find max BC for relative annotation.
+    let mut max_bc = 0u32;
+    for i in 0..total {
+        if bc[i] > max_bc { max_bc = bc[i]; }
+    }
+
+    let mut bottleneck_count = 0usize;
+
+    for i in 0..total {
+        let score   = bc[i];
+        let is_top  = max_bc > 0 && score == max_bc;
+        let is_relay = score > 0 && !is_top;
+
+        if is_top {
+            set_color(sink, 14, 0); // bright yellow — top bottleneck
+        } else if is_relay {
+            set_color(sink, 11, 0); // cyan — relay
+        } else {
+            set_color(sink, 8, 0);  // dark grey — endpoint
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // BC score (right-aligned, 6 wide).
+        set_color(sink, if is_top { 14 } else if is_relay { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score as usize);
+        print_str(sink, "  ");
+
+        // Role label.
+        if is_top {
+            set_color(sink, 14, 0);
+            print_str(sink, "bottleneck");
+            bottleneck_count += 1;
+        } else if is_relay {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "endpoint");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-bc: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_bc as usize);
+    if bottleneck_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  bottlenecks: ");
+        print_num_inline(sink, bottleneck_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
+/// V2.28: `uname` — kernel version and capacity limits.
+/// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
+/// Shows GOS version, ABI, capacity limits, and queue/ring depths.
+pub fn dispatch_uname(sink: &ConsoleSink) {
+    let cap = gos_runtime::runtime_capacity();
+    let snapshot = gos_runtime::snapshot();
+    set_color(sink, 11, 0);
+    print_str(sink, " kernel info\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  GOS v2.28 (graph-kernel)  abi: ");
+    print_num_inline(sink, cap.abi_major as usize);
+    print_str(sink, ".");
+    print_num_inline(sink, cap.abi_minor as usize);
+    print_str(sink, ".");
+    print_num_inline(sink, cap.abi_patch as usize);
+    print_str(sink, "  protocol: ");
+    print_num_inline(sink, cap.protocol_version as usize);
+    print_str(sink, "\n  capacity");
+    set_color(sink, 11, 0);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "    nodes:          ");
+    print_num_inline(sink, snapshot.node_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_nodes);
+    print_str(sink, "\n    edges:          ");
+    print_num_inline(sink, snapshot.edge_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_edges);
+    print_str(sink, "\n    plugins:        ");
+    print_num_inline(sink, snapshot.plugin_count);
+    print_str(sink, " / ");
+    print_num_inline(sink, cap.max_plugins);
+    print_str(sink, "\n    ready-queue:    ");
+    print_num_inline(sink, cap.max_ready_queue);
+    print_str(sink, "  signal-queue: ");
+    print_num_inline(sink, cap.max_signal_queue);
+    print_str(sink, "  fault-queue: ");
+    print_num_inline(sink, cap.max_fault_queue);
+    print_str(sink, "\n    diff-ring:      ");
+    print_num_inline(sink, cap.max_diff_ring);
+    print_str(sink, "  subscribe-pairs: ");
+    print_num_inline(sink, cap.max_subscribe_pairs);
+    print_str(sink, "\n    node-trace:     ");
+    print_num_inline(sink, cap.max_node_trace);
+    print_str(sink, " (ring depth per node)");
+    print_str(sink, "\n    node-log:       ");
+    print_num_inline(sink, cap.max_node_log);
+    print_str(sink, " (ring depth per node)");
+    print_str(sink, "\n  arch: x86_64  no_std  tick: ");
+    print_num_inline(sink, snapshot.tick as usize);
+    print_str(sink, "\n");
+}
+
+/// Right-align a number in 4 columns (spaces then digits).
+fn print_num_right4(sink: &ConsoleSink, n: usize) {
+    if n >= 1000 {
+        print_num_inline(sink, n);
+    } else if n >= 100 {
+        print_str(sink, " ");
+        print_num_inline(sink, n);
+    } else if n >= 10 {
+        print_str(sink, "  ");
+        print_num_inline(sink, n);
+    } else {
+        print_str(sink, "   ");
+        print_num_inline(sink, n);
+    }
+}
+
+/// Right-align a number in 6 columns (spaces then digits).
+fn print_num_right6(sink: &ConsoleSink, n: usize) {
+    if n >= 100_000 {
+        print_num_inline(sink, n);
+    } else if n >= 10_000 {
+        print_str(sink, " ");
+        print_num_inline(sink, n);
+    } else if n >= 1_000 {
+        print_str(sink, "  ");
+        print_num_inline(sink, n);
+    } else if n >= 100 {
+        print_str(sink, "   ");
+        print_num_inline(sink, n);
+    } else if n >= 10 {
+        print_str(sink, "    ");
+        print_num_inline(sink, n);
+    } else {
+        print_str(sink, "     ");
+        print_num_inline(sink, n);
+    }
+}
+
+fn node_lifecycle_label(lc: gos_protocol::NodeLifecycle) -> &'static str {
+    match lc {
+        gos_protocol::NodeLifecycle::Discovered  => "discovered",
+        gos_protocol::NodeLifecycle::Loaded      => "loaded",
+        gos_protocol::NodeLifecycle::Registered  => "registered",
+        gos_protocol::NodeLifecycle::Allocated   => "allocated",
+        gos_protocol::NodeLifecycle::Ready       => "ready",
+        gos_protocol::NodeLifecycle::Running     => "running",
+        gos_protocol::NodeLifecycle::Waiting     => "waiting",
+        gos_protocol::NodeLifecycle::Suspended   => "suspended",
+        gos_protocol::NodeLifecycle::Faulted     => "faulted",
+        gos_protocol::NodeLifecycle::Terminated  => "terminated",
+    }
+}
+
+fn module_lifecycle_label(state: gos_protocol::ModuleLifecycle) -> &'static str {
+    match state {
+        gos_protocol::ModuleLifecycle::Installed => "installed",
+        gos_protocol::ModuleLifecycle::Validated => "validated",
+        gos_protocol::ModuleLifecycle::Mapped => "mapped",
+        gos_protocol::ModuleLifecycle::Instantiated => "instantiated",
+        gos_protocol::ModuleLifecycle::Running => "running",
+        gos_protocol::ModuleLifecycle::Quiescing => "quiescing",
+        gos_protocol::ModuleLifecycle::Stopped => "stopped",
+        gos_protocol::ModuleLifecycle::Faulted => "faulted",
+    }
+}
+
+/// List all registered plugins — `lsmod`-style inventory.
+/// Shows name, version, load state, and node count per plugin.
+pub fn dispatch_plugin_list(sink: &ConsoleSink) {
+    use gos_protocol::PluginSummary;
+    const PAGE: usize = 32;
+    let mut summaries = [PluginSummary::EMPTY; PAGE];
+    let (total, filled) = gos_runtime::plugin_page::<PAGE>(0, &mut summaries);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " plugins");
+    set_color(sink, 8, 0);
+    print_str(sink, "  name                 ver   state       nodes\n");
+    set_color(sink, 7, 0);
+
+    for summary in summaries.iter().take(filled) {
+        let fg: u8 = match summary.state {
+            gos_protocol::PluginState::Loaded     => 10,
+            gos_protocol::PluginState::Faulted    => 12,
+            gos_protocol::PluginState::Discovered => 8,
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+        let name = summary.name;
+        print_str(sink, name);
+        let pad = 22usize.saturating_sub(name.len());
+        for _ in 0..pad { print_str(sink, " "); }
+        print_num_right4(sink, summary.version as usize);
+        print_str(sink, "  ");
+        let state_str = summary.state.as_str();
+        print_str(sink, state_str);
+        let state_pad = 12usize.saturating_sub(state_str.len());
+        for _ in 0..state_pad { print_str(sink, " "); }
+        print_num_right4(sink, summary.node_count);
+        print_str(sink, "\n");
+    }
+
+    if filled == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no plugins registered)\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total);
+    print_str(sink, " plugin(s)\n");
+    set_color(sink, 7, 0);
+}
+
+fn module_fault_policy_label(policy: gos_protocol::ModuleFaultPolicy) -> &'static str {
+    match policy {
+        gos_protocol::ModuleFaultPolicy::FaultKernelDegraded => "kernel-degrade",
+        gos_protocol::ModuleFaultPolicy::Restart => "restart",
+        gos_protocol::ModuleFaultPolicy::RestartAlways => "restart-always",
+        gos_protocol::ModuleFaultPolicy::Manual => "manual",
+    }
+}
+
 fn entry_policy_label(policy: gos_protocol::EntryPolicy) -> &'static str {
     match policy {
         gos_protocol::EntryPolicy::Manual => "manual",
@@ -1111,6 +3531,7 @@ fn graph_context_label(context: u8) -> &'static str {
         GRAPH_CTX_OVERVIEW => "overview",
         GRAPH_CTX_NODE => "node",
         GRAPH_CTX_EDGE => "edge",
+        GRAPH_CTX_METRICS => "metrics",
         _ => "none",
     }
 }
@@ -1279,6 +3700,7 @@ fn fill_band(sink: &ConsoleSink, row: usize, left: usize, width: usize, fg: u8, 
     draw_repeat(sink, row, left, fg, bg, b' ', width);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_box(
     sink: &ConsoleSink,
     top: usize,
@@ -1455,11 +3877,83 @@ fn draw_runtime_gap_flux(sink: &ConsoleSink, state: &ShellState) {
         };
         let col = 49 + ((idx + phase) % 2);
         draw_byte(sink, row, col, fg, WABI_INK, glyph);
-        if (idx + phase) % 4 == 0 {
+        if (idx + phase).is_multiple_of(4) {
             draw_byte(sink, row, 50, WABI_STONE, WABI_INK, b'.');
         }
     }
     draw_byte(sink, 3 + (phase % 8), 50, WABI_PAPER, WABI_INK, b'.');
+}
+
+/// Render the VECTOR DECK panel in live proc watch mode (like `htop` or `watch -n1 proc`).
+///
+/// Shows the top 6 nodes sorted by vector address with cumulative signal count,
+/// outbound edge count, and lifecycle state.  Updated on every heartbeat tick while
+/// WATCH_PROC_MODE is set, giving a continuously-refreshing view without threads.
+fn draw_watch_proc_panel(sink: &ConsoleSink, snapshot: gos_protocol::GraphSnapshot) {
+    use gos_protocol::NodeProcSummary;
+    const WATCH_PAGE: usize = 6;
+    let mut summaries = [NodeProcSummary::EMPTY; WATCH_PAGE];
+    let (total, filled) = gos_runtime::proc_page::<WATCH_PAGE>(0, &mut summaries);
+
+    draw_box(
+        sink,
+        COMMAND_DECK_TOP,
+        COMMAND_DECK_LEFT,
+        COMMAND_DECK_WIDTH,
+        COMMAND_DECK_HEIGHT,
+        " PROC WATCH ",
+        WABI_TEA,
+        WABI_INK,
+    );
+
+    // Row 3 — status line: tick + nodes + hint
+    fill_band(sink, 3, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+    draw_text(sink, 3, 4, WABI_STONE, WABI_INK, "tick ");
+    draw_usize(sink, 3, 9, WABI_MOON, WABI_INK, snapshot.tick as usize);
+    draw_text(sink, 3, 20, WABI_STONE, WABI_INK, "nodes ");
+    draw_usize(sink, 3, 26, WABI_PAPER, WABI_INK, total);
+    draw_text(sink, 3, 33, WABI_STONE, WABI_INK, "any key stops");
+
+    // Row 4 — column header
+    fill_band(sink, 4, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+    draw_text(sink, 4, 4, WABI_STONE, WABI_INK, "vector           sig  out  lifecycle");
+
+    // Rows 5-10 — node rows (up to 6)
+    for i in 0..WATCH_PAGE {
+        let row = 5 + i;
+        fill_band(sink, row, COMMAND_DECK_LEFT + 1, COMMAND_DECK_WIDTH - 2, WABI_INK, WABI_INK);
+        if i < filled {
+            let summary = &summaries[i];
+            let fg: u8 = match summary.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => WABI_SAGE,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => WABI_TEA,
+                _                                      => WABI_STONE,
+            };
+            set_color(sink, fg, WABI_INK);
+            goto(sink, row, 4);
+            let mut vec_buf = LineBuf::<16>::new();
+            vec_buf.push_vector(summary.vector);
+            let vec_str = core::str::from_utf8(vec_buf.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            let pad = 16usize.saturating_sub(vec_str.len());
+            for _ in 0..pad { print_byte(sink, b' '); }
+            set_color(sink, WABI_MOON, WABI_INK);
+            print_num_right4(sink, summary.signal_count as usize);
+            set_color(sink, WABI_STONE, WABI_INK);
+            print_str(sink, " ");
+            print_num_right4(sink, summary.edge_out_count as usize);
+            set_color(sink, fg, WABI_INK);
+            print_str(sink, "  ");
+            print_str(sink, node_lifecycle_label(summary.lifecycle));
+        } else if i == filled && total > WATCH_PAGE {
+            set_color(sink, WABI_STONE, WABI_INK);
+            goto(sink, row, 4);
+            print_str(sink, "...");
+            print_num_inline(sink, total - WATCH_PAGE);
+            print_str(sink, " more");
+        }
+    }
 }
 
 fn draw_command_deck_panel(
@@ -1467,6 +3961,10 @@ fn draw_command_deck_panel(
     state: &ShellState,
     snapshot: gos_protocol::GraphSnapshot,
 ) {
+    if WATCH_PROC_MODE.load(Ordering::SeqCst) != 0 {
+        draw_watch_proc_panel(sink, snapshot);
+        return;
+    }
     let phase = (state.sigil_frame as usize) / 2;
     draw_box(
         sink,
@@ -1540,6 +4038,7 @@ fn draw_command_deck_panel(
     draw_badge(sink, 7, 24, WABI_MOON, WABI_TEA, "edge");
     draw_badge(sink, 7, 31, WABI_MOON, WABI_MOSS, "back");
     draw_badge(sink, 7, 38, WABI_MOON, WABI_STONE, "where");
+    draw_badge(sink, 7, 46, WABI_MOON, WABI_STONE, "metrics");
 
     draw_text(sink, 8, 4, WABI_STONE, WABI_INK, "query");
     draw_text(sink, 8, 11, WABI_PAPER, WABI_INK, "cypher MATCH ...");
@@ -1924,13 +4423,12 @@ fn draw_core_glyph(sink: &ConsoleSink, stage: usize, pulse: usize) {
     let wobble = frame % LIVE_SIGIL_FRAMES;
     let top = (4i32 + BOOT_WOBBLE_Y[wobble]).max(3) as usize;
     let left = (29i32 + BOOT_WOBBLE_X[wobble]).max(26) as usize;
-    let width = 23usize;
     let height = 11usize;
 
     for y in 0..height {
         let mut row = [b' '; 23];
         let dy = y as i32 - 5;
-        for x in 0..width {
+        for (x, cell) in row.iter_mut().enumerate() {
             let dx = x as i32 - 11;
             let ax = dx * 2;
             let ay = dy * 3;
@@ -1956,11 +4454,11 @@ fn draw_core_glyph(sink: &ConsoleSink, stage: usize, pulse: usize) {
                 byte = CP437_LIGHT;
             }
 
-            if byte != b' ' && ((x + frame + y) % 9 == 0) {
+            if byte != b' ' && (x + frame + y).is_multiple_of(9) {
                 byte = CP437_LIGHT;
             }
 
-            row[x] = byte;
+            *cell = byte;
         }
 
         let fg = if y == 5 || y == 6 {
@@ -1991,6 +4489,7 @@ fn draw_sigil_panel(sink: &ConsoleSink, stage: usize, pulse: usize) {
     draw_core_glyph(sink, stage, pulse);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_metric_line(
     sink: &ConsoleSink,
     row: usize,
@@ -2172,6 +4671,7 @@ fn render_graph_notice(sink: &ConsoleSink, state: &mut ShellState, title: &str, 
     render_graph_footer(sink, state, "graph notice");
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let mut nodes = [GraphNodeSummary::EMPTY; GRAPH_OVERVIEW_ITEMS];
     let mut edges = [GraphEdgeSummary::EMPTY; GRAPH_OVERVIEW_ITEMS];
@@ -2232,7 +4732,7 @@ fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_o
     footer.push_str("overview page ");
     footer.push_dec((offset / GRAPH_OVERVIEW_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_OVERVIEW_ITEMS - 1) / GRAPH_OVERVIEW_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_OVERVIEW_ITEMS).max(1) as u64);
     footer.push_str("  nodes ");
     footer.push_dec((offset + node_returned).min(node_total) as u64);
     footer.push_byte(b'/');
@@ -2248,6 +4748,7 @@ fn render_graph_overview(sink: &ConsoleSink, state: &mut ShellState, requested_o
     );
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_node_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let mut page = [GraphNodeSummary::EMPTY; GRAPH_PAGE_ITEMS];
     let (total, _) = gos_runtime::node_page(0, &mut page);
@@ -2289,7 +4790,7 @@ fn render_node_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset
     footer.push_str("  page ");
     footer.push_dec((offset / GRAPH_PAGE_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_PAGE_ITEMS - 1) / GRAPH_PAGE_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_PAGE_ITEMS).max(1) as u64);
     render_graph_footer(
         sink,
         state,
@@ -2361,6 +4862,7 @@ fn selected_edge_direction(state: &ShellState, edge: &GraphEdgeSummary) -> Graph
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 fn render_edge_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset: usize) {
     let Some(node_vec) = state.selected_node else {
         render_graph_notice(sink, state, "EDGE LIST", "no node selected", "use node <vector> first", 12);
@@ -2432,7 +4934,7 @@ fn render_edge_list(sink: &ConsoleSink, state: &mut ShellState, requested_offset
     footer.push_str("  page ");
     footer.push_dec((offset / GRAPH_PAGE_ITEMS + 1) as u64);
     footer.push_byte(b'/');
-    footer.push_dec(((total + GRAPH_PAGE_ITEMS - 1) / GRAPH_PAGE_ITEMS).max(1) as u64);
+    footer.push_dec(total.div_ceil(GRAPH_PAGE_ITEMS).max(1) as u64);
     render_graph_footer(
         sink,
         state,
@@ -2585,6 +5087,72 @@ fn render_nodes_for_selected_edge(sink: &ConsoleSink, state: &mut ShellState) {
     render_graph_footer(sink, state, "show toggles back to edge view  node <vec> selects");
 }
 
+fn render_metrics(sink: &ConsoleSink, state: &mut ShellState) {
+    clear_command_area(sink);
+    state.graph_mode = GRAPH_MODE_INFO;
+    state.graph_context = GRAPH_CTX_METRICS;
+    draw_text(sink, GRAPH_VIEW_TITLE_ROW, 4, 11, 0, "V2.3 RUNTIME METRICS  (refresh: metrics)");
+
+    let g_epoch = gos_runtime::graph_epoch();
+    let r_epoch = gos_supervisor::render_epoch();
+    let mut line = LineBuf::<72>::new();
+    line.push_str("graph_epoch: ");
+    line.push_dec(g_epoch);
+    line.push_str("  render_epoch: ");
+    line.push_dec(r_epoch);
+    let lag = g_epoch.saturating_sub(r_epoch);
+    if lag > 0 {
+        line.push_str("  lag: ");
+        line.push_dec(lag);
+    }
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("idle_cycles: ");
+    line.push_dec(gos_supervisor::idle_cycle_count());
+    line.push_str("  (quiescent service cycles)");
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 1, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("causal_depth_max: ");
+    line.push_dec(gos_supervisor::causal_depth_max());
+    line.push_str("  cap=2048");
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 2, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("subscribe_pairs: ");
+    line.push_dec(gos_runtime::subscribe_pair_count() as u64);
+    line.push_byte(b'/');
+    line.push_dec(gos_runtime::MAX_SUBSCRIBE_PAIRS as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 3, 4, 15, 0, &line);
+
+    let snap = gos_runtime::snapshot();
+    line = LineBuf::new();
+    line.push_str("tick: ");
+    line.push_dec(snap.tick);
+    line.push_str("  plugins: ");
+    line.push_dec(snap.plugin_count as u64);
+    line.push_str("  nodes: ");
+    line.push_dec(snap.node_count as u64);
+    line.push_str("  edges: ");
+    line.push_dec(snap.edge_count as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 4, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("domain_switches: ");
+    line.push_dec(gos_runtime::domain_switch_count());
+    line.push_str("  preemptions: ");
+    line.push_dec(gos_runtime::preempt_count());
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 5, 4, 15, 0, &line);
+
+    line = LineBuf::new();
+    line.push_str("boot_fallback_allocs: ");
+    line.push_dec(gos_runtime::boot_fallback_alloc_count());
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 6, 4, 8, 0, &line);
+
+    render_graph_footer(sink, state, "metrics  back  where");
+}
+
 fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     clear_command_area(sink);
     state.graph_mode = GRAPH_MODE_INFO;
@@ -2656,30 +5224,40 @@ fn render_where(sink: &ConsoleSink, state: &mut ShellState) {
     // Phase B.4.1: domain PML4 root.  Non-zero confirms map_module ->
     // build_domain -> k_vmm::create_isolated_address_space ran for this
     // instance's owning module.
-    if let Some(vector) = state.selected_node {
-        if let Some(instance_id) = gos_runtime::instance_id_for_vec(vector) {
-            if instance_id.0 != 0 {
-                if let Some(root) = gos_supervisor::instance_domain_root(instance_id) {
-                    let mut domain_line = LineBuf::<72>::new();
-                    domain_line.push_str("domain root_phys=0x");
-                    domain_line.push_hex(root);
-                    if root == 0 {
-                        domain_line.push_str("  (UNMAPPED)");
-                    }
-                    draw_linebuf(
-                        sink,
-                        GRAPH_VIEW_FIRST_ITEM_ROW + 5,
-                        4,
-                        15,
-                        0,
-                        &domain_line,
-                    );
-                }
-            }
+    if let Some(vector) = state.selected_node
+        && let Some(instance_id) = gos_runtime::instance_id_for_vec(vector)
+        && instance_id.0 != 0
+        && let Some(root) = gos_supervisor::instance_domain_root(instance_id)
+    {
+        let mut domain_line = LineBuf::<72>::new();
+        domain_line.push_str("domain root_phys=0x");
+        domain_line.push_hex(root);
+        if root == 0 {
+            domain_line.push_str("  (UNMAPPED)");
         }
+        draw_linebuf(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW + 5,
+            4,
+            15,
+            0,
+            &domain_line,
+        );
     }
 
-    render_graph_footer(sink, state, "where  select clear");
+    // V2.3 epoch/idle/causal/subscribe telemetry — row +6 (last row in command area)
+    let mut v23 = LineBuf::<72>::new();
+    v23.push_str("ep:");
+    v23.push_dec(gos_runtime::graph_epoch());
+    v23.push_str("  idle:");
+    v23.push_dec(gos_supervisor::idle_cycle_count());
+    v23.push_str("  depth:");
+    v23.push_dec(gos_supervisor::causal_depth_max());
+    v23.push_str("  subs:");
+    v23.push_dec(gos_runtime::subscribe_pair_count() as u64);
+    draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + 6, 4, 8, 0, &v23);
+
+    render_graph_footer(sink, state, "where  select clear  metrics");
 }
 
 fn restore_graph_nav_state(sink: &ConsoleSink, state: &mut ShellState, snapshot: GraphNavState) {
@@ -2715,7 +5293,13 @@ fn restore_graph_nav_state(sink: &ConsoleSink, state: &mut ShellState, snapshot:
                 render_graph_overview(sink, state, 0);
             }
         }
-        GRAPH_MODE_INFO => render_where(sink, state),
+        GRAPH_MODE_INFO => {
+            if state.graph_context == GRAPH_CTX_METRICS {
+                render_metrics(sink, state);
+            } else {
+                render_where(sink, state);
+            }
+        }
         _ => {}
     }
 }
@@ -2936,6 +5520,12 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         render_where(sink, state);
         return true;
     }
+    if cmd == "metrics" {
+        begin_graph_command(sink, state);
+        push_graph_nav_state(state);
+        render_metrics(sink, state);
+        return true;
+    }
     if cmd == "select clear" {
         clear_graph_selection(state);
         clear_command_area(sink);
@@ -3017,7 +5607,7 @@ fn starts_with_ci(text: &str, needle: &str) -> bool {
         return false;
     }
     for idx in 0..needle.len() {
-        if text[idx].to_ascii_lowercase() != needle[idx].to_ascii_lowercase() {
+        if !text[idx].eq_ignore_ascii_case(&needle[idx]) {
             return false;
         }
     }
@@ -3941,6 +6531,7 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
                 } else {
                     clipboard_target
                 },
+                last_rendered_epoch: 0,
                 console_live: 0,
                 sigil_frame: 0,
                 heartbeat_divider: 0,
@@ -3950,6 +6541,14 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
             },
         );
     }
+    // V2.15: register reactive node props so fire_subscribers encodes the active
+    // theme index in DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED signal val.
+    let _ = gos_runtime::register_node_prop_u8(THEME_WABI_NODE_ID, DISPLAY_THEME_WABI);
+    let _ = gos_runtime::register_node_prop_u8(THEME_SHOJI_NODE_ID, DISPLAY_THEME_SHOJI);
+    // Subscribe: k-vga auto-repaints when theme.current Use-edge changes.
+    let k_vga_node_id = derive_node_id(PluginId::from_ascii("K_VGA"), "vga.entry");
+    let _ = gos_runtime::register_subscribe(THEME_CURRENT_NODE_ID, k_vga_node_id);
+
     let sink = sink_from_ctx(ctx);
     let _ = apply_theme_choice(&sink, THEME_KIND_WABI);
     seed_ai_panel(unsafe { state_mut(ctx) });

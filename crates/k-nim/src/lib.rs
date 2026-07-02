@@ -432,14 +432,11 @@ pub(crate) fn append_history(state: &mut NimState, user_msg: &[u8], asst_reply: 
     // We do a trial encode to check fit.
     let mut trial = [0u8; HISTORY_BUF_SIZE];
     let mut tp = state.history_len;
-    let fits = {
-        let ok = buf_append(&mut trial[..], &mut tp, b"{\"role\":\"user\",\"content\":\"")
-            && buf_append_json_str(&mut trial[..], &mut tp, user_msg)
-            && buf_append(&mut trial[..], &mut tp, b"\"},{\"role\":\"assistant\",\"content\":\"")
-            && buf_append_json_str(&mut trial[..], &mut tp, asst_reply)
-            && buf_append(&mut trial[..], &mut tp, b"\"},");
-        ok
-    };
+    let fits = buf_append(&mut trial[..], &mut tp, b"{\"role\":\"user\",\"content\":\"")
+        && buf_append_json_str(&mut trial[..], &mut tp, user_msg)
+        && buf_append(&mut trial[..], &mut tp, b"\"},{\"role\":\"assistant\",\"content\":\"")
+        && buf_append_json_str(&mut trial[..], &mut tp, asst_reply)
+        && buf_append(&mut trial[..], &mut tp, b"\"},");
 
     if !fits {
         // Clear history and try again from scratch

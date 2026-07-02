@@ -35,13 +35,24 @@ The repository is no longer documented as a loader-first or procedure-first kern
 - Cypher v1 subset for graph browsing and controlled activation/routing
 - Host-backed CUDA bridge for graph-visible accelerator work
 - Native network status node exporting `net/uplink`
+- `nodes` / `nodes faulted` / `nodes summary` — live node introspection (ps-style)
+- `proc` / `ps` — ps-style table: signal counts + edge out-degree per node
+- `stat <vec>` / `node stat <vec>` — per-node deep stat (like /proc/pid/status)
+- `edges` / `edges count` / `edges <type>` — live edge introspection (ss-style)
+- `graph diff` / `graph diff pin` / `graph diff reset` — topology mutation changelog (git-diff-style)
+- `graph diff <N>` — topology changes since epoch N (like git log sha..HEAD)
+- `graph topo` / `graph topo <L4>` — L4-domain topology view (like ip route show / lshw)
+- `journal` — journal ring status and format info
+- `metrics export` — machine-parseable telemetry key=value dump
+- `boot verify` — boot manifest edge verification report
 
 See:
 
-- [doc/GOS_ARCH_v2.md](./doc/GOS_ARCH_v2.md)
-- [doc/GRAPH_CLI_COMMANDS_zh.md](./doc/GRAPH_CLI_COMMANDS_zh.md)
-- [doc/CYPHER_NODE_zh.md](./doc/CYPHER_NODE_zh.md)
-- [doc/NETWORK_NODE_zh.md](./doc/NETWORK_NODE_zh.md)
+- [doc/README.md](./doc/README.md) — 文档总索引（按工程阶段分层）
+- [doc/02_基本设计/GOS_ARCH_v2.md](./doc/02_基本设计/GOS_ARCH_v2.md)
+- [doc/03_详细设计/GRAPH_CLI_COMMANDS_zh.md](./doc/03_详细设计/GRAPH_CLI_COMMANDS_zh.md)
+- [doc/03_详细设计/CYPHER_NODE_zh.md](./doc/03_详细设计/CYPHER_NODE_zh.md)
+- [doc/03_详细设计/NETWORK_NODE_zh.md](./doc/03_详细设计/NETWORK_NODE_zh.md)
 
 ## Developer Quick Start
 
@@ -95,7 +106,7 @@ pwsh -File .\tools\write-usb-image.ps1 -List
 pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-installer.img -DiskNumber 3
 ```
 
-Detailed Chinese install instructions are in [doc/INSTALL_BARE_METAL_zh.md](./doc/INSTALL_BARE_METAL_zh.md).
+Detailed Chinese install instructions are in [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](./doc/06_运维维护/INSTALL_BARE_METAL_zh.md).
 
 ## Current Development Priority
 

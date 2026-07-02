@@ -24,6 +24,8 @@ use gos_protocol::{
     RuntimeEdgeType,
 };
 
+use gos_runtime;
+
 use super::{
     pre::{DataSource, Input},
     CLIPBOARD_NODE_VEC, GRAPH_MODE_NONE, LIVE_SIGIL_FRAMES, MENU_MODE_AI_API, MENU_MODE_COMMAND,
@@ -73,7 +75,17 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: Input) -> Option<Output>
             super::draw_ai_panel(&sink, state);
             super::draw_operator_band(&sink, state, snapshot);
             if state.heartbeat_divider % 4 == 0 {
-                super::draw_command_deck_panel(&sink, state, snapshot);
+                // V2.3 epoch-diff idle skip: only repaint the command-deck
+                // panel when the graph topology actually changed since the
+                // last repaint.  Directly implements Demo #2 zero-idle-frames
+                // for the shell panel without any special render bookkeeping.
+                // V2.30: in watch mode, always repaint so tick counter updates.
+                let current_epoch = gos_runtime::graph_epoch();
+                let watch_active = super::WATCH_PROC_MODE.load(core::sync::atomic::Ordering::SeqCst) != 0;
+                if watch_active || current_epoch != state.last_rendered_epoch {
+                    state.last_rendered_epoch = current_epoch;
+                    super::draw_command_deck_panel(&sink, state, snapshot);
+                }
                 super::redraw_footer(&sink, state, false);
             }
             super::restore_cursor(&sink, 0);
@@ -105,6 +117,21 @@ fn process_data(
     source: DataSource,
     byte: u8,
 ) -> ExecStatus {
+    // --- V2.30 watch mode: any keyboard key exits and restores normal deck --------
+    if source == DataSource::Keyboard
+        && super::WATCH_PROC_MODE.load(core::sync::atomic::Ordering::SeqCst) != 0
+    {
+        super::WATCH_PROC_MODE.store(0, core::sync::atomic::Ordering::SeqCst);
+        // Force deck repaint by invalidating the epoch cache.
+        state.last_rendered_epoch = u64::MAX;
+        super::restore_output_cursor(sink);
+        super::set_color(sink, 8, 0);
+        super::print_str(sink, " watch stopped\n");
+        super::save_output_cursor(sink);
+        super::redraw_footer(sink, state, false);
+        return ExecStatus::Done;
+    }
+
     // --- IME node forwarded a composed character ---------------------------------
     if source == DataSource::Ime {
         if state.menu_mode == MENU_MODE_COMMAND {
@@ -168,10 +195,10 @@ fn process_data(
     }
 
     // --- zh-pinyin IME composition ----------------------------------------------
-    if state.input_lang == IME_MODE_ZH_PINYIN {
-        if let Some(status) = process_pinyin(sink, state, byte) {
-            return status;
-        }
+    if state.input_lang == IME_MODE_ZH_PINYIN
+        && let Some(status) = process_pinyin(sink, state, byte)
+    {
+        return status;
     }
 
     // --- Enter / Return — execute the buffered command --------------------------
@@ -184,12 +211,11 @@ fn process_data(
         0x03 => { let _ = super::clipboard_copy_active_input(sink, state); }
         0x16 => { let _ = super::clipboard_paste_active_input(sink, state); }
         0x18 => { let _ = super::clipboard_cut_active_input(sink, state); }
-        0x08 | 0x7F => {
-            if super::command_pop_scalar(state) {
-                super::reset_command_history_cursor(state);
-                super::redraw_footer(sink, state, false);
-            }
+        0x08 | 0x7F if super::command_pop_scalar(state) => {
+            super::reset_command_history_cursor(state);
+            super::redraw_footer(sink, state, false);
         }
+        0x08 | 0x7F => {}
         byte if byte >= 0x20 => {
             super::append_command_byte(sink, state, byte, false);
         }
@@ -503,6 +529,53 @@ fn dispatch_text_command(
         super::print_str(sink, "  help    show commands\n");
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
+        super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  nodes              list all live graph nodes (ps-style)\n");
+        super::print_str(sink, "  nodes faulted      list only faulted nodes\n");
+        super::print_str(sink, "  nodes summary      lifecycle distribution count\n");
+        super::print_str(sink, "  boot verify        boot manifest edge verification report\n");
+        super::print_str(sink, "  metrics export     machine-parseable key=value telemetry dump\n");
+        super::print_str(sink, "  journal            journal format info and replay status\n");
+        super::print_str(sink, "  proc               ps-style table: node signal counts + edge out-degree\n");
+        super::print_str(sink, "  stat <vector>      detailed stat for one node (like /proc/<pid>/status)\n");
+        super::print_str(sink, "  node stat clear <vector>  reset signal_count to 0 (like perf stat reset)\n");
+        super::print_str(sink, "  nstat clear <vector>      alias for node stat clear\n");
+        super::print_str(sink, "  kill <vector>      fault a node by vector (like kill -9 <pid>)\n");
+        super::print_str(sink, "  node fault <vector>  alias for kill\n");
+        super::print_str(sink, "  resume <vector>    resume a faulted/suspended node (like systemctl restart)\n");
+        super::print_str(sink, "  node resume <vector>  alias for resume\n");
+        super::print_str(sink, "  node info <vector> comprehensive node view: stat + edges (like systemctl status)\n");
+        super::print_str(sink, "  ninfo <vector>     alias for node info\n");
+        super::print_str(sink, "  node trace <vector>       signal dispatch history for one node (like strace -p <pid>)\n");
+        super::print_str(sink, "  ntrace <vector>           alias for node trace\n");
+        super::print_str(sink, "  node trace clear <vector> clear signal trace ring for one node (like perf trace reset)\n");
+        super::print_str(sink, "  ntrace clear <vector>     alias for node trace clear\n");
+        super::print_str(sink, "  node log <vector>         lifecycle event log for one node (like journalctl -u <svc>)\n");
+        super::print_str(sink, "  nlog <vector>             alias for node log\n");
+        super::print_str(sink, "  node log clear <vector>   clear lifecycle log for one node (like journalctl --vacuum-time)\n");
+        super::print_str(sink, "  nlog clear <vector>       alias for node log clear\n");
+        super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
+        super::print_str(sink, "  edges count        total edge count\n");
+        super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
+        super::print_str(sink, "  graph diff         show topology changes since pinned epoch (like git diff)\n");
+        super::print_str(sink, "  graph diff <N>     show topology changes since epoch N (e.g. graph diff 42)\n");
+        super::print_str(sink, "  graph diff pin     pin current epoch as diff baseline\n");
+        super::print_str(sink, "  graph diff reset   reset baseline to epoch 0 (show all since boot)\n");
+        super::print_str(sink, "  graph topo         node count per l4 domain (like ip route show)\n");
+        super::print_str(sink, "  graph topo <L4>    list nodes in l4 domain L4 (like ip link show)\n");
+        super::print_str(sink, "  graph health       holistic health report: faults, ring, metrics (like systemctl status)\n");
+        super::print_str(sink, "  graph path <A> <B> BFS shortest path from node A to node B (like traceroute)\n");
+        super::print_str(sink, "  graph cycles       detect directed cycles in the graph (like tsort cycle-check)\n");
+        super::print_str(sink, "  graph toposort     topological dependency ordering of all nodes (like tsort)\n");
+        super::print_str(sink, "  graph reachable <V> all nodes reachable from V via directed edges (like systemctl list-dependencies --all)\n");
+        super::print_str(sink, "  reachable <V>      alias for graph reachable\n");
+        super::print_str(sink, "  graph degree       in/out degree per node + hub identification (like ip -s link show)\n");
+        super::print_str(sink, "  degree / hub       aliases for graph degree\n");
+        super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
+        super::print_str(sink, "  ver / version      alias for uname\n");
+        super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
+        super::print_str(sink, "  graph watch        alias for watch\n");
+        super::print_str(sink, "  watch stop         exit watch mode\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -611,6 +684,282 @@ fn dispatch_text_command(
             super::print_str(sink, "none");
         }
         super::print_str(sink, "\n");
+    } else if cmd == "modules" || cmd == "mods" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " module health\n");
+        super::set_color(sink, 7, 0);
+        let mut summaries = [gos_supervisor::ModuleStatusSummary {
+            handle: gos_protocol::ModuleHandle::ZERO,
+            module_id: gos_protocol::ModuleId::ZERO,
+            state: gos_protocol::ModuleLifecycle::Stopped,
+            fault_policy: gos_protocol::ModuleFaultPolicy::Manual,
+            restart_generation: 0,
+            degraded: false,
+        }; gos_supervisor::MAX_MODULES];
+        let count = gos_supervisor::module_status_summaries(&mut summaries);
+        if count == 0 {
+            super::print_str(sink, "  (no modules installed)\n");
+        }
+        for summary in summaries.iter().take(count) {
+            let raw = summary.module_id.0;
+            let mut len = 0;
+            while len < raw.len() && raw[len] != 0 {
+                len += 1;
+            }
+            let name = core::str::from_utf8(&raw[..len]).unwrap_or("?");
+            super::print_str(sink, "  ");
+            super::print_str(sink, name);
+            super::print_str(sink, "  state: ");
+            super::print_str(sink, super::module_lifecycle_label(summary.state));
+            super::print_str(sink, "  policy: ");
+            super::print_str(sink, super::module_fault_policy_label(summary.fault_policy));
+            super::print_str(sink, "  restarts: ");
+            super::print_num_inline(sink, summary.restart_generation as usize);
+            if summary.degraded {
+                super::print_str(sink, "  DEGRADED");
+            }
+            super::print_str(sink, "\n");
+        }
+    } else if cmd == "nodes" || cmd == "nodes all" {
+        super::dispatch_nodes_list(sink, false);
+    } else if cmd == "nodes faulted" || cmd == "nodes fault" || cmd == "faults" {
+        super::dispatch_nodes_list(sink, true);
+    } else if cmd == "nodes summary" || cmd == "nodes stat" {
+        super::dispatch_lifecycle_summary(sink);
+    } else if cmd == "plugins" || cmd == "lsmod" || cmd == "plugin list" {
+        super::dispatch_plugin_list(sink);
+    } else if cmd == "boot" || cmd == "boot verify" || cmd == "boot status" {
+        super::dispatch_boot_verify(sink);
+    } else if cmd == "metrics export" || cmd == "metrics dump" {
+        super::dispatch_metrics_export(sink);
+    } else if cmd == "journal" || cmd == "journal status" || cmd == "journal info" {
+        super::dispatch_journal_info(sink);
+    } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
+        super::dispatch_proc_list(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node stat clear ")
+        .or_else(|| cmd.strip_prefix("nstat clear "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_stat_clear(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node stat clear requires a vector address (e.g. node stat clear 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd.strip_prefix("stat ").or_else(|| cmd.strip_prefix("node stat ")) {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_stat(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " stat requires a vector address (e.g. stat 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("kill ")
+        .or_else(|| cmd.strip_prefix("node fault "))
+        .or_else(|| cmd.strip_prefix("fault "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_kill(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " kill requires a vector address (e.g. kill 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("resume ")
+        .or_else(|| cmd.strip_prefix("node resume "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_resume(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " resume requires a vector address (e.g. resume 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node info ")
+        .or_else(|| cmd.strip_prefix("ninfo "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_info(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node info requires a vector address (e.g. node info 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node trace clear ")
+        .or_else(|| cmd.strip_prefix("ntrace clear "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_trace_clear(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node trace clear requires a vector address (e.g. node trace clear 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node trace ")
+        .or_else(|| cmd.strip_prefix("ntrace "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_trace(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node trace requires a vector address (e.g. node trace 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node log clear ")
+        .or_else(|| cmd.strip_prefix("nlog clear "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_log_clear(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node log clear requires a vector address (e.g. node log clear 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node log ")
+        .or_else(|| cmd.strip_prefix("nlog "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_log(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node log requires a vector address (e.g. node log 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "edges" || cmd == "edges all" {
+        super::dispatch_edges_list(sink, None);
+    } else if cmd == "edges count" || cmd == "edge count" {
+        super::dispatch_edge_count(sink);
+    } else if let Some(type_str) = cmd.strip_prefix("edges ") {
+        if let Some(et) = super::parse_edge_type_filter(type_str) {
+            super::dispatch_edges_list(sink, Some(et));
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " unknown edge type. Types: call spawn depend signal return mount sync stream use\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "graph diff" || cmd == "diff" || cmd == "diff graph" {
+        let since = super::GRAPH_DIFF_PIN_EPOCH.load(core::sync::atomic::Ordering::SeqCst);
+        super::dispatch_graph_diff(sink, since);
+    } else if cmd == "graph diff pin" || cmd == "diff pin" {
+        let epoch = gos_runtime::graph_epoch();
+        super::GRAPH_DIFF_PIN_EPOCH.store(epoch, core::sync::atomic::Ordering::SeqCst);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " diff baseline pinned at epoch ");
+        super::print_num_inline(sink, epoch as usize);
+        super::print_str(sink, "\n");
+        super::set_color(sink, 7, 0);
+    } else if cmd == "graph diff reset" || cmd == "diff reset" {
+        super::GRAPH_DIFF_PIN_EPOCH.store(0, core::sync::atomic::Ordering::SeqCst);
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " diff baseline reset to epoch 0 (showing all since boot)\n");
+        super::set_color(sink, 7, 0);
+    } else if let Some(epoch_str) = cmd
+        .strip_prefix("graph diff ")
+        .or_else(|| cmd.strip_prefix("diff "))
+        .filter(|s| *s != "pin" && *s != "reset")
+    {
+        // `graph diff <N>` — show diff since a specific epoch number supplied inline.
+        // "graph diff pin" and "graph diff reset" are already matched above via exact branches.
+        let trimmed = epoch_str.trim();
+        if let Some(epoch) = super::parse_epoch_decimal(trimmed) {
+            super::dispatch_graph_diff(sink, epoch);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph diff <epoch>: epoch must be a decimal number (e.g. graph diff 42)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "uname" || cmd == "uname -a" || cmd == "ver" || cmd == "version" {
+        super::dispatch_uname(sink);
+    } else if cmd == "watch" || cmd == "graph watch" || cmd == "watch proc" || cmd == "watch nodes" {
+        super::dispatch_watch_proc(sink);
+    } else if cmd == "watch stop" || cmd == "watch exit" {
+        super::dispatch_watch_stop(sink);
+    } else if cmd == "graph health" || cmd == "health" {
+        super::dispatch_graph_health(sink);
+    } else if let Some(pair_str) = cmd.strip_prefix("graph path ") {
+        // `graph path <from_vec> <to_vec>`
+        let trimmed = pair_str.trim();
+        // Find the space separating the two vector addresses.
+        // Vector addresses look like "1.2.3.4" — split at the first space.
+        if let Some(space) = trimmed.find(' ') {
+            let from_str = trimmed[..space].trim();
+            let to_str   = trimmed[space + 1..].trim();
+            match (
+                gos_protocol::VectorAddress::parse(from_str),
+                gos_protocol::VectorAddress::parse(to_str),
+            ) {
+                (Some(from), Some(to)) => super::dispatch_graph_path(sink, from, to),
+                (None, _) => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph path: invalid from-vector (e.g. 1.0.0.1)\n");
+                    super::set_color(sink, 7, 0);
+                }
+                (_, None) => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph path: invalid to-vector (e.g. 1.0.0.4)\n");
+                    super::set_color(sink, 7, 0);
+                }
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph path requires two vector addresses: graph path <from> <to>\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "graph cycles" || cmd == "cycles" || cmd == "graph cyclic" || cmd == "cyclic" {
+        super::dispatch_graph_cycles(sink);
+    } else if cmd == "graph toposort" || cmd == "toposort" || cmd == "topo sort" || cmd == "graph tsort" || cmd == "tsort" {
+        super::dispatch_graph_toposort(sink);
+    } else if cmd == "graph scc" || cmd == "scc" || cmd == "graph components" || cmd == "components" {
+        super::dispatch_graph_scc(sink);
+    } else if cmd == "graph condensation" || cmd == "condensation" || cmd == "condense" || cmd == "graph condense" {
+        super::dispatch_graph_condensation(sink);
+    } else if cmd == "graph bipartite" || cmd == "bipartite" || cmd == "graph bip" || cmd == "bip" {
+        super::dispatch_graph_bipartite(sink);
+    } else if cmd == "graph degree" || cmd == "degree" || cmd == "graph hub" || cmd == "hub" {
+        super::dispatch_graph_degree(sink);
+    } else if cmd == "graph centrality" || cmd == "centrality" || cmd == "graph central" || cmd == "central" || cmd == "betweenness" {
+        super::dispatch_graph_centrality(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("graph reachable ")
+        .or_else(|| cmd.strip_prefix("reachable "))
+        .or_else(|| cmd.strip_prefix("reach "))
+        .or_else(|| cmd.strip_prefix("graph reach "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_graph_reachable(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph reachable requires a vector address (e.g. graph reachable 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if cmd == "graph topo" || cmd == "topo" {
+        super::dispatch_graph_topo(sink, None);
+    } else if let Some(l4_str) = cmd
+        .strip_prefix("graph topo ")
+        .or_else(|| cmd.strip_prefix("topo "))
+    {
+        let trimmed = l4_str.trim();
+        if let Some(epoch_val) = super::parse_epoch_decimal(trimmed) {
+            if epoch_val <= 255 {
+                super::dispatch_graph_topo(sink, Some(epoch_val as u8));
+            } else {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " graph topo <L4>: l4 domain must be 0-255\n");
+                super::set_color(sink, 7, 0);
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph topo <L4>: l4 must be a decimal number 0-255\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();
         super::set_color(sink, 11, 0);
@@ -1186,7 +1535,7 @@ fn dispatch_nim_port(
         return;
     }
     // Validate: must be ASCII digits only
-    if bytes.iter().any(|&b| b < b'0' || b > b'9') || bytes.is_empty() {
+    if bytes.is_empty() || bytes.iter().any(|b| !b.is_ascii_digit()) {
         super::set_color(sink, 12, 0);
         super::print_str(sink, " [nim] port must be decimal digits (e.g. 8000)\n");
         return;

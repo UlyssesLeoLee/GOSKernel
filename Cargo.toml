@@ -9,6 +9,7 @@ members = [
     "crates/gos-ai-bridge",
     "crates/gos-cluster",
     "crates/gos-cypher-mut",
+    "crates/gos-rewrite",
     "crates/gos-journal",
     "crates/gos-log",
     "crates/gos-sign",

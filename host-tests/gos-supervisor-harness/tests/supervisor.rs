@@ -7,15 +7,17 @@ use gos_protocol::{
     CapabilitySpec, ClaimId, ClaimPolicy, DomainId, ExecutionLaneClass, LeaseEpoch,
     ModuleAbiV1, ModuleCallStatus, ModuleDependencySpec, ModuleDescriptor, ModuleEntry,
     ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleImageFormat, ModuleImageSegment,
-    ModuleSegmentKind, NodeInstanceId, PreemptPolicy, RESOURCE_DISPLAY_CONSOLE,
+    ModuleLifecycle, ModuleSegmentKind, NodeInstanceId, PreemptPolicy, RESOURCE_DISPLAY_CONSOLE,
     MODULE_ABI_VERSION,
 };
 use gos_supervisor::{
-    bootstrap, charge_heap, claim_resource, current_instance, dequeue_ready_instance,
-    drain_revocation, fault_module, heap_grant_summary, install_module, instance_domain_root,
-    instance_is_degraded, instance_restart_generation, process_restart_queue, queue_restart,
-    realize_boot_modules, release_claim, schedule_instance, snapshot, spawn_instance,
-    template_for_module, SupervisorError, MAX_CLAIMS, MAX_RESTARTS_BEFORE_DEGRADE,
+    bootstrap, charge_heap, claim_resource, current_instance,
+    dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
+    instance_domain_root, instance_is_degraded, instance_restart_generation, module_lifecycle,
+    module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
+    release_claim, restart_module, schedule_instance, snapshot, spawn_instance,
+    template_for_module, ModuleStatusSummary, SupervisorError, MAX_CLAIMS, MAX_MODULES,
+    MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -272,13 +274,85 @@ fn queued_restart_restarts_module_through_scheduler_control_plane() {
     assert!(summary.ready_queued);
 }
 
+// ── Atomic bring-up regression: one bad plugin can't abort the boot ─────────
+//
+// CONSUMER declares a required dependency that was never installed, so
+// its bring-up pipeline must fail at validate_module.  Before atomic
+// rollback, realize_boot_modules propagated that as an Err and the
+// *whole* boot call failed — taking every other module down with it.
+// Now each module is its own transaction: CONSUMER rolls back to a
+// clean Faulted state (no leaked instance/domain/capabilities) while
+// PROVIDER, installed alongside it, still comes up Running.
 #[test]
 fn missing_dependency_is_rejected() {
     let _guard = test_guard();
     reset_state();
     bootstrap(0);
-    install_module(CONSUMER).expect("consumer install");
-    assert_eq!(realize_boot_modules(), Err(SupervisorError::ModuleRejected));
+    let provider = install_module(PROVIDER).expect("provider install");
+    let consumer = install_module(CONSUMER).expect("consumer install");
+
+    let report = realize_boot_modules().expect("realize must not abort for a sibling failure");
+    assert_eq!(report.failed_modules, 1);
+    assert_eq!(report.running_modules, 1);
+
+    assert_eq!(
+        module_lifecycle(consumer).expect("consumer lifecycle"),
+        ModuleLifecycle::Faulted
+    );
+    assert_eq!(
+        module_lifecycle(provider).expect("provider lifecycle"),
+        ModuleLifecycle::Running
+    );
+
+    // No instance, domain, or capability was left behind for the
+    // rolled-back module.
+    assert_eq!(current_instance(consumer), Err(SupervisorError::InstanceNotFound));
+    let snap = snapshot().expect("snapshot");
+    assert_eq!(snap.live_instances, 1, "only PROVIDER's instance should remain live");
+    assert_eq!(snap.isolated_domains, 1, "only PROVIDER's domain should remain mapped");
+}
+
+// Once the missing dependency is installed, the rolled-back module can
+// be retried in isolation via `restart_module` — proving rollback left
+// it in a genuinely clean, re-attemptable state rather than stuck.
+#[test]
+fn rolled_back_module_can_be_retried_after_dependency_is_installed() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let consumer = install_module(CONSUMER).expect("consumer install");
+    let report = realize_boot_modules().expect("realize");
+    assert_eq!(report.failed_modules, 1);
+    assert_eq!(
+        module_lifecycle(consumer).expect("lifecycle"),
+        ModuleLifecycle::Faulted
+    );
+
+    // Install the dependency CONSUMER was missing, then retry just that
+    // one module instead of re-running the whole boot sequence.
+    const PROVIDED_DEP: ModuleDescriptor = ModuleDescriptor {
+        abi_version: MODULE_ABI_VERSION,
+        module_id: ModuleId::from_ascii("MOD.MISSING"),
+        name: "MOD_MISSING",
+        version: 1,
+        image_format: ModuleImageFormat::Builtin,
+        fault_policy: ModuleFaultPolicy::Manual,
+        dependencies: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        segments: TEST_SEGMENTS,
+        entry: ModuleEntry::NONE,
+        signature: None,
+        flags: 0,
+    };
+    install_module(PROVIDED_DEP).expect("install missing dependency");
+
+    restart_module(consumer).expect("retry must succeed now that the dependency exists");
+    assert_eq!(
+        module_lifecycle(consumer).expect("lifecycle"),
+        ModuleLifecycle::Running
+    );
 }
 
 #[test]
@@ -574,13 +648,27 @@ fn user_level_module_is_rejected_at_start() {
         flags: MODULE_FLAG_USER,
     };
 
-    install_module(USER_MODULE).expect("install");
-    // realize_boot_modules calls start_module per descriptor; ours
-    // must surface ModuleRejected because it's tagged Privilege::User.
+    let user_module = install_module(USER_MODULE).expect("install");
+    // realize_boot_modules calls start_module per descriptor; start_module
+    // still surfaces ModuleRejected for a Privilege::User module, but
+    // realize_boot_modules now treats that as one module's atomic
+    // bring-up failure rather than aborting the whole boot call: it
+    // rolls USER_MODULE back to Faulted and reports it via
+    // failed_modules instead of propagating an Err.
+    let report = realize_boot_modules().expect("realize must not abort for this module's rejection");
+    assert_eq!(report.failed_modules, 1);
     assert_eq!(
-        realize_boot_modules(),
-        Err(SupervisorError::ModuleRejected)
+        module_lifecycle(user_module).expect("lifecycle"),
+        ModuleLifecycle::Faulted
     );
+
+    // start_module rejects User-privilege modules *after* instantiate_module
+    // already spawned the primary instance and map_module already built
+    // the domain — rollback must undo both, not just leave the state
+    // half-built at the point of failure.
+    let snap = snapshot().expect("snapshot");
+    assert_eq!(snap.live_instances, 0, "rollback must free the instance instantiate_module created");
+    assert_eq!(snap.isolated_domains, 0, "rollback must free the domain map_module created");
 }
 
 // ── Phase B.4.3 regression: CPU fault dispatch hook ──────────────────────────
@@ -722,4 +810,53 @@ fn restart_cap_demotes_to_degraded_and_blocks_new_claims_and_charges() {
         "expected InstanceNotFound or ModuleRejected, got {:?}",
         charge_result
     );
+}
+
+const ZERO_SUMMARY: ModuleStatusSummary = ModuleStatusSummary {
+    handle: ModuleHandle::ZERO,
+    module_id: ModuleId::ZERO,
+    state: ModuleLifecycle::Stopped,
+    fault_policy: ModuleFaultPolicy::Manual,
+    restart_generation: 0,
+    degraded: false,
+};
+
+#[test]
+fn module_status_summaries_reports_lifecycle_and_degraded_state() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1, "exactly the one installed module is reported");
+    let running = out[0];
+    assert_eq!(running.handle, provider);
+    assert_eq!(running.module_id, ModuleId::from_ascii("MOD.PROVIDER"));
+    assert_eq!(running.state, ModuleLifecycle::Running);
+    assert_eq!(running.fault_policy, ModuleFaultPolicy::RestartAlways);
+    assert_eq!(running.restart_generation, 0);
+    assert!(!running.degraded);
+
+    // Drive the module past the restart cap so it lands in Faulted +
+    // degraded, and confirm the summary reflects both the bumped
+    // restart_generation and the derived `degraded` flag.
+    for _ in 0..=MAX_RESTARTS_BEFORE_DEGRADE {
+        fault_module(provider).expect("fault");
+    }
+
+    let mut out = [ZERO_SUMMARY; MAX_MODULES];
+    let count = module_status_summaries(&mut out);
+    assert_eq!(count, 1);
+    let faulted = out[0];
+    assert_eq!(faulted.handle, provider);
+    assert_eq!(faulted.state, ModuleLifecycle::Faulted);
+    // The cap-th restart bumps restart_generation to the cap; the
+    // following fault sees restart_count >= cap and degrades instead of
+    // restarting again, so the counter stays at the cap rather than
+    // incrementing past it.
+    assert_eq!(faulted.restart_generation, MAX_RESTARTS_BEFORE_DEGRADE);
+    assert!(faulted.degraded, "restart cap must surface as degraded");
 }

@@ -6,6 +6,8 @@
 //! legacy compatibility layer used during the v0.2 runtime migration.
 
 pub mod block;
+pub mod edge_algebra;
+pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm};
 pub mod socket;
 pub mod stem;
 pub use stem::*;
@@ -379,6 +381,11 @@ pub const DISPLAY_CONTROL_POINTER_COL: u8 = 0xC0;
 pub const DISPLAY_CONTROL_POINTER_ROW: u8 = 0xC1;
 pub const DISPLAY_CONTROL_POINTER_VISIBLE: u8 = 0xC2;
 pub const DISPLAY_CONTROL_THEME: u8 = 0xC3;
+/// V2.15: Subscribe-triggered reactive repaint. Delivered by the runtime to
+/// subscriber nodes when their observed node undergoes a structural mutation.
+/// `val` encodes the active Use-edge target's registered node property (e.g.
+/// the theme index for theme.current → DISPLAY_THEME_WABI / DISPLAY_THEME_SHOJI).
+pub const DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED: u8 = 0xC4;
 pub const DISPLAY_THEME_WABI: u8 = 0x00;
 pub const DISPLAY_THEME_SHOJI: u8 = 0x01;
 
@@ -806,6 +813,26 @@ pub enum ControlPlaneMessageKind {
     SnapshotChunk = 0x06,
     Fault = 0x07,
     Metric = 0x08,
+    /// A Cypher write mutation was applied successfully.  `subject` is the
+    /// caller-supplied source attestation ([u8;16]); `arg0` encodes the
+    /// mutation kind and first operand; `arg1` encodes the second operand.
+    /// Every `apply_cypher_mutation` success produces exactly one of these.
+    MutationAudit = 0x09,
+    /// `service_system_cycle` hit its per-cycle iteration cap — indicates a
+    /// deep causal chain or livelock candidate.  `arg0` = iteration depth at
+    /// overflow.  Does NOT mean the system halted; the loop bails and steady-
+    /// state picks back up on the next PIT tick.
+    CausalOverflow = 0x0A,
+    /// A rewrite rule fired and its mutation was applied successfully.
+    /// `subject` = rule label ([u8;16]); `arg0` = rule index in the engine;
+    /// `arg1` = graph epoch after the mutation.
+    RuleApplied = 0x0B,
+    /// A reactive Subscribe pair was triggered: the observed node was
+    /// structurally mutated (graph_epoch bumped by register_node,
+    /// register_edge, or unregister_edge).  `subject` = observed NodeId
+    /// (16 bytes); `arg0` = lower 8 bytes of subscriber NodeId (LE u64);
+    /// `arg1` = new graph_epoch after the mutation.
+    SubscribeTriggered = 0x0C,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1596,6 +1623,72 @@ impl GraphNodeSummary {
     };
 }
 
+/// Process-table summary for one graph node — per-node signal activity and
+/// outbound edge count.  Returned by `gos_runtime::proc_page()` sorted by
+/// vector address, analogous to a `ps` listing.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeProcSummary {
+    pub vector: VectorAddress,
+    pub local_node_key: &'static str,
+    pub plugin_name: &'static str,
+    pub lifecycle: NodeLifecycle,
+    /// Cumulative signals dispatched to this node since registration.
+    pub signal_count: u32,
+    /// Number of outbound edges currently registered from this node.
+    pub edge_out_count: u16,
+}
+
+impl NodeProcSummary {
+    pub const EMPTY: Self = Self {
+        vector: VectorAddress::new(0, 0, 0, 0),
+        local_node_key: "",
+        plugin_name: "",
+        lifecycle: NodeLifecycle::Discovered,
+        signal_count: 0,
+        edge_out_count: 0,
+    };
+}
+
+/// V2.24 — one entry in the per-node signal trace ring (like `strace -p <pid>`).
+///
+/// `kind == 0` is the EMPTY sentinel: `KernelSignalKind` values start at 0x01,
+/// so zero is never a real signal.  Use this to detect unfilled ring slots.
+#[derive(Clone, Copy)]
+pub struct NodeTraceEntry {
+    /// Sender's raw vector address (`VectorAddress::from_u64(self.from)` to decode).
+    /// `0` for kernel-initiated signals (Spawn, Interrupt, Terminate).
+    pub from:   u64,
+    /// Value of `signal_count` just *before* this dispatch (monotonically increasing).
+    pub serial: u32,
+    /// Signal kind discriminant — matches `KernelSignalKind` u8 values.
+    /// `0` = EMPTY (no signal recorded in this ring slot yet).
+    pub kind:   u8,
+    /// For `Control`: cmd byte.  For `Interrupt`: irq byte.  For `Data`: the data byte.
+    /// `0` for all other kinds.
+    pub cmd:    u8,
+}
+
+impl NodeTraceEntry {
+    pub const EMPTY: Self = Self { from: 0, serial: 0, kind: 0, cmd: 0 };
+}
+
+/// V2.25 — one entry in the per-node lifecycle event log (like `journalctl -u <service>`).
+///
+/// Records each `NodeLifecycle` state transition with the monotonic tick at
+/// which it occurred.  `tick == 0 && lifecycle == 0` is the EMPTY sentinel.
+#[derive(Clone, Copy)]
+pub struct NodeLogEntry {
+    /// Monotonic runtime tick when this lifecycle transition occurred.
+    pub tick:      u64,
+    /// New `NodeLifecycle` state, encoded as its `#[repr(u8)]` discriminant.
+    pub lifecycle: u8,
+    pub _pad:      [u8; 7],
+}
+
+impl NodeLogEntry {
+    pub const EMPTY: Self = Self { tick: 0, lifecycle: 0, _pad: [0u8; 7] };
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GraphEdgeSummary {
     pub edge_vector: EdgeVector,
@@ -1631,6 +1724,51 @@ impl GraphEdgeSummary {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Plugin inventory types — lsmod-style listing (V2.20)
+// ---------------------------------------------------------------------------
+
+/// Public load state for a graph plugin — returned in `PluginSummary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PluginState {
+    Discovered = 0x00,
+    Loaded     = 0x01,
+    Faulted    = 0xFF,
+}
+
+impl PluginState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PluginState::Discovered => "discovered",
+            PluginState::Loaded     => "loaded",
+            PluginState::Faulted    => "faulted",
+        }
+    }
+}
+
+/// One-row summary for a registered graph plugin.
+/// Returned by `gos_runtime::plugin_page()`, analogous to `lsmod` output.
+#[derive(Debug, Clone, Copy)]
+pub struct PluginSummary {
+    pub plugin_id:  PluginId,
+    pub name:       &'static str,
+    pub version:    u32,
+    pub state:      PluginState,
+    /// Number of nodes currently registered under this plugin.
+    pub node_count: usize,
+}
+
+impl PluginSummary {
+    pub const EMPTY: Self = Self {
+        plugin_id:  PluginId::ZERO,
+        name:       "",
+        version:    0,
+        state:      PluginState::Discovered,
+        node_count: 0,
+    };
+}
+
 
 #[derive(Debug, Clone, Copy)]
 pub struct ControlPlaneHint {
@@ -1638,4 +1776,56 @@ pub struct ControlPlaneHint {
     pub subject: [u8; 16],
     pub arg0: u64,
     pub arg1: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Graph diff types — structural mutation changelog (like `git log` for the graph)
+// ---------------------------------------------------------------------------
+
+/// What kind of structural change occurred at a given epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GraphDiffKind {
+    NodeAdded   = 0,
+    NodeRemoved = 1,
+    EdgeAdded   = 2,
+    EdgeRemoved = 3,
+}
+
+impl GraphDiffKind {
+    pub const fn is_addition(self) -> bool {
+        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::EdgeAdded)
+    }
+    pub const fn is_node(self) -> bool {
+        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::NodeRemoved)
+    }
+}
+
+/// One entry in the structural mutation ring — recorded on every node/edge add or remove.
+#[derive(Debug, Clone, Copy)]
+pub struct GraphDiffEntry {
+    /// Graph epoch immediately after this mutation.
+    pub epoch: u64,
+    pub kind: GraphDiffKind,
+    /// For node events: the node's VectorAddress. For edge events: the from-node vector.
+    pub from_vector: VectorAddress,
+    /// For edge events: the to-node vector. Zero for node events.
+    pub to_vector: VectorAddress,
+    /// Human-readable key (local_node_key or edge key), zero-padded to 16 bytes.
+    pub label: [u8; 16],
+}
+
+impl GraphDiffEntry {
+    pub const EMPTY: Self = Self {
+        epoch: 0,
+        kind: GraphDiffKind::NodeAdded,
+        from_vector: VectorAddress::new(0, 0, 0, 0),
+        to_vector: VectorAddress::new(0, 0, 0, 0),
+        label: [0u8; 16],
+    };
+
+    pub fn label_str(&self) -> &str {
+        let end = self.label.iter().position(|&b| b == 0).unwrap_or(16);
+        core::str::from_utf8(&self.label[..end]).unwrap_or("?")
+    }
 }

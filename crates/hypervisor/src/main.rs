@@ -55,11 +55,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     raw_serial_println(format_args!("boot: supervisor staged isolated domains"));
 
     k_serial::serial_println!(
-        "supervisor modules={} running={} domains={} caps={}",
+        "supervisor modules={} running={} domains={} caps={} failed={}",
         supervisor_report.discovered_modules,
         supervisor_report.running_modules,
         supervisor_report.isolated_domains,
-        supervisor_report.published_capabilities
+        supervisor_report.published_capabilities,
+        supervisor_report.failed_modules
     );
 
     k_serial::serial_println!("\n=== GOS v0.2 BUNDLE LOAD ===");

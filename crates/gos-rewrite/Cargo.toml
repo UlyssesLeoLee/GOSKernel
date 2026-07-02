@@ -1,0 +1,8 @@
+[package]
+name = "gos-rewrite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gos-protocol = { path = "../gos-protocol" }
+gos-cypher-mut = { path = "../gos-cypher-mut" }

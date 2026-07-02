@@ -286,7 +286,7 @@ fn com2_init() {
     unsafe {
         out8(COM2 + 1, 0x00); // disable interrupts
         out8(COM2 + 3, 0x80); // enable DLAB
-        out8(COM2 + 0, 0x01); // divisor LSB → 115200 baud
+        out8(COM2, 0x01); // divisor LSB → 115200 baud
         out8(COM2 + 1, 0x00); // divisor MSB
         out8(COM2 + 3, 0x03); // 8-N-1
         out8(COM2 + 2, 0xC7); // enable + clear FIFOs, 14-byte threshold
@@ -636,9 +636,7 @@ fn build_http_request(
     req_buf[p] = b':'; p += 1;
     buf_append_u32(req_buf, &mut p, host_port as u32);
     if !buf_append(req_buf, &mut p, b"\r\nContent-Type: application/json\r\n") { return 0; }
-    if !extra_hdr.is_empty() {
-        if !buf_append(req_buf, &mut p, extra_hdr) { return 0; }
-    }
+    if !extra_hdr.is_empty() && !buf_append(req_buf, &mut p, extra_hdr) { return 0; }
     if !buf_append(req_buf, &mut p, b"Content-Length: ") { return 0; }
     if !buf_append_u32(req_buf, &mut p, body.len() as u32) { return 0; }
     if !buf_append(req_buf, &mut p, b"\r\n\r\n") { return 0; }

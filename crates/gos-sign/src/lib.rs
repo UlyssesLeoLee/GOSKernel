@@ -14,7 +14,8 @@
 //! Wiring sequence
 //! ---------------
 //! 1. Kernel boot installs a `SignatureVerifier`:
-//!      gos_sign::install_verifier(SignatureVerifier { verify, ... });
+//!
+//!    `gos_sign::install_verifier(SignatureVerifier { verify, ... });`
 //! 2. supervisor::install_module calls `gos_sign::verify_module(..)`
 //!    against the descriptor's signature + policy_hash.
 //! 3. Verifier returns Ok / Err per the active SecurityPolicy.

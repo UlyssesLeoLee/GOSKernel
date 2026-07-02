@@ -103,7 +103,7 @@ fn com3_init() {
     unsafe {
         out8(COM3 + 1, 0x00); // disable interrupts
         out8(COM3 + 3, 0x80); // enable DLAB
-        out8(COM3 + 0, 0x01); // divisor LSB → 115200 baud
+        out8(COM3, 0x01); // divisor LSB → 115200 baud
         out8(COM3 + 1, 0x00); // divisor MSB
         out8(COM3 + 3, 0x03); // 8-N-1
         out8(COM3 + 2, 0xC7); // enable + clear FIFOs, 14-byte threshold
@@ -399,9 +399,9 @@ fn render_live_graph() {
             };
             let label = fit_label(raw_label, node_w);
             fb.reset();
-            let _ = write!(
+            let _ = writeln!(
                 fb,
-                "VKNOD:{}:{}:{}:{}:{}:{:06x}:{}\n",
+                "VKNOD:{}:{}:{}:{}:{}:{:06x}:{}",
                 gi + 1,
                 x,
                 y,
@@ -430,9 +430,9 @@ fn render_live_graph() {
             if let (Some(f), Some(t)) = (from, to) {
                 if f != t {
                     fb.reset();
-                    let _ = write!(
+                    let _ = writeln!(
                         fb,
-                        "VKEDG:{}:{}:{:06x}\n",
+                        "VKEDG:{}:{}:{:06x}",
                         f + 1,
                         t + 1,
                         edge_color(edge.edge_type)

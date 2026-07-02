@@ -182,8 +182,9 @@ impl BitmapFrameAllocator {
 
     /// Rebuild the L1 summary bitmap from current L0 state.
     unsafe fn rebuild_summary(total_frames: usize) {
-        let active_words = (total_frames + 63) / 64;
+        let active_words = total_frames.div_ceil(64);
 
+        #[allow(clippy::needless_range_loop)]
         for summary_idx in 0..SUMMARY_WORDS {
             let mut word: u64 = 0;
             let base = summary_idx * 64;
@@ -273,6 +274,7 @@ impl BitmapFrameAllocator {
     /// Allocate a single 4 KiB physical frame. O(1) amortised.
     pub fn alloc_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         unsafe {
+            #[allow(clippy::needless_range_loop)]
             for summary_idx in 0..SUMMARY_WORDS {
                 let summary_word = SUMMARY[summary_idx];
                 if summary_word == u64::MAX {

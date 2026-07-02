@@ -1,0 +1,11 @@
+[package]
+name = "gos-rewrite-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
+gos-rewrite = { path = "../../crates/gos-rewrite" }

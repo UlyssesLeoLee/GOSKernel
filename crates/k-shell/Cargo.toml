@@ -8,4 +8,5 @@ gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 gos-runtime = { path = "../gos-runtime" }
 gos-supervisor = { path = "../gos-supervisor", default-features = false }
+gos-journal = { path = "../gos-journal" }
 spin = "0.9"

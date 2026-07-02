@@ -1,24 +1,22 @@
 #![cfg_attr(not(any(test, feature = "host-testing")), no_std)]
 
-use core::sync::atomic::{AtomicPtr, Ordering};
-#[cfg(any(test, feature = "host-testing"))]
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(test)]
 use core::sync::atomic::AtomicUsize;
 
 use gos_protocol::{
     fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy,
-    ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, HeapQuota,
-    ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
+    ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, GraphSnapshot,
+    HeapQuota, ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
     ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleLifecycle,
-    ModuleMessage, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
+    ModuleMessage, NodeId, NodeInstanceId, NodeInstanceLifecycle, NodeTemplateId,
     PermissionSpec, PluginId, PreemptPolicy, ResourceId, ResourceLease, SpawnPolicy,
     RESOURCE_BLOCK_DEVICE, RESOURCE_DISPLAY_CONSOLE, RESOURCE_FILE_HANDLE,
     RESOURCE_FRAME_ALLOC, RESOURCE_GPU_ACCEL, RESOURCE_GPU_MEMORY,
     RESOURCE_HEAP_SOURCE, RESOURCE_PAGE_MAPPER, RESOURCE_SOCKET, MODULE_ABI_VERSION,
 };
-#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-use k_vmm;
+use gos_cypher_mut::ReceptiveEdgeKind;
+use gos_rewrite::{GraphView, RewriteAction, RewriteEngine, RewriteRule, RewriteError, MAX_REWRITE_RULES};
 use spin::Mutex;
 
 pub const MAX_MODULES: usize = 32;
@@ -80,6 +78,7 @@ pub enum SupervisorError {
     InvalidState,
     ModuleRejected,
     DomainCreateFailed,
+    DomainTeardownFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +112,28 @@ pub struct SupervisorBootReport {
     pub running_modules: usize,
     pub isolated_domains: usize,
     pub published_capabilities: usize,
+    /// Modules whose bring-up pipeline (validate/map/instantiate/start)
+    /// failed partway through and were atomically rolled back to a clean
+    /// `Faulted` state (no leaked instance/domain/capabilities).  A
+    /// non-zero count means the boot is degraded but did *not* abort:
+    /// every other module still came up normally, and a faulted module
+    /// can be retried later via `restart_module`.
+    pub failed_modules: usize,
+}
+
+/// At-a-glance health for a single installed module: lifecycle state,
+/// configured fault policy, and how many times it has been restarted.
+/// `degraded` mirrors the condition `process_next_restart` uses to stop
+/// retrying (Faulted + restart_generation at the cap) so callers don't
+/// have to re-derive the threshold themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleStatusSummary {
+    pub handle: ModuleHandle,
+    pub module_id: ModuleId,
+    pub state: ModuleLifecycle,
+    pub fault_policy: ModuleFaultPolicy,
+    pub restart_generation: u32,
+    pub degraded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +313,29 @@ fn create_domain_root(
         )
         .map_err(|_| SupervisorError::DomainCreateFailed)
     }
+}
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+fn destroy_domain_root(domain: ModuleDomain, heap_bytes_used: u64) -> Result<(), SupervisorError> {
+    unsafe {
+        k_vmm::destroy_isolated_address_space(
+            domain.root_table_phys,
+            domain.image_base,
+            domain.image_len,
+            domain.stack_base,
+            domain.stack_len,
+            domain.ipc_base,
+            domain.ipc_len,
+            domain.heap_base,
+            heap_bytes_used,
+        )
+        .map_err(|_| SupervisorError::DomainTeardownFailed)
+    }
+}
+
+#[cfg(any(test, feature = "host-testing"))]
+fn destroy_domain_root(_domain: ModuleDomain, _heap_bytes_used: u64) -> Result<(), SupervisorError> {
+    Ok(())
 }
 
 #[cfg(any(test, feature = "host-testing"))]
@@ -998,10 +1042,16 @@ impl Supervisor {
             }
             self.modules[slot].restart_generation =
                 self.modules[slot].restart_generation.wrapping_add(1);
-            self.validate_module(handle)?;
-            self.map_module(handle)?;
-            self.instantiate_module(handle)?;
-            self.start_module(handle)?;
+            // bring_up_module rolls the module atomically back to a
+            // clean Faulted state on failure (no leaked instance/
+            // domain/capabilities) and already emitted the Fault
+            // control-plane event; apply_fault_policy decides what
+            // happens next — another restart, degrade, or wait for an
+            // operator — exactly as it would for a runtime fault.
+            if let Err(err) = self.bring_up_module(handle) {
+                let _ = self.apply_fault_policy(handle);
+                return Err(err);
+            }
             return Ok(Some(handle));
         }
         Ok(None)
@@ -1294,6 +1344,87 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Frees a module's isolated domain (page tables + backing frames)
+    /// and resets its `ModuleDomain` to `EMPTY`.  No-op if the module
+    /// never got as far as `map_module`.  `heap_bytes_used` must cover
+    /// only the heap pages actually demand-mapped via `request_pages` —
+    /// the rest of the reserved heap window was never touched.
+    fn unmap_domain(&mut self, handle: ModuleHandle, heap_bytes_used: u64) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        let domain = self.modules[slot].domain;
+        if domain.root_table_phys == 0 {
+            return Ok(());
+        }
+        destroy_domain_root(domain, heap_bytes_used)?;
+        self.modules[slot].domain = ModuleDomain::EMPTY;
+        Ok(())
+    }
+
+    /// Atomically unwinds every side effect a module's bring-up pipeline
+    /// (validate -> map -> instantiate -> start) may have produced,
+    /// regardless of which stage it reached, and leaves the module
+    /// `Faulted` — the same end state a runtime fault produces — with
+    /// *no* committed resources left behind (unlike `degrade_module`,
+    /// which keeps the domain mapped for a cheap restart, a rolled-back
+    /// module's domain may never have finished construction, so it is
+    /// always freed).  Existing recovery paths apply unchanged:
+    /// `restart_module` / `process_next_restart` already know how to
+    /// re-drive a `Faulted` module, and `ModuleFaultPolicy` still governs
+    /// whether that happens automatically or waits for an operator.
+    ///
+    /// Each cleanup step is independently idempotent (filtering by
+    /// `handle`/`instance_id`, so "nothing of mine was ever created" is
+    /// just a fast no-op), which is what makes calling all of them
+    /// unconditionally — instead of tracking exactly which stage failed
+    /// — safe.
+    fn rollback_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let mut heap_bytes_used: u64 = 0;
+        for record in self.instances.iter() {
+            if record.occupied && record.module == handle {
+                heap_bytes_used = heap_bytes_used.max(record.heap_cursor_pages as u64 * PAGE_BYTES);
+            }
+        }
+        self.revoke_capabilities(handle);
+        self.drain_messages(handle);
+        self.teardown_module_instances(handle);
+        self.unmap_domain(handle, heap_bytes_used)?;
+        let slot = self.find_module_slot(handle)?;
+        self.modules[slot].state = ModuleLifecycle::Faulted;
+        self.modules[slot].queued_restart = false;
+        self.emit_fault_event(handle)?;
+        Ok(())
+    }
+
+    /// Drives a single module through its full bring-up pipeline as one
+    /// atomic unit: either every stage succeeds and the module ends up
+    /// `Running`, or the first failing stage triggers `rollback_module`
+    /// and the original error is returned with the module cleanly
+    /// `Faulted` — never half-mapped, half-instantiated, or leaking a
+    /// domain/instance/capability.
+    ///
+    /// This is what lets `realize_boot_modules` treat each plugin as an
+    /// independent unit: one module's failure can't corrupt another's
+    /// state, and a caller can retry a rolled-back module later without
+    /// first hand-untangling whatever it left behind.
+    fn bring_up_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let outcome = (|| {
+            self.validate_module(handle)?;
+            self.map_module(handle)?;
+            self.instantiate_module(handle)?;
+            self.start_module(handle)
+        })();
+        if let Err(err) = outcome {
+            // Best-effort: if rollback itself fails (e.g. the domain
+            // teardown faults), surface that failure instead of masking
+            // it as the original error — a stuck half-torn-down domain
+            // is a more urgent problem than the bring-up failure that
+            // triggered it.
+            self.rollback_module(handle)?;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn disconnect_endpoints(&mut self, handle: ModuleHandle) {
         for idx in 0..self.subscriptions.len() {
             if !self.subscriptions[idx].occupied {
@@ -1361,14 +1492,15 @@ impl Supervisor {
         Ok(())
     }
 
-    fn fault_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+    /// Emit a Fault control-plane envelope so shell/observer can show the
+    /// most recent fault subject + policy + restart count.  Shared by
+    /// `fault_module` (runtime faults) and `rollback_module` (bring-up
+    /// failures) so both surfaces the same way to operators.
+    fn emit_fault_event(&self, handle: ModuleHandle) -> Result<(), SupervisorError> {
         let slot = self.find_module_slot(handle)?;
-        self.modules[slot].state = ModuleLifecycle::Faulted;
         let policy = self.modules[slot].source.fault_policy();
         let restart_count = self.modules[slot].restart_generation;
         let module_id = self.modules[slot].source.module_id();
-        // Emit a Fault control-plane envelope so shell/observer can show
-        // the most recent fault subject + policy + restart count.
         gos_runtime::with_runtime(|rt| {
             rt.emit_control_plane(
                 ControlPlaneMessageKind::Fault,
@@ -1377,6 +1509,27 @@ impl Supervisor {
                 restart_count as u64,
             );
         });
+        Ok(())
+    }
+
+    fn fault_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        self.modules[slot].state = ModuleLifecycle::Faulted;
+        self.emit_fault_event(handle)?;
+        self.apply_fault_policy(handle)
+    }
+
+    /// Decide what happens to an already-`Faulted` module: give the
+    /// restart policy another try (bounded by
+    /// `MAX_RESTARTS_BEFORE_DEGRADE`), degrade permanently, or leave it
+    /// for an operator.  Split out of `fault_module` so
+    /// `process_next_restart` can re-apply the same policy after a
+    /// `bring_up_module` retry fails, without emitting a second
+    /// duplicate Fault control-plane event.
+    fn apply_fault_policy(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        let policy = self.modules[slot].source.fault_policy();
+        let restart_count = self.modules[slot].restart_generation;
         match policy {
             ModuleFaultPolicy::Restart | ModuleFaultPolicy::RestartAlways => {
                 if restart_count >= MAX_RESTARTS_BEFORE_DEGRADE {
@@ -1410,6 +1563,41 @@ impl Supervisor {
         self.find_module_slot(handle)
             .map(|slot| self.modules[slot].state == ModuleLifecycle::Faulted)
             .unwrap_or(true)
+    }
+
+    fn module_lifecycle(&self, handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
+        let slot = self.find_module_slot(handle)?;
+        Ok(self.modules[slot].state)
+    }
+
+    /// Fill `out` with a status summary for every occupied module slot,
+    /// in slot order, and return how many were written. Caller-supplied
+    /// buffer keeps this no_std/no-alloc; if `out` is shorter than the
+    /// number of installed modules, only the first `out.len()` are
+    /// written (matches the bring-up slot scan order, not insertion
+    /// order).
+    fn module_status_summaries(&self, out: &mut [ModuleStatusSummary]) -> usize {
+        let mut written = 0;
+        for record in self.modules.iter() {
+            if written >= out.len() {
+                break;
+            }
+            if !record.occupied {
+                continue;
+            }
+            let degraded = record.state == ModuleLifecycle::Faulted
+                && record.restart_generation >= MAX_RESTARTS_BEFORE_DEGRADE;
+            out[written] = ModuleStatusSummary {
+                handle: record.handle,
+                module_id: record.source.module_id(),
+                state: record.state,
+                fault_policy: record.source.fault_policy(),
+                restart_generation: record.restart_generation,
+                degraded,
+            };
+            written += 1;
+        }
+        written
     }
 
     fn uninstall_module(&mut self, handle: ModuleHandle) -> Result<(), SupervisorError> {
@@ -1931,16 +2119,22 @@ impl Supervisor {
 
     fn realize_boot_modules(&mut self) -> Result<SupervisorBootReport, SupervisorError> {
         self.ensure_bootstrapped()?;
+        let mut failed_modules = 0usize;
         for idx in 0..self.modules.len() {
             if !self.modules[idx].occupied {
                 continue;
             }
             let handle = self.modules[idx].handle;
             if self.modules[idx].state == ModuleLifecycle::Installed {
-                self.validate_module(handle)?;
-                self.map_module(handle)?;
-                self.instantiate_module(handle)?;
-                self.start_module(handle)?;
+                // Each module is its own atomic unit: bring_up_module
+                // either commits it to Running or rolls it all the way
+                // back to a clean Faulted state. Either way we move on
+                // to the next module instead of letting one bad plugin
+                // (missing dependency, signature rejection, a faulting
+                // module_init, ...) abort boot for every other module.
+                if self.bring_up_module(handle).is_err() {
+                    failed_modules += 1;
+                }
             }
         }
         // Defense-in-depth: after every module has been started, sweep
@@ -1956,6 +2150,7 @@ impl Supervisor {
             running_modules: snapshot.running_modules,
             isolated_domains: snapshot.isolated_domains,
             published_capabilities: snapshot.published_capabilities,
+            failed_modules,
         })
     }
 
@@ -2034,6 +2229,56 @@ impl Supervisor {
 
 static SUPERVISOR: Mutex<Supervisor> = Mutex::new(Supervisor::new());
 static ACTIVE_SUPERVISOR: AtomicPtr<Supervisor> = AtomicPtr::new(core::ptr::null_mut());
+
+// ── V2.2 Rewrite Engine ──────────────────────────────────────────────────────
+//
+// A global `RewriteEngine` holds the set of active rewrite rules.  At the end
+// of each `service_system_cycle` the engine evaluates every rule against the
+// current graph topology via `RuntimeGraphView`, then applies each firing
+// rule's mutation through `gos_runtime::apply_cypher_mutation` and emits a
+// `RuleApplied` control-plane telemetry event.
+//
+// The engine is intentionally separate from `SUPERVISOR` so the two locks
+// can be acquired independently — no deadlock risk from concurrent reads.
+
+static REWRITE_ENGINE: Mutex<RewriteEngine> = Mutex::new(RewriteEngine::new());
+
+// V2.3 epoch-diff render skip: track the graph_epoch seen at end of each
+// service_system_cycle.  When the epoch is stable across cycles, no render
+// signal needs to be posted — this is the infrastructure for "idle = 0 frames"
+// (V2.3 Demo #2 pre-req).  Initialised to u64::MAX so the first cycle always
+// sees a change and does NOT skip.
+static LAST_RENDER_EPOCH: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Count of service_system_cycle calls where graph_epoch was unchanged.
+static IDLE_CYCLE_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Peak dispatch-loop iteration depth across all service_system_cycle calls.
+/// Lets operators see how far the system is from the MAX_CYCLE_ITERATIONS cap
+/// (2048) without waiting for a CausalOverflow event.
+static CAUSAL_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// Thin view adapter: bridges the `gos-rewrite::GraphView` trait to the
+/// module-level `gos_runtime::*` public API so the engine can evaluate
+/// structural predicates (node presence, edge existence, epoch) without
+/// holding the runtime lock across the full rule-sweep.
+struct RuntimeGraphView;
+
+impl GraphView for RuntimeGraphView {
+    fn node_exists(&self, id: NodeId) -> bool {
+        gos_runtime::node_exists_by_id(id)
+    }
+
+    fn edge_exists(&self, from: NodeId, to: NodeId, kind: ReceptiveEdgeKind) -> bool {
+        gos_runtime::edge_exists_by_kind(from, to, kind)
+    }
+
+    fn epoch(&self) -> u64 {
+        gos_runtime::graph_epoch()
+    }
+
+    fn snapshot(&self) -> GraphSnapshot {
+        gos_runtime::snapshot()
+    }
+}
 
 fn with_supervisor<R>(f: impl FnOnce(&Supervisor) -> R) -> R {
     let active = ACTIVE_SUPERVISOR.load(Ordering::SeqCst);
@@ -2438,6 +2683,29 @@ pub fn realize_boot_modules() -> Result<SupervisorBootReport, SupervisorError> {
     SUPERVISOR.lock().realize_boot_modules()
 }
 
+/// Atomically run a single `Installed`/`Stopped` module through
+/// validate -> map -> instantiate -> start. On success the module ends
+/// up `Running`; on failure it is rolled back to a clean `Faulted` state
+/// (no leaked domain/instance/capabilities) and the triggering error is
+/// returned. Lets a caller retry an individual module — e.g. one that
+/// `realize_boot_modules` rolled back for a missing dependency that has
+/// since been installed — without re-running the whole boot sequence.
+pub fn bring_up_module(handle: ModuleHandle) -> Result<(), SupervisorError> {
+    SUPERVISOR.lock().bring_up_module(handle)
+}
+
+pub fn module_lifecycle(handle: ModuleHandle) -> Result<ModuleLifecycle, SupervisorError> {
+    SUPERVISOR.lock().module_lifecycle(handle)
+}
+
+/// Snapshot the lifecycle/fault-policy/restart state of every installed
+/// module into `out`, returning how many were written. Lets callers
+/// (e.g. the shell `modules` command) render a global health view
+/// instead of having to know individual handles up front.
+pub fn module_status_summaries(out: &mut [ModuleStatusSummary]) -> usize {
+    SUPERVISOR.lock().module_status_summaries(out)
+}
+
 pub fn snapshot() -> Result<SupervisorSnapshot, SupervisorError> {
     let guard = SUPERVISOR.lock();
     guard.ensure_bootstrapped()?;
@@ -2612,11 +2880,87 @@ pub fn service_system_cycle() {
         }
         iter = iter.wrapping_add(1);
         if iter >= MAX_CYCLE_ITERATIONS {
-            // Diagnostic break — leaves the runtime in whatever state
-            // it reached.  Steady-state shell pump will pick back up.
+            // Emit a CausalOverflow telemetry event so the shell `where`
+            // view and serial logs can surface deep chains or livelock
+            // candidates without silently truncating them.
+            gos_runtime::notify_causal_overflow(iter);
             break;
         }
     }
+    // Record peak dispatch depth for observability (V2.3 causal depth counter).
+    CAUSAL_DEPTH_MAX.fetch_max(iter as u64, Ordering::Relaxed);
+
+    // ── V2.2: Rewrite pass ────────────────────────────────────────────────────
+    // After the dispatch loop quiesces, evaluate every registered rewrite rule
+    // against the current graph topology.  Each firing rule's mutation is
+    // applied via the audit path and a `RuleApplied` control-plane event is
+    // emitted so the shell and serial log can trace rule activity.
+    //
+    // The epoch snapshot after applying all mutations is used for the telemetry
+    // arg1, giving operators a stable reference point for "what epoch did this
+    // rule produce."
+    {
+        let sentinel = RewriteAction {
+            mutation: gos_cypher_mut::CypherMutation::AddEdge {
+                from: NodeId::ZERO,
+                to: NodeId::ZERO,
+                edge_kind: ReceptiveEdgeKind::Mount,
+            },
+            source: [0u8; 16],
+        };
+        let mut out = [(0usize, sentinel); MAX_REWRITE_RULES];
+        let fired = REWRITE_ENGINE.lock().apply_rules(&RuntimeGraphView, &mut out);
+        for (rule_idx, action) in out[..fired].iter().copied() {
+            let _ = gos_runtime::apply_cypher_mutation(action.mutation, action.source);
+            let epoch_after = gos_runtime::graph_epoch();
+            gos_runtime::emit_rule_applied(action.source, rule_idx as u32, epoch_after);
+        }
+    }
+
+    // V2.3 epoch-diff render skip: compare current graph_epoch with the epoch
+    // recorded at the end of the previous cycle.  When the graph is structurally
+    // stable (no node/edge add/remove), we increment the idle counter instead of
+    // posting a render signal — the render node's Subscribe path handles wakeup.
+    let epoch_now = gos_runtime::graph_epoch();
+    let prev_epoch = LAST_RENDER_EPOCH.swap(epoch_now, Ordering::Relaxed);
+    if epoch_now == prev_epoch {
+        IDLE_CYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Register a rewrite rule in the engine.  Rules are evaluated in insertion
+/// order at the end of every `service_system_cycle`.  Returns the rule index
+/// (for telemetry correlation) or `RewriteError::RuleTableFull` when the
+/// 64-rule limit is reached.
+pub fn add_rewrite_rule(rule: RewriteRule) -> Result<usize, RewriteError> {
+    REWRITE_ENGINE.lock().add_rule(rule)
+}
+
+/// Remove all registered rewrite rules and reset the fire counter.
+pub fn clear_rewrite_rules() {
+    REWRITE_ENGINE.lock().clear();
+}
+
+/// The graph_epoch recorded at the end of the most recent service_system_cycle.
+/// V2.3 render nodes compare this against `gos_runtime::graph_epoch()` to
+/// decide whether a repaint is needed.
+pub fn render_epoch() -> u64 {
+    LAST_RENDER_EPOCH.load(Ordering::Relaxed)
+}
+
+/// Number of service_system_cycle calls where graph_epoch was unchanged since
+/// the previous call.  Rising value means the graph is quiescent (idle frames
+/// are being suppressed — V2.3 Demo #2 pre-req).
+pub fn idle_cycle_count() -> u64 {
+    IDLE_CYCLE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Peak dispatch-loop iteration depth seen across all service_system_cycle
+/// calls since boot.  Compared against MAX_CYCLE_ITERATIONS (2048) this gives
+/// operators a continuous margin-to-cap metric without waiting for a
+/// CausalOverflow event.
+pub fn causal_depth_max() -> u64 {
+    CAUSAL_DEPTH_MAX.load(Ordering::Relaxed)
 }
 
 pub fn claim_resource(

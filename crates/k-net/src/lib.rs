@@ -746,8 +746,8 @@ fn e1000_ring_init(state: &mut NetState) {
 
     // ── RX ring ──────────────────────────────────────────────────────────────
     unsafe {
-        for i in 0..RX_DESC_COUNT {
-            let buf_virt = rx_bufs[i].as_ptr() as u64;
+        for (i, buf) in rx_bufs.iter().enumerate() {
+            let buf_virt = buf.as_ptr() as u64;
             let buf_phys = match gos_hal::phys::virt_to_phys(buf_virt) {
                 Some(p) => p,
                 None => return, // page-table miss — abort ring init

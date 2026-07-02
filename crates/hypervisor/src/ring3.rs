@@ -2,16 +2,12 @@
 //!
 //! This module wires the kernel side of the syscall path:
 //!
-//!   1. `IA32_EFER.SCE = 1`  — enable the `syscall` instruction.
-//!   2. `IA32_STAR`          — encodes the kernel CS/SS and user CS/SS
-//!                             selectors so `syscall`/`sysret` flip the
-//!                             segment registers atomically.
-//!   3. `IA32_LSTAR`         — kernel handler RIP for the `syscall`
-//!                             instruction.
-//!   4. `IA32_FMASK`         — RFLAGS bits to clear on `syscall` entry
-//!                             (we mask IF so interrupts are disabled
-//!                             until the handler is on its kernel
-//!                             stack and ready).
+//!   1. `IA32_EFER.SCE = 1` — enable the `syscall` instruction.
+//!   2. `IA32_STAR` — encodes the kernel CS/SS and user CS/SS selectors
+//!      so `syscall`/`sysret` flip the segment registers atomically.
+//!   3. `IA32_LSTAR` — kernel handler RIP for the `syscall` instruction.
+//!   4. `IA32_FMASK` — RFLAGS bits to clear on `syscall` entry (masks IF
+//!      so interrupts are disabled until the handler is on its kernel stack).
 //!
 //! The handler is a small naked trampoline that calls
 //! [`rust_syscall_handler`], which decodes RAX as the syscall number

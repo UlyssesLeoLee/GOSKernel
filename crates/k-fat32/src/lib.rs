@@ -207,9 +207,9 @@ impl Fat32 {
 fn copy_8_3_name(raw: &[u8], dst: &mut [u8; 64]) -> u8 {
     // raw[0..8] is name (space-padded), raw[8..11] is extension.
     let mut len = 0u8;
-    for i in 0..8 {
-        if raw[i] != b' ' {
-            dst[len as usize] = raw[i];
+    for &b in &raw[0..8] {
+        if b != b' ' {
+            dst[len as usize] = b;
             len += 1;
         }
     }
@@ -217,9 +217,9 @@ fn copy_8_3_name(raw: &[u8], dst: &mut [u8; 64]) -> u8 {
     if has_ext {
         dst[len as usize] = b'.';
         len += 1;
-        for i in 8..11 {
-            if raw[i] != b' ' {
-                dst[len as usize] = raw[i];
+        for &b in &raw[8..11] {
+            if b != b' ' {
+                dst[len as usize] = b;
                 len += 1;
             }
         }
