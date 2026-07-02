@@ -3529,6 +3529,115 @@ pub fn dispatch_graph_eccentricity(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.42: `graph katz` — incoming Katz centrality per node (walk-count influence).
+///
+/// Katz centrality counts all directed walks of every length ending at each node,
+/// attenuated by α = 1/8 per hop.  Unlike closeness (which only weighs shortest
+/// paths) Katz also credits indirect influence through longer walks.
+///
+///   KC[v] = Σ_{k=1}^{∞} (1/8)^k × (directed walks of length k ending at v)
+///
+/// Score interpretation (×10⁻⁶):
+///   0          → leaf   (no walks reach this node; pure source or disconnected)
+///   0 < s ≤ 1M → relay  (receives moderate walk-influence)
+///   s > 1M     → hub    (receives heavy walk-influence above α⁻¹ = 8× normalisation)
+///
+/// Output sorted descending: highest-influence nodes first.
+/// OS analogy: `netstat -s` hop-weight — which kernel service accumulates the
+/// most signal traffic across all directed path lengths?
+pub fn dispatch_graph_katz(sink: &ConsoleSink) {
+    const MAX_N:  usize = 128;
+    const SCALE:  usize = 1_000_000;
+    let (vecs, katz, total) = gos_runtime::graph_katz::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph katz\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              katz  role\n");
+    set_color(sink, 7, 0);
+
+    let mut hub_count = 0usize;
+
+    for i in 0..total {
+        let score  = katz[i] as usize;
+        let is_hub  = score > SCALE;
+        let is_leaf = score == 0;
+
+        if is_hub {
+            set_color(sink, 14, 0); // bright yellow
+        } else if !is_leaf {
+            set_color(sink, 11, 0); // cyan
+        } else {
+            set_color(sink, 8, 0);  // dark grey
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector column to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // Katz score (right-aligned, 6 wide).
+        set_color(sink, if is_hub { 14 } else if !is_leaf { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score);
+        print_str(sink, "  ");
+
+        // Role label.
+        if is_hub {
+            set_color(sink, 14, 0);
+            print_str(sink, "hub");
+            hub_count += 1;
+        } else if !is_leaf {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "leaf");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    let max_katz = if total > 0 { katz[0] as usize } else { 0 }; // sorted descending, so [0] is max
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  α=1/8  max-katz: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_katz);
+    set_color(sink, 8, 0);
+    print_str(sink, " (×1e-6)");
+    if hub_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  hubs: ");
+        print_num_inline(sink, hub_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

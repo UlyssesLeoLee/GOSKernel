@@ -573,6 +573,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  degree / hub       aliases for graph degree\n");
         super::print_str(sink, "  graph closeness    outgoing closeness centrality per node (like ping avg RTT census)\n");
         super::print_str(sink, "  closeness / cc     aliases for graph closeness\n");
+        super::print_str(sink, "  graph katz         incoming Katz centrality per node (walk-count influence, like netstat -s)\n");
+        super::print_str(sink, "  katz / kz          aliases for graph katz\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -933,6 +935,8 @@ fn dispatch_text_command(
         super::dispatch_graph_closeness(sink);
     } else if cmd == "graph eccentricity" || cmd == "eccentricity" || cmd == "graph ecc" || cmd == "ecc" || cmd == "graph radius" || cmd == "radius" {
         super::dispatch_graph_eccentricity(sink);
+    } else if cmd == "graph katz" || cmd == "katz" || cmd == "kz" || cmd == "graph influence" || cmd == "influence" {
+        super::dispatch_graph_katz(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))

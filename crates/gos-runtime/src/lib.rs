@@ -2295,6 +2295,112 @@ impl GraphRuntime {
         (out_vecs, out_ecc, copy_len, radius, diameter)
     }
 
+    /// V2.42: Incoming Katz centrality — counts all directed walks ending at each node.
+    ///
+    /// KC[v] = Σ_{k=1}^{∞} α^k × (number of directed walks of length k ending at v)
+    /// where α = 1/ALPHA_DEN = 1/8.
+    ///
+    /// Iterative fixed-point (20 steps, no_std, integer arithmetic):
+    ///   x^(0)[v]   = 0
+    ///   x^(t+1)[v] = Σ_{u: u→v edges} (SCALE + x^(t)[u]) / ALPHA_DEN
+    ///
+    /// Convergence: guaranteed for max_in_degree < ALPHA_DEN (= 8).
+    /// For higher in-degree, values saturate at u64::MAX (cast to u32::MAX) but
+    /// relative ordering among those nodes remains meaningful.
+    ///
+    /// Score interpretation (×10⁻⁶):
+    ///   0          → leaf   (no walks reach this node)
+    ///   0 < s ≤ 1M → relay  (receives limited walk-influence)
+    ///   s > 1M     → hub    (receives heavy walk-influence)
+    ///
+    /// Output sorted descending by Katz score.
+    /// OS analogy: `netstat -s` hop weight — which kernel service receives the
+    /// most signal traffic summed across all walk lengths?
+    pub fn graph_katz_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE:     u64   = 1_000_000;
+        const ALPHA_DEN: u64   = 8;
+        const K_ITERS:   usize = 20;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Double-buffer: x0 = current iteration, x1 = scratch for next.
+        let mut x0 = [0u64; MAX_NODES];
+        let mut x1 = [0u64; MAX_NODES];
+
+        for _iter in 0..K_ITERS {
+            // Reset x1 for this pass.
+            for si in 0..node_count {
+                x1[node_slots[si]] = 0;
+            }
+
+            // For each live node v, accumulate contributions from all u→v edges.
+            for vi in 0..node_count {
+                let v = node_slots[vi];
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.to_node != v_id { continue; }
+
+                    let u = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+
+                    // Edge u→v contributes (SCALE + x0[u]) / ALPHA_DEN to v's score.
+                    let contrib = SCALE.saturating_add(x0[u]) / ALPHA_DEN;
+                    x1[v] = x1[v].saturating_add(contrib);
+                }
+            }
+
+            // Swap buffers.
+            for si in 0..node_count {
+                x0[node_slots[si]] = x1[node_slots[si]];
+            }
+        }
+
+        // Sort descending by Katz score (insertion sort — N ≤ 128).
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_val  = x0[key_slot];
+            let mut j    = i;
+            while j > 0 && x0[sorted[j - 1]] < key_val {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // Pack output arrays (cap at N).
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_katz = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_katz[i] = x0[slot].min(u32::MAX as u64) as u32;
+        }
+
+        (out_vecs, out_katz, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4609,6 +4715,23 @@ pub fn graph_closeness<const N: usize>() -> ([VectorAddress; N], [u32; N], usize
 /// Algorithm: one BFS per source node, O(V × (V+E)).
 pub fn graph_eccentricity<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, u32, u32) {
     RUNTIME.lock().graph_eccentricity_inner()
+}
+
+/// V2.42: Incoming Katz centrality for all live nodes (iterative power series).
+///
+/// Returns `(vecs, katz, total)`:
+/// - `vecs[0..total]`  — live node vectors, descending Katz score order.
+/// - `katz[0..total]`  — Katz score × 1_000_000 per node (capped at u32::MAX).
+/// - `total`           — number of live nodes packed into the output arrays.
+///
+/// KC[v] = Σ_{k=1}^{∞} (1/8)^k × (directed walks of length k ending at v).
+/// Isolated nodes → KC = 0.  Self-loops contribute α/(1-α) = 1/7 ≈ 142_857 × 10⁻⁶.
+/// Algorithm: 20 fixed-point iterations, O(K × V × E).
+/// OS analogy: `netstat -s` — which kernel service receives the most indirect
+/// signal traffic summed across all path lengths?
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_katz<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_katz_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
