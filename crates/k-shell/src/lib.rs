@@ -3422,6 +3422,113 @@ pub fn dispatch_graph_closeness(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.41: `graph eccentricity` — per-node worst-case directed hop count.
+///
+/// Displays eccentricity for every node plus the graph radius and diameter.
+/// Sorted ascending so centre nodes (ecc == radius) appear first.
+/// Isolated nodes (ecc = 0, no reachable neighbours) appear last in dark grey.
+///
+/// OS analogy: `traceroute` worst-case latency census.
+pub fn dispatch_graph_eccentricity(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, ecc, total, radius, diameter) = gos_runtime::graph_eccentricity::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph eccentricity\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              ecc   role\n");
+    set_color(sink, 7, 0);
+
+    let mut center_count = 0usize;
+
+    for i in 0..total {
+        let score        = ecc[i];
+        let is_center    = radius > 0 && score == radius;
+        let is_periphery = diameter > 0 && score == diameter && score != radius;
+        let is_isolated  = score == 0;
+
+        if is_center {
+            set_color(sink, 14, 0); // bright yellow
+        } else if is_periphery {
+            set_color(sink, 12, 0); // red
+        } else if is_isolated {
+            set_color(sink, 8, 0);  // dark grey
+        } else {
+            set_color(sink, 11, 0); // cyan
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector column to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // Eccentricity (right-aligned, 6 wide).
+        set_color(sink,
+            if is_center { 14 } else if is_periphery { 12 } else if is_isolated { 8 } else { 11 },
+            0);
+        print_str(sink, " ");
+        print_num_right6(sink, score as usize);
+        print_str(sink, "  ");
+
+        // Role label.
+        if is_center {
+            set_color(sink, 14, 0);
+            print_str(sink, "center");
+            center_count += 1;
+        } else if is_periphery {
+            set_color(sink, 12, 0);
+            print_str(sink, "periphery");
+        } else if is_isolated {
+            set_color(sink, 8, 0);
+            print_str(sink, "isolated");
+        } else {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  radius: ");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, radius as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, "  diameter: ");
+    set_color(sink, 12, 0);
+    print_num_inline(sink, diameter as usize);
+    if center_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  center: ");
+        print_num_inline(sink, center_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

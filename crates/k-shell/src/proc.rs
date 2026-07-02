@@ -931,6 +931,8 @@ fn dispatch_text_command(
         super::dispatch_graph_centrality(sink);
     } else if cmd == "graph closeness" || cmd == "closeness" || cmd == "graph close" || cmd == "close centrality" || cmd == "cc" {
         super::dispatch_graph_closeness(sink);
+    } else if cmd == "graph eccentricity" || cmd == "eccentricity" || cmd == "graph ecc" || cmd == "ecc" || cmd == "graph radius" || cmd == "radius" {
+        super::dispatch_graph_eccentricity(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
