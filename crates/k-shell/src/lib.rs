@@ -3880,6 +3880,117 @@ pub fn dispatch_graph_hits(sink: &ConsoleSink) {
     let _ = SCALE;
 }
 
+/// V2.45: `graph community` — Label Propagation community detection.
+///
+/// Detects communities (clusters) in the kernel graph by treating all directed
+/// edges as undirected and running Label Propagation (LPA) for 20 iterations.
+/// Each node adopts the most-frequent label of its neighbors each round;
+/// tie-break: smallest label.  After convergence the algorithm assigns community
+/// ids 0, 1, 2... sorted by community size (largest = 0).
+///
+/// Community roles:
+///   major-community — the largest community (id 0)
+///   minor-community — smaller but multi-node community
+///   isolated        — single-node community (no undirected neighbors)
+///
+/// OS analogy: `iproute2 bridge vlan show` + `systemd-analyze critical-chain`
+/// — which kernel services naturally cluster into tightly coupled sub-systems?
+pub fn dispatch_graph_community(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+
+    let (vecs, comm_ids, total, comm_count) = gos_runtime::graph_community::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph community\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Count size of largest community for role annotation.
+    let mut comm_sizes = [0u8; MAX_N];
+    for i in 0..total {
+        let c = comm_ids[i] as usize;
+        if c < MAX_N { comm_sizes[c] = comm_sizes[c].saturating_add(1); }
+    }
+    let largest_size = if comm_count > 0 { comm_sizes[0] as usize } else { 0 };
+
+    // Per-community block: walk through sorted nodes detecting id boundaries.
+    let mut pos = 0usize;
+    while pos < total {
+        let cur_comm = comm_ids[pos];
+        let mut end  = pos;
+        while end < total && comm_ids[end] == cur_comm { end += 1; }
+        let size      = end - pos;
+        let is_major  = cur_comm == 0 && largest_size > 1;
+        let is_minor  = size > 1 && !is_major;
+        let is_isolated = size == 1;
+
+        let hdr_color = if is_major { 13 } else if is_minor { 11 } else { 8 };
+
+        // Community header line
+        set_color(sink, hdr_color, 0);
+        print_str(sink, "  [C");
+        print_num_inline(sink, cur_comm as usize);
+        print_str(sink, "]  ");
+        set_color(sink, 7, 0);
+        print_num_inline(sink, size);
+        print_str(sink, if size == 1 { " node" } else { " nodes" });
+        print_str(sink, "  ");
+        set_color(sink, hdr_color, 0);
+        if is_major {
+            print_str(sink, "major-community");
+        } else if is_minor {
+            print_str(sink, "minor-community");
+        } else {
+            print_str(sink, "isolated");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Member node list (up to 4 per row)
+        let mut col = 0usize;
+        for i in pos..end {
+            if col == 0 { print_str(sink, "      "); }
+            let mut vbuf = LineBuf::<20>::new();
+            vbuf.push_vector(vecs[i]);
+            let vstr = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+            set_color(sink, if is_major { 13 } else if is_minor { 11 } else { 8 }, 0);
+            print_str(sink, vstr);
+            set_color(sink, 7, 0);
+            col += 1;
+            if col == 4 || i + 1 == end {
+                print_str(sink, "\n");
+                col = 0;
+            } else {
+                print_str(sink, "  ");
+            }
+        }
+
+        pos = end;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  LPA/20iter  communities: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, comm_count);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

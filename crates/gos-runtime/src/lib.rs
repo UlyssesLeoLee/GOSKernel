@@ -2641,6 +2641,164 @@ impl GraphRuntime {
         (out_vecs, out_hub, out_auth, copy_len)
     }
 
+    /// V2.45: Label Propagation Algorithm (LPA) for community detection.
+    ///
+    /// Treats directed edges as undirected (combines in-edges and out-edges)
+    /// so that the strongly connected kernel sub-systems form natural clusters.
+    ///
+    /// Algorithm (synchronous, 20 iterations):
+    ///   1. Initialize: each node is in its own community (label = slot index).
+    ///   2. Each iteration: every node adopts the most-frequent label seen among
+    ///      all its neighbors (both in- and out-neighbors).
+    ///      Tie-break: smallest label value (deterministic, avoids oscillation).
+    ///   3. After 20 iterations the labels are relabelled 0, 1, 2... sorted by
+    ///      community size descending (largest community gets id=0).
+    ///
+    /// Returns `(vecs, community_ids, node_count, community_count)`.
+    /// Output sorted by community_id ascending, then by slot ascending within
+    /// each community, so that all members of the same community are contiguous.
+    ///
+    /// Community roles (by size relative to largest):
+    ///   major-community — the largest community
+    ///   minor-community — smaller but multi-node community
+    ///   isolated        — single-node community (no undirected neighbors)
+    pub fn graph_community_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u8; N], usize, usize) {
+        const ITERS: usize = 20;
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return ([VectorAddress::new(0, 0, 0, 0); N], [0u8; N], 0, 0);
+        }
+
+        // Initialize: label[slot] = slot (each node its own community).
+        let mut label = [0u8; MAX_NODES];
+        for si in 0..node_count {
+            label[node_slots[si]] = node_slots[si] as u8;
+        }
+
+        // Asynchronous LPA: update each node's label immediately so that later
+        // nodes in the same round see already-updated labels.  This avoids the
+        // classic synchronous-LPA oscillation on bipartite and chain topologies
+        // (where synchronous LPA cycles between two complementary colorings
+        // forever instead of converging to one community).
+        for _iter in 0..ITERS {
+            for si in 0..node_count {
+                let v    = node_slots[si];
+                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+
+                // Frequency table: freq[label] = how many neighbors carry that label.
+                let mut freq = [0u8; MAX_NODES];
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    let nb_id = if edge.spec.from_node == v_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == v_id {
+                        edge.spec.from_node
+                    } else {
+                        continue;
+                    };
+                    if let Some(nb) = self.node_slot_by_id(nb_id) {
+                        let l = label[nb] as usize;
+                        if l < MAX_NODES { freq[l] = freq[l].saturating_add(1); }
+                    }
+                }
+
+                // Adopt the label with the highest frequency; tie-break: smallest.
+                let mut best_l    = MAX_NODES; // sentinel
+                let mut best_freq = 0u8;
+                for l in 0..MAX_NODES {
+                    if freq[l] == 0 { continue; }
+                    if freq[l] > best_freq
+                        || (freq[l] == best_freq && (best_l >= MAX_NODES || l < best_l))
+                    {
+                        best_freq = freq[l];
+                        best_l    = l;
+                    }
+                }
+                // Immediate update (asynchronous): later nodes in this round
+                // already see v's new label, enabling chain convergence in one pass.
+                if best_l < MAX_NODES {
+                    label[v] = best_l as u8;
+                }
+            }
+        }
+
+        // Count per-community sizes.
+        let mut comm_size = [0u8; MAX_NODES];
+        for si in 0..node_count {
+            let l = label[node_slots[si]] as usize;
+            if l < MAX_NODES { comm_size[l] = comm_size[l].saturating_add(1); }
+        }
+
+        // Collect non-empty communities and sort by size desc, then by label asc.
+        let mut comm_order = [0usize; MAX_NODES];
+        let mut comm_count = 0usize;
+        for l in 0..MAX_NODES {
+            if comm_size[l] > 0 {
+                comm_order[comm_count] = l;
+                comm_count += 1;
+            }
+        }
+        for i in 1..comm_count {
+            let key_l = comm_order[i];
+            let key_s = comm_size[key_l];
+            let mut j = i;
+            while j > 0 {
+                let p   = comm_order[j - 1];
+                let p_s = comm_size[p];
+                if p_s > key_s || (p_s == key_s && p < key_l) { break; }
+                comm_order[j] = p;
+                j -= 1;
+            }
+            comm_order[j] = key_l;
+        }
+
+        // Build label → new community_id mapping.
+        let mut lbl_to_comm = [0u8; MAX_NODES];
+        for ci in 0..comm_count {
+            lbl_to_comm[comm_order[ci]] = ci as u8;
+        }
+
+        // Sort nodes by (community_id asc, slot asc) for grouped output.
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let ks = sorted[i];
+            let kc = lbl_to_comm[label[ks] as usize] as usize;
+            let mut j = i;
+            while j > 0 {
+                let ps = sorted[j - 1];
+                let pc = lbl_to_comm[label[ps] as usize] as usize;
+                if pc < kc || (pc == kc && ps < ks) { break; }
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = ks;
+        }
+
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_comm = [0u8; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_comm[i] = lbl_to_comm[label[slot] as usize];
+        }
+
+        (out_vecs, out_comm, copy_len, comm_count)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -5018,6 +5176,20 @@ pub fn graph_pagerank<const N: usize>() -> ([VectorAddress; N], [u32; N], usize)
 /// signal-forwarders (hub) vs the most-cited destinations (authority)?
 pub fn graph_hits<const N: usize>() -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
     RUNTIME.lock().graph_hits_inner()
+}
+
+/// V2.45: Label Propagation community detection over the live kernel graph.
+///
+/// Treats directed edges as undirected; returns community assignments
+/// for all live nodes.  See `RuntimeState::graph_community_inner` for the
+/// full algorithm description.
+///
+/// Returns `(vecs, community_ids, node_count, community_count)`.
+/// The arrays `vecs[0..node_count]` and `community_ids[0..node_count]`
+/// are sorted so that all members of the same community are contiguous
+/// and communities are ordered by size descending (largest = id 0).
+pub fn graph_community<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
+    RUNTIME.lock().graph_community_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
