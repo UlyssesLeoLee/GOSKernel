@@ -1913,7 +1913,7 @@ impl GraphRuntime {
 
             // BFS data structures (stack arrays, slot-indexed).
             let mut dist    = [u32::MAX; MAX_NODES]; // shortest-path distance from s
-            let mut sigma   = [0u32;     MAX_NODES]; // # shortest paths from s to v
+            let mut sigma   = [0u64;     MAX_NODES]; // # shortest paths from s to v
             let mut queue   = [0usize;   MAX_NODES]; // BFS queue (slot indices)
             let mut bfs_ord = [0usize;   MAX_NODES]; // BFS traversal order for back-prop
 
@@ -1996,10 +1996,10 @@ impl GraphRuntime {
                     if dist[w] != dist[v].saturating_add(1) { continue; }
                     if sigma[w] == 0 { continue; }
 
-                    // δ[v] += (σ[v] / σ[w]) × (SCALE + δ[w])
-                    let contribution = (sigma[v] as u64)
+                    // δ[v] += σ[v] × (SCALE + δ[w]) / σ[w]  (multiply before divide)
+                    let contribution = sigma[v]
                         .saturating_mul(SCALE.saturating_add(delta[w]))
-                        / (sigma[w] as u64);
+                        / sigma[w];
                     delta[v] = delta[v].saturating_add(contribution);
                 }
 

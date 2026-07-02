@@ -43,10 +43,12 @@ For each source node s:
    scan all in-edges (v → w) where `dist[w] == dist[v] + 1` (i.e., v is a
    predecessor of w in the s-rooted shortest-path DAG):
    ```
-   delta[v] += (sigma[v] / sigma[w]) × (SCALE + delta[w])
+   delta[v] += sigma[v] × (SCALE + delta[w]) / sigma[w]
    ```
    This is the Brandes pair-dependency recurrence, computed in integer arithmetic
    with fixed-point scaling (SCALE = 1_000_000) to avoid fractions.
+   Note: the multiply must precede the divide — dividing sigma[v]/sigma[w] first
+   would integer-truncate the ratio to 0 in most cases.
    Accumulate into `bc_scaled[w] += delta[w]` for each w ≠ s.
 
 3. **Output** — divide `bc_scaled[slot] / SCALE` to get the integer truncation
@@ -57,8 +59,9 @@ For each source node s:
 For V=128, E=512: ~81K operations per BFS × 128 sources = ~10M ops total.
 Acceptable for the kernel's MAX_NODES=128 / MAX_EDGES=512 bounds.
 
-**Overflow safety**: `sigma` uses `u32` with `saturating_add`; `delta` and
-`bc_scaled` use `u64` with `saturating_mul`/`saturating_add`.
+**Overflow safety**: `sigma` uses `u64` with `saturating_add` (widened from u32
+to prevent overflow in layered graphs where shortest-path counts compound across
+layers); `delta` and `bc_scaled` use `u64` with `saturating_mul`/`saturating_add`.
 
 **Return layout**:
 - `vecs[0..total]` — live node vectors, descending betweenness order.
@@ -189,6 +192,7 @@ each contribute σ(s,t,X)/σ(s,t) = 1/1 = 1 to BC[X]. Sum = 9.
   `build-std = ["std", "panic_abort"]`.
 - Version number: V2.39 (sequential after V2.38 graph-degree).
 - All arithmetic uses saturating operations to prevent overflow in dense graphs.
+- `sigma` is `u64` to prevent overflow in layered graphs with many parallel shortest paths.
 - SCALE = 1_000_000 preserves fractional accuracy for graphs with multiple
   equal-length paths (diamond topologies, parallel routes).
 
