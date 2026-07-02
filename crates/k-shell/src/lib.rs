@@ -3308,6 +3308,120 @@ pub fn dispatch_graph_centrality(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.40: `graph closeness` — outgoing closeness centrality per node (directed BFS).
+///
+/// Closeness centrality measures how quickly a node can reach all other nodes
+/// via directed edges.  For node v:
+///   CC[v] = r_v × 1_000_000 / Σ_{u reachable from v, u≠v} d(v,u)
+/// where r_v = number of nodes reachable from v (excl. v), d(v,u) = BFS distance.
+/// Isolated nodes (r_v = 0) → CC[v] = 0.
+///
+/// High CC → node can reach the rest of the graph in very few directed hops.
+/// CC = 0  → node is isolated or cannot reach any other node (pure sink).
+///
+/// Output: table sorted descending by CC score, annotated with role:
+///   central    — top CC score: most efficiently connected broadcaster
+///   relay      — moderate CC: reaches others but not the most efficiently
+///   peripheral — zero or very low CC: isolated or deep in the graph
+///
+/// OS analogy: `ping` average RTT census — which kernel service node can
+/// broadcast to all others via the fewest outgoing hops on average?
+pub fn dispatch_graph_closeness(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, cc, total) = gos_runtime::graph_closeness::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph closeness\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              cc    role\n");
+    set_color(sink, 7, 0);
+
+    let mut max_cc = 0u32;
+    for i in 0..total {
+        if cc[i] > max_cc { max_cc = cc[i]; }
+    }
+
+    // Threshold: "relay" if CC > 0 and < max; "central" if CC == max (and > 0).
+    let mut central_count = 0usize;
+
+    for i in 0..total {
+        let score      = cc[i];
+        let is_central = max_cc > 0 && score == max_cc;
+        let is_relay   = score > 0 && !is_central;
+
+        if is_central {
+            set_color(sink, 14, 0); // bright yellow
+        } else if is_relay {
+            set_color(sink, 11, 0); // cyan
+        } else {
+            set_color(sink, 8, 0);  // dark grey
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        // Pad vector to 16 chars.
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // CC score (right-aligned, 6 wide).
+        set_color(sink, if is_central { 14 } else if is_relay { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score as usize);
+        print_str(sink, "  ");
+
+        // Role label.
+        if is_central {
+            set_color(sink, 14, 0);
+            print_str(sink, "central");
+            central_count += 1;
+        } else if is_relay {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "peripheral");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-cc: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_cc as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, " (×1e-6)");
+    if central_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  central: ");
+        print_num_inline(sink, central_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

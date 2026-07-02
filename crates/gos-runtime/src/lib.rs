@@ -2034,6 +2034,134 @@ impl GraphRuntime {
         (out_vecs, out_bc, copy_len)
     }
 
+    /// V2.40: Closeness centrality for each live node (directed, outgoing BFS).
+    ///
+    /// For a directed graph, the outgoing closeness centrality of node v is:
+    ///   CC[v] = r_v / Σ_{u reachable from v, u≠v} d(v,u)
+    /// where r_v is the number of nodes reachable from v (excluding v itself)
+    /// and d(v,u) is the shortest-path distance from v to u via directed edges.
+    ///
+    /// Disconnected nodes (r_v = 0) get CC[v] = 0.
+    /// Fixed-point scaling (SCALE = 1_000_000) avoids floating-point arithmetic.
+    /// Output `cc[i]` = (r_v * SCALE) / Σ d(v,u), integer-truncated.
+    ///
+    /// Returns `(vecs, cc, total)`:
+    ///   vecs[0..total] — live node vectors, descending closeness order.
+    ///   cc[0..total]   — closeness score × SCALE per node.
+    ///   total          — number of live nodes packed into the output arrays.
+    ///
+    /// Algorithm: one BFS per source node, O(V × (V+E)).
+    /// OS analogy: `ping` round-trip times — which kernel service node can reach
+    /// all others in the fewest directed hops on average?
+    pub fn graph_closeness_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE: u64 = 1_000_000;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Per-slot closeness accumulator (scaled).
+        let mut cc_scaled = [0u64; MAX_NODES];
+
+        // One BFS per source node following outgoing edges.
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+
+            let mut dist  = [u32::MAX; MAX_NODES];
+            let mut queue = [0usize;   MAX_NODES];
+
+            dist[s]  = 0;
+            queue[0] = s;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+                let _ = s_id; // used via BFS below
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            // Sum distances from s to all reachable nodes (excluding s itself).
+            let mut dist_sum = 0u64;
+            let mut reachable_count = 0u64;
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX {
+                    dist_sum = dist_sum.saturating_add(dist[t] as u64);
+                    reachable_count += 1;
+                }
+            }
+
+            // CC[s] = reachable_count * SCALE / dist_sum  (0 if isolated).
+            cc_scaled[s] = if dist_sum == 0 {
+                0
+            } else {
+                reachable_count.saturating_mul(SCALE) / dist_sum
+            };
+        }
+
+        // Sort node_slots by descending closeness (insertion sort — N ≤ 128).
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_cc   = cc_scaled[key_slot];
+            let mut j    = i;
+            while j > 0 && cc_scaled[sorted[j - 1]] < key_cc {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // Pack output arrays (cap at N).
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_cc   = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_cc[i]   = (cc_scaled[slot]).min(u32::MAX as u64) as u32;
+        }
+
+        (out_vecs, out_cc, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4319,6 +4447,23 @@ pub fn graph_degree<const N: usize>() -> ([VectorAddress; N], [u16; N], [u16; N]
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_centrality<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_centrality_inner()
+}
+
+/// V2.40: Outgoing closeness centrality for all live nodes (directed BFS).
+///
+/// Returns `(vecs, cc, total)`:
+/// - `vecs[0..total]` — live node vectors, descending closeness order.
+/// - `cc[0..total]`   — closeness score × 1_000_000 per node.
+/// - `total`          — number of live nodes packed into the output arrays.
+///
+/// For each node v: CC[v] = r_v × 1_000_000 / Σ d(v,u) over reachable u≠v.
+/// Isolated nodes (r_v = 0) → CC = 0.
+/// Algorithm: one BFS per source, O(V × (V+E)).
+/// OS analogy: `ping` RTT average — which kernel service can reach all others
+/// in the fewest directed hops?
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_closeness<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_closeness_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

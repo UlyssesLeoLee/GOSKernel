@@ -571,6 +571,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  reachable <V>      alias for graph reachable\n");
         super::print_str(sink, "  graph degree       in/out degree per node + hub identification (like ip -s link show)\n");
         super::print_str(sink, "  degree / hub       aliases for graph degree\n");
+        super::print_str(sink, "  graph closeness    outgoing closeness centrality per node (like ping avg RTT census)\n");
+        super::print_str(sink, "  closeness / cc     aliases for graph closeness\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -927,6 +929,8 @@ fn dispatch_text_command(
         super::dispatch_graph_degree(sink);
     } else if cmd == "graph centrality" || cmd == "centrality" || cmd == "graph central" || cmd == "central" || cmd == "betweenness" {
         super::dispatch_graph_centrality(sink);
+    } else if cmd == "graph closeness" || cmd == "closeness" || cmd == "graph close" || cmd == "close centrality" || cmd == "cc" {
+        super::dispatch_graph_closeness(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
