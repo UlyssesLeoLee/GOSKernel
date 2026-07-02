@@ -48,14 +48,19 @@ static KEY_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsi
 static KEY_TAIL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Push a decoded ASCII byte for desktop consumers (in addition to shell routing).
+///
+/// Wraps in a critical section so the IRQ1 post::emit path and the main-loop
+/// inject_byte path cannot both reserve the same KEY_BUF slot.
 pub fn push_key(b: u8) {
-    use core::sync::atomic::Ordering::Relaxed;
-    let h = KEY_HEAD.load(Relaxed);
-    let nh = (h + 1) % KEY_RING;
-    if nh != KEY_TAIL.load(Relaxed) {
-        KEY_BUF[h].store(b, Relaxed);
-        KEY_HEAD.store(nh, Relaxed);
-    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        use core::sync::atomic::Ordering::Relaxed;
+        let h = KEY_HEAD.load(Relaxed);
+        let nh = (h + 1) % KEY_RING;
+        if nh != KEY_TAIL.load(Relaxed) {
+            KEY_BUF[h].store(b, Relaxed);
+            KEY_HEAD.store(nh, Relaxed);
+        }
+    });
 }
 
 /// Drain one decoded key for the desktop, or None if empty.

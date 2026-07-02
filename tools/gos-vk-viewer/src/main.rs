@@ -140,7 +140,9 @@ fn parse_last_frame(text: &str) -> Option<Frame> {
                 let p: Vec<&str> = rest.splitn(7, ':').collect();
                 if p.len() >= 5 && !p[0].is_empty() {
                     let idx = f.nodes.len();
-                    f.nodes.push(Node { kx: p[1].parse().unwrap_or(0.0), ky: p[2].parse().unwrap_or(0.0), is_red: idx % 2 == 0 });
+                    let kx = p[1].parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(0.0);
+                    let ky = p[2].parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(0.0);
+                    f.nodes.push(Node { kx, ky, is_red: idx % 2 == 0 });
                     f.id_index.insert(p[0].to_string(), idx);
                 }
             }
@@ -219,7 +221,7 @@ fn layout_rings(nodes: &[Node]) -> Vec<Vec3> {
         return Vec::new();
     }
     let mut keys: Vec<f32> = nodes.iter().map(|n| n.ky).collect();
-    keys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    keys.sort_by(|a, b| a.total_cmp(b));
     keys.dedup_by(|a, b| (*a - *b).abs() < 1.0);
     let nt = keys.len().max(1);
     let tier_of = |ky: f32| keys.iter().position(|&t| (t - ky).abs() < 1.0).unwrap_or(0);
@@ -229,7 +231,7 @@ fn layout_rings(nodes: &[Node]) -> Vec<Vec3> {
         members[tier_of(nd.ky)].push(i);
     }
     for m in &mut members {
-        m.sort_by(|&a, &b| nodes[a].kx.partial_cmp(&nodes[b].kx).unwrap());
+        m.sort_by(|&a, &b| nodes[a].kx.total_cmp(&nodes[b].kx));
     }
 
     let mut pos = vec![Vec3::ZERO; n];
@@ -599,7 +601,9 @@ fn spawn_frame_reader(addr: String, shared: SharedScene, input_tx: InputTx) {
             Ok(mut stream) => {
                 eprintln!("[viewer] connected to {addr}; waiting for @gos.vk frames…");
                 // Publish a write-half so the event loop can send keyboard back.
+                // Non-blocking so a stalled kernel never freezes the event thread.
                 if let Ok(c) = stream.try_clone() {
+                    let _ = c.set_nonblocking(true);
                     if let Ok(mut g) = input_tx.lock() {
                         *g = Some(c);
                     }
@@ -921,7 +925,16 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
                     let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("overlay_inst"), contents: bytemuck::cast_slice(&overlay_inst), usage: wgpu::BufferUsages::VERTEX });
                     let frame_tex = match surface.get_current_texture() {
                         Ok(t) => t,
-                        Err(_) => { surface.configure(&device, &config); return; }
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            surface.configure(&device, &config);
+                            return;
+                        }
+                        Err(wgpu::SurfaceError::Timeout) => return,
+                        Err(wgpu::SurfaceError::OutOfMemory) => {
+                            eprintln!("[viewer] surface out of memory; exiting");
+                            elwt.exit();
+                            return;
+                        }
                     };
                     let view = frame_tex.texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -1010,7 +1023,11 @@ VKEDG:1:2:5566aa\nVKEDG:1:3:5566aa\nVKEND:\n";
                             let mut sent = false;
                             if let Ok(mut g) = input_tx.lock() {
                                 if let Some(s) = g.as_mut() {
-                                    sent = std::io::Write::write_all(s, &[b]).is_ok();
+                                    match std::io::Write::write(s, &[b]) {
+                                        Ok(_) => sent = true,
+                                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                                        Err(_) => *g = None, // disconnected
+                                    }
                                 }
                             }
                             // On-screen echo: mirrors the kernel's COM1

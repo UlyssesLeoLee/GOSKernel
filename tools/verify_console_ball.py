@@ -319,7 +319,7 @@ def main():
 
         # ---- 2. Click the ball -> console opens ---------------------------
         click_at(mon, s1, bsx, bsy, button=1, label="click ball")
-        t2, s2 = wait_for(mon, "console_via_ball", console_open)
+        t2, _ = wait_for(mon, "console_via_ball", console_open)
         print("    CONSOLE OPENED VIA BALL CLICK:", "PASS" if t2 else "FAIL", f"(close-button border detected: {t2})")
 
         # ---- 3. ESC -> back to the 3D scene (ball reappears) -------------

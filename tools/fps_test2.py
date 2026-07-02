@@ -34,8 +34,8 @@ def run(accel, duration=35):
     boot_time = None
     t0 = time.time()
     while time.time() - t0 < 90:
-        for l in lines:
-            if "desktop: graph" in l and boot_time is None:
+        for line in lines:
+            if "desktop: graph" in line and boot_time is None:
                 boot_time = time.time() - t0
                 print(f"  Boot done at +{boot_time:.1f}s")
         if boot_time:
@@ -43,8 +43,8 @@ def run(accel, duration=35):
         time.sleep(0.3)
     if not boot_time:
         print("  ERROR: did not boot in 90s")
-        for l in lines[-15:]:
-            print(f"    {l}")
+        for line in lines[-15:]:
+            print(f"    {line}")
         proc.terminate(); proc.wait()
         return None
 
@@ -55,11 +55,11 @@ def run(accel, duration=35):
     fbf_records = []
 
     while time.time() < t_measure_end:
-        for l in lines:
-            if l.startswith("FBF ") and l not in seen_fbf:
-                seen_fbf.add(l)
+        for line in lines:
+            if line.startswith("FBF ") and line not in seen_fbf:
+                seen_fbf.add(line)
                 rel = time.time() - t_measure_start
-                fbf_records.append((rel, l))
+                fbf_records.append((rel, line))
         time.sleep(0.5)
 
     # Quick mouse test via monitor
@@ -134,8 +134,8 @@ def run(accel, duration=35):
     else:
         print(f"  No FBF events in {duration}s")
         print(f"  Last serial lines:")
-        for l in lines[-10:]:
-            print(f"    {l}")
+        for line in lines[-10:]:
+            print(f"    {line}")
         return None
 
 if __name__ == "__main__":

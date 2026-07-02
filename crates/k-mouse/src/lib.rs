@@ -72,13 +72,18 @@ pub static MOTION_DY: AtomicI32 = AtomicI32::new(0);
 pub static MOTION_BTN: AtomicU8 = AtomicU8::new(0);
 
 /// Drain accumulated pointer motion since the last call: (dx, dy, buttons).
+///
+/// Wraps in a critical section so IRQ12 cannot split a single PS/2 packet
+/// across two frames (dx from packet N, dy/buttons from packet N+1).
 pub fn take_motion() -> (i32, i32, u8) {
-    use core::sync::atomic::Ordering;
-    (
-        MOTION_DX.swap(0, Ordering::Relaxed),
-        MOTION_DY.swap(0, Ordering::Relaxed),
-        MOTION_BTN.load(Ordering::Relaxed),
-    )
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        use core::sync::atomic::Ordering::Relaxed;
+        (
+            MOTION_DX.swap(0, Relaxed),
+            MOTION_DY.swap(0, Relaxed),
+            MOTION_BTN.load(Relaxed),
+        )
+    })
 }
 
 #[repr(C)]

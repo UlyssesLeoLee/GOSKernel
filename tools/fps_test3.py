@@ -100,7 +100,7 @@ def run(accel="whpx", duration=40):
                 print(f"    {f:8s}: {avg:6d} µs")
         print(f"    {'TOTAL':8s}: {total_frame:6d} µs  ({1e6/total_frame:.1f} FPS ceiling)")
         # Print raw lines too so we can see variability
-        print(f"  Last 5 PERF lines:")
+        print("  Last 5 PERF lines:")
         for l in perf_records[-5:]:
             print(f"    {l}")
     else:
