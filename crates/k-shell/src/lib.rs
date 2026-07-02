@@ -2416,7 +2416,7 @@ pub fn dispatch_graph_path(sink: &ConsoleSink, from: VectorAddress, to: VectorAd
     let mut from_buf = LineBuf::<20>::new();
     from_buf.push_vector(from);
     print_str(sink, core::str::from_utf8(from_buf.as_slice()).unwrap_or("?"));
-    print_str(sink, " \xE2\x86\x92 "); // → (UTF-8)
+    print_str(sink, " \u{2192} "); // →
     let mut to_buf = LineBuf::<20>::new();
     to_buf.push_vector(to);
     print_str(sink, core::str::from_utf8(to_buf.as_slice()).unwrap_or("?"));
@@ -2538,7 +2538,7 @@ pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
         print_str(sink, "  ");
         if is_closing {
             set_color(sink, 12, 0);
-            print_str(sink, "\xE2\x86\xA9 "); // ↩ (back to cycle start)
+            print_str(sink, "\u{21A9} "); // ↩ (back to cycle start)
         } else {
             set_color(sink, 14, 0);
             print_str(sink, "  ");
@@ -2570,7 +2570,7 @@ pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
         if !is_closing && i + 2 < cycle_len {
             // Arrow pointing to next
             set_color(sink, 8, 0);
-            print_str(sink, "  \xE2\x86\x93"); // ↓
+            print_str(sink, "  \u{2193}"); // ↓
         }
 
         set_color(sink, 7, 0);
@@ -2598,7 +2598,7 @@ pub fn dispatch_graph_cycles(sink: &ConsoleSink) {
 pub fn dispatch_graph_toposort(sink: &ConsoleSink) {
     const MAX_TOPO: usize = 128;
     let (order, order_len, is_dag) = gos_runtime::graph_toposort::<MAX_TOPO>();
-    let total = gos_runtime::node_count();
+    let total = gos_runtime::snapshot().node_count;
 
     // Header
     set_color(sink, 0, 11); // black on cyan
