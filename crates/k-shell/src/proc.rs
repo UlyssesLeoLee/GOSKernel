@@ -941,6 +941,8 @@ fn dispatch_text_command(
         super::dispatch_graph_katz(sink);
     } else if cmd == "graph pagerank" || cmd == "pagerank" || cmd == "pr" || cmd == "graph rank" || cmd == "rank" {
         super::dispatch_graph_pagerank(sink);
+    } else if cmd == "graph hits" || cmd == "hits" || cmd == "graph ha" || cmd == "ha" || cmd == "hub authority" {
+        super::dispatch_graph_hits(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))

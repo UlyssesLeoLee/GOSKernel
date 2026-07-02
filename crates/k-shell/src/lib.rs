@@ -3751,6 +3751,135 @@ pub fn dispatch_graph_pagerank(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.44: `graph hits` — HITS hub and authority scores per node.
+///
+/// Kleinberg's HITS algorithm decomposes the graph into a bipartite hub/authority
+/// view.  Each node receives two scores:
+///   hub score      — how well it points to high-authority nodes
+///   authority score — how well it is pointed to by high-hub nodes
+///
+/// Update (simultaneous, 20 iterations, L∞-normalised):
+///   new_a[v] = Σ_{u→v} h[u]   (in-neighbors' hub mass)
+///   new_h[v] = Σ_{v→w} a[w]   (out-neighbors' authority mass)
+///
+/// Output sorted by authority score descending.
+/// OS analogy: `vmstat` / `top` bipartite — signal-forwarder vs cited-destination.
+pub fn dispatch_graph_hits(sink: &ConsoleSink) {
+    const MAX_N:     usize = 128;
+    const SCALE:     usize = 1_000_000;
+    const TOP_FLOOR: usize = 800_000;   // ≥ 800_000 → top hub or top authority
+    const LOW_CEIL:  usize = 200_000;   // < 200_000 → isolated / no structural role
+
+    let (vecs, hub, auth, total) = gos_runtime::graph_hits::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph hits\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector             hub   authority  role\n");
+    set_color(sink, 7, 0);
+
+    let mut top_auth_count = 0usize;
+    let mut top_hub_count  = 0usize;
+
+    for i in 0..total {
+        let h_score = hub[i]  as usize;
+        let a_score = auth[i] as usize;
+        let is_top_auth = a_score >= TOP_FLOOR;
+        let is_top_hub  = h_score >= TOP_FLOOR;
+        let is_isolated = a_score < LOW_CEIL && h_score < LOW_CEIL;
+
+        let color = if is_top_auth && is_top_hub {
+            13 // magenta — both hub+authority (e.g. cycle node)
+        } else if is_top_auth {
+            14 // bright yellow — pure authority
+        } else if is_top_hub {
+            11 // cyan — pure hub
+        } else if is_isolated {
+            8  // dark grey — no structural role
+        } else {
+            7  // white — relay
+        };
+
+        set_color(sink, color, 0);
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        // Hub score (right-aligned 6 wide, ×1e-3)
+        set_color(sink, if is_top_hub { 11 } else { 8 }, 0);
+        print_str(sink, "  ");
+        print_num_right6(sink, h_score / 1000);
+        print_str(sink, "k");
+
+        // Authority score
+        set_color(sink, if is_top_auth { 14 } else { 8 }, 0);
+        print_str(sink, "  ");
+        print_num_right6(sink, a_score / 1000);
+        print_str(sink, "k");
+
+        // Role label
+        set_color(sink, color, 0);
+        print_str(sink, "  ");
+        if is_top_auth && is_top_hub {
+            print_str(sink, "hub+authority");
+            top_auth_count += 1;
+            top_hub_count  += 1;
+        } else if is_top_auth {
+            print_str(sink, "authority");
+            top_auth_count += 1;
+        } else if is_top_hub {
+            print_str(sink, "hub");
+            top_hub_count += 1;
+        } else if is_isolated {
+            print_str(sink, "isolated");
+        } else {
+            print_str(sink, "relay");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  HITS/20iter");
+    if top_hub_count > 0 {
+        set_color(sink, 11, 0);
+        print_str(sink, "  hubs: ");
+        print_num_inline(sink, top_hub_count);
+    }
+    if top_auth_count > 0 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  authorities: ");
+        print_num_inline(sink, top_auth_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    let _ = SCALE;
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

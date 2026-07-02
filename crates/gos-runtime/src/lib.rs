@@ -2512,6 +2512,135 @@ impl GraphRuntime {
         (out_vecs, out_pr, copy_len)
     }
 
+    /// V2.44: HITS (Hyperlink-Induced Topic Search) hub and authority scores.
+    ///
+    /// Kleinberg's HITS algorithm produces two complementary scores per node:
+    ///   hub[v]       = how well v points to high-authority nodes
+    ///   authority[v] = how well v is pointed to by high-hub nodes
+    ///
+    /// Update rules (applied simultaneously each iteration):
+    ///   new_a[v] = Σ_{u→v}  h[u]    (authority = sum of in-neighbor hub scores)
+    ///   new_h[v] = Σ_{v→w}  a[w]    (hub = sum of out-neighbor authority scores)
+    ///
+    /// Normalization after each step: scores scaled so max = SCALE = 1_000_000.
+    /// Dangling nodes (no in-edges): authority → 0; (no out-edges): hub → 0.
+    /// 20 fixed-point iterations — convergence verified by harness tests.
+    ///
+    /// Returns `(vecs, hub, auth, total)` sorted descending by authority score.
+    pub fn graph_hits_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
+        const SCALE: u64   = 1_000_000;
+        const ITERS: usize = 20;
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return ([VectorAddress::new(0, 0, 0, 0); N], [0u32; N], [0u32; N], 0);
+        }
+
+        let mut hub  = [0u64; MAX_NODES];
+        let mut auth = [0u64; MAX_NODES];
+        for si in 0..node_count {
+            hub[node_slots[si]]  = SCALE;
+            auth[node_slots[si]] = SCALE;
+        }
+
+        let mut new_hub  = [0u64; MAX_NODES];
+        let mut new_auth = [0u64; MAX_NODES];
+
+        for _iter in 0..ITERS {
+            for si in 0..node_count {
+                new_hub[node_slots[si]]  = 0;
+                new_auth[node_slots[si]] = 0;
+            }
+
+            // new_a[v] = Σ_{u→v} h[u]  (using old hub)
+            for vi in 0..node_count {
+                let v    = node_slots[vi];
+                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.to_node != v_id { continue; }
+                    let u = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(s) => s, None => continue,
+                    };
+                    new_auth[v] = new_auth[v].saturating_add(hub[u]);
+                }
+            }
+
+            // new_h[v] = Σ_{v→w} a[w]  (using old auth)
+            for vi in 0..node_count {
+                let v    = node_slots[vi];
+                let v_id = match self.nodes[v] { Some(r) => r.spec.node_id, None => continue };
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.from_node != v_id { continue; }
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s, None => continue,
+                    };
+                    new_hub[v] = new_hub[v].saturating_add(auth[w]);
+                }
+            }
+
+            let max_auth = {
+                let mut m = 0u64;
+                for si in 0..node_count {
+                    let v = node_slots[si];
+                    if new_auth[v] > m { m = new_auth[v]; }
+                }
+                m
+            };
+            let max_hub = {
+                let mut m = 0u64;
+                for si in 0..node_count {
+                    let v = node_slots[si];
+                    if new_hub[v] > m { m = new_hub[v]; }
+                }
+                m
+            };
+
+            for si in 0..node_count {
+                let v = node_slots[si];
+                auth[v] = if max_auth > 0 { new_auth[v].saturating_mul(SCALE) / max_auth } else { 0 };
+                hub[v]  = if max_hub  > 0 { new_hub[v].saturating_mul(SCALE)  / max_hub  } else { 0 };
+            }
+        }
+
+        // Sort descending by authority score (insertion sort).
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_auth = auth[key_slot];
+            let mut j    = i;
+            while j > 0 && auth[sorted[j - 1]] < key_auth {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_hub  = [0u32; N];
+        let mut out_auth = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_auth[i] = auth[slot].min(u32::MAX as u64) as u32;
+            out_hub[i]  = hub[slot].min(u32::MAX as u64) as u32;
+        }
+
+        (out_vecs, out_hub, out_auth, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -4865,6 +4994,30 @@ pub fn graph_katz<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
 /// dominate the random walk over the live graph topology?
 pub fn graph_pagerank<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_pagerank_inner()
+}
+
+/// V2.44: HITS hub and authority scores for all live nodes.
+///
+/// Returns `(vecs, hub, auth, total)`:
+/// - `vecs[0..total]`  — node vectors, sorted descending by authority score.
+/// - `hub[0..total]`   — hub score × 1_000_000 (how well node points to authorities).
+/// - `auth[0..total]`  — authority score × 1_000_000 (how well node is cited by hubs).
+/// - `total`           — number of live nodes packed into the arrays.
+///
+/// Algorithm: Kleinberg's HITS — 20 iterations of simultaneous update + L∞ normalisation.
+///   new_a[v] = Σ_{u→v} h[u]  ;  new_h[v] = Σ_{v→w} a[w]  ;  then max-normalise both.
+/// Isolated nodes converge to hub=0, auth=0.  Cyclic/mutual nodes converge to hub=auth=1M.
+///
+/// Role interpretation:
+///   hub  ≥ 800_000  → top-hub       (excellent pointer to authorities)
+///   auth ≥ 800_000  → top-authority  (cited by the best hubs)
+///   both ≥ 800_000  → hub+authority  (symmetric role, e.g. nodes in cycles)
+///   both < 200_000  → isolated       (no structural role in the bipartite HITS view)
+///
+/// OS analogy: `vmstat` + `top` bipartite — which kernel nodes are the best
+/// signal-forwarders (hub) vs the most-cited destinations (authority)?
+pub fn graph_hits<const N: usize>() -> ([VectorAddress; N], [u32; N], [u32; N], usize) {
+    RUNTIME.lock().graph_hits_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
