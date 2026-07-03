@@ -3465,6 +3465,163 @@ impl GraphRuntime {
         (out_vecs, out_visits, n, actual_steps, stuck_steps)
     }
 
+    /// V2.53: Weighted betweenness centrality via all-pairs Dijkstra (Brandes).
+    ///
+    /// Like `graph_centrality` (V2.39, unweighted BFS Brandes) but uses
+    /// `edge.spec.weight` to find minimum-weight paths via Dijkstra:
+    ///   WBC[v] = Σ_{s≠v≠t} σ_w(s,t,v) / σ_w(s,t)
+    /// where σ_w(s,t) counts shortest-weight directed paths from s to t.
+    ///
+    /// Diverges from unweighted betweenness when indirect low-weight paths are
+    /// shorter by weight than direct high-weight edges.  Uniform-weight graphs
+    /// give identical results to `graph_centrality`.
+    ///
+    /// Algorithm: O(V² × (V+E)) — one O(V²) Dijkstra per source, no heap.
+    /// Output sorted descending; wbc[i] = raw_scaled / 1_000_000.
+    pub fn graph_between_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE: u64 = 1_000_000;
+        const EPS:   f32 = 1e-6;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Per-slot weighted betweenness accumulator.
+        let mut bc_scaled = [0u64; MAX_NODES];
+
+        // ── Brandes + Dijkstra — one pass per source ─────────────────────────
+        for si in 0..node_count {
+            let s = node_slots[si];
+
+            // Dijkstra state.
+            let mut dist    = [f32::MAX; MAX_NODES];
+            let mut sigma   = [0u64;     MAX_NODES];
+            let mut visited = [false;    MAX_NODES];
+            let mut stk     = [0usize;   MAX_NODES]; // extraction order (non-decr dist)
+            let mut stk_len = 0usize;
+
+            dist[s]  = 0.0;
+            sigma[s] = 1;
+
+            for _ in 0..node_count {
+                // Pick unvisited node with minimum distance (O(V²) Dijkstra).
+                let mut u     = usize::MAX;
+                let mut u_dst = f32::MAX;
+                for ni in 0..node_count {
+                    let sl = node_slots[ni];
+                    if !visited[sl] && dist[sl] < u_dst {
+                        u     = sl;
+                        u_dst = dist[sl];
+                    }
+                }
+                if u == usize::MAX || u_dst >= f32::MAX { break; }
+                visited[u] = true;
+
+                // Record extraction order for back-propagation.
+                if stk_len < MAX_NODES {
+                    stk[stk_len] = u;
+                    stk_len += 1;
+                }
+
+                let u_id = match self.nodes[u] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                // Relax directed out-edges from u.
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != u_id { continue; }
+                    let v = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+                    if v == u { continue; } // skip self-loops
+                    let w  = edge.spec.weight.max(0.0);
+                    let nd = u_dst + w;
+                    if nd < dist[v] - EPS {
+                        // Strictly shorter: replace path count.
+                        dist[v]  = nd;
+                        sigma[v] = sigma[u];
+                    } else if (nd - dist[v]).abs() <= EPS && dist[v] < f32::MAX {
+                        // Equal-weight path: accumulate path count.
+                        sigma[v] = sigma[v].saturating_add(sigma[u]);
+                    }
+                }
+            }
+
+            // ── Back-propagation (reverse extraction order) ───────────────────
+            let mut delta = [0u64; MAX_NODES];
+            for bi in (0..stk_len).rev() {
+                let w = stk[bi];
+                if w == s || sigma[w] == 0 { continue; }
+
+                let w_id = match self.nodes[w] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                // Find in-edges of w; v is a predecessor iff dist[v]+weight ≈ dist[w].
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.to_node != w_id { continue; }
+                    let v = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+                    if sigma[v] == 0 { continue; }
+                    if dist[v] >= f32::MAX { continue; }
+                    let ew = edge.spec.weight.max(0.0);
+                    if (dist[v] + ew - dist[w]).abs() > EPS { continue; }
+
+                    // δ[v] += σ[v] × (SCALE + δ[w]) / σ[w]
+                    let contribution = sigma[v]
+                        .saturating_mul(SCALE.saturating_add(delta[w]))
+                        / sigma[w];
+                    delta[v] = delta[v].saturating_add(contribution);
+                }
+
+                bc_scaled[w] = bc_scaled[w].saturating_add(delta[w]);
+            }
+        }
+
+        // ── Sort node_slots by descending WBC (insertion sort) ────────────────
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_bc   = bc_scaled[key_slot];
+            let mut j    = i;
+            while j > 0 && bc_scaled[sorted[j - 1]] < key_bc {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // ── Pack output ───────────────────────────────────────────────────────
+        let copy_len = node_count.min(N);
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_bc   = [0u32; N];
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_bc[i]   = (bc_scaled[slot] / SCALE) as u32;
+        }
+        (out_vecs, out_bc, copy_len)
+    }
+
     /// V2.49: Dijkstra single-source shortest-path tree over the **directed**
     /// kernel graph from a given source node.
     ///
@@ -6121,6 +6278,22 @@ pub fn graph_sim<const N: usize>(
     let steps = steps.min(256);
     let snap  = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_sim_inner::<N>(&snap, steps, seed)
+}
+
+/// V2.53: Weighted betweenness centrality for all live nodes (Brandes + Dijkstra).
+///
+/// Returns `(vecs, wbc, total)`:
+/// - `vecs[0..total]` — live node vectors, descending WBC order.
+/// - `wbc[0..total]`  — WBC score × 1_000_000 per node (truncated to u32).
+/// - `total`          — number of live nodes packed into the output arrays.
+///
+/// Unlike `graph_centrality` (V2.39, BFS hop-count), uses `edge.spec.weight`
+/// so minimum-weight paths are found via Dijkstra.  Uniform-weight graphs
+/// produce identical results to `graph_centrality`.
+/// Algorithm: O(V² × (V+E)), no heap (O(V²) Dijkstra per source).
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_between<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_between_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

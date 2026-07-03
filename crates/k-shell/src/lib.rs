@@ -3362,6 +3362,113 @@ pub fn dispatch_graph_centrality(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.53: `graph between` — weighted betweenness centrality per node (Brandes + Dijkstra).
+///
+/// Like `graph centrality` (V2.39) but uses `edge.spec.weight` to find
+/// minimum-weight paths instead of minimum-hop paths.  Diverges from the
+/// unweighted version when a low-weight indirect path is cheaper than a
+/// high-weight direct edge.  Uniform-weight graphs produce identical results.
+///
+/// WBC[v] = Σ_{s≠v≠t} σ_w(s,t,v)/σ_w(s,t) — the fraction of all-pairs
+/// minimum-weight paths that pass through v, summed over all pairs.
+///
+/// Output: table sorted descending by WBC score, annotated with role:
+///   keystone   — WBC = max, most critical weighted routing node
+///   relay      — WBC > 0, carries some minimum-weight traffic
+///   endpoint   — WBC = 0 (leaf / isolated / not on any shortest-weight path)
+///
+/// OS analogy: `traceroute` with latency weights — which kernel service node
+/// sits on the most minimum-latency paths between other service pairs?
+pub fn dispatch_graph_between(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, wbc, total) = gos_runtime::graph_between::<MAX_N>();
+
+    set_color(sink, 13, 0); // bright magenta
+    print_str(sink, " graph between  (weighted Dijkstra)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              wbc   role\n");
+    set_color(sink, 7, 0);
+
+    let mut max_wbc = 0u32;
+    for i in 0..total {
+        if wbc[i] > max_wbc { max_wbc = wbc[i]; }
+    }
+
+    let mut keystone_count = 0usize;
+
+    for i in 0..total {
+        let score    = wbc[i];
+        let is_top   = max_wbc > 0 && score == max_wbc;
+        let is_relay = score > 0 && !is_top;
+
+        if is_top {
+            set_color(sink, 13, 0); // bright magenta — keystone
+        } else if is_relay {
+            set_color(sink, 11, 0); // cyan — relay
+        } else {
+            set_color(sink, 8, 0);  // dark grey — endpoint
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        set_color(sink, if is_top { 13 } else if is_relay { 11 } else { 8 }, 0);
+        print_str(sink, " ");
+        print_num_right6(sink, score as usize);
+        print_str(sink, "  ");
+
+        if is_top {
+            set_color(sink, 13, 0);
+            print_str(sink, "keystone");
+            keystone_count += 1;
+        } else if is_relay {
+            set_color(sink, 11, 0);
+            print_str(sink, "relay");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "endpoint");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  max-wbc: ");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, max_wbc as usize);
+    if keystone_count > 0 {
+        set_color(sink, 13, 0);
+        print_str(sink, "  keystones: ");
+        print_num_inline(sink, keystone_count);
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.40: `graph closeness` — outgoing closeness centrality per node (directed BFS).
 ///
 /// Closeness centrality measures how quickly a node can reach all other nodes

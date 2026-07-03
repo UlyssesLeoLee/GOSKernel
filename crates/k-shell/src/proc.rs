@@ -995,6 +995,10 @@ fn dispatch_text_command(
             super::print_str(sink, " graph sim: expected a step count 1-256 (e.g. graph sim 32)\n");
             super::set_color(sink, 7, 0);
         }
+    } else if cmd == "graph between" || cmd == "between" || cmd == "gbetween"
+        || cmd == "graph wbc" || cmd == "wbc" || cmd == "weighted betweenness"
+    {
+        super::dispatch_graph_between(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))
