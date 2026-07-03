@@ -2749,6 +2749,46 @@ pub fn dispatch_graph_wiener(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.71: `graph harmonic` / `gharm` — harmonic centrality (sum of reciprocal distances).
+///
+/// HC[v] = Σ 1_000_000/d(v,u) for all reachable u≠v.  Handles disconnected graphs.
+pub fn dispatch_graph_harmonic(sink: &ConsoleSink) {
+    let (vecs, hc, total) = gos_runtime::graph_harmonic::<128>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph harmonic centrality\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  harmonic: undefined (empty graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    let mut i = 0usize;
+    while i < total {
+        let mut vec_line = LineBuf::<20>::new();
+        vec_line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+        set_color(sink, 10, 0);
+        print_str(sink, "  ");
+        print_str(sink, vec_str);
+        set_color(sink, 7, 0);
+        print_str(sink, "  HC=");
+        print_num_inline(sink, hc[i] as usize);
+        print_str(sink, "\n");
+        i += 1;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, total);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

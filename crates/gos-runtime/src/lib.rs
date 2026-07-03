@@ -3160,6 +3160,108 @@ impl GraphRuntime {
         (out_vecs, out_cc, copy_len)
     }
 
+    /// V2.71: Harmonic centrality for all live nodes.
+    ///
+    /// HC[v] = Σ_{u≠v, d(v,u)<∞} 1_000_000/d(v,u)
+    ///
+    /// Unlike closeness centrality, harmonic centrality handles disconnected
+    /// graphs naturally — unreachable pairs contribute 0 to the sum.
+    /// Returns sorted descending by HC.  Algorithm: one BFS per source, O(V × (V+E)).
+    pub fn graph_harmonic_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize) {
+        const SCALE: u64 = 1_000_000;
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        let mut hc = [0u64; MAX_NODES];
+
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+
+            let mut dist  = [u32::MAX; MAX_NODES];
+            let mut queue = [0usize;   MAX_NODES];
+
+            dist[s]  = 0;
+            queue[0] = s;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+                let _ = s_id;
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            // HC[s] += 1_000_000/d(s,u) for each reachable u ≠ s (d ≥ 1, no div-by-zero).
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX {
+                    hc[s] = hc[s].saturating_add(SCALE / dist[t] as u64);
+                }
+            }
+        }
+
+        // Sort descending by harmonic centrality (insertion sort, N ≤ 128).
+        let mut sorted = node_slots;
+        for i in 1..node_count {
+            let key_slot = sorted[i];
+            let key_hc   = hc[key_slot];
+            let mut j    = i;
+            while j > 0 && hc[sorted[j - 1]] < key_hc {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_hc   = [0u32; N];
+        let copy_len     = node_count.min(N);
+        for i in 0..copy_len {
+            let slot    = sorted[i];
+            out_vecs[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_hc[i]   = (hc[slot]).min(u32::MAX as u64) as u32;
+        }
+
+        (out_vecs, out_hc, copy_len)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7310,6 +7412,17 @@ pub fn graph_centrality<const N: usize>() -> ([VectorAddress; N], [u32; N], usiz
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_closeness<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_closeness_inner()
+}
+
+/// V2.71: Harmonic centrality for all live nodes.
+///
+/// HC[v] = Σ_{u≠v, d(v,u)<∞} 1_000_000/d(v,u)  (sum of reciprocal BFS distances).
+///
+/// Handles disconnected graphs naturally: unreachable pairs contribute 0.
+/// Isolated nodes → HC = 0.  Algorithm: one BFS per source, O(V × (V+E)).
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_harmonic<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_harmonic_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
