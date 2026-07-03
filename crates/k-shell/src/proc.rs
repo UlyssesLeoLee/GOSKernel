@@ -616,6 +616,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gperiph            alias for graph peripheral\n");
         super::print_str(sink, "  graph center       nodes with ecc == radius (centre of the graph)\n");
         super::print_str(sink, "  gcenter            alias for graph center\n");
+        super::print_str(sink, "  graph efficiency   E(G) = \u{2211} 1/d(i,j) / (n*(n-1)) \u{2014} global network efficiency\n");
+        super::print_str(sink, "  geff               alias for graph efficiency\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1092,6 +1094,8 @@ fn dispatch_text_command(
         super::dispatch_graph_peripheral(sink);
     } else if cmd == "graph center" || cmd == "gcenter" {
         super::dispatch_graph_center(sink);
+    } else if cmd == "graph efficiency" || cmd == "graph eff" || cmd == "geff" || cmd == "global efficiency" {
+        super::dispatch_graph_global_efficiency(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))

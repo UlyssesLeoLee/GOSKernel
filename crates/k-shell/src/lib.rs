@@ -2923,6 +2923,71 @@ pub fn dispatch_graph_center(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.74: `graph efficiency` / `geff` — global graph efficiency.
+///
+/// E(G) = 1/(n*(n-1)) * Σ_{i≠j, d(i,j)<∞} 1/d(i,j)
+///
+/// Quantifies how efficiently the graph exchanges information on average.
+/// Disconnected pairs contribute 0 (not infinity), making this metric
+/// well-defined for disconnected graphs — unlike average path length.
+/// E=1.0 for complete directed graphs; E=0.0 for fully disconnected.
+/// Printed as X.XXXXXX with 6 decimal places (1_000_000 ppm scale).
+pub fn dispatch_graph_global_efficiency(sink: &ConsoleSink) {
+    let (ppm, pairs_max, node_count) = gos_runtime::graph_global_efficiency();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph global efficiency\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count < 2 {
+        set_color(sink, 8, 0);
+        if node_count == 0 {
+            print_str(sink, "  E(G): undefined (empty graph)\n");
+        } else {
+            print_str(sink, "  E(G): 0.000000 (single node, no pairs)\n");
+        }
+        print_str(sink, "  nodes=");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Print E(G) = W.XXXXXX (ppm gives 6 decimal places; whole part is 0 or 1).
+    set_color(sink, 10, 0);
+    print_str(sink, "  E(G) = ");
+    let whole = (ppm / 1_000_000) as usize;
+    let frac  = (ppm % 1_000_000) as usize;
+    print_num_inline(sink, whole);
+    print_str(sink, ".");
+    // Zero-pad frac to 6 digits.
+    if frac < 10 {
+        print_str(sink, "00000");
+    } else if frac < 100 {
+        print_str(sink, "0000");
+    } else if frac < 1_000 {
+        print_str(sink, "000");
+    } else if frac < 10_000 {
+        print_str(sink, "00");
+    } else if frac < 100_000 {
+        print_str(sink, "0");
+    }
+    print_num_inline(sink, frac);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  pairs_max=");
+    print_num_inline(sink, pairs_max);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

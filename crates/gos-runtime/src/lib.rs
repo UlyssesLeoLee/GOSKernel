@@ -3556,6 +3556,95 @@ impl GraphRuntime {
         (out_vecs, out_ecc, copy_len, node_count, radius)
     }
 
+    /// V2.74: Global graph efficiency.
+    ///
+    /// E(G) = 1/(n*(n-1)) * Σ_{i≠j, d(i,j)<∞} 1/d(i,j)
+    ///
+    /// Quantifies how efficiently a network exchanges information on average,
+    /// treating disconnected pairs as contributing 0 (infinite distance).
+    /// Returns (efficiency_ppm, pairs_max, node_count):
+    ///   efficiency_ppm = E(G) * 1_000_000  (0..=1_000_000)
+    ///   pairs_max      = n*(n-1)  — the normalizer (0 when n < 2)
+    ///   node_count     = live nodes
+    /// Complete directed graph (all d=1) → E=1.0 (ppm=1_000_000).
+    /// Disconnected graph (no edges)     → E=0.0 (ppm=0).
+    /// Algorithm: one BFS per source node, O(V × (V+E)).
+    pub fn graph_global_efficiency_inner(&self) -> (u64, usize, usize) {
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count < 2 {
+            return (0, 0, node_count);
+        }
+
+        const SCALE: u64 = 1_000_000;
+        let mut sum_recip: u64 = 0;
+
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+            let _ = s_id;
+
+            let mut dist  = [u32::MAX; MAX_NODES];
+            let mut queue = [0usize;   MAX_NODES];
+            dist[s]  = 0;
+            queue[0] = s;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX && dist[t] > 0 {
+                    sum_recip = sum_recip.saturating_add(SCALE / dist[t] as u64);
+                }
+            }
+        }
+
+        let pairs_max = node_count * (node_count - 1);
+        let efficiency_ppm = sum_recip / pairs_max as u64;
+        (efficiency_ppm, pairs_max, node_count)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7747,6 +7836,18 @@ pub fn graph_peripheral<const N: usize>() -> ([VectorAddress; N], [u32; N], usiz
 /// Algorithm: one BFS per source node, O(V × (V+E)).
 pub fn graph_center<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
     RUNTIME.lock().graph_center_inner()
+}
+
+/// V2.74: Global efficiency of the directed graph.
+///
+/// E(G) = 1/(n*(n-1)) * Σ_{i≠j, d(i,j)<∞} 1/d(i,j)  (unweighted BFS).
+///
+/// Returns (efficiency_ppm, pairs_max, node_count).
+///   efficiency_ppm = E(G) scaled by 1_000_000 (0 = fully disconnected, 1_000_000 = complete).
+///   pairs_max      = n*(n-1), the normalisation denominator (0 when n < 2).
+///   node_count     = live nodes.
+pub fn graph_global_efficiency() -> (u64, usize, usize) {
+    RUNTIME.lock().graph_global_efficiency_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
