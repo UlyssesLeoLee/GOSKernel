@@ -602,6 +602,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  assortativity / gassort  aliases for graph assortativity\n");
         super::print_str(sink, "  graph reciprocity  fraction of directed edges that are mutual (bidirectional)\n");
         super::print_str(sink, "  reciprocity / grecip  aliases for graph reciprocity\n");
+        super::print_str(sink, "  graph modularity   Newman\u{2013}Girvan Q score of LPA community partition \u{2208} [0,1]\n");
+        super::print_str(sink, "  modularity / gmodq aliases for graph modularity\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1066,6 +1068,8 @@ fn dispatch_text_command(
         super::dispatch_graph_assortativity(sink);
     } else if cmd == "graph reciprocity" || cmd == "reciprocity" || cmd == "grecip" {
         super::dispatch_graph_reciprocity(sink);
+    } else if cmd == "graph modularity" || cmd == "modularity" || cmd == "gmodq" {
+        super::dispatch_graph_modularity(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))

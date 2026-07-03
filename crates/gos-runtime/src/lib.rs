@@ -1358,6 +1358,163 @@ impl GraphRuntime {
         (reciprocity_ppm, mutual, m)
     }
 
+    /// V2.67: Graph modularity — quality of the LPA community partition.
+    ///
+    /// Runs the same Label Propagation Algorithm as `graph_community` to detect
+    /// communities, then evaluates Newman–Girvan modularity Q over that partition.
+    ///
+    ///   Q = Σ_c [ L_c / m  −  (d_c / (2m))² ]
+    ///
+    /// where m = undirected edge count (directed pair counted once), L_c = undirected
+    /// edges with both endpoints in community c, d_c = Σ degree of nodes in c.
+    /// Directed edges are treated as undirected (consistent with LPA). Self-loops excluded.
+    ///
+    /// Integer arithmetic (avoids float, no_std safe):
+    ///   Q_ppm = (4m·ΣL_c − Σd_c²) × 1_000_000 / (4m²)
+    ///
+    /// Returns (modularity_ppm, community_count, undirected_edge_count, node_count).
+    ///   1_000_000 → hypothetically perfect partition; 0 → single community or no edges.
+    fn graph_modularity_inner(snap: &GraphTopologySnapshot) -> (i32, usize, usize, usize) {
+        const ITERS: usize = 20;
+
+        let node_count = snap.node_count;
+        if node_count == 0 {
+            return (0, 0, 0, 0);
+        }
+
+        // ── 1. LPA (identical to graph_community_inner, without final remapping) ──
+        let mut label = [0u8; MAX_NODES];
+        for si in 0..node_count {
+            label[snap.node_slots[si]] = snap.node_slots[si] as u8;
+        }
+
+        for _iter in 0..ITERS {
+            for si in 0..node_count {
+                let v    = snap.node_slots[si];
+                let v_id = snap.slot_id[v];
+
+                let mut freq = [0u8; MAX_NODES];
+                for ei in 0..MAX_EDGES {
+                    if !snap.edge_live[ei] { continue; }
+                    let nb_id = if snap.edge_from[ei] == v_id {
+                        snap.edge_to[ei]
+                    } else if snap.edge_to[ei] == v_id {
+                        snap.edge_from[ei]
+                    } else {
+                        continue;
+                    };
+                    if nb_id == v_id { continue; }
+                    if let Some(nb) = snap.node_slot_by_id(nb_id) {
+                        let l = label[nb] as usize;
+                        if l < MAX_NODES { freq[l] = freq[l].saturating_add(1); }
+                    }
+                }
+
+                let mut best_l    = MAX_NODES;
+                let mut best_freq = 0u8;
+                for l in 0..MAX_NODES {
+                    if freq[l] == 0 { continue; }
+                    if freq[l] > best_freq
+                        || (freq[l] == best_freq && (best_l >= MAX_NODES || l < best_l))
+                    {
+                        best_freq = freq[l];
+                        best_l    = l;
+                    }
+                }
+                if best_l < MAX_NODES {
+                    label[v] = best_l as u8;
+                }
+            }
+        }
+
+        // ── 2. Count distinct communities ────────────────────────────────────────
+        let mut comm_present = [false; MAX_NODES];
+        for si in 0..node_count {
+            let l = label[snap.node_slots[si]] as usize;
+            if l < MAX_NODES { comm_present[l] = true; }
+        }
+        let comm_count = comm_present.iter().filter(|&&p| p).count();
+
+        // ── 3. Deduplicate directed edges → undirected edge set, compute m ────────
+        // Record (from, to); when we encounter (v, u) and (u, v) already recorded
+        // it is the same undirected edge — skip it.
+        let mut seen_from = [NodeId::ZERO; MAX_EDGES];
+        let mut seen_to   = [NodeId::ZERO; MAX_EDGES];
+        let mut m = 0usize;
+
+        for ei in 0..MAX_EDGES {
+            if !snap.edge_live[ei] { continue; }
+            let u = snap.edge_from[ei];
+            let v = snap.edge_to[ei];
+            if u == v { continue; }
+            let already = (0..m).any(|j| seen_from[j] == v && seen_to[j] == u);
+            if !already && m < MAX_EDGES {
+                seen_from[m] = u;
+                seen_to[m]   = v;
+                m += 1;
+            }
+        }
+
+        if m == 0 {
+            return (0, comm_count, 0, node_count);
+        }
+
+        // ── 4. Undirected degree per slot ─────────────────────────────────────────
+        let mut deg = [0u32; MAX_NODES];
+        for si in 0..node_count {
+            let v    = snap.node_slots[si];
+            let v_id = snap.slot_id[v];
+            let mut nb_seen = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei] { continue; }
+                let other = if snap.edge_from[ei] == v_id {
+                    snap.edge_to[ei]
+                } else if snap.edge_to[ei] == v_id {
+                    snap.edge_from[ei]
+                } else {
+                    continue;
+                };
+                if other == v_id { continue; }
+                if !nb_seen[..nb].contains(&other) && nb < MAX_NODES {
+                    nb_seen[nb] = other;
+                    nb += 1;
+                }
+            }
+            deg[v] = nb as u32;
+        }
+
+        // ── 5. ΣL_c: count intra-community undirected edges ──────────────────────
+        let mut sum_l = 0i64;
+        for ei in 0..m {
+            let u = seen_from[ei];
+            let v = seen_to[ei];
+            if let (Some(su), Some(sv)) = (snap.node_slot_by_id(u), snap.node_slot_by_id(v)) {
+                if label[su] == label[sv] {
+                    sum_l += 1;
+                }
+            }
+        }
+
+        // ── 6. Σd_c²: per-community degree sum, then squared ─────────────────────
+        let mut dc = [0i64; MAX_NODES];
+        for si in 0..node_count {
+            let slot = snap.node_slots[si];
+            let l    = label[slot] as usize;
+            if l < MAX_NODES { dc[l] += deg[slot] as i64; }
+        }
+        let mut sum_d2 = 0i64;
+        for l in 0..MAX_NODES { sum_d2 += dc[l] * dc[l]; }
+
+        // ── 7. Q_ppm = (4m·ΣL − Σd²) × 1_000_000 / (4m²) ──────────────────────
+        let m_i   = m as i64;
+        let numer = (4 * m_i * sum_l - sum_d2) * 1_000_000;
+        let denom = 4 * m_i * m_i;
+        let q_ppm = (numer / denom).max(-1_000_000).min(1_000_000) as i32;
+
+        (q_ppm, comm_count, m, node_count)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6405,6 +6562,20 @@ pub fn graph_assortativity() -> (i32, usize, usize) {
 /// 1_000_000 = fully reciprocal; 0 = no mutual edges or no edges.
 pub fn graph_reciprocity() -> (u32, usize, usize) {
     RUNTIME.lock().graph_reciprocity_inner()
+}
+
+/// V2.67: Graph modularity — quality of the LPA community partition (Newman–Girvan Q).
+///
+/// Runs LPA community detection (same algorithm as `graph_community`) then
+/// evaluates Q = Σ_c [ L_c/m − (d_c/(2m))² ] over the resulting partition.
+/// Directed edges treated as undirected; self-loops excluded.
+///
+/// Returns (modularity_ppm, community_count, undirected_edge_count, node_count).
+///   modularity_ppm ∈ [0, 1_000_000] for LPA partitions of connected components.
+///   0 → single community or no edges.
+pub fn graph_modularity() -> (i32, usize, usize, usize) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_modularity_inner(&snap)
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.

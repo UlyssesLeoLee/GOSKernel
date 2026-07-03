@@ -2520,6 +2520,62 @@ pub fn dispatch_graph_reciprocity(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.67: `graph modularity` — Newman–Girvan modularity Q of the LPA community partition.
+///
+/// Runs the same LPA as `graph community` to detect communities, then evaluates
+/// Q = Σ_c [ L_c/m − (d_c/(2m))² ] over those communities.
+///
+/// modularity_ppm ∈ [0, 1_000_000] for any LPA-detected partition.
+///   0        → single community (connected graph) or no edges
+///   500_000  → two equal-sized disconnected cliques (theoretical benchmark)
+///   1_000_000 → hypothetically perfect partition (rarely achievable in practice)
+///
+/// Displays: modularity as % and ppm, plus community count / edge count / node count.
+pub fn dispatch_graph_modularity(sink: &ConsoleSink) {
+    let (q_ppm, comms, edges, nodes) = gos_runtime::graph_modularity();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph modularity\n");
+    set_color(sink, 7, 0);
+
+    if edges == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  modularity: undefined (no edges)\n");
+        set_color(sink, 7, 0);
+    } else if q_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  modularity: 0.00%  (0 ppm)  \u{2014} single community\n");
+        set_color(sink, 7, 0);
+    } else {
+        let abs_ppm  = q_ppm.max(0) as usize;
+        let pct_int  = abs_ppm / 10_000;
+        let pct_frac = (abs_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  modularity: ");
+        print_num_inline(sink, pct_int);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, abs_ppm);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  communities=");
+    print_num_inline(sink, comms);
+    print_str(sink, "  edges=");
+    print_num_inline(sink, edges);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, nodes);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
