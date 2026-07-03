@@ -2913,13 +2913,13 @@ impl GraphRuntime {
     /// domain would conflict, so coloring finds conflict-free domain partitions.
     fn graph_color_inner<const N: usize>(
         snap: &GraphTopologySnapshot,
-    ) -> ([VectorAddress; N], [u8; N], usize, u8) {
+    ) -> ([VectorAddress; N], [u8; N], [u8; N], usize, u8) {
         const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
         const NO_COLOR: u8 = u8::MAX;
 
         let n = snap.node_count;
         if n == 0 {
-            return ([ZERO_VEC; N], [0u8; N], 0, 0);
+            return ([ZERO_VEC; N], [0u8; N], [0u8; N], 0, 0);
         }
 
         // Step 1 — compute total (undirected) degree for each slot.
@@ -3005,15 +3005,17 @@ impl GraphRuntime {
 
         // Step 4 — pack output in sorted order.
         let copy_len = n.min(N);
-        let mut out_vecs   = [ZERO_VEC; N];
-        let mut out_colors = [0u8; N];
+        let mut out_vecs    = [ZERO_VEC; N];
+        let mut out_colors  = [0u8; N];
+        let mut out_degrees = [0u8; N];
         for i in 0..copy_len {
-            let slot      = order[i];
-            out_vecs[i]   = snap.slot_vec[slot];
-            out_colors[i] = color_slot[slot];
+            let slot        = order[i];
+            out_vecs[i]     = snap.slot_vec[slot];
+            out_colors[i]   = color_slot[slot];
+            out_degrees[i]  = degree[slot].min(u8::MAX as usize) as u8;
         }
 
-        (out_vecs, out_colors, copy_len, chromatic)
+        (out_vecs, out_colors, out_degrees, copy_len, chromatic)
     }
 
     /// V2.48: Prim's algorithm — Minimum Spanning Forest over the undirected
@@ -3127,7 +3129,7 @@ impl GraphRuntime {
             let w = out_key[i];
             let w_u32 = if w >= INF { 0 } else { (w * 1000.0) as u32 };
             out_weights[i] = w_u32;
-            if i > 0 || out_parents[i] != out_vecs[i] {
+            if i > 0 {
                 // Only add edge weights (roots contribute 0).
                 total_w_f += w;
             }
@@ -5689,7 +5691,7 @@ pub fn graph_spanning<const N: usize>(
 /// - `chromatic_number`      — number of distinct colors used.
 ///
 /// OS analogy: colors = conflict-free scheduling domains / CPU-affinity groups.
-pub fn graph_color<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
+pub fn graph_color<const N: usize>() -> ([VectorAddress; N], [u8; N], [u8; N], usize, u8) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_color_inner::<N>(&snap)
 }

@@ -120,7 +120,7 @@ Locks `RUNTIME`, calls `topology_snapshot()`, delegates to `graph_mst_inner`.
 ### `crates/k-shell/src/proc.rs`
 
 - Dispatch (2 lines):
-  ```
+  ```text
   "graph mst" | "mst" | "gmst" | "graph tree mst" | "min spanning" → dispatch_graph_mst
   ```
 - Help text: 2 new lines documenting `graph mst` and its aliases.

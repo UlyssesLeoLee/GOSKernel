@@ -4027,7 +4027,7 @@ pub fn dispatch_graph_spanning(sink: &ConsoleSink) {
 
     // Compute which nodes are children (have at least one child in the spanning tree).
     // A node is a branch if some other node has it as parent (and that node isn't itself).
-    let mut has_child = [false; 128usize];
+    let mut has_child = [false; MAX_N];
     for i in 0..total {
         if depths[i] > 0 {
             // Find the parent index so we can mark it.
@@ -4155,7 +4155,7 @@ pub fn dispatch_graph_spanning(sink: &ConsoleSink) {
 pub fn dispatch_graph_color(sink: &ConsoleSink) {
     const MAX_N: usize = 128;
 
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<MAX_N>();
+    let (vecs, colors, degrees, total, chromatic) = gos_runtime::graph_color::<MAX_N>();
 
     set_color(sink, 11, 0);
     print_str(sink, " graph color\n");
@@ -4193,6 +4193,7 @@ pub fn dispatch_graph_color(sink: &ConsoleSink) {
 
     for i in 0..total {
         let c   = colors[i];
+        let d   = degrees[i];
         let vec = vecs[i];
         let tc  = TERM[(c as usize) % 8];
 
@@ -4215,7 +4216,11 @@ pub fn dispatch_graph_color(sink: &ConsoleSink) {
 
         // role column
         set_color(sink, tc, 0);
-        if c == 0 { print_str(sink, "center"); } else {
+        if d == 0 {
+            print_str(sink, "isolated");
+        } else if c == 0 {
+            print_str(sink, "center");
+        } else {
             print_str(sink, "domain-");
             print_num_inline(sink, c as usize);
         }

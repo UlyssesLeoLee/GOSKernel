@@ -118,7 +118,7 @@ Locks `RUNTIME`, calls `topology_snapshot()`, delegates to `graph_shortest_inner
 ### `crates/k-shell/src/proc.rs`
 
 - Dispatch (with vector parsing):
-  ```
+  ```text
   "graph shortest <v>" | "shortest <v>" | "graph dijkstra <v>" | "dijkstra <v>"
   → VectorAddress::parse(v) → dispatch_graph_shortest(sink, src)
   ```

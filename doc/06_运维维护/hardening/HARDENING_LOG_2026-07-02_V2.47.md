@@ -64,7 +64,7 @@ Output: (vecs, colors, node_count, chromatic_number)
 
 4. **Chromatic number is a greedy upper bound**: optimal chromatic number is NP-hard in general. Welsh-Powell is optimal for paths, bipartite graphs, complete graphs, and star graphs (the common kernel topology patterns), and provides a practical upper bound for real topologies.
 
-5. **Role labels**: `center` (color 0 = first assigned, highest-degree node), `domain-N` (color N > 0 = conflict group N). `isolated` nodes (no edges) receive color 0 by default.
+5. **Role labels**: `isolated` (degree 0 = no edges), `center` (color 0 AND degree > 0 = highest-degree node, first assigned), `domain-N` (color N > 0 = conflict group N). Isolated nodes are separated from the center check to avoid conflation — both get color 0, but their roles differ.
 
 **Complexity:** O(V·E) per call — O(E) degree scan + O(V²) sort (n≤128) + O(V·E) greedy assignment.  
 **Space:** O(MAX_NODES) = O(128) — all fixed-size stack arrays, no_std/no_alloc compatible.
@@ -98,13 +98,14 @@ Output: (vecs, colors, node_count, chromatic_number)
   - Footer: horizontal separator line
 
 - **Role labels:**
-  - `center` — color 0 (highest-degree node, first assigned)
+  - `isolated` — degree 0 (no edges; checked before color to avoid conflation with `center`)
+  - `center` — color 0 AND degree > 0 (highest-degree node, first assigned by Welsh-Powell)
   - `domain-N` — color N > 0 (N-th conflict group)
 
 ### `crates/k-shell/src/proc.rs`
 
 - Dispatch wiring (4 lines):
-  ```
+  ```text
   "graph color" | "color" | "gcolor" | "graph colour" | "colour" → dispatch_graph_color
   ```
 - Help text: 2 new lines documenting `graph color` and its aliases.
@@ -155,7 +156,7 @@ Example output (triangle K₃ + isolated D):
   C0     [24:1:1:0]       center
   C1     [24:1:2:0]       domain-1
   C2     [24:1:3:0]       domain-2
-  C0     [24:1:4:0]       center
+  C0     [24:1:4:0]       isolated
  ─────────────────────────────────────────────────────────────
 ```
 

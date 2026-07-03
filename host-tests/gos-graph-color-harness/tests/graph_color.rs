@@ -132,7 +132,7 @@ fn color_of(
 fn empty_graph_no_color() {
     let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     reset();
-    let (_vecs, _colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (_vecs, _colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 0, "empty: 0 nodes");
     assert_eq!(chromatic, 0, "empty: chromatic number = 0");
 }
@@ -145,7 +145,7 @@ fn single_node_color_zero() {
     reset();
     register_plugin();
     add_node(COL_VEC_A, COL_KEY_A, COL_ID_A, 0xC001);
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 1, "1 node");
     assert_eq!(chromatic, 1, "1 node → chromatic = 1");
     let ca = color_of(&vecs, &colors, total, COL_VEC_A).expect("A present");
@@ -161,7 +161,7 @@ fn two_isolated_nodes_same_color() {
     register_plugin();
     add_node(COL_VEC_A, COL_KEY_A, COL_ID_A, 0xC001);
     add_node(COL_VEC_B, COL_KEY_B, COL_ID_B, 0xC002);
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 2, "2 nodes");
     assert_eq!(chromatic, 1, "no edges → chromatic = 1");
     let ca = color_of(&vecs, &colors, total, COL_VEC_A).expect("A present");
@@ -180,7 +180,7 @@ fn k2_two_colors() {
     add_node(COL_VEC_A, COL_KEY_A, COL_ID_A, 0xC001);
     add_node(COL_VEC_B, COL_KEY_B, COL_ID_B, 0xC002);
     add_edge(COL_ID_A, COL_ID_B, "col.ab.t4");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 2, "2 nodes");
     assert_eq!(chromatic, 2, "K₂ requires 2 colors");
     let ca = color_of(&vecs, &colors, total, COL_VEC_A).expect("A present");
@@ -200,7 +200,7 @@ fn path_abc_two_colors() {
     add_node(COL_VEC_C, COL_KEY_C, COL_ID_C, 0xC003);
     add_edge(COL_ID_A, COL_ID_B, "col.ab.t5");
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t5");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 3, "3 nodes");
     assert!(chromatic <= 2, "path graph is bipartite → chromatic ≤ 2");
     let ca = color_of(&vecs, &colors, total, COL_VEC_A).expect("A present");
@@ -224,7 +224,7 @@ fn triangle_three_colors() {
     add_edge(COL_ID_A, COL_ID_B, "col.ab.t6");
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t6");
     add_edge(COL_ID_C, COL_ID_A, "col.ca.t6");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 3, "3 nodes");
     assert_eq!(chromatic, 3, "K₃ requires 3 colors");
     let ca = color_of(&vecs, &colors, total, COL_VEC_A).expect("A present");
@@ -253,7 +253,7 @@ fn k4_four_colors() {
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t7");
     add_edge(COL_ID_B, COL_ID_D, "col.bd.t7");
     add_edge(COL_ID_C, COL_ID_D, "col.cd.t7");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 4, "4 nodes");
     assert_eq!(chromatic, 4, "K₄ requires 4 colors");
     // All four colors must be distinct.
@@ -283,7 +283,7 @@ fn bipartite_k22_two_colors() {
     add_edge(COL_ID_A, COL_ID_D, "col.ad.t8");
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t8");
     add_edge(COL_ID_B, COL_ID_D, "col.bd.t8");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 4, "4 nodes");
     assert!(chromatic <= 2, "bipartite graph chromatic ≤ 2; got {chromatic}");
     // Cross-set adjacency: A≠C, A≠D, B≠C, B≠D.
@@ -313,7 +313,7 @@ fn validity_no_adjacent_same_color() {
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t9");
     add_edge(COL_ID_C, COL_ID_A, "col.ca.t9");
     // D is isolated — no edges.
-    let (vecs, colors, total, _chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, _chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 4);
 
     // Verify every directed edge's endpoints have different colors.
@@ -345,7 +345,7 @@ fn descending_degree_order() {
     add_edge(COL_ID_B, COL_ID_A, "col.ba.t10");
     add_edge(COL_ID_B, COL_ID_C, "col.bc.t10");
     add_edge(COL_ID_B, COL_ID_D, "col.bd.t10");
-    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<128>();
+    let (vecs, colors, _degrees, total, chromatic) = gos_runtime::graph_color::<128>();
     assert_eq!(total, 4, "4 nodes");
     assert_eq!(chromatic, 2, "star graph K_{{1,3}} is bipartite → 2 colors");
     // The center node B (highest degree = 3) must appear at index 0.
