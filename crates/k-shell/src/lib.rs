@@ -8218,6 +8218,11 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     // theme index in DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED signal val.
     let _ = gos_runtime::register_node_prop_u8(THEME_WABI_NODE_ID, DISPLAY_THEME_WABI);
     let _ = gos_runtime::register_node_prop_u8(THEME_SHOJI_NODE_ID, DISPLAY_THEME_SHOJI);
+    // V2.56: bind each theme node's primary palette color so the renderer can
+    // call node_attr_get(theme_vec) instead of indexing the hardcoded PAL_U32 array.
+    // PAL_U32[DISPLAY_THEME_WABI=0]=0x00DB_1C21 (RED), [1]=0x00ED_EDF2 (WHITE).
+    let _ = gos_runtime::register_node_prop_u32(THEME_WABI_NODE_ID, 0x00DB_1C21);
+    let _ = gos_runtime::register_node_prop_u32(THEME_SHOJI_NODE_ID, 0x00ED_EDF2);
     // Subscribe: k-vga auto-repaints when theme.current Use-edge changes.
     let k_vga_node_id = derive_node_id(PluginId::from_ascii("K_VGA"), "vga.entry");
     let _ = gos_runtime::register_subscribe(THEME_CURRENT_NODE_ID, k_vga_node_id);
