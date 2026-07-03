@@ -1052,6 +1052,8 @@ fn dispatch_text_command(
         super::dispatch_graph_density(sink);
     } else if cmd == "graph clustering" || cmd == "clustering" || cmd == "gcluster" {
         super::dispatch_graph_clustering(sink);
+    } else if cmd == "graph transitivity" || cmd == "transitivity" || cmd == "gtrans" {
+        super::dispatch_graph_transitivity(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))

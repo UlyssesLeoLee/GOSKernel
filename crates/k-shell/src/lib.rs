@@ -2279,6 +2279,54 @@ pub fn dispatch_graph_clustering(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.63: `graph transitivity` — global transitivity (3×triangles / open_triplets).
+///
+/// Watts-Strogatz CC (V2.61) averages per-node local CCs; global transitivity
+/// gives each triplet equal weight regardless of which node it's centred on,
+/// so high-degree hub nodes dominate the metric.
+pub fn dispatch_graph_transitivity(sink: &ConsoleSink) {
+    let (transitivity_ppm, triangles, triplets, n) = gos_runtime::graph_transitivity();
+    set_color(sink, 11, 0);
+    print_str(sink, " graph transitivity\n");
+    set_color(sink, 7, 0);
+
+    if n == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  transitivity: undefined (empty graph)\n");
+        set_color(sink, 7, 0);
+    } else if triplets == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  transitivity: 0%  (0 ppm) — no triplets\n");
+        set_color(sink, 7, 0);
+    } else {
+        let pct_int  = transitivity_ppm / 10_000;
+        let pct_frac = (transitivity_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  transitivity: ");
+        print_num_inline(sink, pct_int as usize);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac as usize);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, transitivity_ppm as usize);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, n);
+    print_str(sink, "  triangles=");
+    print_num_inline(sink, triangles as usize);
+    print_str(sink, "  triplets=");
+    print_num_inline(sink, triplets as usize);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
