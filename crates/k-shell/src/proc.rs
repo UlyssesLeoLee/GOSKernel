@@ -977,6 +977,24 @@ fn dispatch_text_command(
         super::dispatch_graph_color(sink);
     } else if cmd == "graph mst" || cmd == "mst" || cmd == "gmst" || cmd == "graph tree mst" || cmd == "min spanning" {
         super::dispatch_graph_mst(sink);
+    } else if cmd == "graph sim" || cmd == "sim" || cmd == "gsim" || cmd == "graph walk" || cmd == "walk" {
+        super::dispatch_graph_sim(sink, 16);
+    } else if let Some(n_str) = cmd
+        .strip_prefix("graph sim ")
+        .or_else(|| cmd.strip_prefix("sim "))
+        .or_else(|| cmd.strip_prefix("gsim "))
+        .or_else(|| cmd.strip_prefix("graph walk "))
+        .or_else(|| cmd.strip_prefix("walk "))
+    {
+        let trimmed = n_str.trim();
+        if let Some(n_val) = super::parse_epoch_decimal(trimmed) {
+            let steps = (n_val as u32).min(256).max(1);
+            super::dispatch_graph_sim(sink, steps);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph sim: expected a step count 1-256 (e.g. graph sim 32)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))

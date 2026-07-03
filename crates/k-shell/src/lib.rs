@@ -4620,6 +4620,81 @@ pub fn dispatch_graph_flow(sink: &ConsoleSink, source: VectorAddress, snk_vec: V
     print_str(sink, "\n");
 }
 
+/// V2.52: `graph sim [N]` — random walk simulation over the live graph.
+///
+/// Simulates N random-walk steps (default 16, clamped to 256) starting from
+/// a random live node, sampling outgoing edges proportional to their weight.
+/// Dead-end nodes cause a teleport to a random live node (PageRank restart).
+/// Nodes are listed highest-to-lowest by visit count — the "hottest" signal
+/// paths in the graph topology under random load.
+///
+/// OS analogy: `strace -e trace=signal` — identifies which kernel subsystems
+/// dominate signal traffic under simulated random load.
+pub fn dispatch_graph_sim(sink: &ConsoleSink, steps: u32) {
+    const MAX_N: usize = 128;
+
+    let epoch = gos_runtime::graph_epoch();
+    let seed  = (epoch as u32) ^ steps ^ 0xDEAD_BEEF;
+    let (vecs, visits, total, actual, stuck) =
+        gos_runtime::graph_sim::<MAX_N>(steps, seed);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph sim  steps=");
+    print_num_inline(sink, steps as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, "  seed=");
+    print_num_inline(sink, seed as usize);
+    print_str(sink, "\n");
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 8, 0);
+    print_str(sink, "  rank  visits  vector\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    for i in 0..total {
+        let v  = visits[i];
+        let fg: u8 = if v == 0 { 8 } else if i == 0 { 13 } else if i < 3 { 11 } else { 7 };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+        print_num_inline(sink, i + 1);
+        print_str(sink, "      ");
+        print_num_inline(sink, v as usize);
+        print_str(sink, "  ");
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vecs[i]);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, actual as usize);
+    print_str(sink, " walk steps  ");
+    if stuck > 0 {
+        set_color(sink, 14, 0);
+        print_num_inline(sink, stuck as usize);
+        print_str(sink, " teleport(s)");
+        set_color(sink, 7, 0);
+    } else {
+        set_color(sink, 10, 0);
+        print_str(sink, "no dead ends");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -3343,6 +3343,128 @@ impl GraphRuntime {
         (out_vecs, out_out, out_in, copy_len, max_flow_u32)
     }
 
+    /// V2.52: Random walk simulation over the live kernel graph.
+    ///
+    /// Performs `steps` random walk steps starting from a random live node.
+    /// At each step the walker samples an outgoing edge proportional to its
+    /// weight (uniform if all weights are zero) and moves to the target node.
+    /// Dead-end nodes (no live outgoing edges) cause a teleport to a uniformly
+    /// random live node (analogous to PageRank's damping restart).
+    ///
+    /// Returns `(vecs, visits, node_count, actual_steps, stuck_steps)`:
+    /// - `vecs[0..node_count]`   — nodes sorted by visit count descending.
+    /// - `visits[0..node_count]` — raw visit count for each node.
+    /// - `node_count`            — total live nodes.
+    /// - `actual_steps`          — steps that traversed an edge.
+    /// - `stuck_steps`           — steps that hit a dead end and teleported.
+    ///
+    /// `sum(visits) == 1 + actual_steps + stuck_steps == 1 + steps`
+    /// for any non-empty graph with steps > 0.
+    fn graph_sim_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+        steps: u32,
+        seed:  u32,
+    ) -> ([VectorAddress; N], [u32; N], usize, u32, u32) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        let n = snap.node_count;
+        if n == 0 || steps == 0 {
+            return ([ZERO_VEC; N], [0u32; N], n, 0, 0);
+        }
+
+        // xorshift32 PRNG — never zero.
+        let mut rng: u32 = if seed == 0 { 0xDEAD_BEEF } else { seed };
+        macro_rules! next_rng {
+            () => {{
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                rng
+            }};
+        }
+
+        let mut raw_visits = [0u32; MAX_NODES];
+
+        // Start at a random live node.
+        let start_idx  = (next_rng!() as usize) % n;
+        let mut cur_slot = snap.node_slots[start_idx];
+        raw_visits[cur_slot] = raw_visits[cur_slot].saturating_add(1);
+
+        let mut actual_steps = 0u32;
+        let mut stuck_steps  = 0u32;
+
+        for _ in 0..steps {
+            let cur_id = snap.slot_id[cur_slot];
+
+            // Collect outgoing edges (to live nodes only) and sum weights.
+            let mut out_idxs  = [0usize; MAX_EDGES];
+            let mut out_count = 0usize;
+            let mut total_w   = 0u32;
+
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei]           { continue; }
+                if snap.edge_from[ei] != cur_id  { continue; }
+                if snap.node_slot_by_id(snap.edge_to[ei]).is_none() { continue; }
+                out_idxs[out_count] = ei;
+                let w = (snap.edge_weight[ei] * 1000.0) as u32;
+                total_w = total_w.saturating_add(if w == 0 { 1 } else { w });
+                out_count += 1;
+            }
+
+            if out_count == 0 {
+                // Dead end — teleport to a random live node.
+                stuck_steps += 1;
+                let restart_idx = (next_rng!() as usize) % n;
+                cur_slot = snap.node_slots[restart_idx];
+                raw_visits[cur_slot] = raw_visits[cur_slot].saturating_add(1);
+                continue;
+            }
+
+            // Sample an edge proportional to weight.
+            let pick   = next_rng!() % total_w;
+            let mut cumulative = 0u32;
+            let mut chosen_ei  = out_idxs[0];
+            for k in 0..out_count {
+                let ei = out_idxs[k];
+                let w  = (snap.edge_weight[ei] * 1000.0) as u32;
+                cumulative += if w == 0 { 1 } else { w };
+                if cumulative > pick {
+                    chosen_ei = ei;
+                    break;
+                }
+            }
+
+            if let Some(next_slot) = snap.node_slot_by_id(snap.edge_to[chosen_ei]) {
+                cur_slot = next_slot;
+                raw_visits[cur_slot] = raw_visits[cur_slot].saturating_add(1);
+                actual_steps += 1;
+            } else {
+                stuck_steps += 1;
+            }
+        }
+
+        // Pack output sorted by visits descending (insertion sort — N ≤ 128).
+        let copy_len       = n.min(N);
+        let mut out_vecs   = [ZERO_VEC; N];
+        let mut out_visits = [0u32; N];
+
+        for i in 0..copy_len {
+            let s = snap.node_slots[i];
+            out_vecs[i]   = snap.slot_vec[s];
+            out_visits[i] = raw_visits[s];
+        }
+        for i in 1..copy_len {
+            let mut j = i;
+            while j > 0 && out_visits[j - 1] < out_visits[j] {
+                out_vecs.swap(j - 1, j);
+                out_visits.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+
+        (out_vecs, out_visits, n, actual_steps, stuck_steps)
+    }
+
     /// V2.49: Dijkstra single-source shortest-path tree over the **directed**
     /// kernel graph from a given source node.
     ///
@@ -5970,6 +6092,35 @@ pub fn graph_flow<const N: usize>(
 ) -> ([VectorAddress; N], [u32; N], [u32; N], usize, u32) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_flow_inner::<N>(&snap, source, sink)
+}
+
+/// V2.52: Random walk simulation over the live kernel graph.
+///
+/// Simulates at most `steps` (clamped to 256) random walk steps starting
+/// from a random live node, sampling outgoing edges proportional to their
+/// weight.  Dead-end nodes trigger a teleport to a uniformly random live
+/// node.  `seed` is mixed with the graph epoch for varied-but-deterministic
+/// output on consecutive calls.
+///
+/// Returns `(vecs, visits, node_count, actual_steps, stuck_steps)`:
+/// - `vecs[0..node_count]`   — nodes sorted by visit count descending.
+/// - `visits[0..node_count]` — raw visit count per node.
+/// - `node_count`            — total live nodes.
+/// - `actual_steps`          — steps that traversed an edge.
+/// - `stuck_steps`           — steps that teleported (dead ends).
+///
+/// Invariant (non-empty graph, steps > 0):
+///   `sum(visits) == 1 + actual_steps + stuck_steps == 1 + min(steps, 256)`
+///
+/// OS analogy: `strace -e trace=signal` — identifies which kernel
+/// subsystems dominate signal traffic under simulated random load.
+pub fn graph_sim<const N: usize>(
+    steps: u32,
+    seed:  u32,
+) -> ([VectorAddress; N], [u32; N], usize, u32, u32) {
+    let steps = steps.min(256);
+    let snap  = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_sim_inner::<N>(&snap, steps, seed)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
