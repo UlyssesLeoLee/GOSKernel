@@ -1,20 +1,27 @@
-# GOS Hardening Log — V2.25 — 2026-07-01
+# GOS 硬化日志 — V2.25
 
-## Summary
+| 项目 | 内容 |
+|---|---|
+| 版本 | V2.25 |
+| 日期 | 2026-07-01 |
 
-V2.25 adds a per-node lifecycle event log with the `node log <vec>` / `nlog <vec>` shell
-command — the graph-OS equivalent of `journalctl -u <service>`.  Every lifecycle transition
-(`Registered → Allocated → Running → Ready → Faulted → Ready`, etc.) is now recorded in a
-16-slot per-node ring with a monotonic tick timestamp, giving operators a complete audit trail
-of how each graph node has evolved since boot.
+## 摘要
+
+V2.25 新增了逐节点生命周期事件日志，以及 `node log <vec>` / `nlog <vec>` shell 命令——这是 graph-OS 对应于 `journalctl -u <service>` 的等价物。现在每一次生命周期转换（`Registered → Allocated → Running → Ready → Faulted → Ready` 等）都会被记录进一个带有单调 tick 时间戳的 16 槽逐节点环形缓冲区，为运维人员提供每个图节点自启动以来完整演化过程的审计轨迹。
 
 ---
 
-## Changes
+## 1. 变更目标
+
+（见上文摘要：为每个图节点建立生命周期转换的完整审计轨迹，对应 Linux 的 `journalctl -u <service>`。）
+
+---
+
+## 2. 修改清单
 
 ### 1. `NodeLogEntry` — gos-protocol (`crates/gos-protocol/src/lib.rs`)
 
-New public struct exported from gos-protocol:
+从 gos-protocol 导出的新公开结构体：
 
 ```rust
 pub struct NodeLogEntry {
@@ -27,54 +34,51 @@ impl NodeLogEntry {
 }
 ```
 
-### 2. Per-node lifecycle log ring — gos-runtime (`crates/gos-runtime/src/lib.rs`)
+### 2. 逐节点生命周期日志环形缓冲区 — gos-runtime (`crates/gos-runtime/src/lib.rs`)
 
-- Added `MAX_NODE_LOG: usize = 16` constant.
-- Added three fields to `GraphRuntime`:
-  - `node_log: [[NodeLogEntry; MAX_NODE_LOG]; MAX_NODES]` — ring storage per node slot.
-  - `node_log_head: [u8; MAX_NODES]` — next-write pointer per node slot.
-  - `node_log_total: [u16; MAX_NODES]` — total transitions ever logged (saturates at u16::MAX).
-- `GraphRuntime::new()` initialises all three to EMPTY / zero.
-- `state_delta()` — the single internal hook called on every lifecycle change — now also
-  pushes a `NodeLogEntry { tick, lifecycle }` into the node's log ring.  This is zero-overhead
-  on the fast path: one array write + one `saturating_add`.
-- Added `node_log_page()` impl method: returns newest-first, capped at MAX_NODE_LOG entries.
-- Added global `node_log_page()` wrapper (mirrors the `node_trace_page` pattern).
-- `NodeLogEntry` imported alongside `NodeTraceEntry` in the protocol import block.
+- 新增常量 `MAX_NODE_LOG: usize = 16`。
+- 为 `GraphRuntime` 新增三个字段：
+  - `node_log: [[NodeLogEntry; MAX_NODE_LOG]; MAX_NODES]` — 每个节点槽的环形存储。
+  - `node_log_head: [u8; MAX_NODES]` — 每个节点槽的下一写入指针。
+  - `node_log_total: [u16; MAX_NODES]` — 累计记录的转换总数（饱和于 u16::MAX）。
+- `GraphRuntime::new()` 将以上三者全部初始化为 EMPTY / 零值。
+- `state_delta()`——每次生命周期变化时调用的唯一内部钩子——现在也会向该节点的日志环形缓冲区推入一条 `NodeLogEntry { tick, lifecycle }`。这在快速路径上是零开销的：只需一次数组写入加一次 `saturating_add`。
+- 新增 `node_log_page()` 实现方法：返回最新在前、上限为 MAX_NODE_LOG 条目的结果。
+- 新增全局 `node_log_page()` 包装函数（沿用 `node_trace_page` 的模式）。
+- 在协议导入代码块中，`NodeLogEntry` 与 `NodeTraceEntry` 一并导入。
 
-### 3. `node log` shell command — k-shell (`crates/k-shell/src/lib.rs`, `crates/k-shell/src/proc.rs`)
+### 3. `node log` shell 命令 — k-shell (`crates/k-shell/src/lib.rs`、`crates/k-shell/src/proc.rs`)
 
-New dispatch function `dispatch_node_log()` in `lib.rs`:
+`lib.rs` 中新增的分发函数 `dispatch_node_log()`：
 
-- Header: node identifier + total event count + showing count.
-- Table: `tick | lifecycle label` — each row is one transition.
-- Color-codes lifecycle: green = Ready/Registered, red = Faulted, yellow = Running,
-  cyan = Suspended, gray = Discovered/Terminated, white = other.
-- Helper `lifecycle_log_entry()` maps the raw u8 discriminant to a label + color.
-- Footer hint: `node trace <vec> for signal history | ninfo <vec> for full view`.
+- 头部：节点标识符 + 事件总数 + 显示数量。
+- 表格：`tick | lifecycle label` —— 每一行代表一次转换。
+- 对生命周期进行颜色编码：绿色 = Ready/Registered，红色 = Faulted，黄色 = Running，青色 = Suspended，灰色 = Discovered/Terminated，白色 = 其他。
+- 辅助函数 `lifecycle_log_entry()` 将原始 u8 判别值映射为标签 + 颜色。
+- 页脚提示：`node trace <vec> for signal history | ninfo <vec> for full view`。
 
-Shell dispatch (`proc.rs`):
+Shell 分发 (`proc.rs`)：
 - `node log <vec>` / `nlog <vec>` → `dispatch_node_log(sink, vec)`
-- `help` text updated with two new entries.
+- `help` 文本更新，新增两条条目。
 
-### 4. Test harness — `host-tests/gos-node-log-harness/` (10 tests, all passing)
+### 4. 测试套件 — `host-tests/gos-node-log-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
-| 1 | `log_unknown_vector_returns_not_found` | NodeNotFound for unregistered vector |
-| 2 | `log_fresh_node_has_no_entries` | After register, API succeeds and ring is valid |
-| 3 | `log_contains_allocated_after_register` | Allocated state_delta recorded on register_node |
-| 4 | `log_faulted_entry_after_fault_node` | Most recent entry is Faulted after fault_node() |
-| 5 | `log_ready_entry_after_resume_node` | Most recent entry is Ready after resume_node() |
-| 6 | `log_newest_first_ordering` | fault → resume → fault: [0]=Faulted, [1]=Ready |
-| 7 | `log_total_increases_with_events` | total strictly increases with each lifecycle change |
-| 8 | `log_ring_wraps_after_max_entries` | Ring full: returned == MAX_NODE_LOG after overflow |
-| 9 | `log_faulted_discriminant_is_0xff` | Faulted lifecycle == 0xFF matches #[repr(u8)] spec |
-|10 | `log_two_nodes_independent` | Node A fault does not appear in node B's log |
+| 1 | `log_unknown_vector_returns_not_found` | 未注册 vector 返回 NodeNotFound |
+| 2 | `log_fresh_node_has_no_entries` | register 后，API 调用成功且环形缓冲区有效 |
+| 3 | `log_contains_allocated_after_register` | register_node 时记录 Allocated 的 state_delta |
+| 4 | `log_faulted_entry_after_fault_node` | fault_node() 后最新条目为 Faulted |
+| 5 | `log_ready_entry_after_resume_node` | resume_node() 后最新条目为 Ready |
+| 6 | `log_newest_first_ordering` | fault → resume → fault：[0]=Faulted，[1]=Ready |
+| 7 | `log_total_increases_with_events` | total 随每次生命周期变化严格递增 |
+| 8 | `log_ring_wraps_after_max_entries` | 环形缓冲区填满：溢出后返回值 == MAX_NODE_LOG |
+| 9 | `log_faulted_discriminant_is_0xff` | Faulted 生命周期 == 0xFF，与 #[repr(u8)] 规格一致 |
+|10 | `log_two_nodes_independent` | 节点 A 的 fault 不会出现在节点 B 的日志中 |
 
 ---
 
-## Verification
+## 3. 测试结果
 
 ```
 cd host-tests/gos-node-log-harness
@@ -82,7 +86,7 @@ cargo test -- --test-threads=1
 # test result: ok. 10 passed; 0 failed
 ```
 
-Kernel build:
+内核构建：
 ```
 cargo build --release
 # Finished `release` profile [optimized]
@@ -90,36 +94,31 @@ cargo build --release
 
 ---
 
-## Production Quality Rationale
+## 生产级质量依据
 
-| Capability | Linux/macOS equivalent | GOS V2.25 |
+| 能力 | Linux/macOS 对应物 | GOS V2.25 |
 |---|---|---|
-| Service lifecycle log | `journalctl -u <service>` | `node log <vec>` / `nlog <vec>` |
-| Audit trail | systemd unit journal | per-node 16-slot ring with tick timestamps |
-| Newest-first view | `journalctl -u svc --reverse` | always newest-first by design |
-| Fault/recovery history | `journalctl -u svc \| grep -E 'Start\|Stop\|Failed'` | all transitions captured |
-| Zero-overhead recording | systemd journal (separate process) | in-line ring write in `state_delta()` |
-| Ring depth | configurable | 16 entries (MAX_NODE_LOG) |
+| 服务生命周期日志 | `journalctl -u <service>` | `node log <vec>` / `nlog <vec>` |
+| 审计轨迹 | systemd unit journal | 每节点 16 槽环形缓冲区，附带 tick 时间戳 |
+| 最新在前视图 | `journalctl -u svc --reverse` | 设计上始终最新在前 |
+| 故障/恢复历史 | `journalctl -u svc \| grep -E 'Start\|Stop\|Failed'` | 捕获全部转换 |
+| 零开销记录 | systemd journal（独立进程） | `state_delta()` 内联环形缓冲区写入 |
+| 环形缓冲区深度 | 可配置 | 16 条目 (MAX_NODE_LOG) |
 
-The lifecycle log complements `node trace <vec>` (signal dispatch history) and
-`node info <vec>` (static snapshot) to form a complete per-node observability trio:
+生命周期日志与 `node trace <vec>`（信号分发历史）以及 `node info <vec>`（静态快照）相辅相成，构成完整的逐节点可观测性三件套：
 
-| Command | Analogue | Shows |
+| 命令 | 对应物 | 展示内容 |
 |---|---|---|
-| `node info <vec>` | `systemctl status <svc>` | current state snapshot |
-| `node trace <vec>` | `strace -p <pid>` | recent signal dispatches |
-| `node log <vec>` | `journalctl -u <svc>` | lifecycle transition history |
+| `node info <vec>` | `systemctl status <svc>` | 当前状态快照 |
+| `node trace <vec>` | `strace -p <pid>` | 最近的信号分发 |
+| `node log <vec>` | `journalctl -u <svc>` | 生命周期转换历史 |
 
 ---
 
-## Graph-OS Characteristic Preserved
+## 4. 架构意义
 
-The lifecycle log records transitions that are driven by **graph structural events**
-(node registration, edge mutations triggering subscriber signals) as well as operator
-commands (`kill`, `resume`).  The `tick` field ties each transition to the graph
-runtime's own monotonic clock, keeping observability rooted in GOS's event-loop model
-rather than a wall-clock abstraction foreign to a graph OS.
+生命周期日志记录的转换既由**图结构事件**驱动（节点注册、触发订阅者信号的边变更），也由操作员命令（`kill`、`resume`）驱动。`tick` 字段将每次转换与图运行时自身的单调时钟绑定，使可观测性根植于 GOS 的事件循环模型，而非对图 OS 而言外来的墙钟抽象。
 
 ---
 
-*Automated hardening pass — GOS V2.25 — 2026-07-01*
+*自动化硬化流程 — GOS V2.25 — 2026-07-01*

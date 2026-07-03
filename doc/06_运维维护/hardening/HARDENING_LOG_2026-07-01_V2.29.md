@@ -1,21 +1,29 @@
-# GOS Hardening Log — V2.29 — 2026-07-01
+# GOS 硬化日志 — V2.29
 
-## Summary
+| 项目 | 内容 |
+|---|---|
+| 版本 | V2.29 |
+| 日期 | 2026-07-01 |
 
-V2.29 adds per-node signal-count reset and the `node stat clear` / `nstat clear` shell
-commands, bringing graph-OS counter management up to production standards comparable to
-`perf stat reset` and `echo 0 > /proc/<pid>/clear_refs` on Linux.
+## 摘要
 
-This completes the seven-command per-node observability surface and the read/write
-symmetry for all per-node counters: every counter exposed by `stat` now has a reset.
+V2.29 新增了逐节点信号计数重置功能，以及 `node stat clear` / `nstat clear` shell 命令，将 graph-OS 的计数器管理提升到与 Linux 上 `perf stat reset` 和 `echo 0 > /proc/<pid>/clear_refs` 相当的生产级标准。
+
+这补齐了七命令的逐节点可观测性能力面，并为所有逐节点计数器实现了读/写对称：`stat` 暴露的每一个计数器现在都有对应的重置操作。
 
 ---
 
-## Changes
+## 1. 变更目标
+
+（见上文摘要：为 `stat` 暴露的逐节点计数器补齐重置能力，实现观测面的读/写对称，对应 Linux 的 `perf stat reset`。）
+
+---
+
+## 2. 修改清单
 
 ### 1. `reset_node_stat_inner()` — gos-runtime (`crates/gos-runtime/src/lib.rs`)
 
-New method on `Runtime`:
+`Runtime` 上新增的方法：
 
 ```rust
 pub fn reset_node_stat_inner(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
@@ -26,10 +34,9 @@ pub fn reset_node_stat_inner(&mut self, vector: VectorAddress) -> Result<(), Run
 }
 ```
 
-Zeroes `NodeRecord::signal_count` for the target node via a single `u32` store.
-Does not touch `node_trace`, `node_trace_count`, `node_log`, or any other per-node state.
+通过一次 `u32` 存储，将目标节点的 `NodeRecord::signal_count` 清零。不涉及 `node_trace`、`node_trace_count`、`node_log` 或任何其他逐节点状态。
 
-### 2. `reset_node_stat()` — public API (gos-runtime)
+### 2. `reset_node_stat()` — 公开 API（gos-runtime）
 
 ```rust
 pub fn reset_node_stat(vec: VectorAddress) -> Result<(), RuntimeError> {
@@ -37,45 +44,44 @@ pub fn reset_node_stat(vec: VectorAddress) -> Result<(), RuntimeError> {
 }
 ```
 
-Thin lock wrapper. Returns `Err(RuntimeError::NodeNotFound)` if the vector is not registered.
+一层薄的加锁包装。若 vector 未注册，返回 `Err(RuntimeError::NodeNotFound)`。
 
 ### 3. `dispatch_node_stat_clear()` — k-shell (`crates/k-shell/src/lib.rs`)
 
-New public dispatch function. Calls `reset_node_stat()` and emits a colour-coded status line:
+新的公开分发函数。调用 `reset_node_stat()` 并输出一行颜色编码的状态信息：
 
-- **Green**: `node stat cleared  <vec>` + `signal_count -> 0  (trace ring and log unaffected)`
-- **Red**: `node not found: <vec>`
+- **绿色**：`node stat cleared  <vec>` + `signal_count -> 0  (trace ring and log unaffected)`
+- **红色**：`node not found: <vec>`
 
-### 4. Shell routing — k-shell (`crates/k-shell/src/proc.rs`)
+### 4. Shell 路由 — k-shell (`crates/k-shell/src/proc.rs`)
 
-`dispatch_text_command` now matches (inserted before `stat ` / `node stat ` to avoid prefix
-collision with `node stat clear`):
+`dispatch_text_command` 现在会匹配（插入在 `stat ` / `node stat ` 之前，以避免与 `node stat clear` 产生前缀冲突）：
 
 ```
 node stat clear <vector>   →  dispatch_node_stat_clear(sink, vec)
 nstat clear <vector>       →  dispatch_node_stat_clear(sink, vec)
 ```
 
-Help text updated with two new entries under the `stat` section.
+帮助文本在 `stat` 小节下新增两条条目。
 
-### 5. Test harness — `host-tests/gos-node-stat-clear-harness/` (10 tests, all passing)
+### 5. 测试套件 — `host-tests/gos-node-stat-clear-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
-| 1 | `reset_stat_unknown_vector_returns_not_found` | Unknown vector → NodeNotFound |
-| 2 | `reset_stat_fresh_node_returns_ok` | Fresh node (count == 0) → Ok(()) |
-| 3 | `reset_stat_zeroes_signal_count_after_one_dispatch` | 1 dispatch → reset → count == 0 |
-| 4 | `reset_stat_zeroes_signal_count_after_many_dispatches` | 7 dispatches → reset → count == 0 |
-| 5 | `reset_stat_is_idempotent` | Double-reset stays at 0 |
-| 6 | `reset_stat_new_dispatches_increment_from_zero` | 5 dispatches, reset, 3 more → count == 3 |
-| 7 | `reset_stat_does_not_affect_sibling_node` | Reset A → B count unchanged |
-| 8 | `reset_stat_preserves_trace_ring` | Reset stat → trace ring entries intact |
-| 9 | `reset_stat_reflects_in_proc_page` | proc_page shows 0 after reset |
-|10 | `reset_stat_returns_ok_for_live_node` | Live node → Ok(()) |
+| 1 | `reset_stat_unknown_vector_returns_not_found` | 未知 vector → NodeNotFound |
+| 2 | `reset_stat_fresh_node_returns_ok` | 全新节点（count == 0）→ Ok(()) |
+| 3 | `reset_stat_zeroes_signal_count_after_one_dispatch` | 1 次分发 → 重置 → count == 0 |
+| 4 | `reset_stat_zeroes_signal_count_after_many_dispatches` | 7 次分发 → 重置 → count == 0 |
+| 5 | `reset_stat_is_idempotent` | 两次重置仍保持为 0 |
+| 6 | `reset_stat_new_dispatches_increment_from_zero` | 5 次分发，重置，再 3 次 → count == 3 |
+| 7 | `reset_stat_does_not_affect_sibling_node` | 重置 A → B 的计数不变 |
+| 8 | `reset_stat_preserves_trace_ring` | 重置 stat → 追踪环形缓冲区条目保持完整 |
+| 9 | `reset_stat_reflects_in_proc_page` | 重置后 proc_page 显示为 0 |
+|10 | `reset_stat_returns_ok_for_live_node` | 对存活节点返回 Ok(()) |
 
 ---
 
-## Verification
+## 3. 测试结果
 
 ```
 cd host-tests/gos-node-stat-clear-harness
@@ -88,53 +94,48 @@ cargo build --release
 
 ---
 
-## Production Quality Rationale
+## 生产级质量依据
 
-| Capability | Linux/macOS equivalent | GOS V2.29 |
+| 能力 | Linux/macOS 对应物 | GOS V2.29 |
 |---|---|---|
-| Counter reset | `perf stat reset` | `node stat clear <vec>` |
-| Targeted reset | `echo 0 > /proc/<pid>/clear_refs` | `reset_node_stat()` API |
-| Counter isolation | One counter, no side effects | Only `signal_count` zeroed |
-| Symmetry | Every show has a clear | stat/clear pair complete |
-| Measurement window | `perf stat` fresh run | Clear then dispatch N signals |
-| Alias ergonomics | Short alias for frequent ops | `nstat clear <vec>` |
+| 计数器重置 | `perf stat reset` | `node stat clear <vec>` |
+| 定向重置 | `echo 0 > /proc/<pid>/clear_refs` | `reset_node_stat()` API |
+| 计数器隔离 | 单一计数器，无副作用 | 仅 `signal_count` 被清零 |
+| 对称性 | 每个展示操作都有对应的清除操作 | stat/clear 配对完整 |
+| 测量窗口 | `perf stat` 全新运行 | 清除后再分发 N 个信号 |
+| 别名易用性 | 高频操作的简短别名 | `nstat clear <vec>` |
 
-The `reset_node_stat` path takes a single Mutex lock and performs one `u32` store —
-effectively zero overhead compared to signal dispatch itself.
-
----
-
-## Graph-OS Characteristic Preserved
-
-`node stat clear` acts only on the **counter abstraction** (signal_count) — the graph
-topology (edges), structural mutation log (diff ring), and signal trace ring remain intact.
-This preserves GOS's property that observability tools never destroy causal history;
-only the specific measurement window is reset.
-
-The graph model stays coherent: clearing a counter for one node does not cascade to its
-neighbours or alter any edge relationships.
+`reset_node_stat` 路径只获取一次 Mutex 锁并执行一次 `u32` 存储——与信号分发本身相比，开销几乎为零。
 
 ---
 
-## Per-node Observability Surface — Complete as of V2.29
+## 4. 架构意义
 
-| Command | Analogue | Description |
+`node stat clear` 只作用于**计数器抽象**（signal_count）——图拓扑（边）、结构变更日志（diff ring）以及信号追踪环形缓冲区均保持不变。这保留了 GOS 的一项性质：可观测性工具永远不会破坏因果历史，只会重置特定的测量窗口。
+
+图模型保持一致：为某个节点清除计数器不会级联影响其邻居节点，也不会改变任何边关系。
+
+---
+
+## 逐节点可观测性能力面 — 截至 V2.29 已完成
+
+| 命令 | 对应物 | 描述 |
 |---|---|---|
-| `node info <vec>` | `systemctl status` | Current state snapshot |
-| `node trace <vec>` | `strace -p` | Signal dispatch history |
-| `node trace clear <vec>` | `perf trace reset` | Discard signal trace ring |
-| `node log <vec>` | `journalctl -u` | Lifecycle transition history |
-| `node log clear <vec>` | `journalctl --vacuum-time` | Discard lifecycle log |
-| `stat <vec>` | `/proc/<pid>/status` | Deep stat including signal_count |
-| `node stat clear <vec>` | `perf stat reset` | Reset signal_count to 0 **(V2.29)** |
+| `node info <vec>` | `systemctl status` | 当前状态快照 |
+| `node trace <vec>` | `strace -p` | 信号分发历史 |
+| `node trace clear <vec>` | `perf trace reset` | 丢弃信号追踪环形缓冲区 |
+| `node log <vec>` | `journalctl -u` | 生命周期转换历史 |
+| `node log clear <vec>` | `journalctl --vacuum-time` | 丢弃生命周期日志 |
+| `stat <vec>` | `/proc/<pid>/status` | 包含 signal_count 的完整统计 |
+| `node stat clear <vec>` | `perf stat reset` | 将 signal_count 重置为 0 **(V2.29)** |
 
-The seven-command per-node observability surface is now **complete**.
+七命令的逐节点可观测性能力面现已**全部完成**。
 
 ---
 
-## Cumulative Test Suite (V2.29)
+## 5. 累计 host 测试数（V2.29）
 
-| Harness | Tests | Version |
+| 套件 | 测试数 | 版本 |
 |---|---|---|
 | gos-runtime-harness | 26 | V2.2 |
 | gos-supervisor-harness | 16 | V2.2 |
@@ -163,8 +164,8 @@ The seven-command per-node observability surface is now **complete**.
 | gos-node-trace-clear-harness | 10 | V2.27 |
 | gos-uname-harness | 10 | V2.28 |
 | **gos-node-stat-clear-harness** | **10** | **V2.29** |
-| **Total** | **293** | |
+| **合计** | **293** | |
 
 ---
 
-*Automated hardening pass — GOS V2.29 — 2026-07-01*
+*自动化硬化流程 — GOS V2.29 — 2026-07-01*

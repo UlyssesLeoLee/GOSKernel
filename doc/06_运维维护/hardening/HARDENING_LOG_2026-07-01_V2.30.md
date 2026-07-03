@@ -1,38 +1,38 @@
-# GOS Hardening Log — V2.30 — 2026-07-01
+# GOS 硬化日志 — V2.30 — 2026-07-01
 
-## Summary
+## 摘要
 
-V2.30 adds a live proc watch panel — `watch` / `graph watch` commands flip the VECTOR
-DECK panel into a continuously-refreshing proc table driven by the existing heartbeat tick,
-analogous to `watch -n1 proc` or `htop` on Linux.  Any keypress exits watch mode and
-restores the normal VECTOR DECK view.
+V2.30 新增实时 proc 监视面板——`watch` / `graph watch` 命令将 VECTOR
+DECK 面板切换为由现有心跳 tick 驱动的持续刷新 proc 表，类似于 Linux 上的
+`watch -n1 proc` 或 `htop`。任意按键即可退出 watch 模式，恢复正常的
+VECTOR DECK 视图。
 
 ---
 
-## Changes
+## 修改内容
 
-### 1. `WATCH_PROC_MODE` static — k-shell (`crates/k-shell/src/lib.rs`)
+### 1. `WATCH_PROC_MODE` 静态变量 — k-shell（`crates/k-shell/src/lib.rs`）
 
 ```rust
 pub(crate) static WATCH_PROC_MODE: AtomicU8 = AtomicU8::new(0);
 ```
 
-- `0` = normal VECTOR DECK view
-- `1` = live proc watch mode
+- `0` = 正常 VECTOR DECK 视图
+- `1` = 实时 proc watch 模式
 
-### 2. `dispatch_watch_proc()` and `dispatch_watch_stop()` — k-shell (`crates/k-shell/src/lib.rs`)
+### 2. `dispatch_watch_proc()` 与 `dispatch_watch_stop()` — k-shell（`crates/k-shell/src/lib.rs`）
 
 ```rust
 pub fn dispatch_watch_proc(sink: &ConsoleSink) { ... }
 pub fn dispatch_watch_stop(sink: &ConsoleSink) { ... }
 ```
 
-- `dispatch_watch_proc`: sets `WATCH_PROC_MODE = 1`, prints confirmation message.
-- `dispatch_watch_stop`: sets `WATCH_PROC_MODE = 0`, prints "watch stopped".
+- `dispatch_watch_proc`：将 `WATCH_PROC_MODE` 置为 1，打印确认信息。
+- `dispatch_watch_stop`：将 `WATCH_PROC_MODE` 置为 0，打印 "watch stopped"。
 
-### 3. `draw_watch_proc_panel()` — k-shell (`crates/k-shell/src/lib.rs`)
+### 3. `draw_watch_proc_panel()` — k-shell（`crates/k-shell/src/lib.rs`）
 
-New function renders the VECTOR DECK box in watch mode.  Fixed layout (fits 47 × 10 chars):
+新增函数，用于在 watch 模式下渲染 VECTOR DECK 方框。固定布局（适配 47 × 10 字符）：
 
 ```
 ╔═══════════[ PROC WATCH ]══════════════╗
@@ -47,18 +47,18 @@ New function renders the VECTOR DECK box in watch mode.  Fixed layout (fits 47 �
 ╚═══════════════════════════════════════╝
 ```
 
-- Shows top 6 nodes by vector address, all from `proc_page::<6>()`.
-- Color-codes lifecycle: green = Running, red = Faulted, yellow = Suspended, grey = other.
-- Displays cumulative `signal_count` and `edge_out_count` per node.
-- Shows `snapshot().tick` as a live heartbeat counter.
-- Renders `... N more` when total > 6.
+- 按 vector 地址显示前 6 个节点，数据均来自 `proc_page::<6>()`。
+- 生命周期状态按颜色区分：绿色 = Running，红色 = Faulted，黄色 = Suspended，灰色 = 其他。
+- 显示每个节点的累计 `signal_count` 与 `edge_out_count`。
+- 将 `snapshot().tick` 作为实时心跳计数器展示。
+- 当总数 > 6 时渲染 `... N more`。
 
-### 4. `draw_command_deck_panel()` — k-shell (`crates/k-shell/src/lib.rs`)
+### 4. `draw_command_deck_panel()` — k-shell（`crates/k-shell/src/lib.rs`）
 
-Early-return delegate: if `WATCH_PROC_MODE != 0`, calls `draw_watch_proc_panel` and returns.
-Normal graph stats panel is rendered otherwise (no change to existing logic).
+早退委托：若 `WATCH_PROC_MODE != 0`，则调用 `draw_watch_proc_panel` 并直接返回。
+否则渲染正常的图统计面板（对既有逻辑无改动）。
 
-### 5. Heartbeat always repaints in watch mode — k-shell (`crates/k-shell/src/proc.rs`)
+### 5. 心跳在 watch 模式下始终重绘 — k-shell（`crates/k-shell/src/proc.rs`）
 
 ```rust
 let watch_active = super::WATCH_PROC_MODE.load(...) != 0;
@@ -68,10 +68,10 @@ if watch_active || current_epoch != state.last_rendered_epoch {
 }
 ```
 
-V2.3 epoch-diff idle skip is preserved for normal mode.  In watch mode the panel
-repaints every 4th heartbeat tick so the tick counter and signal counts update live.
+V2.3 的 epoch-diff 空闲跳过逻辑在正常模式下保持不变。在 watch 模式下，面板
+每 4 个心跳 tick 重绘一次，使 tick 计数器与信号计数实时更新。
 
-### 6. Any keypress exits watch mode — k-shell (`crates/k-shell/src/proc.rs`)
+### 6. 任意按键退出 watch 模式 — k-shell（`crates/k-shell/src/proc.rs`）
 
 ```rust
 if source == DataSource::Keyboard
@@ -84,41 +84,40 @@ if source == DataSource::Keyboard
 }
 ```
 
-Any keyboard byte while in watch mode clears `WATCH_PROC_MODE`, forces an immediate
-epoch cache invalidation so the normal deck repaints on the next heartbeat, and
-prints "watch stopped" to the scroll area.
+在 watch 模式下任意键盘字节都会清除 `WATCH_PROC_MODE`，强制立即使 epoch
+缓存失效，使正常面板在下一次心跳时重绘，并向滚动区域打印 "watch stopped"。
 
-### 7. Shell commands registered — k-shell (`crates/k-shell/src/proc.rs`)
+### 7. 已注册的 Shell 命令 — k-shell（`crates/k-shell/src/proc.rs`）
 
-| Command | Action |
+| 命令 | 行为 |
 |---|---|
-| `watch` | Enter live proc watch mode |
-| `graph watch` | Alias for `watch` |
-| `watch proc` | Alias for `watch` |
-| `watch nodes` | Alias for `watch` |
-| `watch stop` | Exit watch mode explicitly |
-| `watch exit` | Alias for `watch stop` |
+| `watch` | 进入实时 proc watch 模式 |
+| `graph watch` | `watch` 的别名 |
+| `watch proc` | `watch` 的别名 |
+| `watch nodes` | `watch` 的别名 |
+| `watch stop` | 显式退出 watch 模式 |
+| `watch exit` | `watch stop` 的别名 |
 
-`help` text updated with all six variants.
+`help` 文本已更新，包含全部六种变体。
 
-### 8. Test harness — `host-tests/gos-watch-harness/` (10 tests, all passing)
+### 8. 测试套件 — `host-tests/gos-watch-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
-| 1 | `proc_page_is_idempotent` | Two consecutive proc_page calls return identical totals |
-| 2 | `proc_page_empty_on_empty_runtime` | Empty runtime → watch shows "(no nodes)" |
-| 3 | `proc_page_reflects_registration_immediately` | Registration visible on next proc_page call |
-| 4 | `proc_count_consistent_with_proc_page_total` | proc_count() and proc_page total agree |
-| 5 | `proc_page_reflects_signal_count_after_dispatch` | Live signal_count after one dispatch |
-| 6 | `repeated_proc_page_reads_stable_after_dispatch` | Read-only: no mutation on repeated reads |
-| 7 | `proc_page_shows_faulted_after_fault_node` | fault_node() reflected in lifecycle |
-| 8 | `proc_page_shows_running_after_resume` | resume_node() clears Faulted state |
+| 1 | `proc_page_is_idempotent` | 连续两次调用 proc_page 返回相同的总数 |
+| 2 | `proc_page_empty_on_empty_runtime` | 空 runtime → watch 显示 "(no nodes)" |
+| 3 | `proc_page_reflects_registration_immediately` | 注册后在下一次 proc_page 调用中立即可见 |
+| 4 | `proc_count_consistent_with_proc_page_total` | proc_count() 与 proc_page 总数一致 |
+| 5 | `proc_page_reflects_signal_count_after_dispatch` | 一次 dispatch 后 signal_count 实时更新 |
+| 6 | `repeated_proc_page_reads_stable_after_dispatch` | 只读：重复读取不产生变更 |
+| 7 | `proc_page_shows_faulted_after_fault_node` | fault_node() 反映在 lifecycle 中 |
+| 8 | `proc_page_shows_running_after_resume` | resume_node() 清除 Faulted 状态 |
 | 9 | `snapshot_node_count_matches_proc_count` | snapshot().node_count == proc_count() |
-| 10 | `snapshot_tick_advances_after_pump` | snapshot().tick is live (advances on pump) |
+| 10 | `snapshot_tick_advances_after_pump` | snapshot().tick 为实时值（随 pump 递增） |
 
 ---
 
-## Verification
+## 验证
 
 ```
 cd host-tests/gos-watch-harness
@@ -126,7 +125,7 @@ cargo test -- --test-threads=1
 # test result: ok. 10 passed; 0 failed
 ```
 
-Kernel build:
+内核构建：
 ```
 cargo build --release
 # Finished `release` profile
@@ -134,32 +133,32 @@ cargo build --release
 
 ---
 
-## Production Quality Rationale
+## 生产质量考量
 
-| Capability | Linux/macOS equivalent | GOS V2.30 |
+| 能力 | Linux/macOS 对应物 | GOS V2.30 |
 |---|---|---|
-| Live process monitor | `watch -n1 ps` / `htop` | `watch` / `graph watch` shell command |
-| Auto-refresh | Timer-driven redraw | Heartbeat-driven repaint (no threads) |
-| Any-key exit | Ctrl+C / q | Any keypress exits watch mode |
-| Tick counter | wall clock | `snapshot().tick` (graph OS heartbeat) |
-| Node state | STAT column | `lifecycle` column (Running/Faulted/Suspended) |
-| Signal activity | utime/stime | `signal_count` (cumulative per-node) |
-| Topology fan-out | open file count | `edge_out_count` (outbound edge count) |
-| Watch mode flag | process state | `WATCH_PROC_MODE: AtomicU8` (zero-overhead) |
+| 实时进程监视 | `watch -n1 ps` / `htop` | `watch` / `graph watch` shell 命令 |
+| 自动刷新 | 定时器驱动的重绘 | 心跳驱动的重绘（无线程） |
+| 任意键退出 | Ctrl+C / q | 任意按键退出 watch 模式 |
+| Tick 计数器 | 系统时钟 | `snapshot().tick`（图操作系统心跳） |
+| 节点状态 | STAT 列 | `lifecycle` 列（Running/Faulted/Suspended） |
+| 信号活动 | utime/stime | `signal_count`（每节点累计值） |
+| 拓扑扇出 | 打开文件数 | `edge_out_count`（出边计数） |
+| Watch 模式标志 | 进程状态 | `WATCH_PROC_MODE: AtomicU8`（零开销） |
 
-The watch panel reuses the existing fixed-position VECTOR DECK box — no additional
-terminal rows consumed, no scroll-region conflicts.  The implementation adds exactly one
-`AtomicU8::load` per heartbeat tick in non-watch mode (negligible overhead).
-
----
-
-## Graph-OS Characteristic Preserved
-
-The watch panel exposes **graph-topology metrics** (edge out-degree per node) alongside
-signal throughput (signal_count), keeping the live monitor rooted in GOS's graph model
-rather than a flat process table.  The VECTOR DECK panel's PROC WATCH mode mirrors
-how `htop` overlays onto the terminal while remaining structurally graph-native.
+watch 面板复用了既有的固定位置 VECTOR DECK 方框——不占用额外的终端行，
+不与滚动区域冲突。该实现在非 watch 模式下每个心跳 tick 仅增加一次
+`AtomicU8::load`（开销可忽略不计）。
 
 ---
 
-*Automated hardening pass — GOS V2.30 — 2026-07-01*
+## 图操作系统特性的保持
+
+watch 面板在展示信号吞吐量（signal_count）的同时，暴露了**图拓扑指标**
+（每节点出度），使实时监视器始终扎根于 GOS 的图模型，而非扁平的进程表。
+VECTOR DECK 面板的 PROC WATCH 模式，映照了 `htop` 覆盖终端的方式，同时
+在结构上依然保持图原生。
+
+---
+
+*自动化硬化流程 — GOS V2.30 — 2026-07-01*

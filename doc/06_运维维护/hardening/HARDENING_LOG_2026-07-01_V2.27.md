@@ -1,35 +1,38 @@
-# GOS Hardening Log — V2.27 — 2026-07-01
+# GOS 硬化日志 — V2.27
 
-## Summary
+| 项目 | 内容 |
+|---|---|
+| 版本 | V2.27 |
+| 日期 | 2026-07-01 |
 
-V2.27 adds `node trace clear <vec>` / `ntrace clear <vec>` — a shell command and API to
-discard the per-node signal dispatch trace ring, symmetric with `node log clear` (V2.26).
-This completes the observability quartet's clear operations: both the lifecycle log and the
-signal trace ring can now be discarded independently without affecting cumulative proc stats.
+## 摘要
+
+V2.27 新增 `node trace clear <vec>` / `ntrace clear <vec>`——一个用于丢弃逐节点信号分发追踪环形缓冲区的 shell 命令与 API，与 `node log clear`（V2.26）对称。这补齐了可观测性四件套的清除操作：生命周期日志和信号追踪环形缓冲区现在都可以独立丢弃，且不影响累计的 proc 统计数据。
 
 ---
 
-## Changes
+## 1. 变更目标
+
+（见上文摘要：为信号追踪环形缓冲区补齐清除能力，与生命周期日志的清除操作 `node log clear`（V2.26）对称，完成可观测性四件套的清除侧。）
+
+---
+
+## 2. 修改清单
 
 ### 1. `node_trace_count` — gos-runtime (`crates/gos-runtime/src/lib.rs`)
 
-Added a new per-node counter array `node_trace_count: [u32; MAX_NODES]` to `GraphRuntime`:
+为 `GraphRuntime` 新增了逐节点计数器数组 `node_trace_count: [u32; MAX_NODES]`：
 
-- **Purpose**: tracks how many signal dispatches have been written to the trace ring since
-  last clear, independent of `signal_count` (which is cumulative and used by `proc`).
-- **Initialisation**: `[0u32; MAX_NODES]` in `GraphRuntime::new()`.
-- **Increment**: `prepare_signal_dispatch()` increments `node_trace_count[slot]` via
-  `saturating_add(1)` on every trace write, alongside the existing `signal_count`.
-- **Why separate**: `signal_count` is a monotonic proc metric that must not be reset;
-  `node_trace_count` is the ring-level total that resets on clear, enabling the same
-  `(total=0, returned=0)` semantics that `node_log_total` provides for the log ring.
+- **用途**：追踪自上次清除以来，已写入追踪环形缓冲区的信号分发次数，独立于（被 `proc` 使用的累计型）`signal_count`。
+- **初始化**：在 `GraphRuntime::new()` 中初始化为 `[0u32; MAX_NODES]`。
+- **递增**：`prepare_signal_dispatch()` 在每次追踪写入时，与现有的 `signal_count` 一起，通过 `saturating_add(1)` 递增 `node_trace_count[slot]`。
+- **为何要分开**：`signal_count` 是绝不能被重置的单调 proc 指标；`node_trace_count` 是环形缓冲区层面的总数，会在清除时重置，从而为追踪环形缓冲区提供与 `node_log_total` 之于日志环形缓冲区相同的 `(total=0, returned=0)` 语义。
 
-`node_trace_page()` updated to use `self.node_trace_count[slot]` instead of
-`record.signal_count` for the `total_traced` return value.
+`node_trace_page()` 更新为使用 `self.node_trace_count[slot]` 而非 `record.signal_count` 作为 `total_traced` 的返回值。
 
 ### 2. `clear_node_trace_inner()` — gos-runtime
 
-New method on `GraphRuntime`:
+`GraphRuntime` 上新增的方法：
 
 ```rust
 pub fn clear_node_trace_inner(&mut self, vector: VectorAddress) -> Result<(), RuntimeError> {
@@ -41,11 +44,11 @@ pub fn clear_node_trace_inner(&mut self, vector: VectorAddress) -> Result<(), Ru
 }
 ```
 
-- Zeroes the trace ring entries, resets the head pointer, and resets `node_trace_count`.
-- `signal_count` inside `NodeRecord` is deliberately untouched — `proc` stats remain valid.
-- Returns `NodeNotFound` for unregistered vectors.
+- 清零追踪环形缓冲区条目，重置头指针，并重置 `node_trace_count`。
+- `NodeRecord` 内部的 `signal_count` 刻意保持不变——`proc` 统计数据依然有效。
+- 对未注册的 vector 返回 `NodeNotFound`。
 
-### 3. `clear_node_trace()` — gos-runtime public API
+### 3. `clear_node_trace()` — gos-runtime 公开 API
 
 ```rust
 pub fn clear_node_trace(vec: VectorAddress) -> Result<(), RuntimeError> {
@@ -55,42 +58,41 @@ pub fn clear_node_trace(vec: VectorAddress) -> Result<(), RuntimeError> {
 
 ### 4. `dispatch_node_trace_clear()` — k-shell (`crates/k-shell/src/lib.rs`)
 
-New shell dispatch function:
+新的 shell 分发函数：
 
-- On success: prints `" node trace cleared  <vec>"` in green/grey.
-- On error: prints `" node not found: <vec>"` in red.
-- Analogous to `dispatch_node_log_clear()` (V2.26).
+- 成功时：以绿/灰色打印 `" node trace cleared  <vec>"`。
+- 出错时：以红色打印 `" node not found: <vec>"`。
+- 与 `dispatch_node_log_clear()`（V2.26）对应。
 
-### 5. `node trace clear` / `ntrace clear` routing — k-shell (`crates/k-shell/src/proc.rs`)
+### 5. `node trace clear` / `ntrace clear` 路由 — k-shell (`crates/k-shell/src/proc.rs`)
 
-Shell routing added **before** the existing `node trace <vec>` arm so
-`"node trace clear X"` matches before `"node trace X"`:
+Shell 路由被添加在现有的 `node trace <vec>` 分支**之前**，使 `"node trace clear X"` 先于 `"node trace X"` 被匹配：
 
 ```
 node trace clear <vector>   →  dispatch_node_trace_clear(sink, vec)
 ntrace clear <vector>       →  dispatch_node_trace_clear(sink, vec)   [alias]
 ```
 
-Help text updated to include both new commands.
+帮助文本更新，加入这两个新命令。
 
-### 6. Test harness — `host-tests/gos-node-trace-clear-harness/` (10 tests, all passing)
+### 6. 测试套件 — `host-tests/gos-node-trace-clear-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
-| 1 | `clear_unknown_vector_returns_not_found` | Unregistered vector → NodeNotFound |
-| 2 | `clear_fresh_node_gives_zero_entries` | Clear on fresh node → (0, 0) |
-| 3 | `clear_does_not_unregister_node` | Node still accessible after clear |
-| 4 | `clear_discards_single_dispatch_entry` | 1 dispatch then clear → (0, 0) |
-| 5 | `clear_discards_multiple_dispatch_entries` | 5 dispatches then clear → (0, 0) |
-| 6 | `clear_is_idempotent` | Double-clear still returns (0, 0) |
-| 7 | `clear_then_new_dispatches_traced_correctly` | Ring is fresh after clear; new kind/cmd correct |
-| 8 | `clear_does_not_affect_sibling_node` | Clear A leaves B trace intact |
-| 9 | `clear_resets_total_counter_to_zero` | total=0 after clear, then 1 after next dispatch |
-|10 | `clear_returns_ok_for_live_node` | Returns Ok(()) for registered node |
+| 1 | `clear_unknown_vector_returns_not_found` | 未注册 vector → NodeNotFound |
+| 2 | `clear_fresh_node_gives_zero_entries` | 对全新节点清除 → (0, 0) |
+| 3 | `clear_does_not_unregister_node` | 清除后节点仍可访问 |
+| 4 | `clear_discards_single_dispatch_entry` | 1 次分发后清除 → (0, 0) |
+| 5 | `clear_discards_multiple_dispatch_entries` | 5 次分发后清除 → (0, 0) |
+| 6 | `clear_is_idempotent` | 两次清除仍返回 (0, 0) |
+| 7 | `clear_then_new_dispatches_traced_correctly` | 清除后环形缓冲区全新；新的 kind/cmd 正确 |
+| 8 | `clear_does_not_affect_sibling_node` | 清除 A 不影响 B 的追踪数据 |
+| 9 | `clear_resets_total_counter_to_zero` | 清除后 total=0，下一次分发后为 1 |
+|10 | `clear_returns_ok_for_live_node` | 对已注册节点返回 Ok(()) |
 
 ---
 
-## Verification
+## 3. 测试结果
 
 ```
 cd host-tests/gos-node-trace-clear-harness
@@ -107,29 +109,27 @@ cargo build --release
 
 ---
 
-## Production Quality Rationale
+## 生产级质量依据
 
-| Capability | Linux/macOS equivalent | GOS V2.27 |
+| 能力 | Linux/macOS 对应物 | GOS V2.27 |
 |---|---|---|
-| Clear trace buffer | `perf trace reset` / `truncate -s0 strace.log` | `node trace clear <vec>` |
-| Selective clear (one process) | `strace -p <pid>` restart | `ntrace clear <vec>` |
-| Preserve proc stats | `signal_count` unaffected | ✓ separate `node_trace_count` |
-| Idempotent | clearing empty buffer is safe | ✓ double-clear safe |
-| Error on unknown target | no-op or error | ✓ `NodeNotFound` |
+| 清除追踪缓冲区 | `perf trace reset` / `truncate -s0 strace.log` | `node trace clear <vec>` |
+| 选择性清除（单进程） | 重启 `strace -p <pid>` | `ntrace clear <vec>` |
+| 保留 proc 统计 | `signal_count` 不受影响 | ✓ 独立的 `node_trace_count` |
+| 幂等 | 清除空缓冲区是安全的 | ✓ 两次清除安全 |
+| 未知目标报错 | 无操作或报错 | ✓ `NodeNotFound` |
 
 ---
 
-## Graph-OS Characteristic Preserved
+## 4. 架构意义
 
-`node trace clear` operates on graph **vector addresses** (not flat PIDs), reinforcing
-GOS's topology-rooted identity model: every observability operation names a node by its
-position in the graph.
+`node trace clear` 作用于图**vector 地址**（而非扁平 PID），强化了 GOS 以拓扑为根基的身份模型：每一次可观测性操作都通过节点在图中的位置来命名该节点。
 
 ---
 
-## Observability Quartet — Complete
+## 可观测性四件套 — 已完成
 
-| Command | Analogue | Version |
+| 命令 | 对应物 | 版本 |
 |---|---|---|
 | `node info <vec>` | `systemctl status` | V2.23 |
 | `node trace <vec>` | `strace -p <pid>` | V2.24 |
@@ -137,8 +137,8 @@ position in the graph.
 | `node log <vec>` | `journalctl -u <svc>` | V2.25 |
 | `node log clear <vec>` | `journalctl --vacuum-time` | V2.26 |
 
-Both observability rings now have symmetric read + clear operations.
+两个可观测性环形缓冲区现在都具备对称的读取 + 清除操作。
 
 ---
 
-*Automated hardening pass — GOS V2.27 — 2026-07-01*
+*自动化硬化流程 — GOS V2.27 — 2026-07-01*

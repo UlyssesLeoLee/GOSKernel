@@ -1,19 +1,27 @@
-# GOS Hardening Log — V2.28 — 2026-07-01
+# GOS 硬化日志 — V2.28
 
-## Summary
+| 项目 | 内容 |
+|---|---|
+| 版本 | V2.28 |
+| 日期 | 2026-07-01 |
 
-V2.28 adds `uname` / `ver` / `version` shell commands and a `runtime_capacity()` public
-API that exposes all compile-time capacity limits as a typed `RuntimeCapacity` struct.
-This is GOS's equivalent of `uname -a` + `sysctl kern.*` + `getrlimit` on Linux — an
-operator-queryable view of what the running kernel was built to support, without reading source.
+## 摘要
+
+V2.28 新增 `uname` / `ver` / `version` shell 命令，以及一个将所有编译期容量上限暴露为类型化 `RuntimeCapacity` 结构体的 `runtime_capacity()` 公开 API。这是 GOS 对应于 Linux 上 `uname -a` + `sysctl kern.*` + `getrlimit` 的等价物——让运维人员无需阅读源码即可查询正在运行的内核所支持的规模上限。
 
 ---
 
-## Changes
+## 1. 变更目标
 
-### 1. `RuntimeCapacity` struct — gos-runtime (`crates/gos-runtime/src/lib.rs`)
+（见上文摘要：暴露所有编译期容量上限，使运维人员可在不阅读源码的前提下查询内核构建规格，对应 Linux 的 `uname -a` + `sysctl kern.*` + `getrlimit`。）
 
-New public struct exported from gos-runtime:
+---
+
+## 2. 修改清单
+
+### 1. `RuntimeCapacity` 结构体 — gos-runtime (`crates/gos-runtime/src/lib.rs`)
+
+从 gos-runtime 导出的新公开结构体：
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,19 +43,19 @@ pub struct RuntimeCapacity {
 }
 ```
 
-### 2. `runtime_capacity()` — gos-runtime public API
+### 2. `runtime_capacity()` — gos-runtime 公开 API
 
 ```rust
 pub fn runtime_capacity() -> RuntimeCapacity { ... }
 ```
 
-- Pure constant read — **no lock, no allocation**.
-- Reads all limits from compile-time constants in gos-runtime and gos-protocol.
-- Never panics; always returns a valid struct.
+- 纯常量读取——**无锁、无分配**。
+- 从 gos-runtime 和 gos-protocol 中的编译期常量读取所有上限值。
+- 永不 panic；始终返回一个有效的结构体。
 
 ### 3. `dispatch_uname()` — k-shell (`crates/k-shell/src/lib.rs`)
 
-New shell display function that prints:
+新的 shell 展示函数，打印如下内容：
 
 ```
  kernel info
@@ -63,12 +71,11 @@ New shell display function that prints:
   arch: x86_64  no_std  tick: T
 ```
 
-The live snapshot values (current node/edge/plugin count and tick) are shown alongside
-capacity limits, giving operators an at-a-glance view of utilisation.
+实时快照数值（当前节点/边/插件计数及 tick）与容量上限一并展示，使运维人员能够一目了然地了解资源利用情况。
 
-### 4. `uname` / `ver` routing — k-shell (`crates/k-shell/src/proc.rs`)
+### 4. `uname` / `ver` 路由 — k-shell (`crates/k-shell/src/proc.rs`)
 
-Added before the `graph health` arm:
+添加在 `graph health` 分支之前：
 
 ```
 uname        →  dispatch_uname(sink)
@@ -77,11 +84,11 @@ ver          →  dispatch_uname(sink)   [short alias]
 version      →  dispatch_uname(sink)   [long alias]
 ```
 
-Help text updated to include `uname` and `ver` / `version` entries.
+帮助文本更新，加入 `uname` 和 `ver` / `version` 条目。
 
-### 5. Test harness — `host-tests/gos-uname-harness/` (10 tests, all passing)
+### 5. 测试套件 — `host-tests/gos-uname-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
 | 1 | `capacity_max_nodes_matches_constant` | max_nodes == MAX_NODES (128) |
 | 2 | `capacity_max_edges_matches_constant` | max_edges == MAX_EDGES (512) |
@@ -96,7 +103,7 @@ Help text updated to include `uname` and `ver` / `version` entries.
 
 ---
 
-## Verification
+## 3. 测试结果
 
 ```
 cd host-tests/gos-uname-harness
@@ -109,37 +116,32 @@ cargo build --release
 
 ---
 
-## Production Quality Rationale
+## 生产级质量依据
 
-| Capability | Linux/macOS equivalent | GOS V2.28 |
+| 能力 | Linux/macOS 对应物 | GOS V2.28 |
 |---|---|---|
-| Kernel version | `uname -a` | `uname` shell command |
-| Capacity limits | `getrlimit` / `sysctl kern.*` | `RuntimeCapacity` struct |
-| ABI version | `/proc/version` | `abi_major.abi_minor.abi_patch` |
-| Protocol version | `/proc/net/protocols` | `protocol_version` field |
-| Live utilisation | `free` / `vmstat` | node/edge/plugin current vs. max |
-| Zero-overhead query | reading `/proc` | pure const — no lock, no alloc |
+| 内核版本 | `uname -a` | `uname` shell 命令 |
+| 容量上限 | `getrlimit` / `sysctl kern.*` | `RuntimeCapacity` 结构体 |
+| ABI 版本 | `/proc/version` | `abi_major.abi_minor.abi_patch` |
+| 协议版本 | `/proc/net/protocols` | `protocol_version` 字段 |
+| 实时利用率 | `free` / `vmstat` | 节点/边/插件的当前值 vs. 上限 |
+| 零开销查询 | 读取 `/proc` | 纯常量——无锁、无分配 |
 
-`runtime_capacity()` is a compile-time pure read — no Mutex lock is taken, no heap
-allocation is performed.  It is safe to call from interrupt context.
+`runtime_capacity()` 是一次编译期的纯读取——不获取 Mutex 锁，不进行堆分配。它在中断上下文中调用也是安全的。
 
-The `RuntimeCapacity` struct is `#[derive(Debug, PartialEq, Eq)]`, enabling test harnesses
-to compare the entire struct in one assertion when regression-testing capacity invariants
-across ABI bumps.
+`RuntimeCapacity` 结构体带有 `#[derive(Debug, PartialEq, Eq)]`，使测试套件能够在一次断言中比较整个结构体，用于在 ABI 升级过程中对容量不变式进行回归测试。
 
 ---
 
-## Graph-OS Characteristic Preserved
+## 4. 架构意义
 
-`uname` shows GOS graph capacity limits (max_nodes, max_edges, max_subscribe_pairs)
-rather than traditional OS concepts like RAM or CPU count — keeping the operator's
-mental model anchored to the graph topology layer that defines GOS's resource model.
+`uname` 展示的是 GOS 的图容量上限（max_nodes、max_edges、max_subscribe_pairs），而非诸如内存大小或 CPU 数量等传统 OS 概念——使运维人员的心智模型始终锚定在定义 GOS 资源模型的图拓扑层。
 
 ---
 
-## Cumulative Test Suite (V2.28)
+## 5. 累计 host 测试数（V2.28）
 
-| Harness | Tests | Version |
+| 套件 | 测试数 | 版本 |
 |---|---|---|
 | gos-runtime-harness | 26 | V2.2 |
 | gos-supervisor-harness | 16 | V2.2 |
@@ -167,8 +169,8 @@ mental model anchored to the graph topology layer that defines GOS's resource mo
 | gos-node-log-clear-harness | 10 | V2.26 |
 | gos-node-trace-clear-harness | 10 | V2.27 |
 | **gos-uname-harness** | **10** | **V2.28** |
-| **Total** | **283** | |
+| **合计** | **283** | |
 
 ---
 
-*Automated hardening pass — GOS V2.28 — 2026-07-01*
+*自动化硬化流程 — GOS V2.28 — 2026-07-01*

@@ -1,28 +1,27 @@
-# GOS Hardening Log — V2.23
-**Date:** 2026-07-01  
-**Branch:** main  
-**Commit range:** V2.22 → V2.23
+# GOS 硬化日志 — V2.23
+**日期：** 2026-07-01
+**分支：** main
+**Commit 范围：** V2.22 → V2.23
 
 ---
 
-## Summary
+## 概述
 
-V2.23 adds `node info <vec>` — a comprehensive single-node status view that
-combines `stat` + inline edge listing into one command, analogous to
-`systemctl status <unit>` on Linux or `kubectl describe pod <name>` in
-Kubernetes.  The command gives operators a single pane of glass for any node:
-identity, lifecycle, cumulative signal count, and all edges touching that node
-(both outbound and inbound).
+V2.23 新增了 `node info <vec>` —— 一个综合性的单节点状态视图，将 `stat` 与
+内联的边列表合并为一条命令，类比 Linux 上的 `systemctl status <unit>` 或
+Kubernetes 中的 `kubectl describe pod <name>`。该命令为操作者提供了针对
+任意节点的单一视窗：身份、生命周期、累计信号计数，以及触及该节点的全部边
+（出边和入边）。
 
 ---
 
-## New Shell Command Surface
+## 新增 Shell 命令一览
 
-| Command | Aliases | Analogous Linux cmd | Description |
+| 命令 | 别名 | 对应的 Linux 命令 | 描述 |
 |---------|---------|---------------------|-------------|
-| `node info <vec>` | `ninfo <vec>` | `systemctl status <unit>` | Comprehensive single-node view: stat + edges |
+| `node info <vec>` | `ninfo <vec>` | `systemctl status <unit>` | 综合性单节点视图：stat + 边 |
 
-### Output Layout
+### 输出格式
 
 ```
  node info
@@ -39,69 +38,69 @@ identity, lifecycle, cumulative signal count, and all edges touching that node
   hint: stat <vec> for counters | edges <type> for type filter
 ```
 
-- **out** (green) = edge originating from this node (outbound)  
-- **in** (magenta) = edge targeting this node (inbound)  
-- Lifecycle color-codes: green = running, yellow = suspended, red = faulted
+- **out**（绿色）= 从该节点发出的边（出边）
+- **in**（品红色）= 指向该节点的边（入边）
+- 生命周期颜色编码：绿色 = running，黄色 = suspended，红色 = faulted
 
 ---
 
-## API Surface Used (no new API additions)
+## 使用的 API 面（无新增 API）
 
-V2.23 composes two existing V2.x APIs into a single dispatch function:
+V2.23 将两个既有的 V2.x API 组合为单一的分发函数：
 
-| API | Introduced | Used by `node info` for |
+| API | 引入版本 | `node info` 中的用途 |
 |-----|-----------|------------------------|
-| `gos_runtime::proc_stat_for_vector(vec)` | V2.15 | stat block: key, plugin, lifecycle, signal_count, edge_out_count |
-| `gos_runtime::edge_page_for_node(vec, 0, &mut edges)` | V2.12 | inline edge listing with direction tags |
+| `gos_runtime::proc_stat_for_vector(vec)` | V2.15 | stat 区块：key、plugin、lifecycle、signal_count、edge_out_count |
+| `gos_runtime::edge_page_for_node(vec, 0, &mut edges)` | V2.12 | 带方向标签的内联边列表 |
 
-No new runtime state was added.  All dispatch logic is a pure read — no epoch
-bump, no write operations.
+未新增任何 runtime 状态。所有分发逻辑均为纯读取 —— 不推进 epoch，不产生
+写操作。
 
 ---
 
-## Code Changes
+## 代码修改
 
 ### `crates/k-shell/src/lib.rs`
 
-- Added `pub fn dispatch_node_info(sink: &ConsoleSink, vec: VectorAddress)`
-  - Calls `proc_stat_for_vector` → prints identity + lifecycle block
-  - Calls `edge_page_for_node` → prints inline edge list with out/in direction tags
-  - Color scheme: out-edges green, in-edges magenta, error red, hint gray
-  - Handles "not found" (red) and "no edges" (gray) gracefully
+- 新增 `pub fn dispatch_node_info(sink: &ConsoleSink, vec: VectorAddress)`
+  - 调用 `proc_stat_for_vector` → 打印身份 + 生命周期区块
+  - 调用 `edge_page_for_node` → 打印带出/入方向标签的内联边列表
+  - 配色方案：出边绿色，入边品红色，错误红色，提示灰色
+  - 优雅处理 "not found"（红色）和 "no edges"（灰色）情形
 
 ### `crates/k-shell/src/proc.rs`
 
-- Added command routing in `dispatch_text_command`:
+- 在 `dispatch_text_command` 中新增命令路由：
   - `node info <vec>` → `dispatch_node_info`
-  - `ninfo <vec>` → `dispatch_node_info` (short alias)
-- Updated `help` to list `node info <vector>` and `ninfo <vector>`
+  - `ninfo <vec>` → `dispatch_node_info`（简短别名）
+- 更新 `help`，列出 `node info <vector>` 和 `ninfo <vector>`
 
 ---
 
-## Host Test Harness
+## Host 测试套件
 
-**Crate:** `host-tests/gos-node-info-harness`  
-**Test file:** `tests/node_info.rs`  
-**Test count:** 10 / 10 passed
+**Crate：** `host-tests/gos-node-info-harness`
+**测试文件：** `tests/node_info.rs`
+**测试数：** 10 / 10 通过
 
-| # | Test | What it verifies |
+| # | 测试 | 验证内容 |
 |---|------|-----------------|
-| 1 | `node_info_stat_unknown_returns_none` | `proc_stat_for_vector` → None for unregistered vector |
-| 2 | `node_info_stat_registered_node_returns_correct_key` | stat returns correct `local_node_key` |
-| 3 | `node_info_edge_page_unknown_returns_not_found` | `edge_page_for_node` → `NodeNotFound` for unregistered vec |
-| 4 | `node_info_no_edges_returns_zero` | Node without edges → (total=0, returned=0) |
-| 5 | `node_info_one_edge_returned_for_source_node` | After `register_edge` → source sees 1 edge |
-| 6 | `node_info_edge_directions_correct` | Source → Outbound; target → Inbound |
-| 7 | `node_info_signal_count_starts_at_zero` | `signal_count == 0` for fresh node |
-| 8 | `node_info_edge_out_count_matches_registered_edges` | `edge_out_count` increments after `register_edge` |
-| 9 | `node_info_edges_visible_after_fault` | Faulted node still has edges visible |
-| 10 | `node_info_edges_visible_after_resume` | Resumed node: lifecycle=Ready, edges intact |
+| 1 | `node_info_stat_unknown_returns_none` | 未注册的 vector → `proc_stat_for_vector` 返回 None |
+| 2 | `node_info_stat_registered_node_returns_correct_key` | stat 返回正确的 `local_node_key` |
+| 3 | `node_info_edge_page_unknown_returns_not_found` | 未注册的 vec → `edge_page_for_node` 返回 `NodeNotFound` |
+| 4 | `node_info_no_edges_returns_zero` | 无边节点 → (total=0, returned=0) |
+| 5 | `node_info_one_edge_returned_for_source_node` | `register_edge` 之后 → 源节点可见 1 条边 |
+| 6 | `node_info_edge_directions_correct` | 源节点 → Outbound；目标节点 → Inbound |
+| 7 | `node_info_signal_count_starts_at_zero` | 新节点 `signal_count == 0` |
+| 8 | `node_info_edge_out_count_matches_registered_edges` | `register_edge` 之后 `edge_out_count` 递增 |
+| 9 | `node_info_edges_visible_after_fault` | 故障节点的边依然可见 |
+| 10 | `node_info_edges_visible_after_resume` | 恢复的节点：lifecycle=Ready，边保持完整 |
 
 ---
 
-## Total Host-Test Suite
+## Host 测试套件总计
 
-| Harness | Tests | Notes |
+| 套件 | 测试数 | 备注 |
 |---------|-------|-------|
 | gos-runtime-harness | 26 | |
 | gos-supervisor-harness | 16 | |
@@ -123,23 +122,23 @@ bump, no write operations.
 | gos-plugin-list-harness | 10 | V2.20 |
 | gos-kill-harness | 10 | V2.21 |
 | gos-resume-harness | 10 | V2.22 |
-| **gos-node-info-harness** | **10** | **V2.23 (new)** |
-| **Total** | **233** | **all green** |
+| **gos-node-info-harness** | **10** | **V2.23（新增）** |
+| **总计** | **233** | **全部通过** |
 
 ---
 
-## Invariants Preserved
+## 不变式的保留
 
-- `dispatch_node_info` is a pure read — no epoch bump, no write ops
-- `edge_page_for_node` called with `N=16`; pagination hint printed if total > 16
-- `TEST_LOCK: Mutex<()>` + `reset()` used in all 10 tests for isolation
-- Harness has its own `.cargo/config.toml` with `target = "x86_64-pc-windows-msvc"`
+- `dispatch_node_info` 是纯读取 —— 不推进 epoch，不产生写操作
+- `edge_page_for_node` 以 `N=16` 调用；当 total > 16 时打印翻页提示
+- 全部 10 个测试均使用 `TEST_LOCK: Mutex<()>` + `reset()` 以实现隔离
+- 该测试套件拥有自己的 `.cargo/config.toml`，其中 `target = "x86_64-pc-windows-msvc"`
 
 ---
 
-## Next Steps (V2.24 candidates)
+## 后续步骤（V2.24 候选项）
 
-- `graph watch` / `watch nodes` — auto-refreshing node table (like `watch -n1 proc`)
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- PAL_U32 → attribute node refactor (Demo A prerequisite)
-- `node trace <vec>` — signal dispatch history for one node
+- `graph watch` / `watch nodes` —— 自动刷新的节点表（类似 `watch -n1 proc`）
+- `journal ring <N>` —— 运行时可配置的 JournalRing 容量
+- PAL_U32 → 属性节点重构（Demo A 前置条件）
+- `node trace <vec>` —— 单节点的信号分发历史

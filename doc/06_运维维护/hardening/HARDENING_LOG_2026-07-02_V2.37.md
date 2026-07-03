@@ -1,26 +1,18 @@
-# GOS Hardening Log — V2.37 — 2026-07-02
+# GOS 硬化日志 — V2.37 — 2026-07-02
 
-## Summary
+## 概述
 
-V2.37 adds bipartite-check analysis via `graph bipartite` — a fundamental graph
-property query answering "can the live dependency graph be split into two
-non-conflicting scheduling tiers?"  A graph is bipartite iff it contains no
-odd-length cycle.  The algorithm runs on the *undirected* projection of the
-directed live graph (every directed edge is treated as bidirectional), using
-BFS 2-coloring.  This completes the graph structural analysis quintet begun in
-V2.32 (cycle detection).
+V2.37 通过 `graph bipartite` 新增二分图检测分析 —— 一个基础图属性查询，用于回答"当前存活依赖图能否被拆分为两个互不冲突的调度层？"。当且仅当图中不存在奇数长度环时，该图是二分图。该算法运行在有向存活图的**无向投影**上（每条有向边都被视为双向边），使用 BFS 二染色实现。这补全了始于 V2.32（环检测）的图结构分析五件套。
 
-OS analogy: checking whether a service dependency graph can be cleanly split
-into producers/consumers, or whether a module load order has odd-length
-circular dependencies that block clean tier separation.
+操作系统类比：检查一个服务依赖图能否被干净地拆分为生产者/消费者两层，或者一个模块加载顺序中是否存在奇数长度的循环依赖从而阻碍层级的干净分离。
 
 ---
 
-## Changes
+## 修改内容
 
 ### 1. `graph_bipartite_inner<N>` — gos-runtime (`crates/gos-runtime/src/lib.rs`)
 
-New method on `GraphState` (inserted after `graph_reachable_inner`):
+`GraphState` 上新增的方法（插入在 `graph_reachable_inner` 之后）：
 
 ```rust
 pub fn graph_bipartite_inner<const N: usize>(
@@ -28,24 +20,21 @@ pub fn graph_bipartite_inner<const N: usize>(
 ) -> ([VectorAddress; N], [u8; N], usize, bool)
 ```
 
-**Algorithm**: BFS 2-coloring on the undirected projection of the live directed
-graph. O(V+E), no_std safe, fixed-size stack arrays (no heap allocation).
+**算法**：在存活有向图的无向投影上进行 BFS 二染色。时间复杂度 O(V+E)，no_std 安全，使用固定大小的栈数组（无堆分配）。
 
-**Invariants**:
-- Every directed edge is treated as undirected (both `from→to` and `to→from`
-  neighbors are explored from each node).
-- Self-loops are skipped.
-- Each connected component is seeded independently (handles disconnected graphs).
-- When a conflict is found (same-color neighbors), `is_bipartite = false` is
-  set but BFS continues — so `total` is always correct regardless of the result.
+**不变式**：
+- 每条有向边都被当作无向边处理（从每个节点出发，同时探索 `from→to` 和 `to→from` 两个方向的邻居）。
+- 自环会被跳过。
+- 每个连通分量独立播种（可处理不连通的图）。
+- 当发现冲突（相邻节点同色）时，会设置 `is_bipartite = false`，但 BFS 会继续进行 —— 因此无论结果如何，`total` 始终是正确的。
 
-**Return layout** (consistent with `graph_scc` / `graph_condensation` convention):
-- `vecs[0..total]`   — live node vectors in slot order.
-- `colors[0..total]` — 0 = set A, 1 = set B (meaningful only when is_bipartite).
-- `total`            — number of live nodes packed.
-- `is_bipartite`     — true iff the graph admits a valid 2-coloring.
+**返回值布局**（与 `graph_scc` / `graph_condensation` 的约定保持一致）：
+- `vecs[0..total]`   — 按槽位顺序排列的存活节点向量。
+- `colors[0..total]` — 0 = 集合 A，1 = 集合 B（仅当 is_bipartite 为真时有意义）。
+- `total`            — 已打包的存活节点数量。
+- `is_bipartite`     — 当且仅当该图存在合法二染色方案时为 true。
 
-### 2. `pub fn graph_bipartite<const N>()` — gos-runtime public API
+### 2. `pub fn graph_bipartite<const N>()` — gos-runtime 公开 API
 
 ```rust
 pub fn graph_bipartite<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, bool) {
@@ -53,14 +42,13 @@ pub fn graph_bipartite<const N: usize>() -> ([VectorAddress; N], [u8; N], usize,
 }
 ```
 
-One-liner wrapper consistent with `graph_scc`, `graph_condensation`,
-`graph_reachable`.
+与 `graph_scc`、`graph_condensation`、`graph_reachable` 风格一致的单行包装函数。
 
 ### 3. `dispatch_graph_bipartite` — k-shell (`crates/k-shell/src/lib.rs`)
 
-New shell-level dispatch function (inserted before `dispatch_uname`).
+新增的 shell 层调度函数（插入在 `dispatch_uname` 之前）。
 
-Output format:
+输出格式：
 ```
  graph bipartite
  ───────────────────────────────────────────────────────────
@@ -80,40 +68,40 @@ Output format:
   3 node(s) checked
 ```
 
-Pure read — no epoch bump, no write ops.
+纯读取操作 —— 不产生 epoch 递增，不涉及写操作。
 
-### 4. Command routing — k-shell (`crates/k-shell/src/proc.rs`)
+### 4. 命令路由 — k-shell (`crates/k-shell/src/proc.rs`)
 
-Aliases wired after the `graph condensation` branch:
+别名接在 `graph condensation` 分支之后：
 
 ```
 graph bipartite  |  bipartite  |  graph bip  |  bip
 ```
 
-Four aliases follow the same short-alias pattern as prior graph commands.
+四个别名遵循与之前 graph 命令相同的短别名模式。
 
-### 5. `gos-graph-bipartite-harness` — new host-test crate
+### 5. `gos-graph-bipartite-harness` — 新建 host-test crate
 
-`host-tests/gos-graph-bipartite-harness/` — 10 integration tests covering:
+`host-tests/gos-graph-bipartite-harness/` —— 10 个集成测试，覆盖：
 
-| # | Scenario | Expected |
+| # | 场景 | 预期结果 |
 |---|----------|----------|
-| 1 | Empty graph | bipartite (vacuously) |
-| 2 | Single isolated node | bipartite |
-| 3 | Single edge A→B | bipartite |
-| 4 | Path A→B→C | bipartite |
-| 5 | Triangle A→B→C→A | NOT bipartite (odd cycle 3) |
-| 6 | 4-cycle A→B→C→D→A | bipartite |
-| 7 | 4-cycle + chord A→C | NOT bipartite (3-cycle) |
-| 8 | Two disconnected bipartite components | bipartite |
-| 9 | Star K₁,₄: centre→{A,B,C,D} | bipartite |
-| 10 | Color assignment for path A→B→C | A,C same set; B opposite |
+| 1 | 空图 | 二分图（空图恒真） |
+| 2 | 单个孤立节点 | 二分图 |
+| 3 | 单条边 A→B | 二分图 |
+| 4 | 路径 A→B→C | 二分图 |
+| 5 | 三角形 A→B→C→A | 非二分图（奇数环，长度 3） |
+| 6 | 4 元环 A→B→C→D→A | 二分图 |
+| 7 | 4 元环 + 弦 A→C | 非二分图（3 元环） |
+| 8 | 两个不连通的二分图分量 | 二分图 |
+| 9 | 星形图 K₁,₄：centre→{A,B,C,D} | 二分图 |
+| 10 | 路径 A→B→C 的染色分配 | A、C 同一集合；B 属于另一集合 |
 
-All 10 tests: **PASS** (`cargo +nightly test` in harness dir).
+全部 10 个测试：**通过**（在 harness 目录下执行 `cargo +nightly test`）。
 
 ---
 
-## Test Results
+## 测试结果
 
 ```
 running 10 tests
@@ -133,27 +121,26 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 ---
 
-## Shell Command Surface (V2.37 additions)
+## Shell 命令一览（V2.37 新增）
 
-| Command | Aliases | Description |
+| 命令 | 别名 | 说明 |
 |---------|---------|-------------|
-| `graph bipartite` | `bipartite`, `graph bip`, `bip` | 2-coloring check — is the graph bipartite? Shows set A / set B when yes, odd-cycle hint when no. |
+| `graph bipartite` | `bipartite`, `graph bip`, `bip` | 二染色检测 —— 该图是否为二分图？是则显示集合 A / 集合 B，否则给出奇数环提示。 |
 
 ---
 
-## Invariants Preserved
+## 保持的不变式
 
-- `dispatch_graph_bipartite` is a pure read — no epoch bump, no write ops.
-- Uses existing `TEST_LOCK: Mutex<()>` + `reset()` isolation pattern.
-- Harness `.cargo/config.toml` sets `target = "x86_64-pc-windows-msvc"` +
-  `build-std = ["std", "panic_abort"]`.
-- Version number: V2.37 (sequential after V2.36 graph-reachable).
+- `dispatch_graph_bipartite` 是纯读取操作 —— 不产生 epoch 递增，不涉及写操作。
+- 使用既有的 `TEST_LOCK: Mutex<()>` + `reset()` 隔离模式。
+- Harness 的 `.cargo/config.toml` 设置 `target = "x86_64-pc-windows-msvc"` + `build-std = ["std", "panic_abort"]`。
+- 版本号：V2.37（紧接在 V2.36 graph-reachable 之后）。
 
 ---
 
-## Next Steps
+## 下一步计划
 
-- `graph degree` / `graph centrality` — in/out degree per node, hub identification
-- `node checkpoint <vec>` — snapshot node state to diff ring
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- PAL_U32 → attribute node refactor (Demo A prerequisite)
+- `graph degree` / `graph centrality` —— 每个节点的入/出度、枢纽节点识别
+- `node checkpoint <vec>` —— 将节点状态快照到 diff ring
+- `journal ring <N>` —— 运行时可配置的 JournalRing 容量
+- PAL_U32 → attribute node 重构（Demo A 前置条件）

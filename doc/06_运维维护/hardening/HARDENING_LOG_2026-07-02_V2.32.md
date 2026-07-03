@@ -1,109 +1,103 @@
-# GOS Hardening Log — V2.32 — 2026-07-02
+# GOS 硬化日志 — V2.32 — 2026-07-02
 
-## Summary
+## 摘要
 
-V2.32 adds **directed cycle detection** to the GOS runtime graph via iterative
-3-color DFS, exposing a `graph cycles` / `cycles` shell command analogous to
-`tsort` detecting circular dependencies or `cargo`'s dependency-cycle error.
-This is the most fundamental graph-theory safety check for a graph-OS: circular
-signal routing creates deadlocks; circular dependency declarations prevent
-deterministic boot ordering; circular rewrite-rule chains cause infinite
-oscillation.  The new API lets operators confirm the live graph is a DAG at any
-time.
+V2.32 通过迭代式三色 DFS，为 GOS runtime 图新增了**有向环检测**能力，
+并暴露出 `graph cycles` / `cycles` shell 命令，类似于 `tsort` 检测
+循环依赖，或 `cargo` 的依赖环错误。这是图操作系统最基础的图论安全检查：
+循环信号路由会造成死锁；循环依赖声明会阻碍确定性的启动顺序；循环重写
+规则链会导致无限振荡。新 API 使运维人员能够随时确认当前活跃图是否为 DAG。
 
 ---
 
-## Changes
+## 修改内容
 
 ### 1. `find_graph_cycle_inner<const N>` + `is_cyclic_inner` — gos-runtime
 
-New methods on `GraphRuntime` (`crates/gos-runtime/src/lib.rs`):
+`GraphRuntime` 上新增方法（`crates/gos-runtime/src/lib.rs`）：
 
 ```rust
 pub fn find_graph_cycle_inner<const N: usize>(&self) -> ([VectorAddress; N], usize)
 pub fn is_cyclic_inner(&self) -> bool
 ```
 
-**Algorithm**: iterative DFS with 3-color node marking:
-- `WHITE` (0) = unvisited
-- `GRAY`  (1) = on the current DFS path (ancestor)
-- `BLACK` (2) = fully explored
+**算法**：带三色节点标记的迭代式 DFS：
+- `WHITE`（0）= 未访问
+- `GRAY`（1）= 位于当前 DFS 路径上（祖先节点）
+- `BLACK`（2）= 已完全展开
 
-A *back edge* — an edge from the current GRAY node to any GRAY ancestor — closes
-a cycle.  When detected, the cycle path is reconstructed from the DFS stack by
-finding the index of the back-edge target in the current path and slicing from
-that index to the current position, then appending the target node once more to
-close the loop (so `path[0] == path[len-1]`).
+*回边*——从当前 GRAY 节点指向任一 GRAY 祖先的边——会闭合一个环。检测到
+回边后，通过在当前路径中找到回边目标节点的下标，并从该下标切片至当前
+位置，再将目标节点追加一次以闭合环路（使得 `path[0] == path[len-1]`），
+从而在 DFS 栈中重建环路径。
 
-Properties:
-- **O(V+E)** time, same asymptotic cost as BFS path from V2.31.
-- **no_std safe** — all working storage is fixed-size stack arrays.
-- **No recursion** — explicit DFS stack avoids stack overflow on large graphs.
-- Correctly handles self-loops (A→A), multi-node cycles, and disconnected graphs
-  with isolated cyclic components.
+特性：
+- **O(V+E)** 时间复杂度，与 V2.31 的 BFS 路径查找渐进代价相同。
+- **no_std 安全**——所有工作存储均为固定大小的栈数组。
+- **无递归**——显式 DFS 栈避免了大型图上的栈溢出。
+- 能正确处理自环（A→A）、多节点环，以及带有孤立环状分量的非连通图。
 
-`is_cyclic_inner` delegates to `find_graph_cycle_inner::<2>()` (capacity-2
-path), which detects any cycle while allocating minimal stack memory.
+`is_cyclic_inner` 委托给 `find_graph_cycle_inner::<2>()`（容量为 2 的
+路径），以最小的栈内存分配检测任意环的存在。
 
-### 2. Public API — gos-runtime
+### 2. 公开 API — gos-runtime
 
 ```rust
 pub fn find_graph_cycle<const N: usize>() -> ([VectorAddress; N], usize)
 pub fn is_cyclic() -> bool
 ```
 
-`find_graph_cycle` locks `RUNTIME`, calls `find_graph_cycle_inner`, and returns
-`(path, length)` where `length == 0` means the graph is acyclic.
-`is_cyclic` is a convenience wrapper returning only the boolean.
+`find_graph_cycle` 锁定 `RUNTIME`，调用 `find_graph_cycle_inner`，并返回
+`(path, length)`，其中 `length == 0` 表示图是无环的。
+`is_cyclic` 是仅返回布尔值的便捷包装函数。
 
-### 3. `dispatch_graph_cycles` shell command — k-shell (`crates/k-shell/src/lib.rs`)
+### 3. `dispatch_graph_cycles` shell 命令 — k-shell（`crates/k-shell/src/lib.rs`）
 
-Output format:
-- Banner: `GRAPH CYCLES` (cyan header)
-- **DAG case**: green "no cycles detected  (directed acyclic graph)"
-- **Cycle case**: red "CYCLE DETECTED  N nodes", then each node of the cycle
-  numbered with arrows showing flow direction, closing with a ↩ symbol at the
-  back-edge node
+输出格式：
+- 横幅：`GRAPH CYCLES`（青色标题）
+- **DAG 情形**：绿色 "no cycles detected  (directed acyclic graph)"
+- **有环情形**：红色 "CYCLE DETECTED  N nodes"，随后逐个列出环中的节点
+  编号并以箭头展示流向，在回边节点处以 ↩ 符号闭合
 
-Color coding:
-- Green header on cycle absence
-- Red on cycle detection
-- Yellow for intermediate cycle nodes
-- Cyan for vector addresses
-- ↓ arrows between non-closing hops, ↩ at the closing back-edge
+颜色编码：
+- 无环时标题为绿色
+- 检测到环时为红色
+- 环中间节点为黄色
+- vector 地址为青色
+- 非闭合跳转之间用 ↓ 箭头，闭合回边处用 ↩
 
-### 4. Shell routing — k-shell (`crates/k-shell/src/proc.rs`)
+### 4. Shell 路由 — k-shell（`crates/k-shell/src/proc.rs`）
 
-New branches added to the command dispatcher:
+命令分发器中新增的分支：
 
 ```
 "graph cycles" | "cycles" | "graph cyclic" | "cyclic"
     → dispatch_graph_cycles(sink)
 ```
 
-Help text updated with:
+help 文本已更新：
 ```
 graph cycles       detect directed cycles in the graph (like tsort cycle-check)
 ```
 
-### 5. Test harness — `host-tests/gos-graph-cycles-harness/` (10 tests, all passing)
+### 5. 测试套件 — `host-tests/gos-graph-cycles-harness/`（10 个测试，全部通过）
 
-| # | Test | Verifies |
+| # | 测试 | 验证内容 |
 |---|------|----------|
-| 1 | `empty_graph_no_cycle` | Empty runtime returns cycle_len == 0 |
-| 2 | `single_node_no_cycle` | Isolated node with no edges → acyclic |
-| 3 | `linear_chain_is_acyclic` | A→B→C chain → DAG, no cycle |
-| 4 | `self_loop_is_cyclic` | A→A self-loop detected, len >= 2 |
-| 5 | `two_node_cycle_detected` | A→B→A detected, len >= 3 |
-| 6 | `three_node_cycle_detected` | A→B→C→A detected, len >= 4 |
-| 7 | `diamond_dag_is_acyclic` | A→B, A→C, B→D, C→D (diamond DAG) → acyclic |
-| 8 | `mixed_dag_and_cycle_detected` | DAG subgraph + isolated D→E→D cycle → detected |
-| 9 | `is_cyclic_false_for_dag` | `is_cyclic()` returns false for pure DAG |
-|10 | `is_cyclic_true_when_cycle_exists` | `is_cyclic()` returns true when A→B→C→A exists |
+| 1 | `empty_graph_no_cycle` | 空 runtime 返回 cycle_len == 0 |
+| 2 | `single_node_no_cycle` | 无边的孤立节点 → 无环 |
+| 3 | `linear_chain_is_acyclic` | A→B→C 链 → DAG，无环 |
+| 4 | `self_loop_is_cyclic` | A→A 自环被检测到，长度 >= 2 |
+| 5 | `two_node_cycle_detected` | A→B→A 被检测到，长度 >= 3 |
+| 6 | `three_node_cycle_detected` | A→B→C→A 被检测到，长度 >= 4 |
+| 7 | `diamond_dag_is_acyclic` | A→B, A→C, B→D, C→D（菱形 DAG）→ 无环 |
+| 8 | `mixed_dag_and_cycle_detected` | DAG 子图 + 孤立的 D→E→D 环 → 被检测到 |
+| 9 | `is_cyclic_false_for_dag` | 对纯 DAG，`is_cyclic()` 返回 false |
+|10 | `is_cyclic_true_when_cycle_exists` | 存在 A→B→C→A 时，`is_cyclic()` 返回 true |
 
 ---
 
-## Verification
+## 验证
 
 ```
 cd host-tests/gos-graph-cycles-harness
@@ -111,7 +105,7 @@ cargo test -- --test-threads=1
 # test result: ok. 10 passed; 0 failed
 ```
 
-Regression (graph-path harness):
+回归验证（graph-path harness）：
 ```
 cd host-tests/gos-graph-path-harness
 cargo test -- --test-threads=1
@@ -120,30 +114,29 @@ cargo test -- --test-threads=1
 
 ---
 
-## Production Quality Rationale
+## 生产质量考量
 
-| Capability | Linux/macOS equivalent | GOS V2.32 |
+| 能力 | Linux/macOS 对应物 | GOS V2.32 |
 |---|---|---|
-| Circular dependency detection | `tsort` / `cargo check` | `graph cycles` shell command |
-| DAG verification | `toposort` assert in build systems | `is_cyclic()` API + shell |
-| Deadlock-path detection | `systemd` dependency-cycle check | `graph cycles` on signal graph |
-| Algorithm | DFS 3-color | Iterative DFS, O(V+E), no_std |
-| Output | `tsort: input contains a loop:` | cycle path with vector addresses + node keys |
+| 循环依赖检测 | `tsort` / `cargo check` | `graph cycles` shell 命令 |
+| DAG 验证 | 构建系统中的 `toposort` 断言 | `is_cyclic()` API + shell |
+| 死锁路径检测 | `systemd` 依赖环检查 | 在信号图上执行 `graph cycles` |
+| 算法 | DFS 三色法 | 迭代式 DFS，O(V+E)，no_std |
+| 输出 | `tsort: input contains a loop:` | 带 vector 地址 + 节点 key 的环路径 |
 
-The `find_graph_cycle` function uses the same stack-array approach as BFS path
-(V2.31) and diff-ring (V2.13) — no heap, no recursion, constant compile-time
-working memory — preserving the graph-OS's deterministic resource footprint.
-
----
-
-## Graph-OS Characteristic Preserved
-
-`graph cycles` operates directly on the **directed edge topology** of the live
-graph — not on a process list or file-system hierarchy.  The cycle path output
-shows node vectors and plugin keys, grounding the abstract graph-theory concept
-in the runtime's actual topology.  This keeps the observability surface rooted
-in the graph model that defines GOS.
+`find_graph_cycle` 函数采用了与 BFS 路径查找（V2.31）及 diff-ring（V2.13）
+相同的栈数组方案——无堆分配、无递归、编译期常量工作内存——从而保持了
+图操作系统确定性的资源占用。
 
 ---
 
-*Automated hardening pass — GOS V2.32 — 2026-07-02*
+## 图操作系统特性的保持
+
+`graph cycles` 直接作用于活跃图的**有向边拓扑**——而非进程列表或文件
+系统层级结构。环路径输出展示节点 vector 与插件 key，将抽象的图论概念
+落地于 runtime 的实际拓扑之中。这使可观测性面始终扎根于定义 GOS 的
+图模型。
+
+---
+
+*自动化硬化流程 — GOS V2.32 — 2026-07-02*
