@@ -604,6 +604,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  reciprocity / grecip  aliases for graph reciprocity\n");
         super::print_str(sink, "  graph modularity   Newman\u{2013}Girvan Q score of LPA community partition \u{2208} [0,1]\n");
         super::print_str(sink, "  modularity / gmodq aliases for graph modularity\n");
+        super::print_str(sink, "  graph rich club <k>  density among nodes with degree > k \u{2208} [0,1]\n");
+        super::print_str(sink, "  richclub <k> / grichclub <k>  aliases for graph rich club\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1070,6 +1072,30 @@ fn dispatch_text_command(
         super::dispatch_graph_reciprocity(sink);
     } else if cmd == "graph modularity" || cmd == "modularity" || cmd == "gmodq" {
         super::dispatch_graph_modularity(sink);
+    } else if let Some(k_str) = cmd
+        .strip_prefix("graph rich club ")
+        .or_else(|| cmd.strip_prefix("richclub "))
+        .or_else(|| cmd.strip_prefix("grichclub "))
+    {
+        let k_trimmed = k_str.trim();
+        let mut k_val: u8 = 1;
+        let mut k_valid = !k_trimmed.is_empty();
+        if k_valid {
+            let mut v: u16 = 0;
+            for b in k_trimmed.bytes() {
+                if b < b'0' || b > b'9' { k_valid = false; break; }
+                v = v.saturating_mul(10).saturating_add((b - b'0') as u16);
+                if v > 255 { k_valid = false; break; }
+            }
+            if k_valid { k_val = v as u8; }
+        }
+        if k_valid {
+            super::dispatch_graph_rich_club(sink, k_val);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph rich club: k must be 0\u{2013}255, e.g. `graph rich club 2`\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))

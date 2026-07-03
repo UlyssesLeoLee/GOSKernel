@@ -2576,6 +2576,64 @@ pub fn dispatch_graph_modularity(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.68: `graph rich club <k>` — rich-club coefficient for degree threshold k.
+///
+/// Counts nodes with undirected degree > k ("rich" nodes) and measures how
+/// densely they connect to each other:
+///   ρ(k) = E_{>k} / [N_{>k} × (N_{>k}−1) / 2]
+/// where E_{>k} = undirected edges among rich nodes; N_{>k} = rich node count.
+/// Directed edges treated as undirected; self-loops excluded.
+///
+///   1_000_000 ppm → rich nodes form a clique (maximally connected).
+///   0             → no rich nodes, < 2 rich nodes, or no edges among them.
+///
+/// Displays: ρ(k) as %, raw ppm, plus rich_nodes / edges_among_rich / k.
+pub fn dispatch_graph_rich_club(sink: &ConsoleSink, k: u8) {
+    let (rho_ppm, n_rich, e_rich) = gos_runtime::graph_rich_club(k);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph rich club\n");
+    set_color(sink, 7, 0);
+
+    if n_rich < 2 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  rich club: undefined (fewer than 2 rich nodes for k=");
+        print_num_inline(sink, k as usize);
+        print_str(sink, ")\n");
+        set_color(sink, 7, 0);
+    } else if rho_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  rich club: 0.00%  (0 ppm)  \u{2014} no edges among rich nodes\n");
+        set_color(sink, 7, 0);
+    } else {
+        let pct_int  = rho_ppm / 10_000;
+        let pct_frac = (rho_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  rich club: ");
+        print_num_inline(sink, pct_int as usize);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac as usize);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, rho_ppm as usize);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  k=");
+    print_num_inline(sink, k as usize);
+    print_str(sink, "  rich_nodes=");
+    print_num_inline(sink, n_rich);
+    print_str(sink, "  edges_among_rich=");
+    print_num_inline(sink, e_rich);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

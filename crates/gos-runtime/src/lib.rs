@@ -1515,6 +1515,102 @@ impl GraphRuntime {
         (q_ppm, comm_count, m, node_count)
     }
 
+    /// V2.68: Graph rich-club coefficient for degree threshold `k`.
+    ///
+    /// The rich-club coefficient ρ(k) measures how densely the "rich" nodes
+    /// (those with undirected degree > k) are connected to each other:
+    ///
+    ///   ρ(k) = E_{>k} / [N_{>k} × (N_{>k} − 1) / 2]
+    ///
+    /// where N_{>k} = |{v : deg(v) > k}|  and  E_{>k} = undirected edges
+    /// with both endpoints in that set.  Directed edges are treated as
+    /// undirected (same convention as modularity/assortativity). Self-loops
+    /// are excluded.
+    ///
+    /// Integer arithmetic (no_std safe):
+    ///   ρ_ppm(k) = E_{>k} × 2_000_000 / (N_{>k} × (N_{>k} − 1))
+    ///
+    /// Returns (rich_club_ppm, rich_node_count, edges_among_rich).
+    ///   1_000_000 → all rich nodes form a clique.
+    ///   0         → no rich nodes or no edges among them.
+    fn graph_rich_club_inner(snap: &GraphTopologySnapshot, k: u8) -> (u32, usize, usize) {
+        let node_count = snap.node_count;
+        if node_count == 0 {
+            return (0, 0, 0);
+        }
+
+        // ── 1. Undirected degree per slot (neighbour deduplication) ───────────────
+        let mut deg = [0u32; MAX_NODES];
+        for si in 0..node_count {
+            let v    = snap.node_slots[si];
+            let v_id = snap.slot_id[v];
+            let mut nb_seen = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei] { continue; }
+                let other = if snap.edge_from[ei] == v_id {
+                    snap.edge_to[ei]
+                } else if snap.edge_to[ei] == v_id {
+                    snap.edge_from[ei]
+                } else {
+                    continue;
+                };
+                if other == v_id { continue; }
+                if !nb_seen[..nb].contains(&other) && nb < MAX_NODES {
+                    nb_seen[nb] = other;
+                    nb += 1;
+                }
+            }
+            deg[v] = nb as u32;
+        }
+
+        // ── 2. Collect "rich" node slots (degree > k) ─────────────────────────────
+        let mut rich_slots = [0usize; MAX_NODES];
+        let mut rich_ids   = [NodeId::ZERO; MAX_NODES];
+        let mut n_rich = 0usize;
+        for si in 0..node_count {
+            let v = snap.node_slots[si];
+            if deg[v] > k as u32 && n_rich < MAX_NODES {
+                rich_slots[n_rich] = v;
+                rich_ids[n_rich]   = snap.slot_id[v];
+                n_rich += 1;
+            }
+        }
+
+        if n_rich < 2 {
+            return (0, n_rich, 0);
+        }
+
+        // ── 3. Deduplicate directed edges → undirected; keep only rich–rich ───────
+        let mut seen_from = [NodeId::ZERO; MAX_EDGES];
+        let mut seen_to   = [NodeId::ZERO; MAX_EDGES];
+        let mut e_rich = 0usize;
+
+        for ei in 0..MAX_EDGES {
+            if !snap.edge_live[ei] { continue; }
+            let u = snap.edge_from[ei];
+            let v = snap.edge_to[ei];
+            if u == v { continue; }
+            // Both endpoints must be "rich".
+            let u_rich = rich_ids[..n_rich].contains(&u);
+            let v_rich = rich_ids[..n_rich].contains(&v);
+            if !u_rich || !v_rich { continue; }
+            // Dedup: skip if reverse direction already seen.
+            let already = (0..e_rich).any(|j| seen_from[j] == v && seen_to[j] == u);
+            if !already && e_rich < MAX_EDGES {
+                seen_from[e_rich] = u;
+                seen_to[e_rich]   = v;
+                e_rich += 1;
+            }
+        }
+
+        // ── 4. ρ_ppm = E_{>k} × 2_000_000 / (N_{>k} × (N_{>k} − 1)) ─────────────
+        let denom = (n_rich as u64) * ((n_rich as u64) - 1);
+        let rho_ppm = ((e_rich as u64) * 2_000_000 / denom) as u32;
+
+        (rho_ppm, n_rich, e_rich)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6576,6 +6672,19 @@ pub fn graph_reciprocity() -> (u32, usize, usize) {
 pub fn graph_modularity() -> (i32, usize, usize, usize) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_modularity_inner(&snap)
+}
+
+/// V2.68: Graph rich-club coefficient for degree threshold `k`.
+///
+/// Measures how densely the "rich" nodes (undirected degree > k) are interconnected.
+///   ρ(k) = E_{>k} / [N_{>k} × (N_{>k} − 1) / 2]
+/// Directed edges treated as undirected; self-loops excluded.
+///
+/// Returns (rich_club_ppm, rich_node_count, edges_among_rich).
+///   1_000_000 → rich nodes form a clique; 0 → no rich nodes or no edges among them.
+pub fn graph_rich_club(k: u8) -> (u32, usize, usize) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_rich_club_inner(&snap, k)
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.
