@@ -1312,6 +1312,52 @@ impl GraphRuntime {
         (r_ppm, m, n)
     }
 
+    /// V2.66: Graph reciprocity — fraction of directed edges that are mutual.
+    ///
+    /// For each directed edge (u→v), checks whether the reverse edge (v→u) also
+    /// exists. Self-loops are excluded from both counts.
+    ///
+    /// reciprocity_ppm = mutual_edges / total_edges × 1_000_000
+    ///   mutual_edges  = count of directed edges (u,v) where (v,u) also exists
+    ///   total_edges   = directed edge count (self-loops excluded)
+    ///
+    /// Returns (reciprocity_ppm, mutual_edges, total_edges).
+    ///   1_000_000 → fully reciprocal (all edges bidirectional)
+    ///       0     → no mutual edges, or no edges at all
+    pub fn graph_reciprocity_inner(&self) -> (u32, usize, usize) {
+        // Collect (from, to) for every non-self-loop edge.
+        let mut from_ids = [NodeId::ZERO; MAX_EDGES];
+        let mut to_ids   = [NodeId::ZERO; MAX_EDGES];
+        let mut m = 0usize;
+        for edge in self.edges.iter().flatten() {
+            let u = edge.spec.from_node;
+            let v = edge.spec.to_node;
+            if u == v { continue; }
+            if m < MAX_EDGES {
+                from_ids[m] = u;
+                to_ids[m]   = v;
+                m += 1;
+            }
+        }
+        if m == 0 {
+            return (0, 0, 0);
+        }
+        // For each edge (u,v) check if (v,u) also exists.
+        let mut mutual = 0usize;
+        for i in 0..m {
+            let u = from_ids[i];
+            let v = to_ids[i];
+            for j in 0..m {
+                if from_ids[j] == v && to_ids[j] == u {
+                    mutual += 1;
+                    break;
+                }
+            }
+        }
+        let reciprocity_ppm = ((mutual as u64 * 1_000_000) / m as u64) as u32;
+        (reciprocity_ppm, mutual, m)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6352,6 +6398,13 @@ pub fn graph_kcore<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8)
 /// +1_000_000 = assortative; −1_000_000 = disassortative; 0 = uncorrelated/undefined.
 pub fn graph_assortativity() -> (i32, usize, usize) {
     RUNTIME.lock().graph_assortativity_inner()
+}
+
+/// V2.66: Graph reciprocity — fraction of directed edges that are mutual.
+/// Returns (reciprocity_ppm, mutual_edges, total_edges).
+/// 1_000_000 = fully reciprocal; 0 = no mutual edges or no edges.
+pub fn graph_reciprocity() -> (u32, usize, usize) {
+    RUNTIME.lock().graph_reciprocity_inner()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.

@@ -2472,6 +2472,54 @@ pub fn dispatch_graph_assortativity(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.66: `graph reciprocity` — fraction of directed edges that are mutual.
+///
+/// For each directed edge (u→v), checks whether the reverse edge (v→u) exists.
+/// reciprocity_ppm = mutual_edges / total_edges × 1_000_000.
+///
+/// Displays the reciprocity as a percentage and ppm, plus mutual/total counts.
+pub fn dispatch_graph_reciprocity(sink: &ConsoleSink) {
+    let (recip_ppm, mutual, total) = gos_runtime::graph_reciprocity();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph reciprocity\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  reciprocity: undefined (no edges)\n");
+        set_color(sink, 7, 0);
+    } else if recip_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  reciprocity: 0.00%  (0 ppm)  \xe2\x80\x94 no mutual edges\n");
+        set_color(sink, 7, 0);
+    } else {
+        let pct_int  = recip_ppm / 10_000;
+        let pct_frac = (recip_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  reciprocity: ");
+        print_num_inline(sink, pct_int as usize);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac as usize);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, recip_ppm as usize);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  mutual=");
+    print_num_inline(sink, mutual);
+    print_str(sink, "  total=");
+    print_num_inline(sink, total);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
