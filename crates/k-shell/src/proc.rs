@@ -598,7 +598,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  density / gdensity aliases for graph density\n");
         super::print_str(sink, "  graph clustering   Watts-Strogatz global clustering coefficient (triangle density ppm)\n");
         super::print_str(sink, "  clustering / gcluster  aliases for graph clustering\n");
-        super::print_str(sink, "  graph assortativity  Newman degree assortativity r \xe2\x88\x88 [\xe2\x88\x921,+1] \xe2\x80\x94 hubs-connect-to-hubs?\n");
+        super::print_str(sink, "  graph assortativity  Newman degree assortativity r \u{2208} [\u{2212}1,+1] \u{2014} hubs-connect-to-hubs?\n");
         super::print_str(sink, "  assortativity / gassort  aliases for graph assortativity\n");
         super::print_str(sink, "  graph reciprocity  fraction of directed edges that are mutual (bidirectional)\n");
         super::print_str(sink, "  reciprocity / grecip  aliases for graph reciprocity\n");

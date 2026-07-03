@@ -2491,7 +2491,7 @@ pub fn dispatch_graph_reciprocity(sink: &ConsoleSink) {
         set_color(sink, 7, 0);
     } else if recip_ppm == 0 {
         set_color(sink, 8, 0);
-        print_str(sink, "  reciprocity: 0.00%  (0 ppm)  \xe2\x80\x94 no mutual edges\n");
+        print_str(sink, "  reciprocity: 0.00%  (0 ppm)  \u{2014} no mutual edges\n");
         set_color(sink, 7, 0);
     } else {
         let pct_int  = recip_ppm / 10_000;
@@ -4594,7 +4594,7 @@ pub fn dispatch_graph_community(sink: &ConsoleSink) {
         let size      = end - pos;
         let is_major  = cur_comm == 0 && largest_size > 1;
         let is_minor  = size > 1 && !is_major;
-        let is_isolated = size == 1;
+        let _is_isolated = size == 1;
 
         let hdr_color = if is_major { 13 } else if is_minor { 11 } else { 8 };
 
