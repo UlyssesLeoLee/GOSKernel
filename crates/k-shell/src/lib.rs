@@ -2221,6 +2221,49 @@ pub fn dispatch_node_attr_list(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
+///
+/// Prints a table of (VectorAddress, decimal val) for every occupied slot in
+/// node_props_u8, plus a slot-usage footer.  Useful for theme and signal-val audits.
+pub fn dispatch_node_attr_list_u8(sink: &ConsoleSink) {
+    let mut vecs = [VectorAddress::new(0, 0, 0, 0); gos_runtime::MAX_NODE_PROPS_U8];
+    let mut vals = [0u8; gos_runtime::MAX_NODE_PROPS_U8];
+    let count = gos_runtime::node_attr_list_u8(&mut vecs, &mut vals);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node attr list u8\n");
+    set_color(sink, 7, 0);
+
+    if count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no u8 attributes set)\n");
+        set_color(sink, 7, 0);
+    } else {
+        let mut i = 0usize;
+        while i < count {
+            let mut vec_line = LineBuf::<20>::new();
+            vec_line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+            set_color(sink, 10, 0);
+            print_str(sink, "  ");
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "  val=");
+            print_num_inline(sink, vals[i] as usize);
+            print_str(sink, "\n");
+            i += 1;
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, count);
+    print_str(sink, " / ");
+    print_num_inline(sink, gos_runtime::MAX_NODE_PROPS_U8);
+    print_str(sink, " slots used\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.59: `graph density` — display the ratio of actual edges to max-possible edges.
 ///
 /// For a directed graph: density = E / (N*(N-1)).

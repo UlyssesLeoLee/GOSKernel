@@ -956,6 +956,25 @@ impl GraphRuntime {
         count
     }
 
+    /// V2.60: List all nodes that have a u8 attribute set.
+    /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
+    /// Returns the number of entries written (≤ N).
+    pub fn node_attr_list_u8_inner<const N: usize>(
+        &self,
+        out_vec: &mut [VectorAddress; N],
+        out_val: &mut [u8; N],
+    ) -> usize {
+        let mut count = 0usize;
+        for &(node_id, val) in self.node_props_u8.iter() {
+            if node_id == NodeId::ZERO { continue; }
+            if count >= N { break; }
+            out_vec[count] = self.node_vector(node_id).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_val[count] = val;
+            count += 1;
+        }
+        count
+    }
+
     /// V2.59: Graph density = E / (N*(N-1)) for a directed graph.
     /// Returns (density_ppm, node_count, edge_count) where density_ppm is
     /// the density expressed in parts-per-million (multiply by 1e-6 for 0..1).
@@ -5952,6 +5971,15 @@ pub fn node_attr_list<const N: usize>(
 /// parts-per-million (0 = empty/undefined, 1_000_000 = complete graph).
 pub fn graph_density() -> (u32, usize, usize) {
     RUNTIME.lock().graph_density_inner()
+}
+
+/// V2.60: List all nodes that have a u8 attribute set.
+/// Returns the number of entries written into `out_vec` / `out_val` (≤ N).
+pub fn node_attr_list_u8<const N: usize>(
+    out_vec: &mut [VectorAddress; N],
+    out_val: &mut [u8; N],
+) -> usize {
+    RUNTIME.lock().node_attr_list_u8_inner(out_vec, out_val)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

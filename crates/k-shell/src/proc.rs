@@ -557,7 +557,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  node attr set <vector> <hex>  store u32 attribute on node (palette, flag, counter)\n");
         super::print_str(sink, "  node attr get <vector>        read u32 attribute from node (or 'none' if absent)\n");
         super::print_str(sink, "  node attr list                list all nodes that have u32 attributes set\n");
-        super::print_str(sink, "  nattr set / nattr get / nattr list  aliases for node attr set / get / list\n");
+        super::print_str(sink, "  node attr list u8             list all nodes that have u8 attributes set (theme signal vals)\n");
+        super::print_str(sink, "  nattr set / nattr get / nattr list / nattr list u8  aliases\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -762,6 +763,8 @@ fn dispatch_text_command(
         super::dispatch_journal_info(sink);
     } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
         super::dispatch_proc_list(sink);
+    } else if cmd == "node attr list u8" || cmd == "nattr list u8" {
+        super::dispatch_node_attr_list_u8(sink);
     } else if cmd == "node attr list" || cmd == "nattr list" {
         super::dispatch_node_attr_list(sink);
     } else if let Some(rest) = cmd
