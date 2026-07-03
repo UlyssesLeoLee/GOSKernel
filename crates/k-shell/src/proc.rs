@@ -589,6 +589,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  color / gcolor     aliases for graph color\n");
         super::print_str(sink, "  graph mst          Prim's minimum spanning forest — minimum-cost routing backbone\n");
         super::print_str(sink, "  mst / gmst         aliases for graph mst\n");
+        super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
+        super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -963,6 +965,20 @@ fn dispatch_text_command(
         super::dispatch_graph_color(sink);
     } else if cmd == "graph mst" || cmd == "mst" || cmd == "gmst" || cmd == "graph tree mst" || cmd == "min spanning" {
         super::dispatch_graph_mst(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("graph shortest ")
+        .or_else(|| cmd.strip_prefix("shortest "))
+        .or_else(|| cmd.strip_prefix("graph dijkstra "))
+        .or_else(|| cmd.strip_prefix("dijkstra "))
+    {
+        match gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            Some(src) => super::dispatch_graph_shortest(sink, src),
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " graph shortest: invalid vector (e.g. 1.0.0.1)\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))

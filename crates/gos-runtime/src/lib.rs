@@ -3137,6 +3137,127 @@ impl GraphRuntime {
         (out_vecs, out_parents, out_weights, copy_len, total_mst_w)
     }
 
+    /// V2.49: Dijkstra single-source shortest-path tree over the **directed**
+    /// kernel graph from a given source node.
+    ///
+    /// Uses edge directions as-is (unlike MST/spanning which treat edges as
+    /// undirected).  Edge weights come from `edge.spec.weight` (default 1.0).
+    /// Nodes unreachable from the source receive distance `u32::MAX`.
+    ///
+    /// Returns `(vecs, parents, distances, node_count)`:
+    /// - `vecs[0..node_count]`     — all live nodes; source is first.
+    /// - `parents[0..node_count]`  — parent in SPT (self for source, ZERO_VEC for unreachable).
+    /// - `distances[0..node_count]`— distance × 1000 as u32 (u32::MAX = unreachable).
+    /// - `node_count`              — total live nodes.
+    ///
+    /// If `source` does not match any live node, returns all nodes with
+    /// distance u32::MAX and ZERO_VEC parents (no shortest-path tree).
+    ///
+    /// OS analogy: `ip route show table` with metrics — the minimum-latency
+    /// directed path from a source kernel sub-system to all reachable peers.
+    fn graph_shortest_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+        source: VectorAddress,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const INF: f32 = f32::MAX;
+
+        let n = snap.node_count;
+        if n == 0 {
+            return ([ZERO_VEC; N], [ZERO_VEC; N], [u32::MAX; N], 0);
+        }
+
+        // Find source slot.
+        let src_slot = {
+            let mut found = usize::MAX;
+            for si in 0..n {
+                let s = snap.node_slots[si];
+                if snap.slot_vec[s] == source {
+                    found = s;
+                    break;
+                }
+            }
+            found
+        };
+
+        // Dijkstra state: directed relaxation (only follow out-edges from u).
+        let mut visited = [false; MAX_NODES];
+        let mut dist    = [INF;   MAX_NODES];
+        let mut parent  = [usize::MAX; MAX_NODES];
+
+        if src_slot != usize::MAX {
+            dist[src_slot]   = 0.0;
+            parent[src_slot] = src_slot;
+        }
+
+        for _ in 0..n {
+            // Pick unvisited node with minimum distance.
+            let mut u = usize::MAX;
+            let mut u_dist = INF;
+            for si in 0..n {
+                let s = snap.node_slots[si];
+                if !visited[s] && dist[s] < u_dist {
+                    u      = s;
+                    u_dist = dist[s];
+                }
+            }
+            if u == usize::MAX || u_dist >= INF { break; } // remaining unreachable
+            visited[u] = true;
+
+            // Relax directed out-edges from u only.
+            let u_id = snap.slot_id[u];
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei] { continue; }
+                if snap.edge_from[ei] != u_id { continue; }
+                let nb_id = snap.edge_to[ei];
+                if nb_id == u_id { continue; } // self-loop
+                let v = match snap.node_slot_by_id(nb_id) {
+                    Some(s) => s,
+                    None    => continue,
+                };
+                if visited[v] { continue; }
+                let w = snap.edge_weight[ei];
+                let new_d = u_dist + w;
+                if new_d < dist[v] {
+                    dist[v]   = new_d;
+                    parent[v] = u;
+                }
+            }
+        }
+
+        // Pack output: source first, then all other live nodes in slot order.
+        let copy_len = n.min(N);
+        let mut out_vecs    = [ZERO_VEC; N];
+        let mut out_parents = [ZERO_VEC; N];
+        let mut out_dists   = [u32::MAX; N];
+
+        let mut idx = 0usize;
+        // Source goes first if found.
+        if src_slot != usize::MAX && idx < copy_len {
+            out_vecs[idx]    = snap.slot_vec[src_slot];
+            out_parents[idx] = snap.slot_vec[src_slot];
+            out_dists[idx]   = 0;
+            idx += 1;
+        }
+        for si in 0..n {
+            if idx >= copy_len { break; }
+            let s = snap.node_slots[si];
+            if s == src_slot { continue; }
+            out_vecs[idx] = snap.slot_vec[s];
+            if parent[s] != usize::MAX {
+                out_parents[idx] = snap.slot_vec[parent[s]];
+            }
+            out_dists[idx] = if dist[s] >= INF {
+                u32::MAX
+            } else {
+                (dist[s] * 1000.0) as u32
+            };
+            idx += 1;
+        }
+
+        (out_vecs, out_parents, out_dists, copy_len)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -5593,6 +5714,29 @@ pub fn graph_mst<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_mst_inner::<N>(&snap)
+}
+
+/// V2.49: Dijkstra single-source shortest-path tree from `source` over the
+/// **directed** live kernel graph.
+///
+/// Uses directed edges only (unlike MST which treats edges as undirected).
+/// Edge weights come from `edge.spec.weight` (default 1.0).
+///
+/// Returns `(vecs, parents, distances, node_count)`:
+/// - `vecs[0..node_count]`      — all live nodes; source appears first.
+/// - `parents[0..node_count]`   — parent in shortest-path tree (self for source,
+///                                ZERO_VEC for unreachable nodes).
+/// - `distances[0..node_count]` — distance from source × 1000 as u32
+///                                (`u32::MAX` = unreachable).
+/// - `node_count`               — total live nodes.
+///
+/// OS analogy: `ip route get <dst>` — the minimum-latency directed path from
+/// one kernel sub-system to all reachable peers.
+pub fn graph_shortest<const N: usize>(
+    source: VectorAddress,
+) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_shortest_inner::<N>(&snap, source)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

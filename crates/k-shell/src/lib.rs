@@ -4328,6 +4328,122 @@ pub fn dispatch_graph_mst(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.49: `graph shortest <vec>` — Dijkstra single-source shortest-path tree.
+///
+/// Displays directed distances from `source` to every live node.
+/// Unreachable nodes (no directed path from source) show distance `∞`.
+///
+/// Output columns: status (source/reachable/∞), distance, vector, parent.
+pub fn dispatch_graph_shortest(sink: &ConsoleSink, source: VectorAddress) {
+    const MAX_N: usize = 128;
+
+    let (vecs, parents, dists, total) = gos_runtime::graph_shortest::<MAX_N>(source);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph shortest ");
+    let mut src_buf = LineBuf::<20>::new();
+    src_buf.push_vector(source);
+    let src_str = core::str::from_utf8(src_buf.as_slice()).unwrap_or("?");
+    print_str(sink, src_str);
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  status    dist      vector           parent\n");
+    set_color(sink, 7, 0);
+
+    let mut reachable_count = 0usize;
+
+    for i in 0..total {
+        let vec  = vecs[i];
+        let par  = parents[i];
+        let d    = dists[i];
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let is_src       = vec == source && d == 0;
+        let is_reachable = d != u32::MAX;
+
+        // Status column (10 chars).
+        if is_src {
+            set_color(sink, 13, 0); // magenta = source
+            print_str(sink, "  source   ");
+        } else if is_reachable {
+            set_color(sink, 10, 0); // green = reachable
+            print_str(sink, "  reach    ");
+            reachable_count += 1;
+        } else {
+            set_color(sink, 8, 0); // dark = unreachable
+            print_str(sink, "  \u{221e}         "); // ∞ symbol
+        }
+
+        // Distance column "D.mmm" (9 chars).
+        set_color(sink, 14, 0); // yellow
+        if !is_reachable {
+            print_str(sink, "\u{221e}        ");
+        } else {
+            let whole = d / 1000;
+            let frac  = d % 1000;
+            print_num_inline(sink, whole as usize);
+            print_str(sink, ".");
+            if frac < 10  { print_str(sink, "00"); }
+            else if frac < 100 { print_str(sink, "0"); }
+            print_num_inline(sink, frac as usize);
+            print_str(sink, "  ");
+        }
+
+        // Vector column (17 chars).
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        let vpad = 17usize.saturating_sub(vs.len());
+        for _ in 0..vpad { print_str(sink, " "); }
+
+        // Parent column.
+        if is_src {
+            set_color(sink, 8, 0);
+            print_str(sink, "(source)");
+        } else if par == zero || !is_reachable {
+            set_color(sink, 8, 0);
+            print_str(sink, "(unreachable)");
+        } else {
+            set_color(sink, 7, 0);
+            let mut pbuf = LineBuf::<20>::new();
+            pbuf.push_vector(par);
+            let ps = core::str::from_utf8(pbuf.as_slice()).unwrap_or("?");
+            print_str(sink, ps);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)  Dijkstra SPT from ");
+    set_color(sink, 13, 0);
+    print_str(sink, src_str);
+    set_color(sink, 7, 0);
+    print_str(sink, "  reachable: ");
+    set_color(sink, 10, 0);
+    print_num_inline(sink, reachable_count);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
