@@ -2221,6 +2221,52 @@ pub fn dispatch_node_attr_list(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.59: `graph density` — display the ratio of actual edges to max-possible edges.
+///
+/// For a directed graph: density = E / (N*(N-1)).
+/// Prints density as both ppm and percentage, plus raw node/edge counts.
+pub fn dispatch_graph_density(sink: &ConsoleSink) {
+    let (density_ppm, n, e) = gos_runtime::graph_density();
+    set_color(sink, 11, 0);
+    print_str(sink, " graph density\n");
+    set_color(sink, 7, 0);
+
+    if n < 2 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  density: undefined (fewer than 2 nodes)\n");
+        set_color(sink, 7, 0);
+    } else {
+        // Print "density: NNN.NNN% (E=E N=N max=N*(N-1))"
+        let pct_int  = density_ppm / 10_000;
+        let pct_frac = (density_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  density: ");
+        print_num_inline(sink, pct_int as usize);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac as usize);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, density_ppm as usize);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, n);
+    print_str(sink, "  edges=");
+    print_num_inline(sink, e);
+    if n >= 2 {
+        print_str(sink, "  max=");
+        print_num_inline(sink, n * (n - 1));
+    }
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// `watch` / `graph watch` / `watch proc` / `watch nodes` — enter live proc watch mode.
 ///
 /// Sets WATCH_PROC_MODE = 1 so the heartbeat repaints the VECTOR DECK panel with a

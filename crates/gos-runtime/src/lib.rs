@@ -956,6 +956,21 @@ impl GraphRuntime {
         count
     }
 
+    /// V2.59: Graph density = E / (N*(N-1)) for a directed graph.
+    /// Returns (density_ppm, node_count, edge_count) where density_ppm is
+    /// the density expressed in parts-per-million (multiply by 1e-6 for 0..1).
+    /// Returns (0, n, e) for graphs with fewer than 2 nodes (density undefined).
+    pub fn graph_density_inner(&self) -> (u32, usize, usize) {
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        let e = self.edges.iter().filter(|s| s.is_some()).count();
+        if n < 2 {
+            return (0, n, e);
+        }
+        let max_edges = (n as u64) * (n as u64 - 1); // directed: N*(N-1)
+        let density_ppm = ((e as u64 * 1_000_000) / max_edges).min(1_000_000) as u32;
+        (density_ppm, n, e)
+    }
+
     /// V2.15: Return the NodeId pointed to by the first Use edge originating
     /// from `source`. Used by `fire_subscribers` to encode which variant of an
     /// observed node is currently active as the reactive signal val.
@@ -5930,6 +5945,13 @@ pub fn node_attr_list<const N: usize>(
     out_val: &mut [u32; N],
 ) -> usize {
     RUNTIME.lock().node_attr_list_inner(out_vec, out_val)
+}
+
+/// V2.59: Graph density = E / (N*(N-1)) for a directed graph.
+/// Returns (density_ppm, node_count, edge_count) where density_ppm is in
+/// parts-per-million (0 = empty/undefined, 1_000_000 = complete graph).
+pub fn graph_density() -> (u32, usize, usize) {
+    RUNTIME.lock().graph_density_inner()
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

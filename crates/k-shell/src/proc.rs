@@ -593,6 +593,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  color / gcolor     aliases for graph color\n");
         super::print_str(sink, "  graph mst          Prim's minimum spanning forest — minimum-cost routing backbone\n");
         super::print_str(sink, "  mst / gmst         aliases for graph mst\n");
+        super::print_str(sink, "  graph density      E / (N*(N-1)) sparsity metric — how interconnected the graph is\n");
+        super::print_str(sink, "  density / gdensity aliases for graph density\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1041,6 +1043,8 @@ fn dispatch_text_command(
         || cmd == "graph attract" || cmd == "attract"
     {
         super::dispatch_graph_attractor(sink);
+    } else if cmd == "graph density" || cmd == "density" || cmd == "gdensity" {
+        super::dispatch_graph_density(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))
