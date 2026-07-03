@@ -3722,6 +3722,126 @@ impl GraphRuntime {
         (avg_ppm, nodes_computed, n)
     }
 
+    /// V2.76: Graph local efficiency (Latora–Marchiori 2001).
+    ///
+    /// E_loc(G) = (1/n) × Σ_v E(G_v)
+    ///
+    /// where G_v is the subgraph induced by the **undirected** neighbours of v
+    /// (v itself excluded), and E(G_v) is the directed global efficiency of G_v:
+    ///
+    ///   E(G_v) = Σ_{i≠j ∈ N(v)} 1/d_{G_v}(i,j)  /  (|N(v)| × (|N(v)|−1))
+    ///
+    /// d_{G_v}(i,j) is the directed BFS distance from i to j using only edges
+    /// whose both endpoints are neighbours of v.  Unreachable pairs contribute 0.
+    ///
+    /// Nodes with undirected degree < 2 contribute E(G_v) = 0 (no pairs in subgraph).
+    ///
+    /// Returns (eloc_ppm, nodes_computed, node_count):
+    ///   eloc_ppm      = E_loc × 1_000_000
+    ///   nodes_computed = nodes with undirected degree ≥ 2
+    ///   node_count    = total alive nodes (denominator)
+    pub fn graph_local_efficiency_inner(&self) -> (u32, usize, usize) {
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+
+        const SCALE: u64 = 1_000_000;
+        let mut sum_loc_ppm: u64 = 0;
+        let mut nodes_computed = 0usize;
+
+        for slot in 0..MAX_NODES {
+            let record = match self.nodes[slot] {
+                Some(ref r) => r,
+                None => continue,
+            };
+            let vid = record.spec.node_id;
+
+            // Collect undirected neighbors (deduplicated, no self-loops).
+            let mut neighbors = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !neighbors[..nb].contains(&other) {
+                    neighbors[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+
+            if nb < 2 { continue; }
+            nodes_computed += 1;
+
+            // Compute E(G_v): directed global efficiency of the subgraph on neighbors[0..nb].
+            // dist[ni] is the BFS distance from the current source to neighbors[ni].
+            let pairs_max = (nb * (nb - 1)) as u64;
+            let mut sum_recip: u64 = 0;
+
+            for si in 0..nb {
+                let mut dist = [u32::MAX; MAX_NODES];
+                let mut queue = [0usize; MAX_NODES];
+                dist[si] = 0;
+                queue[0] = si;
+                let mut q_head = 0usize;
+                let mut q_tail = 1usize;
+
+                while q_head < q_tail {
+                    let vi = queue[q_head];
+                    q_head += 1;
+                    let v_id = neighbors[vi];
+
+                    // Follow directed edges from v_id, restricted to nodes in neighbors[0..nb].
+                    for edge in self.edges.iter().flatten() {
+                        if edge.spec.from_node != v_id { continue; }
+                        let w_id = edge.spec.to_node;
+                        // Linear scan for w_id in the neighbor set.
+                        let mut wi_opt = None;
+                        for ni in 0..nb {
+                            if neighbors[ni] == w_id {
+                                wi_opt = Some(ni);
+                                break;
+                            }
+                        }
+                        let wi = match wi_opt {
+                            Some(i) => i,
+                            None => continue,
+                        };
+                        if dist[wi] == u32::MAX {
+                            dist[wi] = dist[vi].saturating_add(1);
+                            if q_tail < MAX_NODES {
+                                queue[q_tail] = wi;
+                                q_tail += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Accumulate 1/d for all reachable targets.
+                for ti in 0..nb {
+                    if ti == si { continue; }
+                    if dist[ti] != u32::MAX && dist[ti] > 0 {
+                        sum_recip = sum_recip.saturating_add(SCALE / dist[ti] as u64);
+                    }
+                }
+            }
+
+            // E(G_v) = sum_recip / (nb * (nb-1))
+            let ev_ppm = sum_recip / pairs_max;
+            sum_loc_ppm = sum_loc_ppm.saturating_add(ev_ppm);
+        }
+
+        // E_loc = (1/n) × Σ E(G_v)
+        let eloc_ppm = (sum_loc_ppm / n as u64).min(1_000_000) as u32;
+        (eloc_ppm, nodes_computed, n)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7937,6 +8057,21 @@ pub fn graph_global_efficiency() -> (u64, usize, usize) {
 /// Differs from `graph_clustering` (V2.61) which computes the global transitivity ratio.
 pub fn graph_avg_clustering() -> (u32, usize, usize) {
     RUNTIME.lock().graph_avg_clustering_inner()
+}
+
+/// V2.76: Graph local efficiency (Latora–Marchiori 2001).
+///
+/// E_loc(G) = (1/n) × Σ_v E(G_v)
+///
+/// where G_v is the directed subgraph induced by the undirected neighbours of v.
+/// Nodes with undirected degree < 2 contribute 0.
+///
+/// Returns `(eloc_ppm, nodes_computed, node_count)`:
+/// - `eloc_ppm`       — E_loc × 1_000_000
+/// - `nodes_computed` — nodes with undirected degree ≥ 2
+/// - `node_count`     — total alive nodes (denominator)
+pub fn graph_local_efficiency() -> (u32, usize, usize) {
+    RUNTIME.lock().graph_local_efficiency_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.

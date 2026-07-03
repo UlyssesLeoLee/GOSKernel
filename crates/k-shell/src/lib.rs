@@ -3043,6 +3043,60 @@ pub fn dispatch_graph_avg_clustering(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.76: `graph local efficiency` / `gleff` — local network efficiency (Latora-Marchiori 2001).
+///
+/// E_loc(G) = (1/n) × Σ_v E(G_v)
+/// where G_v is the directed subgraph induced by the undirected neighbours of v.
+/// Complement to global efficiency: measures local fault-tolerance / resilience.
+pub fn dispatch_graph_local_efficiency(sink: &ConsoleSink) {
+    let (ppm, nodes_computed, node_count) = gos_runtime::graph_local_efficiency();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph local efficiency\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  E_loc: undefined (empty graph)\n");
+        print_str(sink, "  nodes=0\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Print E_loc = W.XXXXXX (6 decimal places via ppm scale).
+    set_color(sink, 10, 0);
+    print_str(sink, "  E_loc = ");
+    let whole = (ppm / 1_000_000) as usize;
+    let frac  = (ppm % 1_000_000) as usize;
+    print_num_inline(sink, whole);
+    print_str(sink, ".");
+    if frac < 10 {
+        print_str(sink, "00000");
+    } else if frac < 100 {
+        print_str(sink, "0000");
+    } else if frac < 1_000 {
+        print_str(sink, "000");
+    } else if frac < 10_000 {
+        print_str(sink, "00");
+    } else if frac < 100_000 {
+        print_str(sink, "0");
+    }
+    print_num_inline(sink, frac);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  nodes_computed=");
+    print_num_inline(sink, nodes_computed);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

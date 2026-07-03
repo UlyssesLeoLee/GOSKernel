@@ -620,6 +620,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  geff               alias for graph efficiency\n");
         super::print_str(sink, "  graph avg clustering  (1/n)\u{2211} CC(v) \u{2014} true Watts-Strogatz per-node average\n");
         super::print_str(sink, "  gavgcc             alias for graph avg clustering\n");
+        super::print_str(sink, "  graph local efficiency  E_loc=(1/n)\u{2211} E(G_v) \u{2014} Latora-Marchiori local efficiency\n");
+        super::print_str(sink, "  gleff              alias for graph local efficiency\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1100,6 +1102,8 @@ fn dispatch_text_command(
         super::dispatch_graph_global_efficiency(sink);
     } else if cmd == "graph avg clustering" || cmd == "gavgcc" {
         super::dispatch_graph_avg_clustering(sink);
+    } else if cmd == "graph local efficiency" || cmd == "graph local eff" || cmd == "gleff" || cmd == "local efficiency" {
+        super::dispatch_graph_local_efficiency(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))
