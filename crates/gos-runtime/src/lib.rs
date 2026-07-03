@@ -300,14 +300,15 @@ struct EdgeOrderEntry {
 /// is released before the O(V×E) iteration begins, preventing deadlock
 /// with interrupt-context callers such as `post_irq_signal`.
 struct GraphTopologySnapshot {
-    node_slots: [usize; MAX_NODES],
-    node_count: usize,
-    slot_live:  [bool; MAX_NODES],
-    slot_id:    [NodeId; MAX_NODES],
-    slot_vec:   [VectorAddress; MAX_NODES],
-    edge_live:  [bool; MAX_EDGES],
-    edge_from:  [NodeId; MAX_EDGES],
-    edge_to:    [NodeId; MAX_EDGES],
+    node_slots:  [usize; MAX_NODES],
+    node_count:  usize,
+    slot_live:   [bool; MAX_NODES],
+    slot_id:     [NodeId; MAX_NODES],
+    slot_vec:    [VectorAddress; MAX_NODES],
+    edge_live:   [bool; MAX_EDGES],
+    edge_from:   [NodeId; MAX_EDGES],
+    edge_to:     [NodeId; MAX_EDGES],
+    edge_weight: [f32; MAX_EDGES],
 }
 
 impl GraphTopologySnapshot {
@@ -470,14 +471,15 @@ impl GraphRuntime {
         const ZERO_ID:  NodeId        = NodeId([0u8; 16]);
         const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
         let mut snap = GraphTopologySnapshot {
-            node_slots: [0usize; MAX_NODES],
-            node_count: 0,
-            slot_live:  [false; MAX_NODES],
-            slot_id:    [ZERO_ID;  MAX_NODES],
-            slot_vec:   [ZERO_VEC; MAX_NODES],
-            edge_live:  [false; MAX_EDGES],
-            edge_from:  [ZERO_ID;  MAX_EDGES],
-            edge_to:    [ZERO_ID;  MAX_EDGES],
+            node_slots:  [0usize; MAX_NODES],
+            node_count:  0,
+            slot_live:   [false; MAX_NODES],
+            slot_id:     [ZERO_ID;  MAX_NODES],
+            slot_vec:    [ZERO_VEC; MAX_NODES],
+            edge_live:   [false; MAX_EDGES],
+            edge_from:   [ZERO_ID;  MAX_EDGES],
+            edge_to:     [ZERO_ID;  MAX_EDGES],
+            edge_weight: [1.0f32; MAX_EDGES],
         };
         for i in 0..MAX_NODES {
             if let Some(r) = self.nodes[i] {
@@ -490,9 +492,10 @@ impl GraphRuntime {
         }
         for i in 0..MAX_EDGES {
             if let Some(e) = self.edges[i] {
-                snap.edge_live[i] = true;
-                snap.edge_from[i] = e.spec.from_node;
-                snap.edge_to[i]   = e.spec.to_node;
+                snap.edge_live[i]   = true;
+                snap.edge_from[i]   = e.spec.from_node;
+                snap.edge_to[i]     = e.spec.to_node;
+                snap.edge_weight[i] = e.spec.weight;
             }
         }
         snap
@@ -3013,6 +3016,127 @@ impl GraphRuntime {
         (out_vecs, out_colors, copy_len, chromatic)
     }
 
+    /// V2.48: Prim's algorithm — Minimum Spanning Forest over the undirected
+    /// projection of the live kernel graph.
+    ///
+    /// Each directed edge is treated as undirected with weight `edge.spec.weight`
+    /// (default 1.0 for edges registered without an explicit weight).
+    /// Disconnected components each get their own MST root (spanning forest).
+    ///
+    /// Returns `(vecs, parents, weights, node_count, total_mst_w)`:
+    /// - `vecs[0..node_count]`    — nodes in Prim visit order.
+    /// - `parents[0..node_count]` — parent vector (self for roots).
+    /// - `weights[0..node_count]` — edge weight to parent × 1000 as u32 (0 for roots).
+    /// - `node_count`             — total live nodes.
+    /// - `total_mst_w`            — sum of all MST edge weights × 1000 as u32.
+    ///
+    /// OS analogy: MST = minimum-cost signal routing backbone — the set of edges
+    /// that keeps all kernel sub-systems connected at the lowest total bandwidth cost.
+    fn graph_mst_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const INF:      f32           = f32::MAX;
+
+        let n = snap.node_count;
+        if n == 0 {
+            return ([ZERO_VEC; N], [ZERO_VEC; N], [0u32; N], 0, 0);
+        }
+
+        // Prim's: key[s] = minimum edge weight connecting slot s to the MST.
+        let mut in_mst      = [false;    MAX_NODES];
+        let mut key         = [INF;      MAX_NODES];
+        let mut parent_slot = [usize::MAX; MAX_NODES];
+
+        // Output in visit order.
+        let mut out_slots  = [0usize; MAX_NODES];
+        let mut out_key    = [0.0f32; MAX_NODES];
+        let mut emit_count = 0usize;
+
+        let mut remaining = n;
+
+        while remaining > 0 {
+            // Find an unvisited node with the minimum key (could be INF = new component root).
+            let mut u = usize::MAX;
+            let mut u_key = INF;
+            for si in 0..n {
+                let s = snap.node_slots[si];
+                if !in_mst[s] && key[s] <= u_key {
+                    // Prefer nodes with smaller slot index to break ties deterministically.
+                    if key[s] < u_key || (key[s] == u_key && (u == usize::MAX || s < u)) {
+                        u = s;
+                        u_key = key[s];
+                    }
+                }
+            }
+            if u == usize::MAX { break; }
+
+            // If this node has no parent yet, it is a component root — initialize its key.
+            if parent_slot[u] == usize::MAX {
+                parent_slot[u] = u; // root: parent = self
+                key[u] = 0.0;
+                u_key  = 0.0;
+            }
+
+            in_mst[u] = true;
+            if emit_count < N {
+                out_slots[emit_count] = u;
+                out_key[emit_count]   = u_key;
+                emit_count += 1;
+            }
+            remaining -= 1;
+
+            // Relax neighbors of u (undirected projection).
+            let u_id = snap.slot_id[u];
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei] { continue; }
+                // Determine if edge connects u to some neighbor v (undirected).
+                let nb_id = if snap.edge_from[ei] == u_id {
+                    snap.edge_to[ei]
+                } else if snap.edge_to[ei] == u_id {
+                    snap.edge_from[ei]
+                } else {
+                    continue;
+                };
+                if nb_id == u_id { continue; } // skip self-loops
+                let v = match snap.node_slot_by_id(nb_id) {
+                    Some(s) => s,
+                    None    => continue,
+                };
+                if in_mst[v] { continue; }
+                let w = snap.edge_weight[ei];
+                if w < key[v] {
+                    key[v]         = w;
+                    parent_slot[v] = u;
+                }
+            }
+        }
+
+        // Build output arrays.
+        let copy_len = emit_count.min(N);
+        let mut out_vecs    = [ZERO_VEC; N];
+        let mut out_parents = [ZERO_VEC; N];
+        let mut out_weights = [0u32; N];
+        let mut total_w_f   = 0.0f32;
+
+        for i in 0..copy_len {
+            let s = out_slots[i];
+            out_vecs[i] = snap.slot_vec[s];
+            let ps = parent_slot[s];
+            out_parents[i] = if ps == usize::MAX { snap.slot_vec[s] } else { snap.slot_vec[ps] };
+            let w = out_key[i];
+            let w_u32 = if w >= INF { 0 } else { (w * 1000.0) as u32 };
+            out_weights[i] = w_u32;
+            if i > 0 || out_parents[i] != out_vecs[i] {
+                // Only add edge weights (roots contribute 0).
+                total_w_f += w;
+            }
+        }
+
+        let total_mst_w = if total_w_f >= INF { 0 } else { (total_w_f * 1000.0) as u32 };
+        (out_vecs, out_parents, out_weights, copy_len, total_mst_w)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -5447,6 +5571,28 @@ pub fn graph_spanning<const N: usize>(
 pub fn graph_color<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_color_inner::<N>(&snap)
+}
+
+/// V2.48: Prim's MST spanning forest over the undirected projection of the live kernel graph.
+///
+/// Treats every directed edge as undirected with weight `edge.spec.weight`
+/// (defaults to 1.0 when edges are registered without an explicit weight).
+/// Disconnected components each receive their own MST root (forest).
+///
+/// Returns `(vecs, parents, weights, node_count, total_mst_w)`:
+/// - `vecs[0..node_count]`    — node vectors in Prim visit order.
+/// - `parents[0..node_count]` — parent vector (self for component roots).
+/// - `weights[0..node_count]` — edge weight to parent × 1000 as u32 (0 for roots).
+/// - `node_count`             — total live nodes.
+/// - `total_mst_w`            — sum of all MST edge weights × 1000 as u32.
+///
+/// OS analogy: `ip route show metric` — the minimum-cost set of signal routes
+/// that keeps all kernel sub-systems reachable, analogous to a routing table
+/// built for minimum total latency/bandwidth cost.
+pub fn graph_mst<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_mst_inner::<N>(&snap)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

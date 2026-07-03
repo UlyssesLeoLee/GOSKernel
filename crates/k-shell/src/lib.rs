@@ -4228,6 +4228,106 @@ pub fn dispatch_graph_color(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.48: `graph mst` — Prim's Minimum Spanning Forest over the live kernel graph.
+///
+/// Treats every directed edge as undirected with weight `edge.spec.weight`
+/// (default 1.0).  Disconnected components each get their own MST root.
+///
+/// Output columns: role (root/branch/leaf), weight-to-parent, vector, parent vector.
+/// Footer: N node(s)  Prim MST  total weight: W.mmm
+pub fn dispatch_graph_mst(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+
+    let (vecs, parents, weights, total, mst_w) = gos_runtime::graph_mst::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph mst\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  role    weight    vector           parent\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..total {
+        let vec     = vecs[i];
+        let parent  = parents[i];
+        let w_u32   = weights[i];
+        let is_root = vec == parent;
+
+        // Role column (6 chars)
+        if is_root {
+            set_color(sink, 13, 0); // magenta = root
+            print_str(sink, "  root  ");
+        } else {
+            set_color(sink, 11, 0); // cyan = branch / child
+            print_str(sink, "  child ");
+        }
+
+        // Weight column "W.mmm" (8 chars + 2 spaces)
+        set_color(sink, 14, 0); // yellow
+        let whole = w_u32 / 1000;
+        let frac  = w_u32 % 1000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        // Print frac with leading zeros (3 digits).
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+        print_str(sink, "  ");
+
+        // Vector column (17 chars)
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        let vpad = 17usize.saturating_sub(vs.len());
+        for _ in 0..vpad { print_str(sink, " "); }
+
+        // Parent column
+        if is_root {
+            set_color(sink, 8, 0);
+            print_str(sink, "(root)");
+        } else {
+            set_color(sink, 7, 0);
+            let mut pbuf = LineBuf::<20>::new();
+            pbuf.push_vector(parent);
+            let ps = core::str::from_utf8(pbuf.as_slice()).unwrap_or("?");
+            print_str(sink, ps);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)  Prim MST  total weight: ");
+    set_color(sink, 14, 0);
+    let whole = mst_w / 1000;
+    let frac  = mst_w % 1000;
+    print_num_inline(sink, whole as usize);
+    print_str(sink, ".");
+    if frac < 10  { print_str(sink, "00"); }
+    else if frac < 100 { print_str(sink, "0"); }
+    print_num_inline(sink, frac as usize);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

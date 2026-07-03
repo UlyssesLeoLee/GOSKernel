@@ -587,6 +587,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  spanning / span    aliases for graph spanning\n");
         super::print_str(sink, "  graph color        greedy graph coloring — conflict-free scheduling domains\n");
         super::print_str(sink, "  color / gcolor     aliases for graph color\n");
+        super::print_str(sink, "  graph mst          Prim's minimum spanning forest — minimum-cost routing backbone\n");
+        super::print_str(sink, "  mst / gmst         aliases for graph mst\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -959,6 +961,8 @@ fn dispatch_text_command(
         super::dispatch_graph_spanning(sink);
     } else if cmd == "graph color" || cmd == "color" || cmd == "gcolor" || cmd == "graph colour" || cmd == "colour" {
         super::dispatch_graph_color(sink);
+    } else if cmd == "graph mst" || cmd == "mst" || cmd == "gmst" || cmd == "graph tree mst" || cmd == "min spanning" {
+        super::dispatch_graph_mst(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
