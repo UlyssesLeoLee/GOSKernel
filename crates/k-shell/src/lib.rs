@@ -2988,6 +2988,61 @@ pub fn dispatch_graph_global_efficiency(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.75: `graph avg clustering` / `gavgcc` — per-node average clustering coefficient.
+///
+/// avg_CC = (1/n) × Σ CC(v)  where CC(v) = triangles(v) / C(k_v, 2)
+/// Unweighted average — distinct from `graph clustering` (V2.61) which is global transitivity.
+/// Nodes with undirected degree < 2 contribute CC(v) = 0.
+/// avg_CC = 1.0 for complete graphs; = 0 when no triangle neighbourhood exists.
+pub fn dispatch_graph_avg_clustering(sink: &ConsoleSink) {
+    let (avg_ppm, nodes_computed, node_count) = gos_runtime::graph_avg_clustering();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph avg clustering\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  avg CC: undefined (empty graph)\n");
+        print_str(sink, "  nodes=0\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Print avg CC = W.XXXXXX (6 decimal places via ppm scale).
+    set_color(sink, 10, 0);
+    print_str(sink, "  avg CC = ");
+    let whole = (avg_ppm / 1_000_000) as usize;
+    let frac  = (avg_ppm % 1_000_000) as usize;
+    print_num_inline(sink, whole);
+    print_str(sink, ".");
+    if frac < 10 {
+        print_str(sink, "00000");
+    } else if frac < 100 {
+        print_str(sink, "0000");
+    } else if frac < 1_000 {
+        print_str(sink, "000");
+    } else if frac < 10_000 {
+        print_str(sink, "00");
+    } else if frac < 100_000 {
+        print_str(sink, "0");
+    }
+    print_num_inline(sink, frac);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  nodes_computed=");
+    print_num_inline(sink, nodes_computed);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

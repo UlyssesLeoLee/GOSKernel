@@ -3645,6 +3645,83 @@ impl GraphRuntime {
         (efficiency_ppm, pairs_max, node_count)
     }
 
+    /// V2.75: Graph average clustering coefficient (true Watts-Strogatz per-node average).
+    ///
+    /// Distinct from graph_clustering (V2.61) and graph_transitivity (V2.63), both of which
+    /// compute the same global ratio total_triangles/total_triplets (weighted by degree).
+    /// This function computes the unweighted per-node average:
+    ///   CC(v) = triangles_v / C(k_v, 2)   where k_v = undirected degree
+    ///   avg_CC = (1/n) × Σ CC(v)           nodes with k_v < 2 contribute 0
+    ///
+    /// Returns (avg_ppm, nodes_computed, node_count).
+    ///   avg_ppm       = avg_CC × 1_000_000  (0..=1_000_000)
+    ///   nodes_computed = nodes with k ≥ 2 that contributed a non-zero CC(v)
+    ///   node_count    = total alive nodes (denominator of average)
+    pub fn graph_avg_clustering_inner(&self) -> (u32, usize, usize) {
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+
+        let mut sum_cc_ppm: u64 = 0;
+        let mut nodes_computed = 0usize;
+
+        for slot in 0..MAX_NODES {
+            let record = match self.nodes[slot] {
+                Some(ref r) => r,
+                None => continue,
+            };
+            let vid = record.spec.node_id;
+
+            // Collect undirected neighbors (deduplicated, no self-loops).
+            let mut neighbors = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !neighbors[..nb].contains(&other) {
+                    neighbors[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+
+            if nb < 2 { continue; }
+
+            let k = nb as u64;
+            let triplets = k * (k - 1) / 2;
+
+            // Count undirected edges among neighbor pairs (one per unordered pair).
+            let mut triangles: u64 = 0;
+            for i in 0..nb {
+                for j in (i + 1)..nb {
+                    let b = neighbors[i];
+                    let c = neighbors[j];
+                    let connected = self.edges.iter().flatten().any(|e| {
+                        (e.spec.from_node == b && e.spec.to_node == c)
+                            || (e.spec.from_node == c && e.spec.to_node == b)
+                    });
+                    if connected {
+                        triangles += 1;
+                    }
+                }
+            }
+
+            sum_cc_ppm += (triangles * 1_000_000) / triplets;
+            nodes_computed += 1;
+        }
+
+        // Divide by ALL alive nodes (not just nodes_computed) for true WS average.
+        let avg_ppm = (sum_cc_ppm / n as u64).min(1_000_000) as u32;
+        (avg_ppm, nodes_computed, n)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7848,6 +7925,18 @@ pub fn graph_center<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, u
 ///   node_count     = live nodes.
 pub fn graph_global_efficiency() -> (u64, usize, usize) {
     RUNTIME.lock().graph_global_efficiency_inner()
+}
+
+/// V2.75: Graph average clustering coefficient (Watts-Strogatz per-node average).
+///
+/// Returns `(avg_ppm, nodes_computed, node_count)`:
+/// - `avg_ppm`       — avg_CC × 1_000_000
+/// - `nodes_computed` — nodes with undirected degree ≥ 2 that contributed to the sum
+/// - `node_count`    — total alive nodes (denominator of the average)
+///
+/// Differs from `graph_clustering` (V2.61) which computes the global transitivity ratio.
+pub fn graph_avg_clustering() -> (u32, usize, usize) {
+    RUNTIME.lock().graph_avg_clustering_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
