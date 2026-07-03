@@ -2789,6 +2789,73 @@ pub fn dispatch_graph_harmonic(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.72: `graph peripheral` / `gperiph` — nodes whose eccentricity equals the graph diameter.
+///
+/// Peripheral nodes are the "boundary" of the graph — they lie farthest from some other node.
+/// Returns peripheral_count, node_count, and diameter.
+pub fn dispatch_graph_peripheral(sink: &ConsoleSink) {
+    let (vecs, ecc, periph_count, node_count, diameter) =
+        gos_runtime::graph_peripheral::<128>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph peripheral nodes\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if diameter == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  all nodes isolated \u{2014} no peripheral nodes (diameter=0)\n");
+        print_str(sink, "  nodes=");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              ecc\n");
+    set_color(sink, 7, 0);
+
+    let mut i = 0usize;
+    while i < periph_count {
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+
+        set_color(sink, 12, 0); // red — peripheral (boundary)
+        print_str(sink, "  ");
+        print_str(sink, vec_str);
+
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        print_str(sink, " ");
+        print_num_right6(sink, ecc[i] as usize);
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+        i += 1;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  diameter=");
+    print_num_inline(sink, diameter as usize);
+    print_str(sink, "  peripheral=");
+    print_num_inline(sink, periph_count);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

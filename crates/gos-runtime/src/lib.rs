@@ -3262,6 +3262,152 @@ impl GraphRuntime {
         (out_vecs, out_hc, copy_len)
     }
 
+    /// V2.72: Graph peripheral nodes — nodes whose eccentricity equals the diameter.
+    ///
+    /// A peripheral node is one that lies farthest from some other node in the graph;
+    /// formally, ecc[v] = diameter.  The set of peripheral nodes is the "boundary" of
+    /// the graph — the structural opposite of the centre.
+    ///
+    /// Returns `(vecs, ecc, peripheral_count, node_count, diameter)`:
+    ///   vecs[0..peripheral_count]  — peripheral node vectors (sorted ascending by address)
+    ///   ecc[0..peripheral_count]   — eccentricity values (all equal to diameter)
+    ///   peripheral_count           — number of peripheral nodes (capped at N)
+    ///   node_count                 — total number of live nodes
+    ///   diameter                   — max eccentricity (0 if all isolated)
+    ///
+    /// Edge cases:
+    ///   • All-isolated graph → diameter=0, peripheral_count=0.
+    ///   • All nodes identical ecc → radius == diameter, every node is both centre and peripheral.
+    ///   • Disconnected graph: ecc uses reachable-only BFS; isolated component sinks have ecc=0,
+    ///     so they never qualify as peripheral unless diameter happens to be 0 (which requires
+    ///     all nodes to be isolated, handled above).
+    ///
+    /// Algorithm: one BFS per source node, O(V × (V+E)).
+    /// OS analogy: `traceroute` max-hop nodes — which kernel services lie at the extreme
+    /// boundary of the reachable graph?
+    pub fn graph_peripheral_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        let mut ecc = [0u32; MAX_NODES];
+
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+            let _ = s_id;
+
+            let mut dist  = [u32::MAX; MAX_NODES];
+            let mut queue = [0usize;   MAX_NODES];
+
+            dist[s]  = 0;
+            queue[0] = s;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            let mut max_d = 0u32;
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX && dist[t] > max_d {
+                    max_d = dist[t];
+                }
+            }
+            ecc[s] = max_d;
+        }
+
+        // Diameter = max eccentricity across all nodes.
+        let mut diameter: u32 = 0;
+        for si in 0..node_count {
+            let s = node_slots[si];
+            if ecc[s] > diameter { diameter = ecc[s]; }
+        }
+
+        // Collect peripheral nodes: ecc[v] == diameter (diameter must be > 0).
+        let mut periph_slots = [0usize; MAX_NODES];
+        let mut periph_count = 0usize;
+        for si in 0..node_count {
+            let s = node_slots[si];
+            if diameter > 0 && ecc[s] == diameter {
+                periph_slots[periph_count] = s;
+                periph_count += 1;
+            }
+        }
+
+        // Insertion-sort peripheral nodes ascending by VectorAddress (via as_u64()).
+        for i in 1..periph_count {
+            let key = periph_slots[i];
+            let key_addr = self.nodes[key]
+                .map(|r| r.vector.as_u64())
+                .unwrap_or(0);
+            let mut j = i;
+            while j > 0 {
+                let prev = periph_slots[j - 1];
+                let prev_addr = self.nodes[prev]
+                    .map(|r| r.vector.as_u64())
+                    .unwrap_or(0);
+                if prev_addr <= key_addr { break; }
+                periph_slots[j] = periph_slots[j - 1];
+                j -= 1;
+            }
+            periph_slots[j] = key;
+        }
+
+        // Pack output arrays (cap at N).
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_ecc  = [0u32; N];
+        let copy_len     = periph_count.min(N);
+        for i in 0..copy_len {
+            let slot    = periph_slots[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_ecc[i]  = ecc[slot];
+        }
+
+        (out_vecs, out_ecc, copy_len, node_count, diameter)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7423,6 +7569,23 @@ pub fn graph_closeness<const N: usize>() -> ([VectorAddress; N], [u32; N], usize
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_harmonic<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_harmonic_inner()
+}
+
+/// V2.72: Graph peripheral nodes — nodes with eccentricity equal to the diameter.
+///
+/// Returns `(vecs, ecc, peripheral_count, node_count, diameter)`:
+/// - `vecs[0..peripheral_count]`  — peripheral node vectors, sorted ascending by address.
+/// - `ecc[0..peripheral_count]`   — eccentricity per peripheral node (all == diameter).
+/// - `peripheral_count`           — number of peripheral nodes (capped at N).
+/// - `node_count`                 — total number of live nodes.
+/// - `diameter`                   — graph diameter (0 if all nodes isolated).
+///
+/// Peripheral nodes have the maximum eccentricity — they are the boundary of the graph.
+/// All-isolated graph → diameter=0, peripheral_count=0.
+/// If radius == diameter every node is simultaneously centre and peripheral.
+/// Algorithm: one BFS per source node, O(V × (V+E)).
+pub fn graph_peripheral<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
+    RUNTIME.lock().graph_peripheral_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
