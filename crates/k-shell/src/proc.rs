@@ -757,6 +757,18 @@ fn dispatch_text_command(
     } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
         super::dispatch_proc_list(sink);
     } else if let Some(vec_str) = cmd
+        .strip_prefix("node checkpoint ")
+        .or_else(|| cmd.strip_prefix("ncp "))
+        .or_else(|| cmd.strip_prefix("checkpoint "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_checkpoint(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node checkpoint requires a vector address (e.g. node checkpoint 6.1.0.0)\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
         .strip_prefix("node stat clear ")
         .or_else(|| cmd.strip_prefix("nstat clear "))
     {

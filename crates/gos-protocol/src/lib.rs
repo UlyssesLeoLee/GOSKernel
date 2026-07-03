@@ -1786,10 +1786,15 @@ pub struct ControlPlaneHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GraphDiffKind {
-    NodeAdded   = 0,
-    NodeRemoved = 1,
-    EdgeAdded   = 2,
-    EdgeRemoved = 3,
+    NodeAdded      = 0,
+    NodeRemoved    = 1,
+    EdgeAdded      = 2,
+    EdgeRemoved    = 3,
+    /// V2.51: observability checkpoint — node state captured into the diff ring
+    /// without modifying graph structure.  Epoch is unchanged; signal_count,
+    /// lifecycle, and edge_out_count are readable from the diff-ring label
+    /// via `node checkpoint <vec>` or by querying `graph diff`.
+    NodeCheckpoint = 4,
 }
 
 impl GraphDiffKind {
@@ -1797,7 +1802,7 @@ impl GraphDiffKind {
         matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::EdgeAdded)
     }
     pub const fn is_node(self) -> bool {
-        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::NodeRemoved)
+        matches!(self, GraphDiffKind::NodeAdded | GraphDiffKind::NodeRemoved | GraphDiffKind::NodeCheckpoint)
     }
 }
 

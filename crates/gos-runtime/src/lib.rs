@@ -1520,6 +1520,17 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// V2.51: Snapshot the current node state into the structural diff ring as a
+    /// `GraphDiffKind::NodeCheckpoint` entry.  Analogous to `perf record -e cycles`
+    /// mark — captures the node's vector, key, signal_count, lifecycle, and
+    /// edge_out_count into the diff ring without modifying graph structure.
+    /// Returns a `NodeProcSummary` of the captured state, or `NodeNotFound`.
+    pub fn node_checkpoint_inner(&mut self, vector: VectorAddress) -> Result<NodeProcSummary, RuntimeError> {
+        let summary = self.proc_stat_for_vector(vector).ok_or(RuntimeError::NodeNotFound)?;
+        self.push_diff(GraphDiffKind::NodeCheckpoint, vector, VectorAddress::new(0, 0, 0, 0), summary.local_node_key.as_bytes());
+        Ok(summary)
+    }
+
     /// V2.31: BFS shortest-path search from `from` to `to` across registered edges.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the ordered sequence of
@@ -5327,6 +5338,14 @@ pub fn clear_node_trace(vec: VectorAddress) -> Result<(), RuntimeError> {
 /// The trace ring and lifecycle log are not affected.
 pub fn reset_node_stat(vec: VectorAddress) -> Result<(), RuntimeError> {
     RUNTIME.lock().reset_node_stat_inner(vec)
+}
+
+/// V2.51: Snapshot the current node state into the structural diff ring.
+/// Pushes a `GraphDiffKind::NodeCheckpoint` entry capturing the node's key,
+/// signal_count, lifecycle, and edge_out_count.  Graph epoch is NOT bumped.
+/// Returns a `NodeProcSummary` of the captured state, or `NodeNotFound`.
+pub fn node_checkpoint(vec: VectorAddress) -> Result<NodeProcSummary, RuntimeError> {
+    RUNTIME.lock().node_checkpoint_inner(vec)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.

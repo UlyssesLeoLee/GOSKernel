@@ -1459,16 +1459,17 @@ pub fn dispatch_graph_diff(sink: &ConsoleSink, since_epoch: u64) {
     set_color(sink, 7, 0);
 
     for entry in entries.iter().take(filled) {
-        let (prefix, fg) = if entry.kind.is_addition() {
-            ("+", 10u8)
-        } else {
-            ("-", 12u8)
+        let (prefix, fg) = match entry.kind {
+            GraphDiffKind::NodeAdded  | GraphDiffKind::EdgeAdded  => ("+", 10u8),
+            GraphDiffKind::NodeRemoved | GraphDiffKind::EdgeRemoved => ("-", 12u8),
+            GraphDiffKind::NodeCheckpoint => ("·", 14u8),
         };
         let kind_label = match entry.kind {
-            GraphDiffKind::NodeAdded   => "node+",
-            GraphDiffKind::NodeRemoved => "node-",
-            GraphDiffKind::EdgeAdded   => "edge+",
-            GraphDiffKind::EdgeRemoved => "edge-",
+            GraphDiffKind::NodeAdded      => "node+ ",
+            GraphDiffKind::NodeRemoved    => "node- ",
+            GraphDiffKind::EdgeAdded      => "edge+ ",
+            GraphDiffKind::EdgeRemoved    => "edge- ",
+            GraphDiffKind::NodeCheckpoint => "ckpt  ",
         };
         set_color(sink, fg, 0);
         print_str(sink, " ");
@@ -2050,6 +2051,59 @@ pub fn dispatch_node_stat_clear(sink: &ConsoleSink, vec: VectorAddress) {
             print_str(sink, "\n");
             set_color(sink, 7, 0);
             print_str(sink, "  signal_count -> 0  (trace ring and log unaffected)\n");
+        }
+    }
+}
+
+/// V2.51: `node checkpoint <vec>` / `ncp <vec>` / `checkpoint <vec>` —
+/// snapshot current node state into the structural diff ring.
+///
+/// Analogous to `perf record --event=mark` or `gdb checkpoint`: records the
+/// node's vector address, key, signal_count, lifecycle, and edge_out_count as a
+/// `GraphDiffKind::NodeCheckpoint` entry in the diff ring.  Graph epoch is NOT
+/// bumped — only the diff ring is touched.  The captured state is displayed
+/// immediately; `graph diff` will show it tagged as `[ckpt]`.
+pub fn dispatch_node_checkpoint(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::node_checkpoint(vec) {
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(s) => {
+            let fg: u8 = match s.lifecycle {
+                gos_protocol::NodeLifecycle::Running   => 10,
+                gos_protocol::NodeLifecycle::Faulted   => 12,
+                gos_protocol::NodeLifecycle::Suspended => 14,
+                _                                      => 7,
+            };
+            set_color(sink, 11, 0);
+            print_str(sink, " node checkpoint  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "  key:          ");
+            print_str(sink, s.local_node_key);
+            print_str(sink, "\n  lifecycle:     ");
+            set_color(sink, fg, 0);
+            print_str(sink, node_lifecycle_label(s.lifecycle));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  signal_count:  ");
+            set_color(sink, 11, 0);
+            print_num_inline(sink, s.signal_count as usize);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n  edge_out:      ");
+            print_num_inline(sink, s.edge_out_count as usize);
+            set_color(sink, 8, 0);
+            print_str(sink, "\n  → recorded in diff ring as [ckpt]  (graph diff to view)\n");
+            set_color(sink, 7, 0);
         }
     }
 }
