@@ -1230,6 +1230,88 @@ impl GraphRuntime {
         (out_vecs, out_core, nc, max_coreness)
     }
 
+    /// V2.65: Degree assortativity coefficient (Newman 2002).
+    ///
+    /// Measures the tendency of nodes to connect to other nodes of similar degree.
+    /// Uses each stored directed edge (u→v) once; degree = undirected neighbor count
+    /// (same definition as used by graph_clustering and graph_transitivity).
+    ///
+    /// Formula (integer arithmetic, no float):
+    ///   M  = directed edge count
+    ///   For each edge (u,v): j = undirected_deg(u), k = undirected_deg(v)
+    ///     S1 += j*k
+    ///     T  += j+k
+    ///     Q  += j²+k²
+    ///   Numerator   = 4·M·S1 − T²
+    ///   Denominator = 2·M·Q  − T²
+    ///   r_ppm = Numerator·1_000_000 / Denominator   (clamped to [−1e6, +1e6])
+    ///
+    /// Returns (assortativity_ppm, edge_count, node_count).
+    ///   +1_000_000 → perfectly assortative (hubs link to hubs)
+    ///   −1_000_000 → perfectly disassortative (hubs link to leaves)
+    ///        0     → uncorrelated or undefined (no edges / all same degree)
+    pub fn graph_assortativity_inner(&self) -> (i32, usize, usize) {
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        let m = self.edges.iter().filter(|s| s.is_some()).count();
+        if m == 0 {
+            return (0, 0, n);
+        }
+
+        // Pre-compute undirected degree for each node slot.
+        let mut deg = [0u32; MAX_NODES];
+        for slot in 0..MAX_NODES {
+            let record = match self.nodes[slot] {
+                Some(ref r) => r,
+                None => continue,
+            };
+            let vid = record.spec.node_id;
+            let mut seen = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !seen[..nb].contains(&other) {
+                    seen[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+            deg[slot] = nb as u32;
+        }
+
+        // Compute Newman sums over stored directed edges.
+        let mut s1: i64 = 0;
+        let mut t:  i64 = 0;
+        let mut q:  i64 = 0;
+        for edge in self.edges.iter().flatten() {
+            let u = edge.spec.from_node;
+            let v = edge.spec.to_node;
+            if u == v { continue; }
+            let j = match self.node_slot_by_id(u) { Some(s) => deg[s] as i64, None => continue };
+            let k = match self.node_slot_by_id(v) { Some(s) => deg[s] as i64, None => continue };
+            s1 += j * k;
+            t  += j + k;
+            q  += j * j + k * k;
+        }
+
+        let m_i = m as i64;
+        let numer = 4 * m_i * s1 - t * t;
+        let denom = 2 * m_i * q  - t * t;
+        if denom == 0 {
+            return (0, m, n);
+        }
+        let r_ppm = ((numer * 1_000_000) / denom)
+            .max(-1_000_000)
+            .min(1_000_000) as i32;
+        (r_ppm, m, n)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6263,6 +6345,13 @@ pub fn graph_transitivity() -> (u32, u64, u64, usize) {
 /// Returns (vecs, coreness, n, max_coreness) sorted by coreness descending.
 pub fn graph_kcore<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
     RUNTIME.lock().graph_kcore_inner::<N>()
+}
+
+/// V2.65: Degree assortativity coefficient (Newman 2002).
+/// Returns (assortativity_ppm, edge_count, node_count).
+/// +1_000_000 = assortative; −1_000_000 = disassortative; 0 = uncorrelated/undefined.
+pub fn graph_assortativity() -> (i32, usize, usize) {
+    RUNTIME.lock().graph_assortativity_inner()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.

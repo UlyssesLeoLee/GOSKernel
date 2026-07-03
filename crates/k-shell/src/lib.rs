@@ -2411,6 +2411,67 @@ pub fn dispatch_graph_kcore(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.65: `graph assortativity` — degree assortativity coefficient (Newman 2002).
+///
+/// Measures whether high-degree nodes preferentially connect to other high-degree
+/// nodes (assortative, r > 0) or to low-degree nodes (disassortative, r < 0).
+/// Degree = undirected neighbour count per node; edges counted once each.
+///
+/// Displays the coefficient as a percentage and ppm value, plus raw edge/node counts.
+pub fn dispatch_graph_assortativity(sink: &ConsoleSink) {
+    let (r_ppm, edges, nodes) = gos_runtime::graph_assortativity();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph assortativity\n");
+    set_color(sink, 7, 0);
+
+    if edges == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  assortativity: undefined (no edges)\n");
+        set_color(sink, 7, 0);
+    } else if r_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  assortativity: 0.00%  (0 ppm)  — uncorrelated\n");
+        set_color(sink, 7, 0);
+    } else {
+        let abs_ppm  = if r_ppm < 0 { -(r_ppm as i64) } else { r_ppm as i64 } as usize;
+        let pct_int  = abs_ppm / 10_000;
+        let pct_frac = (abs_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  assortativity: ");
+        if r_ppm < 0 { print_str(sink, "-"); }
+        print_num_inline(sink, pct_int);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        if r_ppm < 0 { print_str(sink, "-"); }
+        print_num_inline(sink, abs_ppm);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        if r_ppm > 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  assortative");
+            set_color(sink, 7, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "  disassortative");
+            set_color(sink, 7, 0);
+        }
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, nodes);
+    print_str(sink, "  edges=");
+    print_num_inline(sink, edges);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
