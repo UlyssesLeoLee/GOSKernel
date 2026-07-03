@@ -2634,6 +2634,49 @@ pub fn dispatch_graph_rich_club(sink: &ConsoleSink, k: u8) {
     set_color(sink, 7, 0);
 }
 
+/// V2.69: `graph girth` — shortest directed cycle length.
+///
+/// Displays the girth of the live directed graph (length of its shortest
+/// directed cycle).  Self-loops → girth = 1; mutual pairs A↔B → girth = 2;
+/// directed k-cycle → girth = k.  Acyclic (DAG) → "acyclic".
+pub fn dispatch_graph_girth(sink: &ConsoleSink) {
+    let (girth, is_acyclic, node_count) = gos_runtime::graph_girth();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph girth\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  girth: undefined (empty graph)\n");
+        set_color(sink, 7, 0);
+    } else if is_acyclic {
+        set_color(sink, 10, 0);
+        print_str(sink, "  girth: acyclic (no directed cycle)\n");
+        set_color(sink, 7, 0);
+    } else {
+        set_color(sink, 10, 0);
+        print_str(sink, "  girth: ");
+        print_num_inline(sink, girth as usize);
+        set_color(sink, 8, 0);
+        if girth == 1 {
+            print_str(sink, "  (self-loop)");
+        } else if girth == 2 {
+            print_str(sink, "  (mutual pair)");
+        } else {
+            print_str(sink, "  (shortest directed cycle)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

@@ -1611,6 +1611,97 @@ impl GraphRuntime {
         (rho_ppm, n_rich, e_rich)
     }
 
+    /// V2.69: Graph girth — length of the shortest directed cycle.
+    ///
+    /// Runs BFS from every live node as source; detects the shortest directed
+    /// cycle by watching for out-edges that return to the source node.
+    ///
+    ///   girth = 1       → self-loop (node with an edge to itself)
+    ///   girth = 2       → mutual pair A↔B (two opposing directed edges)
+    ///   girth = k       → shortest directed cycle traverses k edges
+    ///   girth = u32::MAX → no directed cycle (acyclic / DAG)
+    ///
+    /// Returns `(girth, is_acyclic, node_count)`.
+    ///   is_acyclic = girth == u32::MAX.
+    /// Directed edges only; self-loops are counted.
+    /// O(V × (V + E)) overall — acceptable for V ≤ 128, E ≤ 512.
+    pub fn graph_girth_inner(&self) -> (u32, bool, usize) {
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        let mut min_girth: u32 = u32::MAX;
+
+        for si in 0..node_count {
+            if min_girth == 1 { break; } // girth cannot be shorter than 1
+
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+
+            // BFS distance table; u32::MAX = unvisited.
+            let mut dist = [u32::MAX; MAX_NODES];
+            dist[s] = 0;
+
+            let mut queue = [0usize; MAX_NODES];
+            let mut q_head = 0usize;
+            let mut q_tail = 0usize;
+            queue[q_tail] = s;
+            q_tail += 1;
+
+            while q_head < q_tail {
+                let cur = queue[q_head];
+                q_head += 1;
+                let cur_dist = dist[cur];
+
+                // Prune: a cycle found from this frontier can't be shorter.
+                if cur_dist + 1 >= min_girth { continue; }
+
+                let cur_id = match self.nodes[cur] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.from_node != cur_id { continue; }
+
+                    let nbr_id = edge.spec.to_node;
+
+                    // Back-edge to source → directed cycle found.
+                    if nbr_id == s_id {
+                        let cycle = cur_dist + 1;
+                        if cycle < min_girth { min_girth = cycle; }
+                        continue;
+                    }
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+
+                    if dist[nbr_slot] == u32::MAX && cur_dist + 1 < min_girth {
+                        dist[nbr_slot] = cur_dist + 1;
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = nbr_slot;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_acyclic = min_girth == u32::MAX;
+        (min_girth, is_acyclic, node_count)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6685,6 +6776,16 @@ pub fn graph_modularity() -> (i32, usize, usize, usize) {
 pub fn graph_rich_club(k: u8) -> (u32, usize, usize) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_rich_club_inner(&snap, k)
+}
+
+/// V2.69: Girth of the directed graph — length of the shortest directed cycle.
+///
+/// Returns (girth, is_acyclic, node_count).
+///   girth = u32::MAX → acyclic directed graph (DAG); is_acyclic = true.
+///   girth = 1        → self-loop present.
+///   girth = k        → shortest directed k-cycle.
+pub fn graph_girth() -> (u32, bool, usize) {
+    RUNTIME.lock().graph_girth_inner()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.
