@@ -3622,6 +3622,209 @@ impl GraphRuntime {
         (out_vecs, out_bc, copy_len)
     }
 
+    /// V2.54: Attractor set detection over the **directed** kernel graph.
+    ///
+    /// An **attractor** (bottom SCC / sink SCC) is a strongly-connected component
+    /// from which no directed edge leaves to any node outside that component.
+    /// Once control/signal flow enters an attractor it can never escape.
+    ///
+    /// Every finite directed graph has at least one attractor SCC.
+    /// Isolated nodes and self-loop-only nodes are trivial attractor SCCs.
+    ///
+    /// Node roles (stored in `roles[i]`, returned u8):
+    ///   0 = **attractor** — member of a bottom SCC; no condensation out-edges.
+    ///   1 = **drain**     — not in a bottom SCC but has a direct condensation
+    ///                        edge to at least one attractor SCC.
+    ///   2 = **transient** — has outgoing condensation edges, but none lead
+    ///                        directly to an attractor SCC (must traverse one or
+    ///                        more drain SCCs to reach stability).
+    ///
+    /// Output is packed in role order (0 then 1 then 2); within each tier
+    /// nodes appear in stable slot order.
+    ///
+    /// Returns `(vecs, roles, total, attractor_count)`:
+    /// - `vecs[0..total]`  — all live node vectors in role-sorted order.
+    /// - `roles[0..total]` — role (0/1/2) for each node.
+    /// - `total`           — number of live nodes.
+    /// - `attractor_count` — number of nodes with role=0 (in bottom SCCs).
+    ///
+    /// Algorithm: Kosaraju two-pass DFS for SCC (O(V+E)), then two edge-scan
+    /// passes to classify SCCs in the condensation DAG.  O(V+E) total.
+    pub fn graph_attractor_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, usize) {
+        const UNSET: u16 = u16::MAX;
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return ([ZERO_VEC; N], [0u8; N], 0, 0);
+        }
+
+        // ── Phase 1: forward DFS → finish-order stack ─────────────────────────
+        let mut visited:      [bool;          MAX_NODES] = [false; MAX_NODES];
+        let mut finish_stack: [usize;         MAX_NODES] = [0;     MAX_NODES];
+        let mut finish_len = 0usize;
+        let mut dfs_stack:  [(usize, usize);  MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if visited[start_slot] { continue; }
+            visited[start_slot] = true;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+
+            while stack_top > 0 {
+                let fi = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { stack_top -= 1; continue; }
+                };
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.from_node != cur_id { ei += 1; continue; }
+                    dfs_stack[fi].1 = ei + 1;
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // self-loop
+                    if !visited[nbr_slot] {
+                        visited[nbr_slot] = true;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+                if !pushed {
+                    if finish_len < MAX_NODES { finish_stack[finish_len] = cur_slot; finish_len += 1; }
+                    stack_top -= 1;
+                }
+            }
+        }
+
+        // ── Phase 2: transposed DFS in reverse finish order → SCC IDs ─────────
+        let mut scc_id: [u16; MAX_NODES] = [UNSET; MAX_NODES];
+        let mut scc_count = 0usize;
+
+        for fi in (0..finish_len).rev() {
+            let start_slot = finish_stack[fi];
+            if scc_id[start_slot] != UNSET { continue; }
+            let comp = scc_count as u16;
+            scc_id[start_slot] = comp;
+            dfs_stack[0] = (start_slot, 0);
+            let mut stack_top = 1usize;
+
+            while stack_top > 0 {
+                let frame = stack_top - 1;
+                let (cur_slot, scan_start) = dfs_stack[frame];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { stack_top -= 1; continue; }
+                };
+                let mut pushed = false;
+                let mut ei = scan_start;
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.to_node != cur_id { ei += 1; continue; } // transposed
+                    dfs_stack[frame].1 = ei + 1;
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(s) => s, None => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; }
+                    if scc_id[nbr_slot] == UNSET {
+                        scc_id[nbr_slot] = comp;
+                        dfs_stack[stack_top] = (nbr_slot, 0);
+                        stack_top += 1;
+                        pushed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+                if !pushed { stack_top -= 1; }
+            }
+            scc_count += 1;
+        }
+
+        // ── Phase 3a: scan condensation — find SCCs with outgoing edges ────────
+        // scc_has_out[c] = true iff SCC c has a condensation edge to another SCC.
+        let mut scc_has_out    = [false; MAX_NODES];
+        // scc_adj_attract[c] = true iff SCC c has a direct condensation edge
+        // to an attractor SCC (role=1 means drain).
+        let mut scc_adj_attract = [false; MAX_NODES];
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let from_slot = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let to_slot   = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            if from_slot == to_slot { continue; } // self-loop: no condensation edge
+            let sf = scc_id[from_slot];
+            let st = scc_id[to_slot];
+            if sf == UNSET || st == UNSET || sf == st { continue; }
+            scc_has_out[sf as usize] = true;
+        }
+
+        // ── Phase 3b: scan condensation — find drains ─────────────────────────
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let from_slot = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let to_slot   = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            if from_slot == to_slot { continue; }
+            let sf = scc_id[from_slot];
+            let st = scc_id[to_slot];
+            if sf == UNSET || st == UNSET || sf == st { continue; }
+            // If the destination SCC is an attractor (no outgoing condensation edges)
+            // then the source SCC is a direct drain.
+            if !scc_has_out[st as usize] {
+                scc_adj_attract[sf as usize] = true;
+            }
+        }
+
+        // ── Phase 4: pack output in role order (0 → 1 → 2) ───────────────────
+        let mut out_vecs  = [ZERO_VEC; N];
+        let mut out_roles = [0u8; N];
+        let mut out_len   = 0usize;
+        let mut attractor_count = 0usize;
+
+        for role in 0u8..3 {
+            for ki in 0..node_count {
+                let slot = node_slots[ki];
+                let sc = scc_id[slot];
+                if sc == UNSET { continue; }
+                let sci = sc as usize;
+                let node_role: u8 = if !scc_has_out[sci] {
+                    0 // attractor
+                } else if scc_adj_attract[sci] {
+                    1 // drain
+                } else {
+                    2 // transient
+                };
+                if node_role != role { continue; }
+                if out_len < N {
+                    out_vecs[out_len]  = self.nodes[slot]
+                        .map(|r| r.vector)
+                        .unwrap_or(ZERO_VEC);
+                    out_roles[out_len] = node_role;
+                    out_len += 1;
+                    if node_role == 0 { attractor_count += 1; }
+                }
+            }
+        }
+
+        (out_vecs, out_roles, out_len, attractor_count)
+    }
+
     /// V2.49: Dijkstra single-source shortest-path tree over the **directed**
     /// kernel graph from a given source node.
     ///
@@ -6294,6 +6497,25 @@ pub fn graph_sim<const N: usize>(
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_between<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_between_inner()
+}
+
+/// V2.54: Attractor-set classification of the live kernel graph.
+///
+/// Returns `(vecs, roles, total, attractor_count)`:
+/// - `vecs[0..total]`  — live node vectors, sorted role-ascending (0 then 1 then 2).
+/// - `roles[0..total]` — 0=attractor, 1=drain, 2=transient.
+/// - `total`           — number of live nodes.
+/// - `attractor_count` — count of nodes in bottom SCCs (role=0).
+///
+/// Role definitions (condensation DAG perspective):
+///   0 attractor — bottom SCC: no condensation out-edges; signal/flow cannot escape.
+///   1 drain     — SCC has a direct condensation edge to an attractor SCC.
+///   2 transient — SCC has out-edges but none lead directly to an attractor SCC.
+///
+/// O(V+E) — Kosaraju SCC + two edge-scan passes.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_attractor<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
+    RUNTIME.lock().graph_attractor_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

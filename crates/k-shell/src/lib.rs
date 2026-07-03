@@ -4802,6 +4802,107 @@ pub fn dispatch_graph_sim(sink: &ConsoleSink, steps: u32) {
     print_str(sink, "\n");
 }
 
+/// V2.54: `graph attractor` — classify every live node into attractor / drain / transient.
+///
+/// An **attractor** (bottom SCC) is a strongly-connected component with no
+/// outgoing edges to the rest of the graph.  Signal or execution flow that
+/// enters an attractor can never leave it.
+///
+/// Node roles:
+///   attractor  — role 0; member of a bottom SCC; no condensation out-edges.
+///   drain      — role 1; not in a bottom SCC but has a direct condensation
+///                edge to at least one attractor SCC (one step from stability).
+///   transient  — role 2; SCC has out-edges, but none lead directly to an
+///                attractor SCC (two or more hops from stability).
+///
+/// Output is sorted: attractors first, drains second, transients last.
+///
+/// OS analogy: `systemctl list-units --state=running` service stability audit —
+/// attractor nodes are always-running service loops, drain nodes are one-hop
+/// from a stable loop, transient nodes are far from any stable loop.
+pub fn dispatch_graph_attractor(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, roles, total, attractor_count) = gos_runtime::graph_attractor::<MAX_N>();
+
+    set_color(sink, 10, 0); // bright green — stable attractors
+    print_str(sink, " graph attractor\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              role\n");
+    set_color(sink, 7, 0);
+
+    let mut drain_count = 0usize;
+    let mut transient_count = 0usize;
+
+    for i in 0..total {
+        let role = roles[i];
+
+        let fg: u8 = match role {
+            0 => 10, // bright green — attractor
+            1 => 14, // bright yellow — drain
+            _ => 8,  // dark grey — transient
+        };
+        set_color(sink, fg, 0);
+        print_str(sink, "  ");
+
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vecs[i]);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+
+        // Pad to fixed column width (20 chars for vector).
+        let vlen = vs.len();
+        let pad = if vlen < 20 { 20 - vlen } else { 0 };
+        for _ in 0..pad {
+            print_str(sink, " ");
+        }
+
+        match role {
+            0 => { set_color(sink, 10, 0); print_str(sink, "attractor"); }
+            1 => { set_color(sink, 14, 0); print_str(sink, "drain");     drain_count += 1; }
+            _ => { set_color(sink, 8,  0); print_str(sink, "transient"); transient_count += 1; }
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)  ");
+    set_color(sink, 10, 0);
+    print_num_inline(sink, attractor_count);
+    print_str(sink, " attractor");
+    set_color(sink, 7, 0);
+    if drain_count > 0 {
+        print_str(sink, "  ");
+        set_color(sink, 14, 0);
+        print_num_inline(sink, drain_count);
+        print_str(sink, " drain");
+        set_color(sink, 7, 0);
+    }
+    if transient_count > 0 {
+        print_str(sink, "  ");
+        set_color(sink, 8, 0);
+        print_num_inline(sink, transient_count);
+        print_str(sink, " transient");
+        set_color(sink, 7, 0);
+    }
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

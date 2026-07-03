@@ -999,6 +999,10 @@ fn dispatch_text_command(
         || cmd == "graph wbc" || cmd == "wbc" || cmd == "weighted betweenness"
     {
         super::dispatch_graph_between(sink);
+    } else if cmd == "graph attractor" || cmd == "attractor" || cmd == "gattractor"
+        || cmd == "graph attract" || cmd == "attract"
+    {
+        super::dispatch_graph_attractor(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))
