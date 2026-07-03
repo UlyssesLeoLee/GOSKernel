@@ -3408,6 +3408,154 @@ impl GraphRuntime {
         (out_vecs, out_ecc, copy_len, node_count, diameter)
     }
 
+    /// V2.73: Graph center nodes — nodes whose eccentricity equals the graph radius.
+    ///
+    /// The centre of a graph is the set of nodes with minimum eccentricity.
+    /// Formally, v is a centre node iff ecc[v] == radius,
+    /// where radius = min_{u: ecc[u] > 0} ecc[u].
+    ///
+    /// This is the structural complement of peripheral nodes (ecc == diameter).
+    /// Centre nodes lie closest (in worst-case terms) to all reachable peers —
+    /// the OS analogy is `sched_setaffinity` NUMA-optimal nodes, or the kernel
+    /// service with the tightest worst-case latency bound to all reachable nodes.
+    ///
+    /// Returns `(vecs, ecc, center_count, node_count, radius)`:
+    ///   vecs[0..center_count]  — centre node vectors (sorted ascending by address)
+    ///   ecc[0..center_count]   — eccentricity values (all equal to radius)
+    ///   center_count           — number of centre nodes (capped at N)
+    ///   node_count             — total number of live nodes
+    ///   radius                 — min nonzero eccentricity (0 if all isolated)
+    ///
+    /// Edge cases:
+    ///   • All-isolated graph → radius=0, center_count=0.
+    ///   • radius == diameter → every node is simultaneously centre and peripheral.
+    ///   • Sinks (ecc=0) never qualify as centre (ecc=0 < any positive radius).
+    ///
+    /// Algorithm: one BFS per source node, O(V × (V+E)).
+    pub fn graph_center_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        let mut ecc = [0u32; MAX_NODES];
+
+        for si in 0..node_count {
+            let s = node_slots[si];
+            let s_id = match self.nodes[s] {
+                Some(r) => r.spec.node_id,
+                None    => continue,
+            };
+            let _ = s_id;
+
+            let mut dist  = [u32::MAX; MAX_NODES];
+            let mut queue = [0usize;   MAX_NODES];
+
+            dist[s]  = 0;
+            queue[0] = s;
+            let mut q_head = 0usize;
+            let mut q_tail = 1usize;
+
+            while q_head < q_tail {
+                let v = queue[q_head];
+                q_head += 1;
+
+                let v_id = match self.nodes[v] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != v_id { continue; }
+
+                    let w = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(slot) => slot,
+                        None       => continue,
+                    };
+                    if dist[w] == u32::MAX {
+                        dist[w] = dist[v].saturating_add(1);
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = w;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            let mut max_d = 0u32;
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX && dist[t] > max_d {
+                    max_d = dist[t];
+                }
+            }
+            ecc[s] = max_d;
+        }
+
+        // Radius = min nonzero eccentricity (u32::MAX sentinel → 0 if all isolated).
+        let mut radius: u32 = u32::MAX;
+        for si in 0..node_count {
+            let s = node_slots[si];
+            if ecc[s] > 0 && ecc[s] < radius { radius = ecc[s]; }
+        }
+        if radius == u32::MAX { radius = 0; }
+
+        // Collect centre nodes: ecc[v] == radius (radius must be > 0).
+        let mut center_slots = [0usize; MAX_NODES];
+        let mut center_count = 0usize;
+        for si in 0..node_count {
+            let s = node_slots[si];
+            if radius > 0 && ecc[s] == radius {
+                center_slots[center_count] = s;
+                center_count += 1;
+            }
+        }
+
+        // Insertion-sort centre nodes ascending by VectorAddress (via as_u64()).
+        for i in 1..center_count {
+            let key = center_slots[i];
+            let key_addr = self.nodes[key]
+                .map(|r| r.vector.as_u64())
+                .unwrap_or(0);
+            let mut j = i;
+            while j > 0 {
+                let prev = center_slots[j - 1];
+                let prev_addr = self.nodes[prev]
+                    .map(|r| r.vector.as_u64())
+                    .unwrap_or(0);
+                if prev_addr <= key_addr { break; }
+                center_slots[j] = center_slots[j - 1];
+                j -= 1;
+            }
+            center_slots[j] = key;
+        }
+
+        // Pack output arrays (cap at N).
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_ecc  = [0u32; N];
+        let copy_len     = center_count.min(N);
+        for i in 0..copy_len {
+            let slot    = center_slots[i];
+            out_vecs[i] = self.nodes[slot]
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_ecc[i]  = ecc[slot];
+        }
+
+        (out_vecs, out_ecc, copy_len, node_count, radius)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -7586,6 +7734,19 @@ pub fn graph_harmonic<const N: usize>() -> ([VectorAddress; N], [u32; N], usize)
 /// Algorithm: one BFS per source node, O(V × (V+E)).
 pub fn graph_peripheral<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
     RUNTIME.lock().graph_peripheral_inner()
+}
+
+/// V2.73: Graph center nodes — nodes whose eccentricity equals the graph radius.
+///
+/// Returns `(vecs, ecc, center_count, node_count, radius)`.
+///   vecs[0..center_count]  — centre node vectors, sorted ascending by VectorAddress.
+///   ecc[0..center_count]   — eccentricity (all equal to radius).
+///   center_count           — number of centre nodes (capped at N).
+///   node_count             — total live nodes.
+///   radius                 — min nonzero eccentricity; 0 if all nodes are isolated.
+/// Algorithm: one BFS per source node, O(V × (V+E)).
+pub fn graph_center<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, usize, u32) {
+    RUNTIME.lock().graph_center_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.

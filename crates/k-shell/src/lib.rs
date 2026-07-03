@@ -2856,6 +2856,73 @@ pub fn dispatch_graph_peripheral(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.73: `graph center` / `gcenter` — nodes whose eccentricity equals the graph radius.
+///
+/// Centre nodes have the minimum worst-case distance to any reachable peer —
+/// the structural complement of peripheral nodes (ecc == diameter).
+pub fn dispatch_graph_center(sink: &ConsoleSink) {
+    let (vecs, ecc, center_count, node_count, radius) =
+        gos_runtime::graph_center::<128>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph center nodes\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if radius == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  all nodes isolated \u{2014} no center nodes (radius=0)\n");
+        print_str(sink, "  nodes=");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              ecc\n");
+    set_color(sink, 7, 0);
+
+    let mut i = 0usize;
+    while i < center_count {
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+
+        set_color(sink, 10, 0); // green — centre (lowest ecc)
+        print_str(sink, "  ");
+        print_str(sink, vec_str);
+
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        print_str(sink, " ");
+        print_num_right6(sink, ecc[i] as usize);
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+        i += 1;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  radius=");
+    print_num_inline(sink, radius as usize);
+    print_str(sink, "  center=");
+    print_num_inline(sink, center_count);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

@@ -614,6 +614,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gharm              alias for graph harmonic\n");
         super::print_str(sink, "  graph peripheral   nodes with ecc == diameter (boundary of the graph)\n");
         super::print_str(sink, "  gperiph            alias for graph peripheral\n");
+        super::print_str(sink, "  graph center       nodes with ecc == radius (centre of the graph)\n");
+        super::print_str(sink, "  gcenter            alias for graph center\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1088,6 +1090,8 @@ fn dispatch_text_command(
         super::dispatch_graph_harmonic(sink);
     } else if cmd == "graph peripheral" || cmd == "gperiph" {
         super::dispatch_graph_peripheral(sink);
+    } else if cmd == "graph center" || cmd == "gcenter" {
+        super::dispatch_graph_center(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))
