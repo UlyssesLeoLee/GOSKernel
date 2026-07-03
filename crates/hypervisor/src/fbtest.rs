@@ -169,6 +169,9 @@ struct Desktop {
     cmd_result_open: bool,
     // Node palette index (0=RED 1=WHITE 2=CYAN 3=GOLD) — persists for the session.
     node_color: [u8; MAXN],
+    // V2.57: live palette colors read from graph node attrs at init (indices match
+    // PAL_U32; entries [0]/[1] sourced from theme.wabi/shoji node_attr_get).
+    pal_u32: [u32; 4],
     // Cached screen-space coords of each node (updated every 3-D frame) for pick.
     snap_nx: [f32; MAXN],
     snap_ny: [f32; MAXN],
@@ -224,6 +227,7 @@ static DESK: SyncUnsafe<Desktop> = SyncUnsafe::new(Desktop {
     cmd_result_vis: false,
     cmd_result_open: false,
     node_color: [0u8; MAXN],
+    pal_u32: PAL_U32,
     snap_nx: [0.0f32; MAXN],
     snap_ny: [0.0f32; MAXN],
     snap_nr: [0.0f32; MAXN],
@@ -873,6 +877,14 @@ pub fn init() {
         }
     }
     crate::raw_serial_println(format_args!("desktop: graph n={} edges={} lfb={}", d.n, d.ne, d.lfb != 0));
+    // V2.57: populate pal_u32[0..1] from graph node attrs (set at boot by shell_on_init).
+    // Falls back silently to PAL_U32 constants if the attrs are absent.
+    if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::THEME_WABI_NODE_VEC)) {
+        d.pal_u32[0] = c;
+    }
+    if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::THEME_SHOJI_NODE_VEC)) {
+        d.pal_u32[1] = c;
+    }
     layout_force(d.n, &d.edges[..d.ne], &mut d.px, &mut d.py, &mut d.pz);
     // Mask IRQ14 (ATA primary) in the slave PIC before ATA ops.
     // Without this, a second IDE drive causes QEMU to fire IRQ14 during
@@ -1293,7 +1305,7 @@ fn draw_popup(fb: &mut [u32], d: &Desktop) {
         let mut ci = 0usize;
         while ci < 4 {
             let bx = px + 56 + ci as i32 * 36;
-            fill_rect(fb, bx, sy, 28, 16, PAL_U32[ci]);
+            fill_rect(fb, bx, sy, 28, 16, d.pal_u32[ci]);
             if ci == col {
                 fill_rect(fb, bx - 1, sy - 1, 30, 1, 0x00ff_ffff);
                 fill_rect(fb, bx - 1, sy + 16, 30, 1, 0x00ff_ffff);
@@ -1689,8 +1701,8 @@ pub fn render_frame() {
             let mx = (nx[a] + nx[b]) * 0.5;
             let my = (nyv[a] + nyv[b]) * 0.5;
             let md = (nd[a] + nd[b]) * 0.5;
-            let ca = PAL_U32[PAL_CONTRAST[d.node_color[a] as usize]];
-            let cb = PAL_U32[PAL_CONTRAST[d.node_color[b] as usize]];
+            let ca = d.pal_u32[PAL_CONTRAST[d.node_color[a] as usize]];
+            let cb = d.pal_u32[PAL_CONTRAST[d.node_color[b] as usize]];
             draw_seg(fb, zb, nx[a], nyv[a], nd[a], mx, my, md, ca);
             draw_seg(fb, zb, mx, my, md, nx[b], nyv[b], nd[b], cb);
         }
