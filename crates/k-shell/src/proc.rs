@@ -554,6 +554,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  nlog <vector>             alias for node log\n");
         super::print_str(sink, "  node log clear <vector>   clear lifecycle log for one node (like journalctl --vacuum-time)\n");
         super::print_str(sink, "  nlog clear <vector>       alias for node log clear\n");
+        super::print_str(sink, "  node attr set <vector> <hex>  store u32 attribute on node (palette, flag, counter)\n");
+        super::print_str(sink, "  node attr get <vector>        read u32 attribute from node (or 'none' if absent)\n");
+        super::print_str(sink, "  nattr set / nattr get  aliases for node attr set / get\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
@@ -756,6 +759,38 @@ fn dispatch_text_command(
         super::dispatch_journal_info(sink);
     } else if cmd == "proc" || cmd == "ps" || cmd == "proc all" {
         super::dispatch_proc_list(sink);
+    } else if let Some(rest) = cmd
+        .strip_prefix("node attr set ")
+        .or_else(|| cmd.strip_prefix("nattr set "))
+    {
+        let parts: (&str, &str) = rest.trim().split_once(' ')
+            .map(|(a, b)| (a, b))
+            .unwrap_or((rest.trim(), ""));
+        let vec_str = parts.0;
+        let hex_str = parts.1.trim().trim_start_matches("0x").trim_start_matches("0X");
+        if let (Some(vec), Ok(val)) = (
+            gos_protocol::VectorAddress::parse(vec_str),
+            u32::from_str_radix(hex_str, 16),
+        ) {
+            super::dispatch_node_attr_set(sink, vec, val);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " usage: node attr set <vec> <hex>  e.g. node attr set 6.1.1.0 00db1c21\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("node attr get ")
+        .or_else(|| cmd.strip_prefix("nattr get "))
+        .or_else(|| cmd.strip_prefix("node attr "))
+        .or_else(|| cmd.strip_prefix("nattr "))
+    {
+        if let Some(vec) = gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            super::dispatch_node_attr_get(sink, vec);
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " node attr get requires a vector address (e.g. node attr get 6.1.1.0)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(vec_str) = cmd
         .strip_prefix("node checkpoint ")
         .or_else(|| cmd.strip_prefix("ncp "))

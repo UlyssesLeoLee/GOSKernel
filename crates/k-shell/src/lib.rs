@@ -2108,6 +2108,75 @@ pub fn dispatch_node_checkpoint(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// V2.55: `node attr set <vec> <hex>` / `nattr set <vec> <hex>` — store a u32 attribute on a node.
+///
+/// Stores an arbitrary u32 scalar (palette color, flag, counter) keyed by the node's
+/// NodeId.  Analogous to `xattr -w` on macOS or `setfattr` on Linux: attaches metadata
+/// to a graph node without touching the node's structural state or epoch.
+pub fn dispatch_node_attr_set(sink: &ConsoleSink, vec: VectorAddress, val: u32) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::node_attr_set(vec, val) {
+        Err(gos_runtime::RuntimeError::NodeNotFound) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node not found: ");
+            print_str(sink, vec_str);
+            print_str(sink, "\n");
+            set_color(sink, 7, 0);
+        }
+        Err(_) => {
+            set_color(sink, 12, 0);
+            print_str(sink, " node attr table full (max ");
+            print_num_inline(sink, gos_runtime::MAX_NODE_PROPS_U32);
+            print_str(sink, " entries)\n");
+            set_color(sink, 7, 0);
+        }
+        Ok(()) => {
+            set_color(sink, 11, 0);
+            print_str(sink, " node attr set  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "  =  0x");
+            print_hex32_inline(sink, val);
+            print_str(sink, "\n");
+        }
+    }
+}
+
+/// V2.55: `node attr get <vec>` / `nattr get <vec>` — read the u32 attribute of a node.
+///
+/// Reads the u32 attribute stored on the node at `vec`.  Returns `none` when no
+/// attribute has been set.  Useful for inspecting palette colors, flags, or other
+/// graph-native scalar data attached to nodes.
+pub fn dispatch_node_attr_get(sink: &ConsoleSink, vec: VectorAddress) {
+    let mut vec_line = LineBuf::<20>::new();
+    vec_line.push_vector(vec);
+    let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+
+    match gos_runtime::node_attr_get(vec) {
+        None => {
+            set_color(sink, 8, 0);
+            print_str(sink, " node attr  ");
+            print_str(sink, vec_str);
+            print_str(sink, "  none\n");
+            set_color(sink, 7, 0);
+        }
+        Some(val) => {
+            set_color(sink, 10, 0);
+            print_str(sink, " node attr  ");
+            set_color(sink, 8, 0);
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "  =  0x");
+            print_hex32_inline(sink, val);
+            print_str(sink, "\n");
+        }
+    }
+}
+
 /// `watch` / `graph watch` / `watch proc` / `watch nodes` — enter live proc watch mode.
 ///
 /// Sets WATCH_PROC_MODE = 1 so the heartbeat repaints the VECTOR DECK panel with a
@@ -7780,6 +7849,15 @@ fn print_num_inline(sink: &ConsoleSink, mut value: usize) {
     while len > 0 {
         len -= 1;
         print_byte(sink, buf[len]);
+    }
+}
+
+fn print_hex32_inline(sink: &ConsoleSink, value: u32) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = value.to_be_bytes();
+    for b in bytes {
+        print_byte(sink, HEX[(b >> 4) as usize]);
+        print_byte(sink, HEX[(b & 0xF) as usize]);
     }
 }
 

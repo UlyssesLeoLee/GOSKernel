@@ -33,6 +33,8 @@ pub const NODE_ARENA_PAGES: usize = 64;
 pub const MAX_DIFF_RING: usize = 128;
 /// V2.15: per-node u8 property slots for reactive signal val encoding.
 pub const MAX_NODE_PROPS_U8: usize = 16;
+/// V2.55: per-node u32 attribute slots — palette colors, flags, arbitrary scalars.
+pub const MAX_NODE_PROPS_U32: usize = 32;
 /// V2.24: per-node signal trace ring depth — most recent N dispatches.
 pub const MAX_NODE_TRACE: usize = 16;
 /// V2.25: per-node lifecycle event log depth — most recent N transitions.
@@ -53,6 +55,8 @@ pub enum RuntimeError {
     LegacyCellMissing,
     NativeExecutorMissing,
     SubscribeTableFull,
+    /// V2.55: all slots in a per-node property table (node_props_u8 or node_props_u32) are used.
+    PropTableFull,
     Fault(&'static str),
 }
 
@@ -350,6 +354,10 @@ pub struct GraphRuntime {
     /// `fire_subscribers` can encode the active Use-edge target without
     /// hard-coding any theme knowledge inside the runtime.
     node_props_u8: [(NodeId, u8); MAX_NODE_PROPS_U8],
+    /// V2.55: per-node u32 attribute slots — stores arbitrary scalar attributes
+    /// (palette colors, flags, counters) keyed by NodeId. Parallel to node_props_u8
+    /// but wider; forms the graph-native replacement for hardcoded PAL_U32 constants.
+    node_props_u32: [(NodeId, u32); MAX_NODE_PROPS_U32],
     /// Cached node enumeration order: storage-slot indices sorted by
     /// vector key, rebuilt lazily when `node_order_epoch != graph_epoch`.
     node_order: [u16; MAX_NODES],
@@ -408,6 +416,7 @@ impl GraphRuntime {
             graph_epoch: 0,
             subscribe_pairs: [None; MAX_SUBSCRIBE_PAIRS],
             node_props_u8: [(NodeId::ZERO, 0u8); MAX_NODE_PROPS_U8],
+            node_props_u32: [(NodeId::ZERO, 0u32); MAX_NODE_PROPS_U32],
             node_order: [0u16; MAX_NODES],
             node_order_len: 0,
             node_order_epoch: u64::MAX,
@@ -882,6 +891,50 @@ impl GraphRuntime {
         self.node_props_u8.iter().find_map(|&(id, val)| {
             if id == node_id && id != NodeId::ZERO { Some(val) } else { None }
         })
+    }
+
+    /// V2.55: Store a u32 attribute on a node (palette color, flag, scalar).
+    /// Idempotent: re-registering the same NodeId overwrites the val.
+    /// Returns false when the table is full (MAX_NODE_PROPS_U32 slots).
+    pub fn register_node_prop_u32(&mut self, node_id: NodeId, val: u32) -> bool {
+        for slot in self.node_props_u32.iter_mut() {
+            if slot.0 == node_id {
+                slot.1 = val;
+                return true;
+            }
+        }
+        for slot in self.node_props_u32.iter_mut() {
+            if slot.0 == NodeId::ZERO {
+                *slot = (node_id, val);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// V2.55: Retrieve the u32 attribute stored for `node_id`, or None if absent.
+    pub fn node_prop_u32(&self, node_id: NodeId) -> Option<u32> {
+        self.node_props_u32.iter().find_map(|&(id, val)| {
+            if id == node_id && id != NodeId::ZERO { Some(val) } else { None }
+        })
+    }
+
+    /// V2.55: Set a u32 attribute on the node at `vector`.
+    /// Returns Err(NodeNotFound) if no node is registered at that vector.
+    /// Returns Err(PropTableFull) if the attribute table is full.
+    pub fn node_attr_set_inner(&mut self, vector: VectorAddress, val: u32) -> Result<(), RuntimeError> {
+        let node_id = self.node_id_for_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        if self.register_node_prop_u32(node_id, val) {
+            Ok(())
+        } else {
+            Err(RuntimeError::PropTableFull)
+        }
+    }
+
+    /// V2.55: Get the u32 attribute stored on the node at `vector`, or None.
+    pub fn node_attr_get_inner(&self, vector: VectorAddress) -> Option<u32> {
+        let node_id = self.node_id_for_vec(vector)?;
+        self.node_prop_u32(node_id)
     }
 
     /// V2.15: Return the NodeId pointed to by the first Use edge originating
@@ -5828,6 +5881,27 @@ pub fn reset_node_stat(vec: VectorAddress) -> Result<(), RuntimeError> {
 /// Returns a `NodeProcSummary` of the captured state, or `NodeNotFound`.
 pub fn node_checkpoint(vec: VectorAddress) -> Result<NodeProcSummary, RuntimeError> {
     RUNTIME.lock().node_checkpoint_inner(vec)
+}
+
+/// V2.55: Set a u32 attribute on the node at `vector`.
+/// The attribute slot is keyed by NodeId and stores arbitrary scalars
+/// (palette colors, flags, counters).  Idempotent: re-setting overwrites.
+/// Returns `Err(NodeNotFound)` if no node is at `vector`,
+/// `Err(PropTableFull)` if all MAX_NODE_PROPS_U32 slots are exhausted.
+pub fn node_attr_set(vec: VectorAddress, val: u32) -> Result<(), RuntimeError> {
+    RUNTIME.lock().node_attr_set_inner(vec, val)
+}
+
+/// V2.55: Get the u32 attribute stored on the node at `vector`.
+/// Returns `None` when the node does not exist or has no attribute set.
+pub fn node_attr_get(vec: VectorAddress) -> Option<u32> {
+    RUNTIME.lock().node_attr_get_inner(vec)
+}
+
+/// V2.55: Register a u32 attribute directly by NodeId (boot-time use).
+/// Returns false when the table is full (MAX_NODE_PROPS_U32 slots).
+pub fn register_node_prop_u32(node_id: NodeId, val: u32) -> bool {
+    RUNTIME.lock().register_node_prop_u32(node_id, val)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.
