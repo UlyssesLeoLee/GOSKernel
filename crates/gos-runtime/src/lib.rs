@@ -2890,6 +2890,129 @@ impl GraphRuntime {
         (out_vecs, out_parents, out_depths, copy_len, tree_count)
     }
 
+    /// V2.47: Welsh-Powell greedy graph coloring.
+    ///
+    /// Assigns each node a non-negative integer color such that no two adjacent
+    /// nodes (connected by any directed edge, treated as undirected) share a color.
+    /// Uses the Welsh-Powell heuristic: process nodes in descending total-degree
+    /// order, then greedily assign the smallest available color.
+    ///
+    /// Returns `(vecs, colors, node_count, chromatic_number)`:
+    /// - `vecs[0..node_count]`   — node vectors in descending total-degree order.
+    /// - `colors[0..node_count]` — color assignment (0-based integer).
+    /// - `node_count`            — total live nodes packed into the arrays.
+    /// - `chromatic_number`      — number of distinct colors used (max color + 1).
+    ///
+    /// An isolated node receives color 0.  The chromatic number is a greedy
+    /// upper bound on the true chromatic number (optimal only for some classes).
+    ///
+    /// OS analogy: colors = CPU affinity / scheduling domains — nodes sharing a
+    /// domain would conflict, so coloring finds conflict-free domain partitions.
+    fn graph_color_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+    ) -> ([VectorAddress; N], [u8; N], usize, u8) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NO_COLOR: u8 = u8::MAX;
+
+        let n = snap.node_count;
+        if n == 0 {
+            return ([ZERO_VEC; N], [0u8; N], 0, 0);
+        }
+
+        // Step 1 — compute total (undirected) degree for each slot.
+        let mut degree = [0usize; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            if !snap.edge_live[ei] { continue; }
+            // Find the slot index for from / to node ids.
+            if let Some(from_s) = snap.node_slot_by_id(snap.edge_from[ei]) {
+                if degree[from_s] < usize::MAX { degree[from_s] += 1; }
+            }
+            if let Some(to_s) = snap.node_slot_by_id(snap.edge_to[ei]) {
+                if snap.edge_from[ei] != snap.edge_to[ei] {
+                    // avoid double-counting self-loops
+                    if degree[to_s] < usize::MAX { degree[to_s] += 1; }
+                }
+            }
+        }
+
+        // Step 2 — build order array: slots sorted by descending degree (stable).
+        let mut order = [0usize; MAX_NODES];
+        for (i, si) in order.iter_mut().enumerate().take(n) {
+            *si = snap.node_slots[i];
+        }
+        // Insertion sort (n ≤ 128, so O(n²) is fine).
+        for i in 1..n {
+            let key = order[i];
+            let mut j = i;
+            while j > 0 && degree[order[j - 1]] < degree[key] {
+                order[j] = order[j - 1];
+                j -= 1;
+            }
+            order[j] = key;
+        }
+
+        // Step 3 — greedy coloring in sorted order.
+        let mut color_slot = [NO_COLOR; MAX_NODES];
+        let mut max_color  = 0u8;
+
+        // Scratch buffer: for each candidate color, is it forbidden at this node?
+        let mut forbidden = [false; 256];
+
+        for oi in 0..n {
+            let cur = order[oi];
+            let cur_id = snap.slot_id[cur];
+
+            // Mark colors used by undirected neighbors that are already colored.
+            // Reset forbidden to all-false first (only mark what we need).
+            let mut max_forbidden = 0usize;
+            for ei in 0..MAX_EDGES {
+                if !snap.edge_live[ei] { continue; }
+                let nb_id = if snap.edge_from[ei] == cur_id {
+                    snap.edge_to[ei]
+                } else if snap.edge_to[ei] == cur_id {
+                    snap.edge_from[ei]
+                } else {
+                    continue;
+                };
+                if nb_id == cur_id { continue; } // self-loop
+                if let Some(nb_s) = snap.node_slot_by_id(nb_id) {
+                    let c = color_slot[nb_s];
+                    if c != NO_COLOR {
+                        let ci = c as usize;
+                        forbidden[ci] = true;
+                        if ci + 1 > max_forbidden { max_forbidden = ci + 1; }
+                    }
+                }
+            }
+
+            // Pick smallest non-forbidden color.
+            let assigned = (0..=255u8)
+                .find(|&c| !forbidden[c as usize])
+                .unwrap_or(0);
+            color_slot[cur] = assigned;
+            if assigned > max_color { max_color = assigned; }
+
+            // Clear forbidden flags we set (avoid memset of 256 bytes each iter).
+            for ci in 0..max_forbidden {
+                forbidden[ci] = false;
+            }
+        }
+
+        let chromatic = if n == 0 { 0u8 } else { max_color + 1 };
+
+        // Step 4 — pack output in sorted order.
+        let copy_len = n.min(N);
+        let mut out_vecs   = [ZERO_VEC; N];
+        let mut out_colors = [0u8; N];
+        for i in 0..copy_len {
+            let slot      = order[i];
+            out_vecs[i]   = snap.slot_vec[slot];
+            out_colors[i] = color_slot[slot];
+        }
+
+        (out_vecs, out_colors, copy_len, chromatic)
+    }
+
     /// V2.32: Directed cycle detection via iterative DFS with 3-color marking.
     ///
     /// Returns `(path, length)` where `path[0..length]` is the detected cycle:
@@ -5305,6 +5428,25 @@ pub fn graph_spanning<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, usize) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_spanning_inner::<N>(&snap)
+}
+
+/// V2.47: Welsh-Powell greedy graph coloring.
+///
+/// Assigns each live node a color (u8) such that no two directly connected nodes
+/// (undirected projection) share the same color.  Nodes are processed in
+/// descending total-degree order (Welsh-Powell heuristic), then greedy
+/// smallest-available-color is assigned.
+///
+/// Returns `(vecs, colors, node_count, chromatic_number)`:
+/// - `vecs[0..node_count]`   — node vectors in descending total-degree order.
+/// - `colors[0..node_count]` — color index (0-based).
+/// - `node_count`            — total live nodes.
+/// - `chromatic_number`      — number of distinct colors used.
+///
+/// OS analogy: colors = conflict-free scheduling domains / CPU-affinity groups.
+pub fn graph_color<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_color_inner::<N>(&snap)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

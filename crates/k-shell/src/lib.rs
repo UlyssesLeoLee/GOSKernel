@@ -4139,6 +4139,95 @@ pub fn dispatch_graph_spanning(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.47: `graph color` — Welsh-Powell greedy graph coloring.
+///
+/// Assigns each live node a color index (0-based) such that no two directly
+/// connected nodes share the same color.  Nodes are sorted in descending
+/// total-degree order (Welsh-Powell heuristic) before greedy assignment.
+///
+/// Output: color index, node vector, and role label:
+///   - `center`   — color 0 (first assigned, highest degree)
+///   - `domain-N` — color N (N > 0)
+///   - `isolated` — no edges at all (always color 0)
+///
+/// OS analogy: each color is a conflict-free scheduling domain / CPU-affinity
+/// group (like Linux cgroups cpuset.cpus assignments, or NUMA node binding).
+pub fn dispatch_graph_color(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+
+    let (vecs, colors, total, chromatic) = gos_runtime::graph_color::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph color\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Summary header.
+    set_color(sink, 7, 0);
+    print_str(sink, "  chromatic number: ");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, chromatic as usize);
+    set_color(sink, 7, 0);
+    print_str(sink, "   nodes: ");
+    print_num_inline(sink, total);
+    print_str(sink, "\n\n");
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  color  vector           role\n");
+    set_color(sink, 7, 0);
+
+    // Color-to-terminal-color mapping: cycle through bright colors.
+    // Colors 0-7: yellow, cyan, green, magenta, red, white, dark-cyan, dark-green
+    const TERM: [u8; 8] = [11, 14, 10, 13, 12, 15, 6, 2];
+
+    for i in 0..total {
+        let c   = colors[i];
+        let vec = vecs[i];
+        let tc  = TERM[(c as usize) % 8];
+
+        set_color(sink, tc, 0);
+        // color column (6 chars)
+        print_str(sink, "  C");
+        print_num_inline(sink, c as usize);
+        // pad to 7 chars total (leading "  C" = 3 chars + digits + spaces)
+        let digits = if c < 10 { 1 } else if c < 100 { 2 } else { 3 };
+        for _ in 0..(4usize.saturating_sub(digits)) { print_str(sink, " "); }
+
+        // vector column
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        let pad = 17usize.saturating_sub(vs.len());
+        for _ in 0..pad { print_str(sink, " "); }
+
+        // role column
+        set_color(sink, tc, 0);
+        if c == 0 { print_str(sink, "center"); } else {
+            print_str(sink, "domain-");
+            print_num_inline(sink, c as usize);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

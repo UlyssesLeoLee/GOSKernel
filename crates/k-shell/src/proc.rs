@@ -585,6 +585,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  community / lpa    aliases for graph community\n");
         super::print_str(sink, "  graph spanning     BFS spanning forest over all live nodes (minimal backbone)\n");
         super::print_str(sink, "  spanning / span    aliases for graph spanning\n");
+        super::print_str(sink, "  graph color        greedy graph coloring — conflict-free scheduling domains\n");
+        super::print_str(sink, "  color / gcolor     aliases for graph color\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -955,6 +957,8 @@ fn dispatch_text_command(
         super::dispatch_graph_community(sink);
     } else if cmd == "graph spanning" || cmd == "spanning" || cmd == "span" || cmd == "graph span" || cmd == "graph tree" || cmd == "gtree" {
         super::dispatch_graph_spanning(sink);
+    } else if cmd == "graph color" || cmd == "color" || cmd == "gcolor" || cmd == "graph colour" || cmd == "colour" {
+        super::dispatch_graph_color(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph reachable ")
         .or_else(|| cmd.strip_prefix("reachable "))
