@@ -4449,6 +4449,123 @@ pub fn dispatch_graph_shortest(sink: &ConsoleSink, source: VectorAddress) {
     print_str(sink, "\n");
 }
 
+/// V2.50: `graph flow <source> <sink>` — maximum network flow (Edmonds-Karp).
+///
+/// Shows the maximum throughput from `source` to `sink` over directed edges,
+/// treating edge weights as capacities.  Lists each node's role and its
+/// net flow volume in the final flow assignment.
+///
+/// OS analogy: `tc -s qdisc show` — per-subsystem bandwidth saturation view.
+pub fn dispatch_graph_flow(sink: &ConsoleSink, source: VectorAddress, snk_vec: VectorAddress) {
+    const MAX_N: usize = 128;
+
+    let (vecs, out_flows, in_flows, total, max_flow) =
+        gos_runtime::graph_flow::<MAX_N>(source, snk_vec);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph flow ");
+    let mut src_buf = LineBuf::<20>::new();
+    src_buf.push_vector(source);
+    let src_str = core::str::from_utf8(src_buf.as_slice()).unwrap_or("?");
+    print_str(sink, src_str);
+    print_str(sink, " \u{2192} ");
+    let mut snk_buf = LineBuf::<20>::new();
+    snk_buf.push_vector(snk_vec);
+    let snk_str = core::str::from_utf8(snk_buf.as_slice()).unwrap_or("?");
+    print_str(sink, snk_str);
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  role       out-flow  in-flow   vector\n");
+    set_color(sink, 7, 0);
+
+    let zero = VectorAddress::new(0, 0, 0, 0);
+
+    for i in 0..total {
+        let vec = vecs[i];
+        let of  = out_flows[i];
+        let inf = in_flows[i];
+        let is_src = vec == source;
+        let is_snk = vec == snk_vec && !is_src;
+        let has_flow = of > 0 || inf > 0;
+
+        // Role column (12 chars).
+        if is_src {
+            set_color(sink, 13, 0);
+            print_str(sink, "  source     ");
+        } else if is_snk {
+            set_color(sink, 10, 0);
+            print_str(sink, "  sink       ");
+        } else if has_flow {
+            set_color(sink, 14, 0);
+            print_str(sink, "  relay      ");
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "  isolated   ");
+        }
+
+        // Out-flow column (10 chars).
+        set_color(sink, 14, 0);
+        let whole = of / 1000;
+        let frac  = of % 1000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+        print_str(sink, "  ");
+
+        // In-flow column (10 chars).
+        set_color(sink, 11, 0);
+        let whole2 = inf / 1000;
+        let frac2  = inf % 1000;
+        print_num_inline(sink, whole2 as usize);
+        print_str(sink, ".");
+        if frac2 < 10  { print_str(sink, "00"); }
+        else if frac2 < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac2 as usize);
+        print_str(sink, "  ");
+
+        // Vector column.
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        print_str(sink, "\n");
+        let _ = zero; // suppress unused warning
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    print_str(sink, " node(s)  max-flow: ");
+    set_color(sink, 13, 0);
+    let mf_whole = max_flow / 1000;
+    let mf_frac  = max_flow % 1000;
+    print_num_inline(sink, mf_whole as usize);
+    print_str(sink, ".");
+    if mf_frac < 10  { print_str(sink, "00"); }
+    else if mf_frac < 100 { print_str(sink, "0"); }
+    print_num_inline(sink, mf_frac as usize);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

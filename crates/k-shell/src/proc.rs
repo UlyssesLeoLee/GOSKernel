@@ -965,6 +965,30 @@ fn dispatch_text_command(
         super::dispatch_graph_color(sink);
     } else if cmd == "graph mst" || cmd == "mst" || cmd == "gmst" || cmd == "graph tree mst" || cmd == "min spanning" {
         super::dispatch_graph_mst(sink);
+    } else if let Some(pair_str) = cmd
+        .strip_prefix("graph flow ")
+        .or_else(|| cmd.strip_prefix("flow "))
+        .or_else(|| cmd.strip_prefix("max flow ")
+            .or_else(|| cmd.strip_prefix("maxflow ")))
+    {
+        // Expect "<source_vec> <sink_vec>"
+        let trimmed = pair_str.trim();
+        if let Some(space) = trimmed.find(' ') {
+            let src_s = trimmed[..space].trim();
+            let snk_s = trimmed[space + 1..].trim();
+            match (gos_protocol::VectorAddress::parse(src_s), gos_protocol::VectorAddress::parse(snk_s)) {
+                (Some(src), Some(snk)) => super::dispatch_graph_flow(sink, src, snk),
+                _ => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph flow: expected <source> <sink> (e.g. graph flow 1.0.0.1 1.0.0.2)\n");
+                    super::set_color(sink, 7, 0);
+                }
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph flow: expected <source> <sink> (e.g. graph flow 1.0.0.1 1.0.0.2)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph shortest ")
         .or_else(|| cmd.strip_prefix("shortest "))

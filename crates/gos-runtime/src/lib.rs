@@ -3139,6 +3139,199 @@ impl GraphRuntime {
         (out_vecs, out_parents, out_weights, copy_len, total_mst_w)
     }
 
+    /// V2.50: Maximum network flow via Edmonds-Karp (BFS Ford-Fulkerson).
+    ///
+    /// Computes the maximum flow from `source` to `sink` over the **directed**
+    /// kernel graph, treating `edge_weight` as edge capacity.  Uses BFS to
+    /// find shortest augmenting paths in the residual graph (Edmonds-Karp,
+    /// O(V × E²)).
+    ///
+    /// Returns `(vecs, out_flow, in_flow, node_count, max_flow)`:
+    /// - `vecs[0..node_count]`      — all live nodes; source first, sink second.
+    /// - `out_flow[0..node_count]`  — per-node total outgoing flow × 1000.
+    /// - `in_flow[0..node_count]`   — per-node total incoming flow × 1000.
+    /// - `node_count`               — total live nodes.
+    /// - `max_flow`                 — maximum flow × 1000 as u32.
+    ///
+    /// Returns max_flow=0 when source or sink are not found, or source==sink.
+    ///
+    /// OS analogy: `tc -s qdisc show` bandwidth accounting — the maximum
+    /// throughput between two kernel sub-systems given edge capacity limits.
+    fn graph_flow_inner<const N: usize>(
+        snap: &GraphTopologySnapshot,
+        source: VectorAddress,
+        sink:   VectorAddress,
+    ) -> ([VectorAddress; N], [u32; N], [u32; N], usize, u32) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        let n = snap.node_count;
+        if n == 0 {
+            return ([ZERO_VEC; N], [0u32; N], [0u32; N], 0, 0);
+        }
+
+        // Find source slot.
+        let src_slot = {
+            let mut found = usize::MAX;
+            for si in 0..n {
+                let s = snap.node_slots[si];
+                if snap.slot_vec[s] == source { found = s; break; }
+            }
+            found
+        };
+        // Find sink slot.
+        let snk_slot = {
+            let mut found = usize::MAX;
+            for si in 0..n {
+                let s = snap.node_slots[si];
+                if snap.slot_vec[s] == sink { found = s; break; }
+            }
+            found
+        };
+
+        let copy_len = n.min(N);
+
+        // Degenerate: missing or identical endpoints → zero flow.
+        if src_slot == usize::MAX || snk_slot == usize::MAX || src_slot == snk_slot {
+            let mut out_vecs = [ZERO_VEC; N];
+            for si in 0..copy_len {
+                out_vecs[si] = snap.slot_vec[snap.node_slots[si]];
+            }
+            return (out_vecs, [0u32; N], [0u32; N], copy_len, 0);
+        }
+
+        // Edmonds-Karp: BFS augmenting paths in the residual graph.
+        // flow[ei] = current flow on forward edge ei (initially 0).
+        let mut edge_flow = [0.0f32; MAX_EDGES];
+        let mut total_flow = 0.0f32;
+
+        loop {
+            // BFS from src_slot to snk_slot through residual capacity.
+            let mut pred      = [usize::MAX; MAX_NODES]; // predecessor node slot
+            let mut pred_edge = [usize::MAX; MAX_NODES]; // edge index used
+            let mut pred_fwd  = [false;      MAX_NODES]; // true=forward, false=backward
+            let mut visited   = [false;      MAX_NODES];
+            let mut queue     = [0usize;     MAX_NODES];
+            let mut q_head    = 0usize;
+            let mut q_tail    = 0usize;
+
+            visited[src_slot] = true;
+            queue[q_tail] = src_slot;
+            q_tail += 1;
+
+            'bfs: while q_head < q_tail {
+                let u    = queue[q_head];
+                q_head  += 1;
+                let u_id = snap.slot_id[u];
+
+                // Forward edges: residual = capacity - flow.
+                for ei in 0..MAX_EDGES {
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_from[ei] != u_id { continue; }
+                    let residual = snap.edge_weight[ei] - edge_flow[ei];
+                    if residual <= 1e-9 { continue; }
+                    let v_id = snap.edge_to[ei];
+                    let v = match snap.node_slot_by_id(v_id) { Some(s) => s, None => continue };
+                    if visited[v] { continue; }
+                    visited[v]   = true;
+                    pred[v]      = u;
+                    pred_edge[v] = ei;
+                    pred_fwd[v]  = true;
+                    if v == snk_slot { break 'bfs; }
+                    if q_tail < MAX_NODES { queue[q_tail] = v; q_tail += 1; }
+                }
+
+                // Backward edges: residual = existing flow (cancel it).
+                for ei in 0..MAX_EDGES {
+                    if !snap.edge_live[ei] { continue; }
+                    if snap.edge_to[ei] != u_id { continue; }
+                    if edge_flow[ei] <= 1e-9 { continue; }
+                    let v_id = snap.edge_from[ei];
+                    let v = match snap.node_slot_by_id(v_id) { Some(s) => s, None => continue };
+                    if visited[v] { continue; }
+                    visited[v]   = true;
+                    pred[v]      = u;
+                    pred_edge[v] = ei;
+                    pred_fwd[v]  = false;
+                    if v == snk_slot { break 'bfs; }
+                    if q_tail < MAX_NODES { queue[q_tail] = v; q_tail += 1; }
+                }
+            }
+
+            if !visited[snk_slot] { break; } // No augmenting path — max-flow reached.
+
+            // Find bottleneck: minimum residual capacity along the path.
+            let mut bottleneck = f32::MAX;
+            let mut cur = snk_slot;
+            while cur != src_slot {
+                let ei  = pred_edge[cur];
+                let fwd = pred_fwd[cur];
+                let res = if fwd {
+                    snap.edge_weight[ei] - edge_flow[ei]
+                } else {
+                    edge_flow[ei]
+                };
+                if res < bottleneck { bottleneck = res; }
+                cur = pred[cur];
+            }
+
+            if bottleneck <= 1e-9 { break; }
+
+            // Augment flow along the path.
+            total_flow += bottleneck;
+            cur = snk_slot;
+            while cur != src_slot {
+                let ei  = pred_edge[cur];
+                let fwd = pred_fwd[cur];
+                if fwd { edge_flow[ei] += bottleneck; } else { edge_flow[ei] -= bottleneck; }
+                cur = pred[cur];
+            }
+        }
+
+        // Tally per-node inflow and outflow from the final flow assignment.
+        let mut node_out = [0.0f32; MAX_NODES];
+        let mut node_in  = [0.0f32; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            if !snap.edge_live[ei] { continue; }
+            let f = edge_flow[ei];
+            if f <= 1e-9 { continue; }
+            let from_id = snap.edge_from[ei];
+            let to_id   = snap.edge_to[ei];
+            if let Some(fs) = snap.node_slot_by_id(from_id) { node_out[fs] += f; }
+            if let Some(ts) = snap.node_slot_by_id(to_id)   { node_in[ts]  += f; }
+        }
+
+        // Pack output: source first, sink second, remaining in slot order.
+        let mut out_vecs = [ZERO_VEC; N];
+        let mut out_out  = [0u32; N];
+        let mut out_in   = [0u32; N];
+        let mut idx = 0usize;
+
+        if idx < copy_len {
+            out_vecs[idx] = snap.slot_vec[src_slot];
+            out_out[idx]  = (node_out[src_slot] * 1000.0) as u32;
+            out_in[idx]   = (node_in[src_slot]  * 1000.0) as u32;
+            idx += 1;
+        }
+        if idx < copy_len {
+            out_vecs[idx] = snap.slot_vec[snk_slot];
+            out_out[idx]  = (node_out[snk_slot] * 1000.0) as u32;
+            out_in[idx]   = (node_in[snk_slot]  * 1000.0) as u32;
+            idx += 1;
+        }
+        for si in 0..n {
+            if idx >= copy_len { break; }
+            let s = snap.node_slots[si];
+            if s == src_slot || s == snk_slot { continue; }
+            out_vecs[idx] = snap.slot_vec[s];
+            out_out[idx]  = (node_out[s] * 1000.0) as u32;
+            out_in[idx]   = (node_in[s]  * 1000.0) as u32;
+            idx += 1;
+        }
+
+        let max_flow_u32 = (total_flow * 1000.0) as u32;
+        (out_vecs, out_out, out_in, copy_len, max_flow_u32)
+    }
+
     /// V2.49: Dijkstra single-source shortest-path tree over the **directed**
     /// kernel graph from a given source node.
     ///
@@ -5739,6 +5932,25 @@ pub fn graph_shortest<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
     let snap = RUNTIME.lock().topology_snapshot();
     GraphRuntime::graph_shortest_inner::<N>(&snap, source)
+}
+
+/// V2.50: Maximum network flow between two nodes (Edmonds-Karp BFS Ford-Fulkerson).
+///
+/// Returns `(vecs, out_flow, in_flow, node_count, max_flow)`:
+/// - `vecs[0..node_count]`     — all live nodes; source first, sink second.
+/// - `out_flow[0..node_count]` — per-node total outgoing flow × 1000.
+/// - `in_flow[0..node_count]`  — per-node total incoming flow × 1000.
+/// - `node_count`              — total live nodes.
+/// - `max_flow`                — maximum flow × 1000 as u32.
+///
+/// OS analogy: `tc -s qdisc show` — maximum achievable throughput from one
+/// kernel sub-system to another given the edge capacity constraints.
+pub fn graph_flow<const N: usize>(
+    source: VectorAddress,
+    sink:   VectorAddress,
+) -> ([VectorAddress; N], [u32; N], [u32; N], usize, u32) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_flow_inner::<N>(&snap, source, sink)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
