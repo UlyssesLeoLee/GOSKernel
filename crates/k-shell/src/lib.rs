@@ -2327,6 +2327,90 @@ pub fn dispatch_graph_transitivity(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.64: `graph kcore` — k-core / coreness decomposition of the kernel graph.
+///
+/// Each node receives a coreness value: the largest k such that the node is
+/// in the k-core (the maximal subgraph where every node has undirected
+/// degree ≥ k).  The graph degeneracy is the maximum coreness.
+///
+/// Role labels (colour-coded):
+///   core      — coreness == max_coreness (densest inner shell)
+///   inner     — coreness > 0, < max_coreness (intermediate shell)
+///   periphery — coreness == 0 (isolated or pendant)
+pub fn dispatch_graph_kcore(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, coreness, total, max_core) = gos_runtime::graph_kcore::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph kcore  (k-core decomposition)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " ───────────────────────────────────────────────────────────\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              k     role\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..total {
+        let k    = coreness[i];
+        let is_core = max_core > 0 && k == max_core;
+        let is_peri = k == 0;
+
+        if is_core {
+            set_color(sink, 10, 0); // bright green — core
+        } else if is_peri {
+            set_color(sink, 8, 0);  // grey — periphery
+        } else {
+            set_color(sink, 11, 0); // cyan — inner
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        print_str(sink, " ");
+        print_num_right6(sink, k as usize);
+        print_str(sink, "  ");
+
+        if is_core {
+            set_color(sink, 10, 0);
+            print_str(sink, "core");
+        } else if is_peri {
+            set_color(sink, 8, 0);
+            print_str(sink, "periphery");
+        } else {
+            set_color(sink, 11, 0);
+            print_str(sink, "inner");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " ───────────────────────────────────────────────────────────\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  degeneracy=");
+    set_color(sink, 10, 0);
+    print_num_inline(sink, max_core as usize);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

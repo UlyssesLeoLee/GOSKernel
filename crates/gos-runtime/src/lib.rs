@@ -1087,6 +1087,149 @@ impl GraphRuntime {
         (ppm, total_triangles, total_triplets, n)
     }
 
+    /// V2.64: Graph k-core decomposition (Batagelj-Zaversnik peeling).
+    ///
+    /// Computes the coreness of each live node: the largest k such that the
+    /// node belongs to the k-core (the maximal subgraph where every node has
+    /// undirected degree ≥ k).  Peels iteratively for k = 1, 2, … removing
+    /// nodes whose current effective degree < k and updating neighbours.
+    ///
+    /// Returns (vecs, coreness, n, max_coreness):
+    ///   vecs[0..n]     — nodes sorted by coreness descending
+    ///   coreness[0..n] — coreness value (0 = isolated, not in any 1-core)
+    ///   n              — total live node count
+    ///   max_coreness   — graph degeneracy (highest coreness)
+    pub fn graph_kcore_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, u8) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        // Compact slot list.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        if nc == 0 {
+            return ([ZERO_VEC; N], [0u8; N], 0, 0);
+        }
+
+        // Compute initial undirected effective degree (deduped, no self-loops).
+        let mut eff_deg = [0u8; MAX_NODES];
+        for ki in 0..nc {
+            let slot = node_slots[ki];
+            let vid  = self.nodes[slot].as_ref().unwrap().spec.node_id;
+            let mut seen = [NodeId::ZERO; MAX_NODES];
+            let mut nb   = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !seen[..nb].contains(&other) {
+                    seen[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+            eff_deg[slot] = nb.min(255) as u8;
+        }
+
+        // Determine upper bound for k.
+        let mut max_deg = 0u8;
+        for ki in 0..nc {
+            let d = eff_deg[node_slots[ki]];
+            if d > max_deg { max_deg = d; }
+        }
+
+        // Peeling phase.
+        let mut coreness = [0u8; MAX_NODES];
+        let mut removed  = [false; MAX_NODES];
+        let mut remaining = nc;
+
+        let mut k: u8 = 1;
+        while k <= max_deg && remaining > 0 {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for ki in 0..nc {
+                    let slot = node_slots[ki];
+                    if removed[slot] { continue; }
+                    if eff_deg[slot] < k {
+                        coreness[slot]  = k.saturating_sub(1);
+                        removed[slot]   = true;
+                        remaining      -= 1;
+                        changed         = true;
+                        // Decrement each distinct non-removed neighbour's degree.
+                        let vid = self.nodes[slot].as_ref().unwrap().spec.node_id;
+                        let mut seen_u = [NodeId::ZERO; MAX_NODES];
+                        let mut nb_u   = 0usize;
+                        for edge in self.edges.iter().flatten() {
+                            let other = if edge.spec.from_node == vid {
+                                edge.spec.to_node
+                            } else if edge.spec.to_node == vid {
+                                edge.spec.from_node
+                            } else {
+                                continue;
+                            };
+                            if other == vid { continue; }
+                            if seen_u[..nb_u].contains(&other) { continue; }
+                            if nb_u < MAX_NODES {
+                                seen_u[nb_u] = other;
+                                nb_u += 1;
+                            }
+                            if let Some(ns) = self.node_slot_by_id(other) {
+                                if !removed[ns] && eff_deg[ns] > 0 {
+                                    eff_deg[ns] -= 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            k = k.saturating_add(1);
+        }
+
+        // Nodes that survived all rounds get coreness = k - 1.
+        let final_k = k.saturating_sub(1);
+        for ki in 0..nc {
+            let slot = node_slots[ki];
+            if !removed[slot] {
+                coreness[slot] = final_k;
+            }
+        }
+
+        // Sort by coreness descending (insertion sort on slots).
+        let mut sorted = node_slots;
+        for i in 1..nc {
+            let key_slot = sorted[i];
+            let key_core = coreness[key_slot];
+            let mut j    = i;
+            while j > 0 && coreness[sorted[j - 1]] < key_core {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key_slot;
+        }
+
+        // Pack output.
+        let copy_len = nc.min(N);
+        let mut out_vecs = [ZERO_VEC; N];
+        let mut out_core = [0u8; N];
+        for i in 0..copy_len {
+            let slot     = sorted[i];
+            out_vecs[i]  = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            out_core[i]  = coreness[slot];
+        }
+        let max_coreness = if copy_len > 0 { out_core[0] } else { 0 };
+        (out_vecs, out_core, nc, max_coreness)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6114,6 +6257,12 @@ pub fn graph_clustering() -> (u32, usize) {
 /// V2.63: Global graph transitivity (3 × triangles / open_triplets).
 pub fn graph_transitivity() -> (u32, u64, u64, usize) {
     RUNTIME.lock().graph_transitivity_inner()
+}
+
+/// V2.64: Graph k-core decomposition — coreness of each node.
+/// Returns (vecs, coreness, n, max_coreness) sorted by coreness descending.
+pub fn graph_kcore<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
+    RUNTIME.lock().graph_kcore_inner::<N>()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.

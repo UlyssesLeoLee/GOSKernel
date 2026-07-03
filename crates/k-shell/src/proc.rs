@@ -1054,6 +1054,10 @@ fn dispatch_text_command(
         super::dispatch_graph_clustering(sink);
     } else if cmd == "graph transitivity" || cmd == "transitivity" || cmd == "gtrans" {
         super::dispatch_graph_transitivity(sink);
+    } else if cmd == "graph kcore" || cmd == "kcore" || cmd == "gkcore"
+        || cmd == "graph core" || cmd == "core decomp" || cmd == "coreness"
+    {
+        super::dispatch_graph_kcore(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))
