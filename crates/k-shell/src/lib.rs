@@ -2177,6 +2177,50 @@ pub fn dispatch_node_attr_get(sink: &ConsoleSink, vec: VectorAddress) {
     }
 }
 
+/// V2.58: `node attr list` / `nattr list` — show all nodes with a u32 attribute set.
+///
+/// Prints a table of (VectorAddress, hex value) for every occupied slot in
+/// node_props_u32, plus a slot-usage footer.  Useful for palette/flag audits.
+pub fn dispatch_node_attr_list(sink: &ConsoleSink) {
+    let mut vecs = [VectorAddress::new(0, 0, 0, 0); gos_runtime::MAX_NODE_PROPS_U32];
+    let mut vals = [0u32; gos_runtime::MAX_NODE_PROPS_U32];
+    let count = gos_runtime::node_attr_list(&mut vecs, &mut vals);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " node attr list\n");
+    set_color(sink, 7, 0);
+
+    if count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no u32 attributes set)\n");
+        set_color(sink, 7, 0);
+    } else {
+        let mut i = 0usize;
+        while i < count {
+            let mut vec_line = LineBuf::<20>::new();
+            vec_line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(vec_line.as_slice()).unwrap_or("?");
+            set_color(sink, 10, 0);
+            print_str(sink, "  ");
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "  0x");
+            print_hex32_inline(sink, vals[i]);
+            print_str(sink, "\n");
+            i += 1;
+        }
+    }
+
+    // Slot-usage footer.
+    set_color(sink, 8, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, count);
+    print_str(sink, " / ");
+    print_num_inline(sink, gos_runtime::MAX_NODE_PROPS_U32);
+    print_str(sink, " slots used\n");
+    set_color(sink, 7, 0);
+}
+
 /// `watch` / `graph watch` / `watch proc` / `watch nodes` — enter live proc watch mode.
 ///
 /// Sets WATCH_PROC_MODE = 1 so the heartbeat repaints the VECTOR DECK panel with a

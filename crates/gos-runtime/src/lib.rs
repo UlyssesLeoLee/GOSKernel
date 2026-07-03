@@ -937,6 +937,25 @@ impl GraphRuntime {
         self.node_prop_u32(node_id)
     }
 
+    /// V2.58: List all nodes that have a u32 attribute set.
+    /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
+    /// Returns the number of entries written (≤ N).
+    pub fn node_attr_list_inner<const N: usize>(
+        &self,
+        out_vec: &mut [VectorAddress; N],
+        out_val: &mut [u32; N],
+    ) -> usize {
+        let mut count = 0usize;
+        for &(node_id, val) in self.node_props_u32.iter() {
+            if node_id == NodeId::ZERO { continue; }
+            if count >= N { break; }
+            out_vec[count] = self.node_vector(node_id).unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_val[count] = val;
+            count += 1;
+        }
+        count
+    }
+
     /// V2.15: Return the NodeId pointed to by the first Use edge originating
     /// from `source`. Used by `fire_subscribers` to encode which variant of an
     /// observed node is currently active as the reactive signal val.
@@ -5902,6 +5921,15 @@ pub fn node_attr_get(vec: VectorAddress) -> Option<u32> {
 /// Returns false when the table is full (MAX_NODE_PROPS_U32 slots).
 pub fn register_node_prop_u32(node_id: NodeId, val: u32) -> bool {
     RUNTIME.lock().register_node_prop_u32(node_id, val)
+}
+
+/// V2.58: List all nodes that have a u32 attribute set.
+/// Returns (vectors, values, count) — at most N entries, in table order.
+pub fn node_attr_list<const N: usize>(
+    out_vec: &mut [VectorAddress; N],
+    out_val: &mut [u32; N],
+) -> usize {
+    RUNTIME.lock().node_attr_list_inner(out_vec, out_val)
 }
 
 /// Count registered nodes whose vector address has the given `l4` domain byte.
