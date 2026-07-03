@@ -877,13 +877,19 @@ pub fn init() {
         }
     }
     crate::raw_serial_println(format_args!("desktop: graph n={} edges={} lfb={}", d.n, d.ne, d.lfb != 0));
-    // V2.57: populate pal_u32[0..1] from graph node attrs (set at boot by shell_on_init).
-    // Falls back silently to PAL_U32 constants if the attrs are absent.
+    // V2.57/V2.62: populate all 4 pal_u32 entries from graph node attrs (set at boot
+    // by shell_on_init). Falls back silently to PAL_U32 constants if attrs are absent.
     if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::THEME_WABI_NODE_VEC)) {
         d.pal_u32[0] = c;
     }
     if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::THEME_SHOJI_NODE_VEC)) {
         d.pal_u32[1] = c;
+    }
+    if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::PALETTE_CYAN_NODE_VEC)) {
+        d.pal_u32[2] = c;
+    }
+    if let Some(c) = without_interrupts(|| gos_runtime::node_attr_get(k_shell::PALETTE_GOLD_NODE_VEC)) {
+        d.pal_u32[3] = c;
     }
     layout_force(d.n, &d.edges[..d.ne], &mut d.px, &mut d.py, &mut d.pz);
     // Mask IRQ14 (ATA primary) in the slave PIC before ATA ops.

@@ -73,10 +73,13 @@ pub const THEME_WABI_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 1, 0);
 pub const THEME_SHOJI_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 2, 0);
 pub const THEME_CURRENT_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 3, 0);
 pub const CLIPBOARD_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 4, 0);
+pub const PALETTE_CYAN_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 5, 0); // V2.62
+pub const PALETTE_GOLD_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 6, 0); // V2.62
 const VGA_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.shell");
 pub const THEME_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.theme");
 pub const CLIPBOARD_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.clip");
+pub const PALETTE_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.pal"); // V2.62
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: EXECUTOR_ID,
     on_init: Some(shell_on_init),
@@ -100,6 +103,16 @@ pub const CLIPBOARD_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     on_init: Some(clipboard_on_init),
     on_event: Some(clipboard_on_event),
     on_suspend: Some(shell_on_suspend),
+    on_resume: None,
+    on_teardown: None,
+    on_telemetry: None,
+};
+// V2.62: passive data-store executor for CYAN/GOLD palette nodes — no event handlers needed.
+pub const PALETTE_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: PALETTE_EXECUTOR_ID,
+    on_init: None,
+    on_event: None,
+    on_suspend: None,
     on_resume: None,
     on_teardown: None,
     on_telemetry: None,
@@ -185,6 +198,8 @@ const THEME_WABI_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID,
 const THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "theme.shoji");
 const THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "theme.current");
 const CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "clipboard.mount");
+const PALETTE_CYAN_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "palette.cyan"); // V2.62
+const PALETTE_GOLD_NODE_ID: gos_protocol::NodeId = derive_node_id(SHELL_PLUGIN_ID, "palette.gold"); // V2.62
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(THEME_KIND_WABI);
 static CLIPBOARD_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -8399,6 +8414,10 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     // PAL_U32[DISPLAY_THEME_WABI=0]=0x00DB_1C21 (RED), [1]=0x00ED_EDF2 (WHITE).
     let _ = gos_runtime::register_node_prop_u32(THEME_WABI_NODE_ID, 0x00DB_1C21);
     let _ = gos_runtime::register_node_prop_u32(THEME_SHOJI_NODE_ID, 0x00ED_EDF2);
+    // V2.62: bind CYAN and GOLD to dedicated palette nodes — all 4 palette entries
+    // are now graph-native.  PAL_U32[2]=0x0000_CCFF (CYAN), [3]=0x00FF_CC44 (GOLD).
+    let _ = gos_runtime::register_node_prop_u32(PALETTE_CYAN_NODE_ID, 0x0000_CCFF);
+    let _ = gos_runtime::register_node_prop_u32(PALETTE_GOLD_NODE_ID, 0x00FF_CC44);
     // Subscribe: k-vga auto-repaints when theme.current Use-edge changes.
     let k_vga_node_id = derive_node_id(PluginId::from_ascii("K_VGA"), "vga.entry");
     let _ = gos_runtime::register_subscribe(THEME_CURRENT_NODE_ID, k_vga_node_id);

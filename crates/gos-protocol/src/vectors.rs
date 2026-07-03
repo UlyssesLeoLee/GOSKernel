@@ -33,6 +33,8 @@ pub const SVC_SHELL_THEME_WABI: VectorAddress = VectorAddress::new(6, 1, 1, 0);
 pub const SVC_SHELL_THEME_SHOJI: VectorAddress = VectorAddress::new(6, 1, 2, 0);
 pub const SVC_SHELL_THEME_CURRENT: VectorAddress = VectorAddress::new(6, 1, 3, 0);
 pub const SVC_SHELL_CLIPBOARD: VectorAddress = VectorAddress::new(6, 1, 4, 0);
+pub const SVC_SHELL_PALETTE_CYAN: VectorAddress = VectorAddress::new(6, 1, 5, 0); // V2.62
+pub const SVC_SHELL_PALETTE_GOLD: VectorAddress = VectorAddress::new(6, 1, 6, 0); // V2.62
 
 pub const SVC_AI: VectorAddress = VectorAddress::new(6, 2, 0, 0);
 pub const SVC_IME: VectorAddress = VectorAddress::new(6, 3, 0, 0);

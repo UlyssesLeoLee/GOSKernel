@@ -2,10 +2,10 @@
 //
 // Verifies the "Desktop.pal_u32 population" pattern: at init time the renderer
 // reads node_attr_get(theme_vec) for wabi/shoji and overrides the default
-// PAL_U32 constants.  The other two palette entries (CYAN, GOLD) stay at their
-// compile-time defaults since they have no graph-backed theme node yet.
+// PAL_U32 constants.  V2.62 added CYAN (pal[2]) and GOLD (pal[3]) graph-backing
+// via dedicated palette.cyan / palette.gold nodes — see gos-pal-full-harness.
 //
-// This harness models the Desktop.pal_u32 caching logic in host-testable form:
+// This harness covers wabi/shoji (pal[0]/pal[1]) specifically.
 //   pal_u32 = PAL_U32;  // compile-time default
 //   if let Some(c) = node_attr_get(THEME_WABI_VEC)  { pal_u32[0] = c; }
 //   if let Some(c) = node_attr_get(THEME_SHOJI_VEC) { pal_u32[1] = c; }
@@ -18,8 +18,8 @@
 //  2.  shoji attr set → pal_u32[1] overrides default WHITE
 //  3.  no attr set → pal_u32[0] stays at PAL_RED (fallback)
 //  4.  no attr set → pal_u32[1] stays at PAL_WHITE (fallback)
-//  5.  pal_u32[2] (CYAN) unchanged by theme attrs — no graph-backing yet
-//  6.  pal_u32[3] (GOLD) unchanged by theme attrs — no graph-backing yet
+//  5.  pal_u32[2] (CYAN) unchanged when only wabi/shoji nodes exist
+//  6.  pal_u32[3] (GOLD) unchanged when only wabi/shoji nodes exist
 //  7.  override wabi color → rope uses new contrasting color via PAL_CONTRAST
 //  8.  override shoji color → rope uses new contrasting color via PAL_CONTRAST
 //  9.  reset then re-register: attr survives reset + re-registration cycle
@@ -143,7 +143,7 @@ fn no_shoji_attr_falls_back_to_default_white() {
     assert_eq!(pal[1], PAL_U32[1], "no shoji attr: pal[1] must be default WHITE 0x{:08X}", PAL_U32[1]);
 }
 
-// ── 5. pal[2] (CYAN) unchanged by theme attrs ────────────────────────────────
+// ── 5. pal[2] (CYAN) unchanged when only wabi/shoji nodes exist ──────────────
 
 #[test]
 fn pal_index_2_stays_at_cyan_regardless_of_theme_attrs() {
@@ -161,7 +161,7 @@ fn pal_index_2_stays_at_cyan_regardless_of_theme_attrs() {
     );
 }
 
-// ── 6. pal[3] (GOLD) unchanged by theme attrs ────────────────────────────────
+// ── 6. pal[3] (GOLD) unchanged when only wabi/shoji nodes exist ──────────────
 
 #[test]
 fn pal_index_3_stays_at_gold_regardless_of_theme_attrs() {

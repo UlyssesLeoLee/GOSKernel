@@ -866,6 +866,14 @@ const SHELL_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_shell::THEME_SHOJI_NODE_VEC,
     local_node_key: "theme.shoji",
     executor: k_shell::THEME_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::PALETTE_CYAN_NODE_VEC,
+    local_node_key: "palette.cyan",
+    executor: k_shell::PALETTE_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::PALETTE_GOLD_NODE_VEC,
+    local_node_key: "palette.gold",
+    executor: k_shell::PALETTE_EXECUTOR_VTABLE,
 }];
 
 const AI_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
