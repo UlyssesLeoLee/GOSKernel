@@ -1702,6 +1702,81 @@ impl GraphRuntime {
         (min_girth, is_acyclic, node_count)
     }
 
+    /// V2.70: Wiener index — sum of all pairwise directed shortest-path distances.
+    ///
+    /// W(G) = Σ_{u≠v, path exists} d(u,v)  (directed, unweighted BFS).
+    ///
+    /// Returns (wiener_index, reachable_pairs, node_count).
+    ///   wiener_index    = total sum of finite pairwise distances
+    ///   reachable_pairs = count of ordered (u,v) pairs with u≠v and d(u,v)<∞
+    ///   node_count      = live nodes
+    pub fn graph_wiener_inner(&self) -> (u64, usize, usize) {
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        let mut wiener_index: u64 = 0;
+        let mut reachable_pairs: usize = 0;
+
+        for si in 0..node_count {
+            let s = node_slots[si];
+            if self.nodes[s].is_none() { continue; }
+
+            let mut dist = [u32::MAX; MAX_NODES];
+            dist[s] = 0;
+
+            let mut queue = [0usize; MAX_NODES];
+            let mut q_head = 0usize;
+            let mut q_tail = 0usize;
+            queue[q_tail] = s;
+            q_tail += 1;
+
+            while q_head < q_tail {
+                let cur = queue[q_head];
+                q_head += 1;
+                let cur_dist = dist[cur];
+
+                let cur_id = match self.nodes[cur] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.from_node != cur_id { continue; }
+
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+                    if dist[nbr_slot] == u32::MAX {
+                        dist[nbr_slot] = cur_dist + 1;
+                        if q_tail < MAX_NODES {
+                            queue[q_tail] = nbr_slot;
+                            q_tail += 1;
+                        }
+                    }
+                }
+            }
+
+            for ti in 0..node_count {
+                let t = node_slots[ti];
+                if t == s { continue; }
+                if dist[t] != u32::MAX {
+                    wiener_index += dist[t] as u64;
+                    reachable_pairs += 1;
+                }
+            }
+        }
+
+        (wiener_index, reachable_pairs, node_count)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -6786,6 +6861,18 @@ pub fn graph_rich_club(k: u8) -> (u32, usize, usize) {
 ///   girth = k        → shortest directed k-cycle.
 pub fn graph_girth() -> (u32, bool, usize) {
     RUNTIME.lock().graph_girth_inner()
+}
+
+/// V2.70: Wiener index of the directed graph.
+///
+/// W(G) = Σ_{u≠v, d(u,v)<∞} d(u,v)  (BFS, unweighted).
+///
+/// Returns (wiener_index, reachable_pairs, node_count).
+///   wiener_index    = sum of all finite directed pairwise distances
+///   reachable_pairs = ordered pairs (u,v) with u≠v and a directed path
+///   node_count      = live nodes
+pub fn graph_wiener() -> (u64, usize, usize) {
+    RUNTIME.lock().graph_wiener_inner()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.

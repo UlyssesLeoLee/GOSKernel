@@ -608,6 +608,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  richclub <k> / grichclub <k>  aliases for graph rich club\n");
         super::print_str(sink, "  graph girth        length of shortest directed cycle (acyclic \u{2192} DAG)\n");
         super::print_str(sink, "  ggirth             alias for graph girth\n");
+        super::print_str(sink, "  graph wiener       Wiener index W(G) = \u{2211} pairwise BFS distances + avg path length\n");
+        super::print_str(sink, "  gwiener            alias for graph wiener\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1076,6 +1078,8 @@ fn dispatch_text_command(
         super::dispatch_graph_modularity(sink);
     } else if cmd == "graph girth" || cmd == "ggirth" {
         super::dispatch_graph_girth(sink);
+    } else if cmd == "graph wiener" || cmd == "gwiener" {
+        super::dispatch_graph_wiener(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))

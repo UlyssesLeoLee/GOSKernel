@@ -2677,6 +2677,78 @@ pub fn dispatch_graph_girth(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.70: `graph wiener` / `gwiener` — Wiener index (sum of pairwise BFS distances).
+///
+/// Prints W(G), reachable pair count, average path length (W/pairs), and node count.
+/// Disconnected pairs (no directed path) are excluded from both W and the average.
+pub fn dispatch_graph_wiener(sink: &ConsoleSink) {
+    let (wiener, pairs, node_count) = gos_runtime::graph_wiener();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph wiener\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  wiener: undefined (empty graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 10, 0);
+    print_str(sink, "  W(G) = ");
+    // Print wiener_index (u64) using existing u64 helper if available, else decompose.
+    // We decompose into high/low u32 and print as decimal.
+    {
+        // Simple decimal print for u64 using a byte buffer.
+        let mut buf = [b'0'; 20];
+        let mut pos = 20usize;
+        let mut v = wiener;
+        if v == 0 {
+            pos -= 1;
+            buf[pos] = b'0';
+        } else {
+            while v > 0 {
+                pos -= 1;
+                buf[pos] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+        }
+        for i in pos..20 {
+            print_byte(sink, buf[i]);
+        }
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  reachable pairs = ");
+    print_num_inline(sink, pairs);
+    print_str(sink, "\n");
+
+    if pairs > 0 {
+        // Average path length: integer part + 3 decimal places
+        let avg_whole = (wiener / pairs as u64) as usize;
+        let avg_frac  = ((wiener % pairs as u64) * 1000 / pairs as u64) as usize;
+        print_str(sink, "  avg path length = ");
+        print_num_inline(sink, avg_whole);
+        print_str(sink, ".");
+        // 3-digit zero-padded fraction
+        if avg_frac < 10 {
+            print_str(sink, "00");
+        } else if avg_frac < 100 {
+            print_str(sink, "0");
+        }
+        print_num_inline(sink, avg_frac);
+        print_str(sink, "\n");
+    }
+
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
