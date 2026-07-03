@@ -2221,6 +2221,49 @@ pub fn dispatch_node_attr_list(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.61: `graph clustering` — display the global clustering coefficient.
+///
+/// Watts-Strogatz style: for each node with >= 2 undirected neighbors, counts
+/// the fraction of neighbor pairs that are connected. Expressed in ppm.
+pub fn dispatch_graph_clustering(sink: &ConsoleSink) {
+    let (clustering_ppm, n) = gos_runtime::graph_clustering();
+    set_color(sink, 11, 0);
+    print_str(sink, " graph clustering\n");
+    set_color(sink, 7, 0);
+
+    if clustering_ppm == 0 && n < 2 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  clustering: undefined (fewer than 2 nodes)\n");
+        set_color(sink, 7, 0);
+    } else if clustering_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  clustering: 0%  (0 ppm) — no triangles\n");
+        set_color(sink, 7, 0);
+    } else {
+        let pct_int  = clustering_ppm / 10_000;
+        let pct_frac = (clustering_ppm % 10_000) / 100;
+        set_color(sink, 10, 0);
+        print_str(sink, "  clustering: ");
+        print_num_inline(sink, pct_int as usize);
+        print_str(sink, ".");
+        if pct_frac < 10 { print_str(sink, "0"); }
+        print_num_inline(sink, pct_frac as usize);
+        print_str(sink, "%");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (");
+        print_num_inline(sink, clustering_ppm as usize);
+        print_str(sink, " ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, n);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

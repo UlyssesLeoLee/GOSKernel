@@ -596,6 +596,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  mst / gmst         aliases for graph mst\n");
         super::print_str(sink, "  graph density      E / (N*(N-1)) sparsity metric — how interconnected the graph is\n");
         super::print_str(sink, "  density / gdensity aliases for graph density\n");
+        super::print_str(sink, "  graph clustering   Watts-Strogatz global clustering coefficient (triangle density ppm)\n");
+        super::print_str(sink, "  clustering / gcluster  aliases for graph clustering\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
@@ -1048,6 +1050,8 @@ fn dispatch_text_command(
         super::dispatch_graph_attractor(sink);
     } else if cmd == "graph density" || cmd == "density" || cmd == "gdensity" {
         super::dispatch_graph_density(sink);
+    } else if cmd == "graph clustering" || cmd == "clustering" || cmd == "gcluster" {
+        super::dispatch_graph_clustering(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph flow ")
         .or_else(|| cmd.strip_prefix("flow "))

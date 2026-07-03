@@ -956,6 +956,71 @@ impl GraphRuntime {
         count
     }
 
+    /// V2.61: Global graph clustering coefficient (Watts-Strogatz style).
+    /// For each node v with >= 2 undirected neighbors, counts edge-pairs among
+    /// those neighbors (treating directed edges as undirected).
+    /// Returns (clustering_ppm, total_node_count).
+    /// clustering_ppm = total_triangle_pairs * 1_000_000 / total_pair_triplets.
+    /// Returns (0, n) when no node has >= 2 neighbors (metric undefined).
+    pub fn graph_clustering_inner(&self) -> (u32, usize) {
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        let mut total_triangles: u64 = 0;
+        let mut total_triplets: u64 = 0;
+
+        for slot in 0..MAX_NODES {
+            let record = match self.nodes[slot] {
+                Some(ref r) => r,
+                None => continue,
+            };
+            let vid = record.spec.node_id;
+
+            // Collect undirected neighbors (deduplicated, self excluded).
+            let mut neighbors = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !neighbors[..nb].contains(&other) {
+                    neighbors[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+
+            if nb < 2 { continue; }
+
+            let k = nb as u64;
+            total_triplets += k * (k - 1) / 2;
+
+            // Count edges among neighbors (undirected), one per unordered pair.
+            for i in 0..nb {
+                for j in (i + 1)..nb {
+                    let b = neighbors[i];
+                    let c = neighbors[j];
+                    let connected = self.edges.iter().flatten().any(|e| {
+                        (e.spec.from_node == b && e.spec.to_node == c)
+                            || (e.spec.from_node == c && e.spec.to_node == b)
+                    });
+                    if connected {
+                        total_triangles += 1;
+                    }
+                }
+            }
+        }
+
+        if total_triplets == 0 {
+            return (0, n);
+        }
+        let ppm = ((total_triangles * 1_000_000) / total_triplets).min(1_000_000) as u32;
+        (ppm, n)
+    }
+
     /// V2.60: List all nodes that have a u8 attribute set.
     /// Fills `out_vec` / `out_val` in table order, skipping free (ZERO) slots.
     /// Returns the number of entries written (≤ N).
@@ -5971,6 +6036,13 @@ pub fn node_attr_list<const N: usize>(
 /// parts-per-million (0 = empty/undefined, 1_000_000 = complete graph).
 pub fn graph_density() -> (u32, usize, usize) {
     RUNTIME.lock().graph_density_inner()
+}
+
+/// V2.61: Global graph clustering coefficient (Watts-Strogatz style).
+/// Returns (clustering_ppm, node_count) where clustering_ppm is in
+/// parts-per-million (0 = no triplets/undefined, 1_000_000 = fully clustered).
+pub fn graph_clustering() -> (u32, usize) {
+    RUNTIME.lock().graph_clustering_inner()
 }
 
 /// V2.60: List all nodes that have a u8 attribute set.
