@@ -618,6 +618,10 @@ fn dispatch_text_command(
         super::print_str(sink, "  gcenter            alias for graph center\n");
         super::print_str(sink, "  graph diameter     combined center+peripheral view: radius/diameter + core/boundary nodes\n");
         super::print_str(sink, "  gdiameter          alias for graph diameter\n");
+        super::print_str(sink, "  graph snapshot     save all topology metrics as a monitoring baseline\n");
+        super::print_str(sink, "  gsnapshot          alias for graph snapshot\n");
+        super::print_str(sink, "  graph compare      diff current metrics against the saved snapshot (delta view)\n");
+        super::print_str(sink, "  gcompare           alias for graph compare\n");
         super::print_str(sink, "  graph efficiency   E(G) = \u{2211} 1/d(i,j) / (n*(n-1)) \u{2014} global network efficiency\n");
         super::print_str(sink, "  geff               alias for graph efficiency\n");
         super::print_str(sink, "  graph avg clustering  (1/n)\u{2211} CC(v) \u{2014} true Watts-Strogatz per-node average\n");
@@ -1116,6 +1120,10 @@ fn dispatch_text_command(
         super::dispatch_graph_power_law(sink);
     } else if cmd == "graph diameter" || cmd == "gdiameter" {
         super::dispatch_graph_diameter(sink);
+    } else if cmd == "graph snapshot" || cmd == "gsnapshot" {
+        super::dispatch_graph_snapshot(sink);
+    } else if cmd == "graph compare" || cmd == "gcompare" {
+        super::dispatch_graph_compare(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))

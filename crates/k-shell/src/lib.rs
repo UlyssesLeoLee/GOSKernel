@@ -6476,6 +6476,261 @@ pub fn dispatch_graph_attractor(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.83: `graph snapshot` / `gsnapshot` — save current topology metrics.
+///
+/// Captures density, transitivity, avg-clustering, global/local efficiency,
+/// small-world σ, scale-free κ, and power-law γ̂ in a single atomic read,
+/// storing them in the persistent `METRIC_SNAPSHOT` slot for later comparison.
+/// Analogous to `sar -o snap.bin` (Linux sysstat) — establish a monitoring baseline.
+pub fn dispatch_graph_snapshot(sink: &ConsoleSink) {
+    let epoch_saved = gos_runtime::graph_snapshot_save();
+    let (_, cur) = gos_runtime::graph_snapshot_compare();
+
+    // Helper: print ppm as W.XXX (3 decimal places).
+    fn print_ppm3(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm / 1_000 % 1_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 10, 0);
+    print_str(sink, " graph snapshot saved\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    print_str(sink, "  epoch      = ");
+    print_num_inline(sink, epoch_saved as usize);
+    print_str(sink, "\n  nodes       = ");
+    print_num_inline(sink, cur.node_count);
+    print_str(sink, "\n  edges       = ");
+    print_num_inline(sink, cur.edge_count);
+    print_str(sink, "\n  density     = ");
+    print_ppm3(sink, cur.density_ppm as u64);
+    print_str(sink, "\n  global CC   = ");
+    print_ppm3(sink, cur.trans_ppm as u64);
+    print_str(sink, "\n  avg CC      = ");
+    print_ppm3(sink, cur.avgcc_ppm as u64);
+    print_str(sink, "\n  E_global    = ");
+    print_ppm3(sink, cur.geff_ppm);
+    print_str(sink, "\n  E_local     = ");
+    print_ppm3(sink, cur.leff_ppm as u64);
+    if cur.sigma_ppm == 0 {
+        print_str(sink, "\n  \u{03c3}           = undef");
+    } else {
+        print_str(sink, "\n  \u{03c3}           = ");
+        print_ppm3(sink, cur.sigma_ppm as u64);
+    }
+    if cur.kappa_ppm == 0 {
+        print_str(sink, "\n  \u{03ba}           = undef");
+    } else {
+        print_str(sink, "\n  \u{03ba}           = ");
+        print_ppm3(sink, cur.kappa_ppm as u64);
+    }
+    if cur.gamma_ppm == 0 {
+        print_str(sink, "\n  \u{03b3}\u{0302}           = undef");
+    } else {
+        print_str(sink, "\n  \u{03b3}\u{0302}           = ");
+        print_ppm3(sink, cur.gamma_ppm as u64);
+    }
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, "  run `graph compare` later to diff against this baseline\n");
+    set_color(sink, 7, 0);
+}
+
+/// V2.83: `graph compare` / `gcompare` — diff current metrics vs saved snapshot.
+///
+/// Shows a side-by-side table of saved vs current values with signed deltas.
+/// Ideal for monitoring topology drift after structural mutations.
+/// Analogous to `sar -s <start> -e <end>` (Linux sysstat) or `diff /proc/net/stat`.
+pub fn dispatch_graph_compare(sink: &ConsoleSink) {
+    let (saved, cur) = gos_runtime::graph_snapshot_compare();
+
+    // Helper: print ppm as W.XXX (3 decimal places).
+    fn print_ppm3(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm / 1_000 % 1_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // Helper: print signed ppm delta (+W.XXX or -W.XXX) with colour (green=+, red=-, grey=0).
+    fn print_delta_ppm(sink: &ConsoleSink, saved_ppm: u64, cur_ppm: u64) {
+        if cur_ppm == saved_ppm {
+            set_color(sink, 8, 0);
+            print_str(sink, "  \u{b1}0");
+        } else if cur_ppm > saved_ppm {
+            set_color(sink, 10, 0);
+            print_str(sink, "  +");
+            // delta may exceed u32; use u64 for safety.
+            let d = cur_ppm - saved_ppm;
+            let w = (d / 1_000_000) as usize;
+            let f = (d / 1_000 % 1_000) as usize;
+            print_num_inline(sink, w);
+            print_str(sink, ".");
+            if f < 10  { print_str(sink, "00"); }
+            else if f < 100 { print_str(sink, "0"); }
+            print_num_inline(sink, f);
+        } else {
+            set_color(sink, 12, 0);
+            print_str(sink, "  -");
+            let d = saved_ppm - cur_ppm;
+            let w = (d / 1_000_000) as usize;
+            let f = (d / 1_000 % 1_000) as usize;
+            print_num_inline(sink, w);
+            print_str(sink, ".");
+            if f < 10  { print_str(sink, "00"); }
+            else if f < 100 { print_str(sink, "0"); }
+            print_num_inline(sink, f);
+        }
+        set_color(sink, 7, 0);
+    }
+
+    // Helper: print signed count delta with colour.
+    fn print_delta_count(sink: &ConsoleSink, saved_n: usize, cur_n: usize) {
+        if cur_n == saved_n {
+            set_color(sink, 8, 0);
+            print_str(sink, "  \u{b1}0");
+        } else if cur_n > saved_n {
+            set_color(sink, 10, 0);
+            print_str(sink, "  +");
+            print_num_inline(sink, cur_n - saved_n);
+        } else {
+            set_color(sink, 12, 0);
+            print_str(sink, "  -");
+            print_num_inline(sink, saved_n - cur_n);
+        }
+        set_color(sink, 7, 0);
+    }
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph compare\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if !saved.valid {
+        set_color(sink, 14, 0);
+        print_str(sink, "  no baseline — run `graph snapshot` first\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  metric       saved        current      delta\n");
+    set_color(sink, 7, 0);
+
+    // nodes
+    print_str(sink, "  nodes        ");
+    print_num_inline(sink, saved.node_count);
+    print_str(sink, "            ");
+    print_num_inline(sink, cur.node_count);
+    print_delta_count(sink, saved.node_count, cur.node_count);
+    print_str(sink, "\n");
+
+    // edges
+    print_str(sink, "  edges        ");
+    print_num_inline(sink, saved.edge_count);
+    print_str(sink, "            ");
+    print_num_inline(sink, cur.edge_count);
+    print_delta_count(sink, saved.edge_count, cur.edge_count);
+    print_str(sink, "\n");
+
+    // density
+    print_str(sink, "  density      ");
+    print_ppm3(sink, saved.density_ppm as u64);
+    print_str(sink, "        ");
+    print_ppm3(sink, cur.density_ppm as u64);
+    print_delta_ppm(sink, saved.density_ppm as u64, cur.density_ppm as u64);
+    print_str(sink, "\n");
+
+    // global CC
+    print_str(sink, "  global CC    ");
+    print_ppm3(sink, saved.trans_ppm as u64);
+    print_str(sink, "        ");
+    print_ppm3(sink, cur.trans_ppm as u64);
+    print_delta_ppm(sink, saved.trans_ppm as u64, cur.trans_ppm as u64);
+    print_str(sink, "\n");
+
+    // avg CC
+    print_str(sink, "  avg CC       ");
+    print_ppm3(sink, saved.avgcc_ppm as u64);
+    print_str(sink, "        ");
+    print_ppm3(sink, cur.avgcc_ppm as u64);
+    print_delta_ppm(sink, saved.avgcc_ppm as u64, cur.avgcc_ppm as u64);
+    print_str(sink, "\n");
+
+    // E_global
+    print_str(sink, "  E_global     ");
+    print_ppm3(sink, saved.geff_ppm);
+    print_str(sink, "        ");
+    print_ppm3(sink, cur.geff_ppm);
+    print_delta_ppm(sink, saved.geff_ppm, cur.geff_ppm);
+    print_str(sink, "\n");
+
+    // E_local
+    print_str(sink, "  E_local      ");
+    print_ppm3(sink, saved.leff_ppm as u64);
+    print_str(sink, "        ");
+    print_ppm3(sink, cur.leff_ppm as u64);
+    print_delta_ppm(sink, saved.leff_ppm as u64, cur.leff_ppm as u64);
+    print_str(sink, "\n");
+
+    // sigma
+    print_str(sink, "  \u{03c3}            ");
+    if saved.sigma_ppm == 0 { print_str(sink, "undef"); } else { print_ppm3(sink, saved.sigma_ppm as u64); }
+    print_str(sink, "        ");
+    if cur.sigma_ppm == 0   { print_str(sink, "undef"); } else { print_ppm3(sink, cur.sigma_ppm as u64); }
+    print_delta_ppm(sink, saved.sigma_ppm as u64, cur.sigma_ppm as u64);
+    print_str(sink, "\n");
+
+    // kappa
+    print_str(sink, "  \u{03ba}            ");
+    if saved.kappa_ppm == 0 { print_str(sink, "undef"); } else { print_ppm3(sink, saved.kappa_ppm as u64); }
+    print_str(sink, "        ");
+    if cur.kappa_ppm == 0   { print_str(sink, "undef"); } else { print_ppm3(sink, cur.kappa_ppm as u64); }
+    print_delta_ppm(sink, saved.kappa_ppm as u64, cur.kappa_ppm as u64);
+    print_str(sink, "\n");
+
+    // gamma
+    print_str(sink, "  \u{03b3}\u{0302}            ");
+    if saved.gamma_ppm == 0 { print_str(sink, "undef"); } else { print_ppm3(sink, saved.gamma_ppm as u64); }
+    print_str(sink, "        ");
+    if cur.gamma_ppm == 0   { print_str(sink, "undef"); } else { print_ppm3(sink, cur.gamma_ppm as u64); }
+    print_delta_ppm(sink, saved.gamma_ppm as u64, cur.gamma_ppm as u64);
+    print_str(sink, "\n");
+
+    // Footer: epoch range.
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  epoch: ");
+    print_num_inline(sink, saved.epoch as usize);
+    print_str(sink, " \u{2192} ");
+    print_num_inline(sink, cur.epoch as usize);
+    if cur.epoch == saved.epoch {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no structural mutations since snapshot)");
+    } else {
+        let adv = cur.epoch - saved.epoch;
+        set_color(sink, 14, 0);
+        print_str(sink, "  (epoch advanced by ");
+        print_num_inline(sink, adv as usize);
+        print_str(sink, ")");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

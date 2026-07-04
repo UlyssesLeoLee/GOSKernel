@@ -4181,6 +4181,36 @@ impl GraphRuntime {
         (gamma_ppm.min(u32::MAX as u64) as u32, n_fit, n)
     }
 
+    /// V2.83: Capture all topology metrics in one RUNTIME lock hold.
+    ///
+    /// Used by `graph_snapshot_save` and `graph_snapshot_compare`.
+    /// Calling all inner methods here avoids repeated lock acquisitions and
+    /// ensures the metrics are consistent with one another (same graph epoch).
+    fn graph_snapshot_inner(&self) -> MetricSnapshot {
+        let (density_ppm, node_count, edge_count) = self.graph_density_inner();
+        let (trans_ppm, _, _, _)                   = self.graph_transitivity_inner();
+        let (avgcc_ppm, _, _)                       = self.graph_avg_clustering_inner();
+        let (geff_ppm, _, _)                        = self.graph_global_efficiency_inner();
+        let (leff_ppm, _, _)                        = self.graph_local_efficiency_inner();
+        let (sigma_ppm, _, _, _, _, _)              = self.graph_small_world_inner();
+        let (kappa_ppm, _, _, _, _)                 = self.graph_scale_free_inner();
+        let (gamma_ppm, _, _)                       = self.graph_power_law_inner();
+        MetricSnapshot {
+            valid: true,
+            epoch: self.graph_epoch,
+            node_count,
+            edge_count,
+            density_ppm,
+            trans_ppm,
+            avgcc_ppm,
+            geff_ppm,
+            leff_ppm,
+            sigma_ppm,
+            kappa_ppm,
+            gamma_ppm,
+        }
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -8468,6 +8498,84 @@ pub fn graph_scale_free() -> (u32, u32, u32, usize, usize) {
 /// Regular graphs: γ > 1 + n/ln(k)^{-1}; pure stars: γ >> 3.
 pub fn graph_power_law() -> (u32, usize, usize) {
     RUNTIME.lock().graph_power_law_inner()
+}
+
+/// V2.83: Snapshot of all topology metrics captured at a single point in time.
+///
+/// Produced by `graph_snapshot_save` and returned by `graph_snapshot_compare`.
+/// All ppm fields are ×1_000_000 (parts-per-million integer representation).
+#[derive(Copy, Clone)]
+pub struct MetricSnapshot {
+    /// false only for the initial unset static; true after first `graph_snapshot_save`.
+    pub valid: bool,
+    /// `graph_epoch` at time of save (bumped by every structural mutation).
+    pub epoch: u64,
+    /// Total live nodes.
+    pub node_count: usize,
+    /// Total directed edges.
+    pub edge_count: usize,
+    /// Graph density × 1_000_000.
+    pub density_ppm: u32,
+    /// Global transitivity (3×triangles/triplets) × 1_000_000.
+    pub trans_ppm: u32,
+    /// Average clustering coefficient (Watts-Strogatz) × 1_000_000.
+    pub avgcc_ppm: u32,
+    /// Global efficiency E(G) × 1_000_000  (u64: same width as `graph_global_efficiency`).
+    pub geff_ppm: u64,
+    /// Local efficiency E_loc(G) × 1_000_000.
+    pub leff_ppm: u32,
+    /// Small-world coefficient σ × 1_000_000  (0 = undefined/insufficient connectivity).
+    pub sigma_ppm: u32,
+    /// Degree heterogeneity index κ × 1_000_000  (0 = no edges).
+    pub kappa_ppm: u32,
+    /// Power-law exponent γ̂ × 1_000_000  (0 = undefined: all k=1 or no edges).
+    pub gamma_ppm: u32,
+}
+
+static METRIC_SNAPSHOT: Mutex<MetricSnapshot> = Mutex::new(MetricSnapshot {
+    valid:       false,
+    epoch:       0,
+    node_count:  0,
+    edge_count:  0,
+    density_ppm: 0,
+    trans_ppm:   0,
+    avgcc_ppm:   0,
+    geff_ppm:    0,
+    leff_ppm:    0,
+    sigma_ppm:   0,
+    kappa_ppm:   0,
+    gamma_ppm:   0,
+});
+
+/// V2.83: Save all current topology metrics into the persistent snapshot slot.
+///
+/// Call this before a topology change (e.g. after boot or a stable operation
+/// point) to establish a baseline; then use `graph_snapshot_compare` to diff
+/// the baseline against the live metrics at any later time.
+///
+/// All metrics are computed inside a single RUNTIME lock hold (consistent epoch).
+/// Returns the `graph_epoch` at which the snapshot was captured.
+pub fn graph_snapshot_save() -> u64 {
+    let snap = RUNTIME.lock().graph_snapshot_inner();
+    let epoch = snap.epoch;
+    *METRIC_SNAPSHOT.lock() = snap;
+    epoch
+}
+
+/// V2.83: Compare the saved metric snapshot against the current live metrics.
+///
+/// Returns `(saved, current)`:
+/// - `saved`   — the snapshot from the last `graph_snapshot_save` call;
+///              `saved.valid == false` if no snapshot has been saved yet.
+/// - `current` — metrics computed right now (always `valid == true`).
+///
+/// Both are computed / retrieved under separate lock acquisitions, so they
+/// may differ by a race if the graph changes concurrently — but for the
+/// interactive shell use-case this is fine.
+pub fn graph_snapshot_compare() -> (MetricSnapshot, MetricSnapshot) {
+    let saved   = *METRIC_SNAPSHOT.lock();
+    let current = RUNTIME.lock().graph_snapshot_inner();
+    (saved, current)
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
