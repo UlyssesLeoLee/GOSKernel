@@ -7162,6 +7162,156 @@ impl GraphRuntime {
 
         (from_vecs, to_vecs, bridge_count, node_count)
     }
+
+    /// V2.87: Eulerian path/circuit detection (directed graph).
+    ///
+    /// Returns `(has_circuit, has_path, start_vec, end_vec, node_count)`:
+    /// - `has_circuit` — Eulerian circuit exists: all edges traversable in a
+    ///   closed walk.  Conditions: weakly connected + every node balanced
+    ///   (in_degree == out_degree).
+    /// - `has_path`    — Eulerian path (non-circuit) exists: exactly one node
+    ///   with out-in=1 (start), exactly one with in-out=1 (end), all others
+    ///   balanced, and weakly connected.  Mutually exclusive with has_circuit.
+    /// - `start_vec`   — start node vector for path; zero when has_circuit or
+    ///   neither.
+    /// - `end_vec`     — end node vector for path; zero when has_circuit or
+    ///   neither.
+    /// - `node_count`  — total live nodes.
+    ///
+    /// Isolated nodes (no edges) are excluded from connectivity and degree
+    /// checks (they contribute nothing to any traversal).
+    /// Vacuous case (no edges): has_circuit=true (empty walk).
+    ///
+    /// Algorithm: one edge scan for degrees, one undirected BFS for weak
+    /// connectivity.  O(V+E).
+    pub fn graph_eulerian_inner(
+        &self,
+    ) -> (bool, bool, VectorAddress, VectorAddress, usize) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+
+        // Compact live nodes.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Degree census: directed in/out per slot.
+        let mut out_deg = [0u16; MAX_NODES];
+        let mut in_deg  = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if let Some(fs) = self.node_slot_by_id(edge.spec.from_node) {
+                out_deg[fs] = out_deg[fs].saturating_add(1);
+            }
+            if let Some(ts) = self.node_slot_by_id(edge.spec.to_node) {
+                in_deg[ts] = in_deg[ts].saturating_add(1);
+            }
+        }
+
+        // Collect active (non-isolated) nodes.
+        let mut active_slots = [0usize; MAX_NODES];
+        let mut active_count = 0usize;
+        for ki in 0..node_count {
+            let s = node_slots[ki];
+            if out_deg[s] > 0 || in_deg[s] > 0 {
+                active_slots[active_count] = s;
+                active_count += 1;
+            }
+        }
+
+        // Vacuous case: no edges → trivial Eulerian circuit (empty walk).
+        if active_count == 0 {
+            return (true, false, zero, zero, node_count);
+        }
+
+        // Degree-balance check.
+        let mut start_slot    = MAX_NODES;
+        let mut end_slot      = MAX_NODES;
+        let mut imbalanced    = 0usize;
+        let mut path_possible = true;
+
+        for ki in 0..active_count {
+            let s    = active_slots[ki];
+            let diff = (out_deg[s] as i32) - (in_deg[s] as i32);
+            match diff {
+                0 => {}          // balanced — ok for circuit or path
+                1 => {           // potential start of path
+                    if start_slot == MAX_NODES { start_slot = s; } else { path_possible = false; }
+                    imbalanced += 1;
+                }
+                -1 => {          // potential end of path
+                    if end_slot == MAX_NODES { end_slot = s; } else { path_possible = false; }
+                    imbalanced += 1;
+                }
+                _ => {           // |diff| >= 2 → neither
+                    path_possible = false;
+                    imbalanced   += 1;
+                }
+            }
+        }
+
+        let circuit_degree_ok = imbalanced == 0;
+        let path_degree_ok    = path_possible
+            && imbalanced == 2
+            && start_slot != MAX_NODES
+            && end_slot   != MAX_NODES;
+
+        if !circuit_degree_ok && !path_degree_ok {
+            return (false, false, zero, zero, node_count);
+        }
+
+        // Weak-connectivity check: undirected BFS from first active node.
+        let mut visited   = [false; MAX_NODES];
+        let mut bfs_queue = [0usize; MAX_NODES];
+        let mut bfs_head  = 0usize;
+        let mut bfs_tail  = 0usize;
+
+        let root = active_slots[0];
+        visited[root]        = true;
+        bfs_queue[bfs_tail]  = root;
+        bfs_tail            += 1;
+
+        while bfs_head < bfs_tail {
+            let cur_slot = bfs_queue[bfs_head]; bfs_head += 1;
+            let cur_id   = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                let nbr_id = if edge.spec.from_node == cur_id {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == cur_id {
+                    edge.spec.from_node
+                } else {
+                    continue
+                };
+                let nbr_slot = match self.node_slot_by_id(nbr_id) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot || visited[nbr_slot] { continue; }
+                visited[nbr_slot] = true;
+                if bfs_tail < MAX_NODES {
+                    bfs_queue[bfs_tail] = nbr_slot;
+                    bfs_tail           += 1;
+                }
+            }
+        }
+
+        for ki in 0..active_count {
+            if !visited[active_slots[ki]] {
+                return (false, false, zero, zero, node_count);
+            }
+        }
+
+        // Connectivity confirmed.
+        if circuit_degree_ok {
+            return (true, false, zero, zero, node_count);
+        }
+
+        let start_vec = self.nodes[start_slot].map(|r| r.vector).unwrap_or(zero);
+        let end_vec   = self.nodes[end_slot].map(|r| r.vector).unwrap_or(zero);
+        (false, true, start_vec, end_vec, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -9325,6 +9475,32 @@ pub fn graph_articulation<const N: usize>() -> ([VectorAddress; N], usize, usize
 /// N controls the output buffer depth (cap at MAX_EDGES = 512).
 pub fn graph_bridges<const N: usize>() -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_bridges_inner()
+}
+
+/// V2.87: Eulerian path/circuit detection for the live kernel graph.
+///
+/// Returns `(has_circuit, has_path, start_vec, end_vec, node_count)`.
+///
+/// `has_circuit`: closed walk traversing every edge exactly once exists.
+///   Conditions: weakly connected (ignoring isolated nodes) AND every node
+///   satisfies in_degree == out_degree.
+///
+/// `has_path`: open walk traversing every edge exactly once exists.
+///   Conditions: weakly connected AND exactly one node has out−in=1 (start)
+///   AND exactly one has in−out=1 (end).  Mutually exclusive with has_circuit.
+///
+/// `start_vec` / `end_vec`: vectors of path endpoints; zero when has_circuit
+///   or neither.
+///
+/// Isolated nodes are excluded from the analysis.
+/// Vacuous (no edges): has_circuit=true (empty closed walk).
+///
+/// Algorithm: O(V+E) — one edge-degree scan + one undirected BFS.
+/// OS analogy: can a maintenance daemon visit every IPC channel exactly once
+/// and return to base (circuit) or traverse the whole message bus end-to-end
+/// (path)?  Equivalent to asking whether a network audit walk is possible.
+pub fn graph_eulerian() -> (bool, bool, VectorAddress, VectorAddress, usize) {
+    RUNTIME.lock().graph_eulerian_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

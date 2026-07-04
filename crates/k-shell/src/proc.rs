@@ -1130,6 +1130,8 @@ fn dispatch_text_command(
         super::dispatch_graph_articulation(sink);
     } else if cmd == "graph bridges" || cmd == "gbridges" || cmd == "cut edges" || cmd == "gcute" {
         super::dispatch_graph_bridges(sink);
+    } else if cmd == "graph eulerian" || cmd == "geulerian" || cmd == "eulerian" || cmd == "euler" {
+        super::dispatch_graph_eulerian(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph predict ")
         .or_else(|| cmd.strip_prefix("gpredict "))

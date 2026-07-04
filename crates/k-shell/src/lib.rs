@@ -6966,6 +6966,70 @@ pub fn dispatch_graph_bridges(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.87: `graph eulerian` — Eulerian path/circuit detection.
+/// Checks whether the directed live kernel graph admits an Eulerian circuit
+/// (closed walk visiting every edge exactly once) or Eulerian path (open walk).
+/// OS analogy: can a maintenance daemon visit every IPC channel exactly once
+/// and return to base (circuit), or perform a complete single-pass audit
+/// (path)?
+pub fn dispatch_graph_eulerian(sink: &ConsoleSink) {
+    let (has_circuit, has_path, start_vec, end_vec, node_count) =
+        gos_runtime::graph_eulerian();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph eulerian\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if has_circuit {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{2713} Eulerian circuit exists\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  every edge can be traversed exactly once in a closed walk\n");
+        print_str(sink, "  (any node may serve as start/end)\n");
+    } else if has_path {
+        set_color(sink, 14, 0);
+        print_str(sink, "  \u{2713} Eulerian path exists (not a circuit)\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  start  ");
+        set_color(sink, 10, 0);
+        let mut buf = LineBuf::<20>::new();
+        buf.push_vector(start_vec);
+        let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+        print_str(sink, s);
+        set_color(sink, 7, 0);
+        print_str(sink, "   end  ");
+        set_color(sink, 12, 0);
+        let mut buf2 = LineBuf::<20>::new();
+        buf2.push_vector(end_vec);
+        let s2 = core::str::from_utf8(buf2.as_slice()).unwrap_or("?");
+        print_str(sink, s2);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  every edge traversable exactly once in a single open walk\n");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "  \u{2717} no Eulerian path or circuit\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  graph is disconnected or degree imbalance > 1\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  nodes: ");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
