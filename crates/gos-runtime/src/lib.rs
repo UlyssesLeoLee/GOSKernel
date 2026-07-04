@@ -6732,6 +6732,146 @@ impl GraphRuntime {
             tick: self.tick,
         })
     }
+
+    /// V2.84: Link prediction metrics for node pair (u, v).
+    ///
+    /// Four classical scores predict whether a missing edge u→v is likely to form:
+    ///   CN  = |N(u) ∩ N(v)|                           (common neighbours count)
+    ///   Jaccard = CN / |N(u) ∪ N(v)| × 1_000_000     (normalised overlap, ppm)
+    ///   AA  = Σ_{w∈CN} 1_000_000/ln(deg(w)) × 1_000_000 (Adamic-Adar, ppm; skips deg≤1)
+    ///   RA  = Σ_{w∈CN} 1_000_000/deg(w)               (Resource Allocation, ppm)
+    ///
+    /// Neighbourhood N(u) is undirected: w∈N(u) if edge u→w or w→u exists.
+    /// u and v are excluded from each other's neighbourhoods.
+    /// Degenerate (u == v) → all zeros.
+    ///
+    /// Returns (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count).
+    pub fn graph_link_predict_inner(
+        &self,
+        u: VectorAddress,
+        v: VectorAddress,
+    ) -> (usize, u32, u32, u32, usize) {
+        // LN_TABLE[k] = floor(ln(k) × 1_000_000), k ∈ [0..128].
+        // LN_TABLE[0] = 0; LN_TABLE[1] = 0 (ln(1)=0 → skip in AA).
+        const LN_TABLE: [u32; 129] = [
+            0,
+            0,         693_147, 1_098_612, 1_386_294, 1_609_437,
+            1_791_759, 1_945_910, 2_079_441, 2_197_224, 2_302_585,
+            2_397_895, 2_484_906, 2_564_949, 2_639_057, 2_708_050,
+            2_772_588, 2_833_213, 2_890_371, 2_944_438, 2_995_732,
+            3_044_522, 3_091_042, 3_135_494, 3_178_053, 3_218_875,
+            3_258_096, 3_295_836, 3_332_204, 3_367_295, 3_401_197,
+            3_433_987, 3_465_735, 3_496_508, 3_526_360, 3_555_348,
+            3_583_518, 3_610_917, 3_637_586, 3_663_562, 3_688_879,
+            3_713_572, 3_737_669, 3_761_200, 3_784_189, 3_806_662,
+            3_828_641, 3_850_147, 3_871_201, 3_891_820, 3_912_023,
+            3_931_826, 3_951_244, 3_970_292, 3_988_984, 4_007_333,
+            4_025_351, 4_043_051, 4_060_443, 4_077_537, 4_094_344,
+            4_110_874, 4_127_134, 4_143_134, 4_158_883, 4_174_387,
+            4_189_654, 4_204_692, 4_219_507, 4_234_107, 4_248_494,
+            4_262_679, 4_276_666, 4_290_459, 4_304_064, 4_317_488,
+            4_330_733, 4_343_805, 4_356_708, 4_369_447, 4_382_026,
+            4_394_449, 4_406_719, 4_418_841, 4_430_817, 4_442_651,
+            4_454_347, 4_465_908, 4_477_337, 4_488_636, 4_499_810,
+            4_510_860, 4_521_789, 4_532_599, 4_543_294, 4_553_877,
+            4_564_348, 4_574_711, 4_584_967, 4_595_119, 4_605_170,
+            4_615_121, 4_624_972, 4_634_728, 4_644_391, 4_653_960,
+            4_663_439, 4_672_829, 4_682_131, 4_691_348, 4_700_480,
+            4_709_530, 4_718_498, 4_727_388, 4_736_198, 4_744_932,
+            4_753_590, 4_762_174, 4_770_685, 4_779_123, 4_787_491,
+            4_795_791, 4_804_021, 4_812_184, 4_820_281, 4_828_313,
+            4_836_281, 4_844_187, 4_852_030,
+        ];
+
+        // Count live nodes.
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_count += 1;
+            }
+        }
+
+        // Resolve slots; return zeros for unknown vectors.
+        let u_slot = match self.node_slot_by_vec(u) { Some(s) => s, None => return (0, 0, 0, 0, node_count) };
+        let v_slot = match self.node_slot_by_vec(v) { Some(s) => s, None => return (0, 0, 0, 0, node_count) };
+        if u_slot == v_slot { return (0, 0, 0, 0, node_count); }
+
+        // Build undirected neighbour bit-vectors (MAX_NODES=128 → 2 × u64).
+        let mut nbr_u = [0u64; 2];
+        let mut nbr_v = [0u64; 2];
+        // Per-slot total undirected degree (self-loops count once).
+        let mut deg = [0u32; MAX_NODES];
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+
+            // Undirected neighbourhood membership.
+            if fs == u_slot && ts != u_slot { nbr_u[ts / 64] |= 1u64 << (ts % 64); }
+            if ts == u_slot && fs != u_slot { nbr_u[fs / 64] |= 1u64 << (fs % 64); }
+            if fs == v_slot && ts != v_slot { nbr_v[ts / 64] |= 1u64 << (ts % 64); }
+            if ts == v_slot && fs != v_slot { nbr_v[fs / 64] |= 1u64 << (fs % 64); }
+
+            // Degree: self-loops count once; other edges count for both endpoints.
+            if fs == ts {
+                deg[fs] = deg[fs].saturating_add(1);
+            } else {
+                deg[fs] = deg[fs].saturating_add(1);
+                deg[ts] = deg[ts].saturating_add(1);
+            }
+        }
+
+        // Exclude u and v themselves from each other's neighbourhood sets.
+        nbr_u[u_slot / 64] &= !(1u64 << (u_slot % 64));
+        nbr_u[v_slot / 64] &= !(1u64 << (v_slot % 64));
+        nbr_v[u_slot / 64] &= !(1u64 << (u_slot % 64));
+        nbr_v[v_slot / 64] &= !(1u64 << (v_slot % 64));
+
+        // CN = |intersection|; |union| for Jaccard denominator.
+        let inter0 = nbr_u[0] & nbr_v[0];
+        let inter1 = nbr_u[1] & nbr_v[1];
+        let union0 = nbr_u[0] | nbr_v[0];
+        let union1 = nbr_u[1] | nbr_v[1];
+
+        let cn = (inter0.count_ones() + inter1.count_ones()) as usize;
+        let un = (union0.count_ones() + union1.count_ones()) as usize;
+
+        let jaccard_ppm: u32 = if un == 0 {
+            0
+        } else {
+            ((cn as u64 * 1_000_000) / un as u64) as u32
+        };
+
+        // AA and RA: iterate over common-neighbour slots via bit-scan.
+        let mut aa_acc: u64 = 0;
+        let mut ra_acc: u64 = 0;
+
+        for word in 0..2usize {
+            let mut bits = if word == 0 { inter0 } else { inter1 };
+            while bits != 0 {
+                let bit  = bits.trailing_zeros() as usize;
+                let slot = word * 64 + bit;
+                bits    &= bits - 1; // clear lowest set bit
+
+                let d   = deg[slot].min(128) as usize;
+                let ln_d = LN_TABLE[d] as u64;
+                // AA: 1/ln(d) × 1e6; LN_TABLE[d] is ln(d)×1e6 so term = 1e12/LN_TABLE[d].
+                if ln_d > 0 {
+                    aa_acc = aa_acc.saturating_add(1_000_000_000_000u64 / ln_d);
+                }
+                // RA: 1/deg(w) × 1e6.
+                if d > 0 {
+                    ra_acc = ra_acc.saturating_add(1_000_000u64 / d as u64);
+                }
+            }
+        }
+
+        let aa_ppm = aa_acc.min(u32::MAX as u64) as u32;
+        let ra_ppm = ra_acc.min(u32::MAX as u64) as u32;
+
+        (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -8576,6 +8716,26 @@ pub fn graph_snapshot_compare() -> (MetricSnapshot, MetricSnapshot) {
     let saved   = *METRIC_SNAPSHOT.lock();
     let current = RUNTIME.lock().graph_snapshot_inner();
     (saved, current)
+}
+
+/// V2.84: Link prediction metrics for node pair (u, v) — Common Neighbors, Jaccard,
+/// Adamic-Adar, and Resource Allocation.
+///
+/// Returns `(cn, jaccard_ppm, aa_ppm, ra_ppm, node_count)`:
+/// - `cn`           — common-neighbour count (integer)
+/// - `jaccard_ppm`  — Jaccard coefficient × 1_000_000; 0 when union is empty
+/// - `aa_ppm`       — Adamic-Adar index × 1_000_000; skips common neighbours with deg ≤ 1
+/// - `ra_ppm`       — Resource Allocation index × 1_000_000
+/// - `node_count`   — total live nodes
+///
+/// Score interpretation: higher → stronger prediction of a missing edge u→v.
+/// Neighbourhood is undirected; u and v are excluded from each other's sets.
+/// Returns all zeros when u == v or either vector is not registered.
+///
+/// OS analogy: `predict` in iproute2 or LLDP neighbor-table projection —
+/// which kernel subsystems are likely to form a new dependency edge?
+pub fn graph_link_predict(u: VectorAddress, v: VectorAddress) -> (usize, u32, u32, u32, usize) {
+    RUNTIME.lock().graph_link_predict_inner(u, v)
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.

@@ -6731,6 +6731,113 @@ pub fn dispatch_graph_compare(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.84: `graph predict <u> <v>` — link prediction metrics for node pair (u, v).
+///
+/// Computes four classical link-prediction scores that quantify how likely a
+/// missing edge u→v is to form, based on shared neighbourhood structure:
+///   CN  — Common Neighbors:    |N(u) \u{2229} N(v)|
+///   J   — Jaccard Coefficient: CN / |N(u) \u{222a} N(v)|
+///   AA  — Adamic-Adar index:   \u{03a3}_{w\u{2208}CN} 1/ln(deg(w))
+///   RA  — Resource Allocation: \u{03a3}_{w\u{2208}CN} 1/deg(w)
+/// All scores shown per-million (ppm).  Higher \u{2192} stronger missing-edge signal.
+/// OS analogy: LLDP / CDP neighbour prediction — which kernel subsystems are
+/// structurally primed to form a new dependency edge?
+pub fn dispatch_graph_predict(sink: &ConsoleSink, u: VectorAddress, v: VectorAddress) {
+    let (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count) =
+        gos_runtime::graph_link_predict(u, v);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph predict ");
+    let mut ubuf = LineBuf::<20>::new();
+    ubuf.push_vector(u);
+    let us = core::str::from_utf8(ubuf.as_slice()).unwrap_or("?");
+    print_str(sink, us);
+    print_str(sink, " \u{2192} ");
+    let mut vbuf = LineBuf::<20>::new();
+    vbuf.push_vector(v);
+    let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+    print_str(sink, vs);
+    print_str(sink, "\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    fn print_predict_ppm(sink: &ConsoleSink, ppm: u32) {
+        let whole = ppm / 1_000_000;
+        let frac  = ppm % 1_000_000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10       { print_str(sink, "00000"); }
+        else if frac < 100 { print_str(sink, "0000"); }
+        else if frac < 1_000 { print_str(sink, "000"); }
+        else if frac < 10_000 { print_str(sink, "00"); }
+        else if frac < 100_000 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  metric                  score    interpretation\n");
+    set_color(sink, 7, 0);
+
+    let cn_fg: u8 = if cn == 0 { 8 } else if cn >= 3 { 10 } else { 14 };
+    set_color(sink, cn_fg, 0);
+    print_str(sink, "  common neighbors        ");
+    print_num_inline(sink, cn);
+    print_str(sink, "        ");
+    if cn == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "no shared neighbours\n");
+    } else {
+        print_num_inline(sink, cn);
+        print_str(sink, " shared neighbour");
+        if cn != 1 { print_str(sink, "s"); }
+        print_str(sink, "\n");
+    }
+
+    let j_fg: u8 = if jaccard_ppm == 0 { 8 } else if jaccard_ppm >= 500_000 { 10 } else { 14 };
+    set_color(sink, j_fg, 0);
+    print_str(sink, "  jaccard coeff           ");
+    print_predict_ppm(sink, jaccard_ppm);
+    print_str(sink, "  N(u)\u{2229}N(v) / N(u)\u{222a}N(v)\n");
+
+    let aa_fg: u8 = if aa_ppm == 0 { 8 } else if aa_ppm >= 1_000_000 { 10 } else { 14 };
+    set_color(sink, aa_fg, 0);
+    print_str(sink, "  adamic-adar             ");
+    print_predict_ppm(sink, aa_ppm);
+    print_str(sink, "  \u{03a3} 1/ln(deg(w)) over CN\n");
+
+    let ra_fg: u8 = if ra_ppm == 0 { 8 } else if ra_ppm >= 500_000 { 10 } else { 14 };
+    set_color(sink, ra_fg, 0);
+    print_str(sink, "  resource allocation     ");
+    print_predict_ppm(sink, ra_ppm);
+    print_str(sink, "  \u{03a3} 1/deg(w) over CN\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    print_str(sink, " node(s)  prediction: ");
+    if cn == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "none (no shared neighbours)");
+    } else if jaccard_ppm >= 200_000 || cn >= 2 {
+        set_color(sink, 10, 0);
+        print_str(sink, "likely");
+    } else {
+        set_color(sink, 14, 0);
+        print_str(sink, "weak");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -622,6 +622,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gsnapshot          alias for graph snapshot\n");
         super::print_str(sink, "  graph compare      diff current metrics against the saved snapshot (delta view)\n");
         super::print_str(sink, "  gcompare           alias for graph compare\n");
+        super::print_str(sink, "  graph predict <u> <v>  link prediction: CN, Jaccard, Adamic-Adar, RA for node pair\n");
+        super::print_str(sink, "  gpredict <u> <v>   alias for graph predict\n");
         super::print_str(sink, "  graph efficiency   E(G) = \u{2211} 1/d(i,j) / (n*(n-1)) \u{2014} global network efficiency\n");
         super::print_str(sink, "  geff               alias for graph efficiency\n");
         super::print_str(sink, "  graph avg clustering  (1/n)\u{2211} CC(v) \u{2014} true Watts-Strogatz per-node average\n");
@@ -1124,6 +1126,29 @@ fn dispatch_text_command(
         super::dispatch_graph_snapshot(sink);
     } else if cmd == "graph compare" || cmd == "gcompare" {
         super::dispatch_graph_compare(sink);
+    } else if let Some(pair_str) = cmd
+        .strip_prefix("graph predict ")
+        .or_else(|| cmd.strip_prefix("gpredict "))
+        .or_else(|| cmd.strip_prefix("link predict "))
+        .or_else(|| cmd.strip_prefix("predict "))
+    {
+        let trimmed = pair_str.trim();
+        if let Some(space) = trimmed.find(' ') {
+            let u_s = trimmed[..space].trim();
+            let v_s = trimmed[space + 1..].trim();
+            match (gos_protocol::VectorAddress::parse(u_s), gos_protocol::VectorAddress::parse(v_s)) {
+                (Some(u), Some(v)) => super::dispatch_graph_predict(sink, u, v),
+                _ => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " graph predict: expected <u> <v> (e.g. graph predict 1.0.0.1 1.0.0.2)\n");
+                    super::set_color(sink, 7, 0);
+                }
+            }
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " graph predict: expected <u> <v> (e.g. graph predict 1.0.0.1 1.0.0.2)\n");
+            super::set_color(sink, 7, 0);
+        }
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))
