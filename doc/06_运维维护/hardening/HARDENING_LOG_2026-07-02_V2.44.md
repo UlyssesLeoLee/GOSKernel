@@ -1,132 +1,106 @@
-# HARDENING LOG — V2.44: `graph hits`
-**Date:** 2026-07-02  
-**Branch:** `feat/vk-auto-live-surface` (automated hardening)  
-**Version:** V2.44  
-**Prior version:** V2.43 (graph pagerank — random-walk stationary distribution)
+# GOS 硬化日志 — V2.44（2026-07-02）
+
+## 版本号: V2.44
+## 功能: `graph hits` — Kleinberg HITS hub/authority 二部图分解
 
 ---
 
-## 变更摘要 / Change Summary
+## 变更摘要
 
-新增 `graph hits` shell 命令及底层 `gos_runtime::graph_hits` API，实现 Kleinberg HITS 算法（hub/authority 二部图分解），并新建 `gos-graph-hits-harness`（10 个宿主测试）。
-
-Added `graph hits` shell command and `gos_runtime::graph_hits` public API — Kleinberg's HITS (Hyperlink-Induced Topic Search) hub/authority bipartite decomposition — plus `gos-graph-hits-harness` (10 host tests).
+新增 `graph hits` shell 命令及底层 `gos_runtime::graph_hits` API，实现 Kleinberg HITS（Hyperlink-Induced Topic Search）算法的 hub/authority 二部图分解，并新建 `gos-graph-hits-harness`（10 个宿主测试）。
 
 ---
 
-## 动机 / Motivation
+## 动机
 
 至此图论中心性系列算法覆盖三种经典视角：
 
-| V2.42 Katz   | 所有路径长度的 walk 数量（原始影响力）         |
-| V2.43 PageRank | 随机游走稳定分布（归一化权威性）             |
-| V2.44 HITS     | 二部图分解：哪些节点是最好的"指针"，哪些节点是最被引用的"目标" |
+| 版本 | 算法 | 含义 |
+|------|------|------|
+| V2.42 Katz | 所有路径长度的 walk 数量 | 原始影响力 |
+| V2.43 PageRank | 随机游走稳定分布 | 归一化权威性 |
+| V2.44 HITS | 二部图分解 | 哪些节点是最好的"指针"，哪些节点是最被引用的"目标" |
 
 HITS 与 PageRank 的核心区别：PageRank 只给每个节点一个分数；HITS 给每个节点**两个**分数（hub + authority），将图分解为"转发者"和"目标"两类，在有向二部结构（发送节点 → 服务节点）中尤为有价值。
 
-OS analogy: `vmstat` / `top` bipartite — which kernel nodes are the best signal-forwarders (**hub**) vs the most-cited signal-destinations (**authority**)?
+OS 类比：`vmstat` / `top` 的二部视图——哪些内核节点是最好的信号转发者（**hub**），哪些是被引用最多的信号目的地（**authority**）？
 
 ---
 
-## 算法 / Algorithm
+## 算法
 
-Kleinberg's HITS with L∞ normalization:
+带 L∞ 归一化的 Kleinberg HITS：
 
 ```text
-Initialise: h[v] = a[v] = SCALE for all live nodes
+初始化：h[v] = a[v] = SCALE，对所有活跃节点
 
-For each iteration (20 total):
-  new_a[v] = Σ_{u→v} h[u]          (authority = sum of in-neighbor hub scores)
-  new_h[v] = Σ_{v→w} a[w]          (hub = sum of out-neighbor authority scores)
-  [updates are simultaneous — use old h and a values]
+每轮迭代（共 20 轮）：
+  new_a[v] = Σ_{u→v} h[u]          （authority = 入邻居 hub 分数之和）
+  new_h[v] = Σ_{v→w} a[w]          （hub = 出邻居 authority 分数之和）
+  [同步更新——使用旧的 h、a 值]
 
-  max_a = max over all v of new_a[v]
-  max_h = max over all v of new_h[v]
+  max_a = 所有 v 中 new_a[v] 的最大值
+  max_h = 所有 v 中 new_h[v] 的最大值
 
-  a[v] = new_a[v] × SCALE / max_a   (if max_a > 0, else 0)
-  h[v] = new_h[v] × SCALE / max_h   (if max_h > 0, else 0)
+  a[v] = new_a[v] × SCALE / max_a   （max_a > 0 时，否则为 0）
+  h[v] = new_h[v] × SCALE / max_h   （max_h > 0 时，否则为 0）
 
-Output sorted descending by authority score.
+输出按 authority 分数降序排序。
 ```
 
-Parameters:
+参数：
 - `SCALE = 1_000_000`
 - `ITERS = 20`
-- Dangling nodes: no out-edges → hub = 0; no in-edges → auth = 0
+- 悬挂节点：无出边 → hub=0；无入边 → authority=0
 
-**Complexity:** O(K × V × E) where K=20, V ≤ 128, E ≤ 512.
+**复杂度**：O(K × V × E)，K=20，V ≤ 128，E ≤ 512。
 
-### Converged values (verified by harness)
+### 收敛值（harness 验证）
 
-| Graph shape              | hub              | authority        |
-|--------------------------|------------------|------------------|
-| Isolated node            | 0                | 0                |
-| Pure source A (A→B)      | 1,000,000        | 0                |
-| Pure sink B (A→B)        | 0                | 1,000,000        |
-| Middle of chain B (A→B→C)| 1,000,000        | 1,000,000        |
-| Star-out center A→{B,C,D}| 1,000,000        | 0                |
-| Star-in center {A,B,C}→D | 0                | 1,000,000        |
-| Mutual cycle A↔B         | 1,000,000        | 1,000,000        |
-| 3-cycle (any node)       | 1,000,000        | 1,000,000        |
-| Bipartite hub (no in)    | 1,000,000        | 0                |
-| Bipartite authority (no out) | 0            | 1,000,000        |
-
----
-
-## 修改文件 / Files Changed
-
-### `crates/gos-runtime/src/lib.rs`
-
-**Added: `GosRuntime::graph_hits_inner<N>()`** (method, ~100 lines)
-- Builds compact node-slot list
-- Initialises hub[v] = auth[v] = SCALE for all live nodes
-- 20-iteration double-buffer simultaneous update (new_auth from old hub; new_hub from old auth)
-- L∞ normalization: divide by max_auth and max_hub independently
-- Insertion sort descending by authority
-- Packs output into `([VectorAddress; N], [u32; N], [u32; N], usize)` — (vecs, hub, auth, total)
-
-**Added: `graph_hits<N>()`** (public free function)
-- Locks `RUNTIME`, calls `graph_hits_inner()`
-- Full doc comment with algorithm, OS analogy, role interpretation
-
-### `crates/k-shell/src/lib.rs`
-
-**Added: `dispatch_graph_hits(sink: &ConsoleSink)`** (~110 lines)
-- Column layout: `vector (16) | hub (6k) | authority (6k) | role`
-- Role colors:
-  - **hub+authority** ≥ 800k: magenta (e.g. cycle nodes)
-  - **authority** ≥ 800k: bright yellow
-  - **hub** ≥ 800k: cyan
-  - **isolated** < 200k both: dark grey
-  - **relay**: white (some score, but not top in either dimension)
-- Footer: node count, iteration count, top-hub count, top-authority count
-
-### `crates/k-shell/src/proc.rs`
-
-- Dispatch branch: `"graph hits"`, `"hits"`, `"graph ha"`, `"ha"`, `"hub authority"`
-
-### `host-tests/gos-graph-hits-harness/`
-
-New harness crate (isolated `[workspace]`, own `.cargo/config.toml`):
-- **10 tests** — all pass (`10 passed; 0 failed`)
-- Tests 1–2: empty graph, isolated node
-- Tests 3–6: single edge, chain, star-out, star-in
-- Tests 7–8: mutual cycle, 3-cycle
-- Tests 9–10: bipartite structure, sort order verification
+| 图结构 | hub | authority |
+|--------|-----|-----------|
+| 孤立节点 | 0 | 0 |
+| 纯源节点 A（A→B） | 1,000,000 | 0 |
+| 纯汇节点 B（A→B） | 0 | 1,000,000 |
+| 链中间节点 B（A→B→C） | 1,000,000 | 1,000,000 |
+| 扇出中心 A→{B,C,D} | 1,000,000 | 0 |
+| 扇入中心 {A,B,C}→D | 0 | 1,000,000 |
+| 互向环 A↔B | 1,000,000 | 1,000,000 |
+| 3-环（任意节点） | 1,000,000 | 1,000,000 |
+| 二部图 hub（无入边） | 1,000,000 | 0 |
+| 二部图 authority（无出边） | 0 | 1,000,000 |
 
 ---
 
-## Shell 命令 / Shell Commands
+## 实现细节
+
+### 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `crates/gos-runtime/src/lib.rs` | 新增 `GosRuntime::graph_hits_inner<N>()`（~100行，双缓冲同步更新 + L∞ 归一化）+ `graph_hits<N>()` 公开函数 |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_hits()`（~110行）：列布局 `vector \| hub \| authority \| role`；角色颜色见下表 |
+| `crates/k-shell/src/proc.rs` | 新增路由分支 `"graph hits"`、`"hits"`、`"graph ha"`、`"ha"`、`"hub authority"` |
+| `host-tests/gos-graph-hits-harness/` | 全新 harness（10 测试，均通过） |
+
+角色颜色编码：
+- **hub+authority** ≥ 800k：洋红（如环节点）
+- **authority** ≥ 800k：亮黄
+- **hub** ≥ 800k：青色
+- **isolated**（两者均 < 200k）：暗灰
+- **relay**：白色（有分数但两个维度都非最高）
+
+### Shell 命令别名
 
 ```text
-graph hits          HITS hub+authority bipartite decomposition
-hits                alias
-graph ha            alias
-ha                  alias
-hub authority       alias
+graph hits          HITS hub+authority 二部图分解
+hits                简写
+graph ha            别名
+ha                  别名
+hub authority       别名
 ```
 
-### 示例输出 / Example Output
+### 示例输出
 
 ```text
  graph hits
@@ -142,34 +116,47 @@ hub authority       alias
 
 ---
 
-## 角色语义 / Role Semantics
+## 角色语义
 
-| Role          | Hub threshold | Auth threshold | Meaning |
-|---------------|---------------|----------------|---------|
-| **hub+authority** | ≥ 800k | ≥ 800k | Symmetric role: cycle node, relay in dense structure |
-| **authority** | any | ≥ 800k | Cited by top hubs; the best signal-destinations |
-| **hub** | ≥ 800k | any | Points to top authorities; the best signal-forwarders |
-| **relay** | 200k–800k | 200k–800k | Partial structural role |
-| **isolated** | < 200k | < 200k | No in-edges and no out-edges to scored nodes |
-
----
-
-## HITS vs PageRank vs Katz / 三者对比
-
-| Metric | Katz (V2.42) | PageRank (V2.43) | HITS (V2.44) |
-|--------|--------------|------------------|--------------|
-| Scores per node | 1 (authority) | 1 (authority) | 2 (hub + authority) |
-| Normalisation | None | ÷ outdeg | L∞ per iteration |
-| Isolated nodes | 0 | 150,000 (TELE floor) | 0, 0 |
-| Cycle nodes | SCALE/7 | 1,000,000 | hub=auth=1M |
-| Best question | "most walk traffic?" | "random walk frequency?" | "pointer vs cited-target?" |
-| OS analogy | `netstat -s` | `top` | `vmstat` bipartite |
+| 角色 | hub 阈值 | authority 阈值 | 含义 |
+|------|----------|----------------|------|
+| **hub+authority** | ≥ 800k | ≥ 800k | 对称角色：环节点，稠密结构中的中继 |
+| **authority** | 任意 | ≥ 800k | 被顶级 hub 引用；最佳的信号目的地 |
+| **hub** | ≥ 800k | 任意 | 指向顶级 authority；最佳的信号转发者 |
+| **relay** | 200k–800k | 200k–800k | 部分结构角色 |
+| **isolated** | < 200k | < 200k | 无入边也无边指向已评分节点 |
 
 ---
 
-## 测试摘要 / Test Summary
+## HITS / PageRank / Katz 三者对比
 
-**Host test suite total: 443 tests** (was 433, +10)
+| 指标 | Katz（V2.42） | PageRank（V2.43） | HITS（V2.44） |
+|------|--------------|--------------------|----------------|
+| 每节点分数数 | 1（authority） | 1（authority） | 2（hub + authority） |
+| 归一化 | 无 | 除以出度 | 每轮 L∞ |
+| 孤立节点 | 0 | 150,000（传送地板值） | 0, 0 |
+| 环节点 | SCALE/7 | 1,000,000 | hub=auth=1M |
+| 最佳提问 | "最多游走流量？" | "随机游走频率？" | "指针 vs 被引用目标？" |
+| OS 类比 | `netstat -s` | `top` | `vmstat` 二部视图 |
+
+---
+
+## 测试用例（10/10 通过）
+
+| 编号 | 用例 | 验证点 |
+|------|------|--------|
+| 1 | 空图 | node_count=0 |
+| 2 | 孤立节点 | hub=0, auth=0 |
+| 3-6 | 单边 / 链 / 扇出 / 扇入 | hub/auth 分布正确 |
+| 7-8 | 互向环 / 3-环 | hub=auth=1,000,000 |
+| 9 | 二部结构 | hub、auth 分离正确 |
+| 10 | 排序验证 | 按 authority 降序 |
+
+---
+
+## 测试摘要
+
+**宿主测试套件总计：443 个**（此前 433，+10）
 
 ```text
 gos-graph-hits-harness: 10/10 ✓
@@ -177,18 +164,22 @@ gos-graph-hits-harness: 10/10 ✓
 
 ---
 
-## 不变量 / Invariants Maintained
+## 不变量确认
 
-- `graph_hits_inner` is a pure read — no epoch bump, no write operations
-- Isolated nodes: hub=0, auth=0 (distinct from Katz=0 and PageRank=150k)
-- Output always sorted descending by authority: `auth[0] ≥ auth[1] ≥ ...`
-- No alloc, no_std safe, O(K×V×E) with K=20
+- [x] `graph_hits_inner` 为纯读操作，不推进 epoch，不写运行时状态
+- [x] 孤立节点：hub=0, auth=0（区别于 Katz=0 与 PageRank=150k）
+- [x] 输出恒按 authority 降序：`auth[0] ≥ auth[1] ≥ ...`
+- [x] 无堆分配，no_std 安全，O(K×V×E)，K=20
 
 ---
 
-## 后续建议 / Next Steps
+## 后续建议
 
-- `node checkpoint <vec>` — snapshot node state to diff ring (observability)
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- `graph sim <N>` — simulate N random-walk steps, emit signal traffic trace
-- PAL_U32 → attribute node refactor (Demo A prerequisite)
+- `node checkpoint <vec>` — 快照节点状态到 diff ring（观测性）
+- `journal ring <N>` — 运行时可配置的 JournalRing 容量
+- `graph sim <N>` — 模拟 N 步随机游走，输出信号流量轨迹
+- PAL_U32 → attribute node 重构（Demo A 前置条件）
+
+---
+
+*由自动强化任务生成 · 2026-07-02*

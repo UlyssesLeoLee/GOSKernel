@@ -5,7 +5,18 @@
 
 **文档管理规范**：本次优化起，各阶段核心 Markdown 文档统一在标题下方附带文档管理票（文档编号 / 版本 / 状态 / 作成・审核・批准 / 变更履历），Excel 文档统一附带「文档管理」首页 sheet。硬化日志系列（06_运维维护/hardening/）作为历史记录，其内容不回溯改写事实，仅做归位与中文化；`doc/` 根目录保留的同名旧文件是硬化当时的原始存档，不做删除，仅供追溯对照。
 
-**本轮优化摘要（2026-07-02）**：
+**本轮优化摘要（2026-07-03）**：
+
+- 硬化日志系列存在中文化缺口：V2.43~V2.49、V2.51~V2.54 共 11 篇此前以英文写入 `06_运维维护/hardening/`，与文档管理规范「硬化日志统一中文化」矛盾。本轮已逐篇核对源码与测试数据后改写为纯中文版，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实
+- V2.50、V2.55~V2.65 共 12 篇已核对：V2.50 本轮撰写时即为纯中文，无需改动；V2.55~V2.65 共 11 篇为中英双语格式（中文段落在前、英文复述在后），中文内容完整可读，本轮判定满足「中文书写」要求，保留双语格式供代码/API 交叉核对，未做删改
+- 下表补齐此前遗漏的 V2.43~V2.65 硬化日志索引条目（此前索引仅收录至 V2.42）
+- [GRAPH_CLI_COMMANDS_zh.md](03_详细设计/GRAPH_CLI_COMMANDS_zh.md) 对照 `k-shell` 源码补齐 V2.43~V2.65 新增的图论分析命令族（PageRank/HITS/community/spanning/color/mst/shortest/flow/between/attractor）与属性存储/图健康度命令族（node attr/pal/density/clustering/transitivity/kcore/assortativity）
+- [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md)（v2.2 → v2.3）更新 §5.1 图论/图健康命令族概述，指向 GRAPH_CLI_COMMANDS_zh.md 作为权威口径
+- 核对 [implementation_plan_v0_1_zh.md](04_实施计划/implementation_plan_v0_1_zh.md)、[task_v0_1_zh.md](04_实施计划/task_v0_1_zh.md) 与最新硬化进度（V2.65，623 host tests）的一致性
+- 上一轮遗留的「V2.42 硬化日志格式统一」「doc/ 根目录旧文件跳转提示」两项待跟进事项已处理，见下文
+- 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
+
+**上一轮优化摘要（2026-07-02，存档）**：
 
 - 硬化日志系列存在大面积中文化缺口：V2.16~V2.18、V2.21~V2.33、V2.35~V2.41 共 23 篇此前以英文写入 `06_运维维护/hardening/`，与文档管理规范「硬化日志统一中文化」矛盾。本轮已逐篇核对源码与测试数据后中文化，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实
 - 发现 V2.15（`stat <vec>` 单节点详情命令）硬化日志此前只停留在 `doc/` 根目录（英文），从未归位至 `06_运维维护/hardening/`，本轮已补建中文版 [hardening/HARDENING_LOG_2026-07-01_V2.15.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.15.md)
@@ -13,7 +24,7 @@
 - 下表补齐此前遗漏的 V2.15~V2.42 硬化日志索引条目（此前索引仅收录至 V2.19，且中间跳过 V2.15~V2.18）
 - 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
 
-**上一轮优化摘要（2026-07-01，存档）**：
+**再上一轮优化摘要（2026-07-01，存档）**：
 
 - 修正 [implementation_plan_v0_1_zh.md](04_实施计划/implementation_plan_v0_1_zh.md)、[task_v0_1_zh.md](04_实施计划/task_v0_1_zh.md) 与 [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md) 之间关于 Phase A/B 完成状态的口径矛盾
 - [GITHUB_DESCRIPTION_020.md](00_项目管理/GITHUB_DESCRIPTION_020.md) 由英文全文改写为中文，并修正 `gos-loader` 定位与 crate 数量（25 → 39）
@@ -137,13 +148,38 @@
 | [hardening/HARDENING_LOG_2026-07-02_V2.40.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.40.md) | MD | V2.40 — graph closeness / closeness 命令 + 出向紧密中心性 + gos-graph-closeness-harness 10 测试（本轮中文化） |
 | [hardening/HARDENING_LOG_2026-07-02_V2.41.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.41.md) | MD | V2.41 — graph eccentricity / radius / diameter 命令 + gos-graph-eccentricity-harness 10 测试（本轮中文化） |
 | [hardening/HARDENING_LOG_2026-07-02_V2.42.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.42.md) | MD | V2.42 — graph katz 命令 + 入向 Katz 中心性 + 图论算法套件（V2.32~V2.42）收官 |
+| [hardening/HARDENING_LOG_2026-07-02_V2.43.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.43.md) | MD | V2.43 — graph pagerank 命令 + 经典 PageRank 随机游走中心性 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.44.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.44.md) | MD | V2.44 — graph hits 命令 + Kleinberg HITS hub/authority 分解 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.45.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.45.md) | MD | V2.45 — graph community 命令 + 标签传播社区发现 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.46.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.46.md) | MD | V2.46 — graph spanning 命令 + BFS 生成森林 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.47.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.47.md) | MD | V2.47 — graph color 命令 + Welsh-Powell 贪心图着色 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.48.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.48.md) | MD | V2.48 — graph mst 命令 + Prim 最小生成森林 + edge_weight 快照基础设施 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.49.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.49.md) | MD | V2.49 — graph shortest 命令 + Dijkstra 单源最短路径 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.50.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.50.md) | MD | V2.50 — graph flow 命令 + Edmonds-Karp 最大流 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-02_V2.51.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.51.md) | MD | V2.51 — node checkpoint 命令 + 节点状态快照写入 diff ring + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-02_V2.52.md](06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.52.md) | MD | V2.52 — graph sim 命令 + xorshift32 随机游走信号流量模拟 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-03_V2.53.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.53.md) | MD | V2.53 — graph between 命令 + Brandes+Dijkstra 加权介数中心性 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-03_V2.54.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.54.md) | MD | V2.54 — graph attractor 命令 + Kosaraju 缩点吸引子集合分类 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-03_V2.55.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.55.md) | MD | V2.55 — node attr set/get 命令 + 每节点 u32 属性存储（PAL_U32 图原生化第1步）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.56.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.56.md) | MD | V2.56 — 引导时为 theme.wabi/theme.shoji 节点写入调色板 u32 属性（第2步）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.57.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.57.md) | MD | V2.57 — Desktop 渲染路径改由 node_attr_get 读取调色板（第3步）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.58.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.58.md) | MD | V2.58 — node attr list 命令 + u32 属性表诊断枚举 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.59.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.59.md) | MD | V2.59 — graph density 命令 + E/(N·(N-1)) 图密度指标 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.60.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.60.md) | MD | V2.60 — node attr list u8 命令 + u8 属性表枚举（与 u32 表对称）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.61.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.61.md) | MD | V2.61 — graph clustering 命令 + Watts-Strogatz 全局聚类系数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.62.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.62.md) | MD | V2.62 — palette.cyan/palette.gold 图节点补全调色板图原生化（第4步）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.63.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.63.md) | MD | V2.63 — graph transitivity 命令 + 原始三角形/三元组计数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.64.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.64.md) | MD | V2.64 — graph kcore 命令 + Batagelj-Zaversnik k-核分解/退化度 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.65.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.65.md) | MD | V2.65 — graph assortativity 命令 + Newman(2002) 度同配系数 + 10 测试 |
 
 ---
 
-*最终更新：2026-07-02 · GOS V2.42 · 图论分析命令族（path/cycles/toposort/scc/condensation/reachable/bipartite/degree/centrality/closeness/eccentricity/katz）全部完成并纳入中文文档*
+*最终更新：2026-07-03 · GOS V2.65 · 累计 623 个 host tests · 图论分析命令族（PageRank/HITS/community/spanning/color/mst/shortest/flow/between/attractor）与图健康度指标族（density/clustering/transitivity/kcore/assortativity）全部完成并纳入中文文档*
 
 ## 待跟进事项
 
-- `graph katz` 的 Chinese 标题行此前为英文，本轮已修正；但 V2.42 硬化日志正文格式（无「项目｜内容」文档管理表头）与 V2.19 模板不完全一致，建议下一轮统一格式。
-- `doc/` 根目录仍保留 V2.1~V2.15 的旧版硬化日志文件（部分为英文原始存档），与 `06_运维维护/hardening/` 下的归位版本并存；建议下一轮评估是否需要在根目录旧文件顶部加入统一的「已迁移，正式版见 hardening/」跳转提示。
-- 04_实施计划 与 02_基本设计 文档尚未核对是否反映 V2.15~V2.42 新增的进程管理与图论分析命令族（见 04_实施计划/task_v0_1_zh.md 待办）。
+- **[已处理]** V2.42 硬化日志正文格式与 V2.19 模板不一致——本轮 V2.43~V2.54 的重写已统一采用 V2.42 建立的模板（版本号/功能 → 变更摘要 → 算法 → 实现细节 → 测试用例 → 不变量确认）。
+- **[已处理]** `doc/` 根目录旧文件跳转提示——经核实，`doc/` 根目录下的同名旧文件（如 `HARDENING_LOG_2026-06-30.md` 等）是硬化当时的原始存档快照，与 `06_运维维护/` 下的归位版本内容不同（根目录版本更早、更简略），属于历史存档而非重复文件，故不添加跳转提示，避免误导为"过时需更新"；已在文档管理规范中明确此存档语义。
+- V2.55~V2.65 共 11 篇硬化日志采用中英双语格式（中文段落 + 英文复述），内容完整但非纯中文；下一轮可评估是否需要移除英文复述段落以完全统一格式，或维持现状以便与源码注释交叉核对。
+- [GOS测试报告书.xlsx](05_测试验证/GOS测试报告书.xlsx) 与 [GOS运维日志汇总.xlsx](06_运维维护/GOS运维日志汇总.xlsx) 的测试总数/硬化日志汇总表尚停留在早期版本（分别约 V2.14、8项测试概览），未反映 V2.15~V2.65 的增量（累计 623 host tests，65 次硬化）；建议下一轮更新两份 xlsx 的汇总表。
+- `implementation_plan_v0_1_zh.md` / `task_v0_1_zh.md` 的 Phase 划分基于 V0.1 早期规划，V2.43~V2.65 新增的图论分析、图健康度、属性存储三大命令族尚未在 Backlog 中登记为已完成任务；本轮已在正文补充图论套件完成状态引用，但 Backlog 条目本身未逐条勾选，建议下一轮核对补全。

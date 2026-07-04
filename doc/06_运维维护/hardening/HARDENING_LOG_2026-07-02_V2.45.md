@@ -1,131 +1,122 @@
-# Hardening Log — V2.45: `graph community` — Label Propagation Community Detection
+# GOS 硬化日志 — V2.45（2026-07-02）
 
-**Date:** 2026-07-02  
-**Branch:** `feat/vk-auto-live-surface`  
-**Commit:** (see below)  
-**Author:** Claude (automated hardening run)
+## 版本号: V2.45
+## 功能: `graph community` — 标签传播社区发现（Label Propagation）
 
 ---
 
-## Summary
+## 变更摘要
 
-V2.45 adds **`graph community`** — Label Propagation Algorithm (LPA) community detection over the GOS kernel graph, completing the graph-analytics surface with the first *clustering* primitive.
+新增 `graph community` —— 对 GOS 内核图执行标签传播算法（LPA）社区发现，为图分析工具集补上第一个**聚类**原语。
 
-Shell aliases: `graph community` / `community` / `lpa` / `graph lpa` / `graph cluster` / `cluster`
+Shell 别名：`graph community` / `community` / `lpa` / `graph lpa` / `graph cluster` / `cluster`
 
-OS analogy: `iproute2 bridge vlan show` + `systemd-analyze critical-chain` — which kernel service nodes naturally cluster into tightly coupled sub-systems?
-
----
-
-## Motivation
-
-After the centrality/ranking suite (V2.38–V2.44, degree → betweenness → closeness → eccentricity → Katz → PageRank → HITS), the natural next step is **community structure**: not "which node is most important?" but "which nodes belong to the same functional sub-system?"
-
-In a graph OS, community detection answers operational questions like:
-- Which services are co-dependent and should be co-located / co-faulted?
-- Which groups form natural isolation domains?
-- Does a proposed architectural change split or merge existing communities?
+OS 类比：`iproute2 bridge vlan show` + `systemd-analyze critical-chain` —— 哪些内核服务节点天然聚成紧耦合的子系统？
 
 ---
 
-## Algorithm: Asynchronous Label Propagation (LPA)
+## 动机
+
+中心度/排名系列算法（V2.38–V2.44：度数 → 介数 → 紧密度 → 离心率 → Katz → PageRank → HITS）完成后，下一个自然的方向是**社区结构**：不再问"哪个节点最重要"，而是问"哪些节点属于同一功能子系统"。
+
+在图论 OS 中，社区发现回答以下运维问题：
+- 哪些服务相互依赖，应当协同部署/协同故障处理？
+- 哪些分组构成天然的隔离域？
+- 一次拟议中的架构变更会拆分还是合并现有社区？
+
+---
+
+## 算法：异步标签传播（LPA）
 
 ```text
-Initialize: label[v] = slot_index(v)   // each node in its own community
+初始化：label[v] = slot_index(v)   // 每个节点各自成一个社区
 
-For iter in 0..20:
-  For each node v in slot order:
-    freq[l] = |{neighbors u of v (in+out) where label[u] == l}|
-    label[v] = argmax_l freq[l]         // tie-break: smallest l
-    # IMMEDIATE update — later nodes see v's new label this round
+迭代 0..20：
+  按 slot 顺序遍历每个节点 v：
+    freq[l] = |{v 的邻居 u（入+出）中 label[u] == l 的数量}|
+    label[v] = argmax_l freq[l]         // 打平：取最小 l
+    # 立即更新——本轮后续节点会看到 v 的新标签
 
-Relabel: communities 0, 1, 2... sorted by size descending
-Output: nodes sorted by (community_id asc, slot asc) for grouped display
+重新编号：社区按规模降序编号为 0, 1, 2...
+输出：按（社区id 升序, slot 升序）排序，便于分组展示
 ```
 
-**Key design choices:**
+**关键设计选择：**
 
-1. **Undirected treatment**: both in-edges and out-edges are used as undirected neighbor links. This makes the algorithm sensitive to co-location in the service graph regardless of signal direction, matching the OS subsystem intuition.
+1. **无向处理**：入边和出边均视为无向邻居连接。使算法对服务图中的"共处"关系敏感，而不受信号方向影响，符合内核子系统的直觉。
+2. **异步更新**：每个节点的标签立即更新（不等到本轮结束再统一写入）。这一点至关重要——同步版本会在二部图和链式拓扑上振荡（两节点每轮互换标签，永不收敛）。异步版本对所有连通分量在 O(迭代次数) 内收敛。
+3. **打平规则：取最小标签**——两个标签频次相同时取较小者，保证确定性、可重现的输出。
+4. **20 轮迭代**——与 V2 系列其他迭代算法（PageRank、Katz、HITS）保持一致。
+5. **社区重新编号**：LPA 收敛后，社区按成员数降序重新编号为 0, 1, 2...，最大的社区恒为 id 0，显示为"major-community"。这使输出直观：C0 始终是最大簇。
 
-2. **Asynchronous updates**: each node's label is updated immediately (not buffered until the end of the round). This is critical — the synchronous variant oscillates on bipartite and chain topologies (two nodes swapping labels every round, never converging). The asynchronous variant converges in O(iterations) for all connected components.
-
-3. **Tie-break: smallest label** — when two labels have equal frequency, the smaller label wins. This produces deterministic, stable output.
-
-4. **20 iterations** — consistent with all other iterative algorithms in the V2 suite (PageRank, Katz, HITS).
-
-5. **Community relabelling**: after LPA converges, communities are assigned ids 0, 1, 2... sorted by member count descending. The largest community always gets id 0, displayed as "major-community". This makes the output intuitive: C0 is the biggest cluster.
-
-**Complexity:** O(V × E × 20) per call — same order as PageRank/HITS.
-
-**Space:** O(MAX_NODES) = O(128) — all fixed arrays, no_std/no_alloc compatible.
+**复杂度**：O(V × E × 20) 每次调用——与 PageRank/HITS 同阶。
+**空间**：O(MAX_NODES) = O(128)——全部为固定数组，兼容 no_std/no_alloc。
 
 ---
 
-## Implementation
+## 实现细节
 
 ### `crates/gos-runtime/src/lib.rs`
 
-- **`RuntimeState::graph_community_inner<const N>()`** — core algorithm (asynchronous LPA, relabelling, sorting).
-- **`pub fn graph_community<const N>()`** — free function wrapper (locks RUNTIME, calls inner).
+- **`RuntimeState::graph_community_inner<const N>()`** —— 核心算法（异步 LPA、重编号、排序）
+- **`pub fn graph_community<const N>()`** —— 公开包装函数（锁定 RUNTIME，调用内部实现）
 
 ### `crates/k-shell/src/lib.rs`
 
-- **`pub fn dispatch_graph_community(sink)`** — display function:
-  - Header: cyan `graph community`
-  - Per-community block: `[C0]  N nodes  major-community / minor-community / isolated`
-  - Member node vectors listed 4 per row (magenta = major, cyan = minor, grey = isolated)
-  - Footer: `N nodes  LPA/20iter  communities: M`
+- **`pub fn dispatch_graph_community(sink)`** —— 展示函数：
+  - 标题：青色 `graph community`
+  - 每社区一块：`[C0]  N nodes  major-community / minor-community / isolated`
+  - 成员节点向量每行 4 个（洋红=major，青色=minor，灰色=isolated）
+  - 页脚：`N nodes  LPA/20iter  communities: M`
 
 ### `crates/k-shell/src/proc.rs`
 
-- Dispatch: `"graph community" | "community" | "lpa" | "graph lpa" | "graph cluster" | "cluster"` → `dispatch_graph_community`
-- Help text: two new lines documenting the command and its aliases.
+- 路由：`"graph community" | "community" | "lpa" | "graph lpa" | "graph cluster" | "cluster"` → `dispatch_graph_community`
+- 帮助文本新增两行，说明命令及别名
 
 ---
 
-## Test Harness: `host-tests/gos-graph-community-harness`
+## 测试用例（10/10 通过）：`host-tests/gos-graph-community-harness`
 
-10 tests covering the full community detection API:
+| 编号 | 用例 | 验证点 |
+|------|------|--------|
+| 1 | 空图 | total=0, comm_count=0 |
+| 2 | 单孤立节点 | 1 节点，1 社区，id=0 |
+| 3 | 两个无边孤立节点 | 2 节点，2 社区（无边无法合并） |
+| 4 | 单边 A→B | 2 节点，1 社区（无向邻居合并） |
+| 5 | 有向三角环 A→B→C→A | 3 节点，1 社区 |
+| 6 | 两对不连通节点（A─B, C─D） | 4 节点，2 社区；A、B 同社区；C、D 同社区，两对不同 |
+| 7 | 完全二部图 K_{2,2}（A,B→C,D） | 4 节点，1 社区（全部无向可达） |
+| 8 | 两个三角形，无桥接 | 6 节点，2 社区（每个三角形一个） |
+| 9 | 排序输出连续性 | 输出中社区 id 非递减 |
+| 10 | 全连接链 A─B─C─D | 4 节点，1 社区，全部 id=0 |
 
-| # | Scenario | Assertion |
-|---|----------|-----------|
-| 1 | Empty graph | total=0, comm_count=0 |
-| 2 | Single isolated node | 1 node, 1 community, id=0 |
-| 3 | Two disconnected nodes (no edges) | 2 nodes, 2 communities (cannot merge without edges) |
-| 4 | Single edge A→B | 2 nodes, 1 community (undirected neighbor → merges) |
-| 5 | Directed triangle A→B→C→A | 3 nodes, 1 community |
-| 6 | Two disconnected pairs (A─B, C─D) | 4 nodes, 2 communities; A,B same; C,D same; pairs differ |
-| 7 | Complete bipartite K_{2,2} (A,B→C,D) | 4 nodes, 1 community (all undirected-reachable) |
-| 8 | Two triangles, no bridge | 6 nodes, 2 communities (one per triangle) |
-| 9 | Sorted output contiguity | community ids in output are non-decreasing |
-| 10 | Fully connected chain A─B─C─D | 4 nodes, 1 community, all ids=0 |
-
-**Result:** 10/10 pass.
+**结果：10/10 通过**
 
 ---
 
-## Community Role Semantics
+## 社区角色语义
 
-| Role | Condition | Color |
-|------|-----------|-------|
-| `major-community` | Largest community (id=0) with >1 node | Magenta (13) |
-| `minor-community` | Multi-node community, not the largest | Cyan (11) |
-| `isolated` | Single-node community (no undirected neighbors) | Dark grey (8) |
+| 角色 | 条件 | 颜色 |
+|------|------|------|
+| `major-community` | 最大社区（id=0）且节点数 >1 | 洋红 (13) |
+| `minor-community` | 多节点社区，非最大 | 青色 (11) |
+| `isolated` | 单节点社区（无无向邻居） | 暗灰 (8) |
 
 ---
 
-## Shell Command Surface
+## Shell 命令一览
 
 ```text
-graph community         label-propagation community detection
-community               alias
-lpa                     alias (Label Propagation Algorithm)
-graph lpa               alias
-graph cluster           alias
-cluster                 alias
+graph community         标签传播社区发现
+community               别名
+lpa                     别名（Label Propagation Algorithm）
+graph lpa               别名
+graph cluster           别名
+cluster                 别名
 ```
 
-Example output (two sub-systems, one isolated service):
+示例输出（两个子系统 + 一个孤立服务）：
 
 ```text
  graph community
@@ -142,20 +133,23 @@ Example output (two sub-systems, one isolated service):
 
 ---
 
-## Invariants Preserved
+## 不变量确认
 
-- **No write ops**: `graph_community` is a pure read (no epoch bump, no mutation).
-- **No alloc / no_std**: all buffers are fixed-size stack arrays.
-- **TEST_LOCK + reset()**: harness uses the standard isolation pattern.
-- **Sequential version**: V2.45 follows V2.44 (HITS) directly.
-- **Doc archived**: this file at `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.45.md`.
+- [x] 纯读操作：`graph_community` 不推进 epoch，不做任何变更
+- [x] 无堆分配 / no_std：所有缓冲区为固定大小栈数组
+- [x] harness 使用标准的 `TEST_LOCK + reset()` 隔离方式
+- [x] 版本顺序：V2.45 紧随 V2.44（HITS）
+- [x] 文档归档路径：`doc/06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.45.md`
 
 ---
 
-## Next Steps
+## 后续建议（V2.46 候选）
 
-Suggested V2.46 candidates:
-- `graph spanning` — BFS/DFS spanning tree (minimal connector backbone)
-- `node checkpoint <vec>` — snapshot node state to diff ring
-- `journal ring <N>` — runtime-configurable JournalRing capacity
-- `graph sim <N>` — simulate N random-walk steps, emit signal traffic trace
+- `graph spanning` —— BFS/DFS 生成树（最小连接骨架）
+- `node checkpoint <vec>` —— 快照节点状态到 diff ring
+- `journal ring <N>` —— 运行时可配置的 JournalRing 容量
+- `graph sim <N>` —— 模拟 N 步随机游走，输出信号流量轨迹
+
+---
+
+*由自动强化任务生成 · 2026-07-02*

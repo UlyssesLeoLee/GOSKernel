@@ -1,164 +1,147 @@
-# Hardening Log — V2.48: `graph mst` — Prim's Minimum Spanning Forest
+# GOS 硬化日志 — V2.48（2026-07-02）
 
-**Date:** 2026-07-02  
-**Branch:** `feat/vk-auto-live-surface`  
-**Commit:** (see below)  
-**Author:** Claude (automated hardening run)
+## 版本号: V2.48
+## 功能: `graph mst` — Prim 最小生成森林
 
 ---
 
-## Summary
+## 变更摘要
 
-V2.48 adds **`graph mst`** — Prim's minimum spanning forest over the undirected projection of the live GOS kernel graph. Every directed edge is treated as undirected with its registered `weight` (default 1.0). Disconnected components each receive their own MST root, producing a spanning **forest** rather than a single spanning tree. The total MST weight (sum of all selected edges) is reported as a fixed-point integer (× 1000) for no_std/no_alloc compatibility.
+新增 `graph mst` —— 在活跃 GOS 内核图的无向投影上执行 Prim 最小生成森林算法。每条有向边被视为带其注册 `weight`（默认1.0）的无向边。不连通的分量各自获得独立的 MST 根，因此产出的是生成**森林**而非单一生成树。MST 总权重（所有选中边之和）以定点整数（× 1000）形式报告，确保 no_std/no_alloc 兼容。
 
-Shell aliases: `graph mst` / `mst` / `gmst` / `graph tree mst` / `min spanning`
+Shell 别名：`graph mst` / `mst` / `gmst` / `graph tree mst` / `min spanning`
 
-OS analogy: `ip route show metric` — the minimum-cost routing backbone that keeps all kernel sub-systems reachable, analogous to a routing table built for minimum total latency/bandwidth cost.
+OS 类比：`ip route show metric` —— 保持所有内核子系统可达的最小成本路由骨架，类比为以最小总延迟/带宽成本构建的路由表。
 
-**Infrastructure change (V2.48):** Extended `GraphTopologySnapshot` to carry `edge_weight: [f32; MAX_EDGES]`, populated from `EdgeRecord.spec.weight` in `topology_snapshot()`. Future algorithms that need weights (flow, shortest-path, etc.) can use this field without additional runtime locking.
-
----
-
-## Motivation
-
-After the structural-analysis suite (V2.41–V2.47), the next natural primitive is **weighted graph algorithms**. The kernel graph already stores a `weight: f32` on every edge (`EdgeSpec.weight`, defaults to 1.0). Until V2.48, no API exposed these weights to analysis functions.
-
-MST in a kernel graph OS answers:
-- What is the minimum-cost set of signal routes that keeps all subsystems connected?
-- Which edges are load-bearing (in the MST) vs. redundant (not in the MST)?
-- What is the total minimum bandwidth cost of the kernel's inter-subsystem communication?
-- Which subsystems are in separate network partitions (multiple MST roots)?
-
-MST is the foundation for further weighted primitives: shortest paths (Dijkstra), max-flow (Ford-Fulkerson), and minimum-cost flow.
+**基础设施变更（V2.48）**：扩展 `GraphTopologySnapshot`，新增 `edge_weight: [f32; MAX_EDGES]` 字段，从 `topology_snapshot()` 中的 `EdgeRecord.spec.weight` 填充。未来需要权重的算法（流量、最短路径等）可直接使用该字段，无需额外的运行时加锁。
 
 ---
 
-## Algorithm: Prim's Minimum Spanning Forest (Undirected Projection)
+## 动机
+
+结构分析套件（V2.41–V2.47）完成后，下一个自然的原语是**带权图算法**。内核图上每条边本已存储 `weight: f32`（`EdgeSpec.weight`，默认1.0），但在 V2.48 之前没有任何 API 将这些权重暴露给分析函数。
+
+MST 在内核图 OS 中回答：
+- 保持所有子系统连通的最小成本信号路由集合是什么？
+- 哪些边是承重的（在 MST 中）、哪些是冗余的（不在 MST 中）？
+- 内核子系统间通信的总最小带宽成本是多少？
+- 哪些子系统处于独立的网络分区（多个 MST 根）？
+
+MST 是后续带权原语的基础：最短路径（Dijkstra）、最大流（Ford-Fulkerson）、最小成本流。
+
+---
+
+## 算法：Prim 最小生成森林（无向投影）
 
 ```text
-Initialize:
-  in_mst[v]      = false  for all v
-  key[v]         = ∞      for all v
-  parent_slot[v] = ∅      for all v
+初始化：
+  in_mst[v]      = false，对所有 v
+  key[v]         = ∞，对所有 v
+  parent_slot[v] = ∅，对所有 v
   remaining      = node_count
 
-While remaining > 0:
-  u = argmin{ key[v] : v not in MST }
+当 remaining > 0：
+  u = argmin{ key[v] : v 不在 MST 中 }
 
-  If key[u] == ∞ (new component — u has no edge to existing MST):
-    parent_slot[u] = u      // u is a new component root
+  若 key[u] == ∞（新分量——u 没有到已有 MST 的边）：
+    parent_slot[u] = u      // u 是新分量的根
     key[u] = 0.0
 
   in_mst[u] = true
-  Emit u to output; record out_key[u] = key[u]
+  将 u 加入输出；记录 out_key[u] = key[u]
   remaining -= 1
 
-  For each live edge e incident to u (undirected):
-    v = neighbor of u through e
+  对每条与 u 相邻的活跃边 e（无向）：
+    v = e 的另一端
     w = edge_weight[e]
-    If v not in MST and w < key[v]:
+    若 v 不在 MST 中 且 w < key[v]：
       key[v]         = w
       parent_slot[v] = u
 
-Build output:
+构建输出：
   out_vecs[i]    = slot_vec[order[i]]
   out_parents[i] = slot_vec[parent_slot[order[i]]]
   out_weights[i] = (out_key[i] × 1000) as u32
-  total_mst_w    = sum(out_key[i] for non-root i) × 1000 as u32
+  total_mst_w    = 所有非根 i 的 out_key[i] 之和 × 1000
 ```
 
-**Key design choices:**
+**关键设计选择：**
 
-1. **Undirected treatment**: both in-edges and out-edges are used as undirected neighbor links. Consistent with `graph spanning`, `graph community`, and `graph bipartite`.
+1. **无向处理**：入边和出边均作为无向邻居连接，与 `graph spanning`、`graph community`、`graph bipartite` 一致。
+2. **Prim 而非 Kruskal**：Prim 给出自然的访问顺序（节点按加入 MST 的顺序输出，按分量分组），且无需边排序——对 `no_std` 固定大小数组很重要。
+3. **权重默认1.0**：未显式设置权重（`EdgeSpec.weight`）的边默认存储为1.0，使无权图上的 MST 等价于 BFS 生成树（但由于打平顺序的度数差异，结构未必完全相同）。
+4. **定点输出（× 1000）**：避免在 `no_std` 内核显示层进行 f32 格式化打印，整数算术足以支持权重展示。
+5. **打平规则**：多个节点 key 相同时最小 slot 索引者胜出，保证等权图上的确定性输出。
+6. **根检测**：`parents[i] == vecs[i]` 且 `weights[i] == 0` 标识分量根节点，其余节点均为带正权重的子节点。
 
-2. **Prim's (not Kruskal's)**: Prim's gives a natural visit order (nodes emitted as they join the MST, grouped by component) and requires no edge sorting — important for `no_std` fixed-size arrays.
-
-3. **Weight default 1.0**: edges registered without an explicit weight (`EdgeSpec.weight`) are stored as 1.0, making MST on an unweighted graph equivalent to BFS spanning (but not necessarily the same structure due to degree-order differences in tie-breaking).
-
-4. **Fixed-point output (× 1000)**: avoids f32 format printing in the `no_std` kernel display layer. Integer arithmetic suffices for weight display.
-
-5. **Tie-breaking**: among nodes with the same minimum key, the one with the smallest slot index wins. This ensures deterministic output for equal-weight graphs.
-
-6. **Root detection**: `parents[i] == vecs[i]` and `weights[i] == 0` identifies component roots. All other nodes are children with a positive weight.
-
-**Complexity:** O(V·E) — O(V) outer iterations × O(E) neighbor scan per iteration. For n≤128 and E≤512, this is at most 65,536 operations per call.
-
-**Space:** O(MAX_NODES + MAX_EDGES) — fixed-size stack arrays, no_std/no_alloc compatible.
+**复杂度**：O(V·E) —— O(V) 次外层迭代 × 每次迭代 O(E) 邻居扫描。n≤128、E≤512 时最多 65,536 次操作。
+**空间**：O(MAX_NODES + MAX_EDGES) —— 固定大小栈数组，兼容 no_std/no_alloc。
 
 ---
 
-## Implementation
+## 实现细节
 
 ### `crates/gos-runtime/src/lib.rs`
 
-**Snapshot extension:**
-- `GraphTopologySnapshot.edge_weight: [f32; MAX_EDGES]` — new field, initialized to `1.0f32` (default weight).
-- `topology_snapshot()` now copies `e.spec.weight` into `snap.edge_weight[i]` for each live edge.
+**快照扩展：**
+- `GraphTopologySnapshot.edge_weight: [f32; MAX_EDGES]` —— 新字段，初始化为 `1.0f32`（默认权重）
+- `topology_snapshot()` 现在为每条活跃边把 `e.spec.weight` 拷贝到 `snap.edge_weight[i]`
 
-**New inner function:**
-- **`RuntimeState::graph_mst_inner<const N>()`** — Prim's spanning forest:
-  - `key[MAX_NODES]`, `in_mst[MAX_NODES]`, `parent_slot[MAX_NODES]` (all fixed-size).
-  - `out_slots[MAX_NODES]`, `out_key[MAX_NODES]` — emit buffers.
-  - Three-pass structure: (1) find min-key unvisited node, (2) mark in MST and emit, (3) relax neighbors.
-  - Disconnected component detection: if selected node has no initialized key (key==INF), it starts a new root with key=0.
+**新内部函数：**
+- **`RuntimeState::graph_mst_inner<const N>()`** —— Prim 生成森林：三阶段结构（找最小 key 未访问节点、标记入 MST 并输出、松弛邻居）；不连通分量检测（若所选节点 key 未初始化即为 INF，则开启新根，key=0）
 
-**New public function:**
+**新公开函数：**
 ```rust
 pub fn graph_mst<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32)
 ```
-Locks `RUNTIME`, calls `topology_snapshot()`, delegates to `graph_mst_inner`.
+锁定 RUNTIME，调用 `topology_snapshot()`，委托给 `graph_mst_inner`。
 
 ### `crates/k-shell/src/lib.rs`
 
-- **`pub fn dispatch_graph_mst(sink)`** — display function:
-  - Header: cyan `graph mst`
-  - Column header: `role  weight  vector  parent`
-  - Per node: role (magenta `root` / cyan `child`), yellow `W.mmm` weight, white vector, parent (gray `(root)` for roots)
-  - Footer: `N node(s)  Prim MST  total weight: W.mmm`
+- **`pub fn dispatch_graph_mst(sink)`** —— 展示函数：
+  - 标题：青色 `graph mst`
+  - 列标题：`role  weight  vector  parent`
+  - 逐节点显示角色（洋红 `root` / 青色 `child`）、黄色 `W.mmm` 权重、白色向量、父节点（根节点为灰色 `(root)`）
+  - 页脚：`N node(s)  Prim MST  total weight: W.mmm`
 
 ### `crates/k-shell/src/proc.rs`
 
-- Dispatch (2 lines):
-  ```text
-  "graph mst" | "mst" | "gmst" | "graph tree mst" | "min spanning" → dispatch_graph_mst
-  ```
-- Help text: 2 new lines documenting `graph mst` and its aliases.
+- 路由（2行）：`"graph mst" | "mst" | "gmst" | "graph tree mst" | "min spanning"` → `dispatch_graph_mst`
+- 帮助文本新增2行
 
 ---
 
-## Test Harness: `host-tests/gos-graph-mst-harness`
+## 测试用例（10/10 通过）：`host-tests/gos-graph-mst-harness`
 
-10 tests covering the full MST API:
+| 编号 | 用例 | 验证点 |
+|------|------|--------|
+| 1 | 空图 | node_count=0, total_mst_w=0 |
+| 2 | 单节点 | node_count=1, weight=0, parent=self |
+| 3 | 两个孤立节点（无边） | total_mst_w=0，均为根 |
+| 4 | K₂ 边权重=1.0 | total_mst_w=1000，一根一子 |
+| 5 | K₂ 边权重=2.5 | total_mst_w=2500 |
+| 6 | 路径 A─B─C，权重均=1.0 | total_mst_w=2000 |
+| 7 | K₃ 三角形（权重1、2、3） | MST 选择 1+2=3（最重边被排除）；total=3000 |
+| 8 | 两分量（A─B，C孤立） | total_mst_w=1000；C 为第二个根 |
+| 9 | 根不变量 | weights[i]==0 时 parents[i]==vecs[i] |
+| 10 | 连通性 | 每个非根节点的父节点均出现在输出向量中 |
 
-| # | Scenario | Assertion |
-|---|----------|-----------|
-| 1 | Empty graph | node_count=0, total_mst_w=0 |
-| 2 | Single node | node_count=1, weight=0, parent=self |
-| 3 | Two isolated nodes (no edge) | total_mst_w=0, both roots |
-| 4 | K₂ edge weight=1.0 | total_mst_w=1000, one root + one child |
-| 5 | K₂ edge weight=2.5 | total_mst_w=2500 |
-| 6 | Path A─B─C all weight=1.0 | total_mst_w=2000 |
-| 7 | K₃ triangle (weights 1, 2, 3) | MST selects 1+2=3 (heaviest excluded); total=3000 |
-| 8 | Two components (A─B, C isolated) | total_mst_w=1000; C is second root |
-| 9 | Root invariant | parents\[i\]==vecs\[i\] whenever weights\[i\]==0 |
-| 10 | Connectivity | every non-root has a parent present in output vecs |
-
-**Result:** 10/10 pass, zero warnings.
+**结果：10/10 通过，零告警**
 
 ---
 
-## Shell Command Surface
+## Shell 命令一览
 
 ```text
-graph mst          Prim's minimum spanning forest — minimum-cost routing backbone
-mst                alias
-gmst               alias
-graph tree mst     alias
-min spanning       alias
+graph mst          Prim 最小生成森林 —— 最小成本路由骨架
+mst                别名
+gmst               别名
+graph tree mst     别名
+min spanning       别名
 ```
 
-Example output (path A─2─B─3─C):
+示例输出（路径 A─2─B─3─C）：
 
 ```text
  graph mst
@@ -173,32 +156,35 @@ Example output (path A─2─B─3─C):
 
 ---
 
-## Infrastructure: `GraphTopologySnapshot` Extension
+## 基础设施：`GraphTopologySnapshot` 扩展
 
-`edge_weight: [f32; MAX_EDGES]` is now part of the topology snapshot captured under the RUNTIME lock. This is a **load-bearing infrastructure change** enabling all future weighted graph algorithms to access edge weights without additional runtime queries:
+`edge_weight: [f32; MAX_EDGES]` 现已纳入在 RUNTIME 锁下捕获的拓扑快照，是一次**承重的基础设施变更**，使所有未来的带权图算法都能访问边权重而无需额外的运行时查询：
 
-| Algorithm | Uses `edge_weight` |
-|-----------|-------------------|
-| V2.48 `graph_mst_inner` | Yes |
-| Future `graph_shortest_path` (Dijkstra) | Yes |
-| Future `graph_flow` (Ford-Fulkerson/Edmonds-Karp) | Yes |
-
----
-
-## Invariants Preserved
-
-- **No write ops**: `graph_mst` is a pure read (no epoch bump, no mutation).
-- **No alloc / no_std**: all buffers are fixed-size stack arrays.
-- **TEST_LOCK + reset()**: harness uses the standard isolation pattern.
-- **Sequential version**: V2.48 follows V2.47 (graph coloring) directly.
-- **Doc archived**: this file at `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.48.md`.
+| 算法 | 使用 `edge_weight` |
+|------|---------------------|
+| V2.48 `graph_mst_inner` | 是 |
+| 未来 `graph_shortest_path`（Dijkstra） | 是 |
+| 未来 `graph_flow`（Ford-Fulkerson/Edmonds-Karp） | 是 |
 
 ---
 
-## Next Steps
+## 不变量确认
 
-Suggested V2.49 candidates:
-- `graph shortest <vec>` — Dijkstra shortest-path tree from a given node
-- `graph flow <from> <to>` — max-flow between two nodes (Ford-Fulkerson)
-- `node checkpoint <vec>` — snapshot node state to the per-node diff ring
-- `graph sim <N>` — simulate N random-walk steps, emit signal traffic trace
+- [x] 纯读操作：`graph_mst` 不推进 epoch，不做任何变更
+- [x] 无堆分配 / no_std：所有缓冲区为固定大小栈数组
+- [x] harness 使用标准的 `TEST_LOCK + reset()` 隔离方式
+- [x] 版本顺序：V2.48 紧随 V2.47（图着色）
+- [x] 文档归档路径：`doc/06_运维维护/hardening/HARDENING_LOG_2026-07-02_V2.48.md`
+
+---
+
+## 后续建议（V2.49 候选）
+
+- `graph shortest <vec>` —— 从指定节点出发的 Dijkstra 最短路径树
+- `graph flow <from> <to>` —— 两节点间最大流（Ford-Fulkerson）
+- `node checkpoint <vec>` —— 快照节点状态到 diff ring
+- `graph sim <N>` —— 模拟 N 步随机游走，输出信号流量轨迹
+
+---
+
+*由自动强化任务生成 · 2026-07-02*

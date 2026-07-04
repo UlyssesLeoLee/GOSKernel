@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gos-graph-shortest-harness"
+name = "gos-graph-flow-harness"
 version = "0.1.0"
 dependencies = [
  "gos-cypher-mut",
