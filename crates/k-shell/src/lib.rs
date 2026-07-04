@@ -3259,6 +3259,88 @@ pub fn dispatch_graph_scale_free(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.80: `graph power law` / `gpowerlaw` — power-law exponent MLE.
+///
+/// Computes the Clauset–Newman–Shalizi (2009) maximum-likelihood estimator:
+///   γ̂ = 1 + n_fit / Σ ln(k_i)   (k_min = 1, non-isolated nodes only)
+///
+/// Typical scale-free networks have γ ∈ [2, 3].
+/// gamma=0 means MLE is undefined (all non-isolated nodes have k=1).
+pub fn dispatch_graph_power_law(sink: &ConsoleSink) {
+    let (gamma_ppm, n_fit, node_count) = gos_runtime::graph_power_law();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph power-law exponent (MLE)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03b3}: undefined (empty graph)\n");
+        print_str(sink, "  nodes=0\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Helper: print a ppm value as W.XXXXXX (6 decimal places).
+    fn print_ppm6(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm % 1_000_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10           { print_str(sink, "00000"); }
+        else if frac < 100     { print_str(sink, "0000"); }
+        else if frac < 1_000   { print_str(sink, "000"); }
+        else if frac < 10_000  { print_str(sink, "00"); }
+        else if frac < 100_000 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // γ̂ value.
+    set_color(sink, 10, 0);
+    print_str(sink, "  \u{03b3}\u{0302}         = ");
+    if gamma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undefined");
+        set_color(sink, 10, 0);
+        print_str(sink, "  (all non-isolated k=1; MLE degenerate)\n");
+    } else {
+        print_ppm6(sink, gamma_ppm as u64);
+        print_str(sink, "\n");
+    }
+
+    // Fit info.
+    set_color(sink, 7, 0);
+    print_str(sink, "  n_fit      = ");
+    print_num_inline(sink, n_fit);
+    print_str(sink, "  (nodes with k\u{2265}1, k_min=1)\n");
+
+    // Classification banner.
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    if gamma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03b3}: insufficient degree heterogeneity for MLE\n");
+    } else if gamma_ppm <= 3_000_000 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{03b3}\u{2208}[1,3]: compatible with power-law / scale-free\n");
+    } else if gamma_ppm <= 4_000_000 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  \u{03b3}\u{2208}(3,4]: steep tail; weakly heterogeneous\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  \u{03b3}>4: not consistent with a power-law degree distribution\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "  n_fit=");
+    print_num_inline(sink, n_fit);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.79: `graph summary` / `gsummary` / `topology summary`
 ///
 /// One-shot topology report: gathers density, transitivity, avg clustering,

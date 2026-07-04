@@ -1110,6 +1110,8 @@ fn dispatch_text_command(
         super::dispatch_graph_summary(sink);
     } else if cmd == "graph scale free" || cmd == "graph scale-free" || cmd == "gscalefree" || cmd == "scale free" {
         super::dispatch_graph_scale_free(sink);
+    } else if cmd == "graph power law" || cmd == "graph power-law" || cmd == "gpowerlaw" || cmd == "power law" || cmd == "gpl" {
+        super::dispatch_graph_power_law(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))

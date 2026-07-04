@@ -4074,6 +4074,113 @@ impl GraphRuntime {
         (kappa_ppm, max_k, avg_degree_ppm, n, m_undir)
     }
 
+    /// V2.80: Power-law exponent MLE estimator (Clauset–Newman–Shalizi 2009, eq. 3.1).
+    ///
+    /// γ̂ = 1 + n_fit × [Σ_{i: k_i ≥ 1} ln(k_i)]^{-1}
+    ///
+    /// Undirected degree k_i is computed per-node (same deduplication as V2.78).
+    /// k_min = 1: isolated nodes (k=0) are excluded from the fit.
+    ///
+    /// Integer arithmetic via the shared LN_TABLE[1..=128] (ln(k) × 1_000_000).
+    ///   sum_ln_ppm = Σ LN_TABLE[k_i]  for k_i ≥ 1
+    ///   gamma_ppm  = 1_000_000 + n_fit × 10^12 / sum_ln_ppm
+    ///              = 0 if sum_ln_ppm == 0 (all non-isolated nodes have k=1; MLE undefined)
+    ///
+    /// Returns `(gamma_ppm, n_fit, node_count)`:
+    /// - gamma_ppm   — γ̂ × 1_000_000  (0 = undefined)
+    /// - n_fit       — nodes included in the fit (k ≥ 1)
+    /// - node_count  — total alive nodes
+    pub fn graph_power_law_inner(&self) -> (u32, usize, usize) {
+        const LN_TABLE: [u32; 129] = [
+            0,
+            0,         693_147, 1_098_612, 1_386_294, 1_609_437,
+            1_791_759, 1_945_910, 2_079_441, 2_197_224, 2_302_585,
+            2_397_895, 2_484_906, 2_564_949, 2_639_057, 2_708_050,
+            2_772_588, 2_833_213, 2_890_371, 2_944_438, 2_995_732,
+            3_044_522, 3_091_042, 3_135_494, 3_178_053, 3_218_875,
+            3_258_096, 3_295_836, 3_332_204, 3_367_295, 3_401_197,
+            3_433_987, 3_465_735, 3_496_508, 3_526_360, 3_555_348,
+            3_583_518, 3_610_917, 3_637_586, 3_663_562, 3_688_879,
+            3_713_572, 3_737_669, 3_761_200, 3_784_189, 3_806_662,
+            3_828_641, 3_850_147, 3_871_201, 3_891_820, 3_912_023,
+            3_931_826, 3_951_244, 3_970_292, 3_988_984, 4_007_333,
+            4_025_351, 4_043_051, 4_060_443, 4_077_537, 4_094_344,
+            4_110_874, 4_127_134, 4_143_134, 4_158_883, 4_174_387,
+            4_189_654, 4_204_692, 4_219_507, 4_234_107, 4_248_494,
+            4_262_679, 4_276_666, 4_290_459, 4_304_064, 4_317_488,
+            4_330_733, 4_343_805, 4_356_708, 4_369_447, 4_382_026,
+            4_394_449, 4_406_719, 4_418_841, 4_430_817, 4_442_651,
+            4_454_347, 4_465_908, 4_477_337, 4_488_636, 4_499_810,
+            4_510_860, 4_521_789, 4_532_599, 4_543_294, 4_553_877,
+            4_564_348, 4_574_711, 4_584_967, 4_595_119, 4_605_170,
+            4_615_121, 4_624_972, 4_634_728, 4_644_391, 4_653_960,
+            4_663_439, 4_672_829, 4_682_131, 4_691_348, 4_700_480,
+            4_709_530, 4_718_498, 4_727_388, 4_736_198, 4_744_932,
+            4_753_590, 4_762_174, 4_770_685, 4_779_123, 4_787_491,
+            4_795_791, 4_804_021, 4_812_184, 4_820_281, 4_828_313,
+            4_836_281, 4_844_187, 4_852_030,
+        ];
+
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        if n == 0 {
+            return (0, 0, 0);
+        }
+
+        // Compute undirected degree for each alive node slot (same as graph_scale_free_inner).
+        let mut deg = [0u32; MAX_NODES];
+        let mut slot_ids = [NodeId::ZERO; MAX_NODES];
+        for slot in 0..MAX_NODES {
+            if let Some(ref r) = self.nodes[slot] {
+                slot_ids[slot] = r.spec.node_id;
+            }
+        }
+        for slot in 0..MAX_NODES {
+            if self.nodes[slot].is_none() { continue; }
+            let vid = slot_ids[slot];
+            let mut neighbors = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !neighbors[..nb].contains(&other) {
+                    neighbors[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+            deg[slot] = nb as u32;
+        }
+
+        // MLE: accumulate Σ ln(k_i) for k_i ≥ 1; count n_fit.
+        let mut sum_ln_ppm: u64 = 0;
+        let mut n_fit: usize = 0;
+        for slot in 0..MAX_NODES {
+            if self.nodes[slot].is_none() { continue; }
+            let k = deg[slot] as usize;
+            if k == 0 { continue; }
+            let k_capped = k.min(128);
+            sum_ln_ppm += LN_TABLE[k_capped] as u64;
+            n_fit += 1;
+        }
+
+        if sum_ln_ppm == 0 {
+            // All non-isolated nodes have k=1: ln(1)=0, MLE is undefined.
+            return (0, n_fit, n);
+        }
+
+        // gamma_ppm = 1_000_000 + n_fit × 10^12 / sum_ln_ppm.
+        let numer: u64 = (n_fit as u64).saturating_mul(1_000_000_000_000);
+        let gamma_ppm = 1_000_000u64 + numer / sum_ln_ppm;
+
+        (gamma_ppm.min(u32::MAX as u64) as u32, n_fit, n)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -8343,6 +8450,24 @@ pub fn graph_small_world() -> (u32, u32, u64, u64, usize, usize) {
 ///   otherwise                        →  "homogeneous (regular/random-like)"
 pub fn graph_scale_free() -> (u32, u32, u32, usize, usize) {
     RUNTIME.lock().graph_scale_free_inner()
+}
+
+/// V2.80: Power-law exponent MLE estimator (Clauset–Newman–Shalizi 2009).
+///
+/// Estimates the power-law exponent γ̂ from the undirected degree sequence
+/// using the maximum-likelihood estimator with k_min = 1 (non-isolated nodes).
+///
+///   γ̂ = 1 + n_fit × [Σ_{k_i ≥ 1} ln(k_i)]^{-1}
+///
+/// Returns `(gamma_ppm, n_fit, node_count)`:
+/// - `gamma_ppm`  — γ̂ × 1_000_000  (0 = undefined: all k=1 or no non-isolated nodes)
+/// - `n_fit`      — nodes in the fit (non-isolated, k ≥ 1)
+/// - `node_count` — total alive nodes
+///
+/// Typical power-law networks: γ ∈ [2, 3] (gamma_ppm ∈ [2_000_000, 3_000_000]).
+/// Regular graphs: γ > 1 + n/ln(k)^{-1}; pure stars: γ >> 3.
+pub fn graph_power_law() -> (u32, usize, usize) {
+    RUNTIME.lock().graph_power_law_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.
