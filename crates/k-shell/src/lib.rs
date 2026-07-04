@@ -3097,6 +3097,83 @@ pub fn dispatch_graph_local_efficiency(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.77: `graph small world` / `gsmallworld` — small-world coefficient \u{03c3}.
+///
+/// \u{03c3} = (CC / CC_rand) / (L / L_rand)
+/// CC_rand \u{2248} 2m / n(n-1), L_rand \u{2248} ln(n)/ln(\u{27e8}k\u{27e9}).
+/// \u{03c3} > 1 indicates small-world structure; \u{03c3} = 0 if insufficient connectivity.
+pub fn dispatch_graph_small_world(sink: &ConsoleSink) {
+    let (sigma_ppm, cc_ppm, l_ppm, l_rand_ppm, node_count, m_undir) =
+        gos_runtime::graph_small_world();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph small-world coefficient\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03c3}: undefined (empty graph)\n");
+        print_str(sink, "  nodes=0\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Helper: print a ppm value as W.XXXXXX (6 decimal places).
+    fn print_ppm(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm % 1_000_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10           { print_str(sink, "00000"); }
+        else if frac < 100     { print_str(sink, "0000"); }
+        else if frac < 1_000   { print_str(sink, "000"); }
+        else if frac < 10_000  { print_str(sink, "00"); }
+        else if frac < 100_000 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // σ value.
+    set_color(sink, 10, 0);
+    print_str(sink, "  \u{03c3}       = ");
+    if sigma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undefined");
+        set_color(sink, 10, 0);
+        print_str(sink, "  (avg_k<2 or L=0)\n");
+    } else {
+        print_ppm(sink, sigma_ppm as u64);
+        print_str(sink, "\n");
+    }
+
+    // CC and CC_rand.
+    set_color(sink, 7, 0);
+    print_str(sink, "  CC      = ");
+    print_ppm(sink, cc_ppm as u64);
+    print_str(sink, "\n");
+
+    // L and L_rand.
+    print_str(sink, "  L       = ");
+    print_ppm(sink, l_ppm);
+    print_str(sink, "\n");
+    print_str(sink, "  L_rand  = ");
+    print_ppm(sink, l_rand_ppm);
+    print_str(sink, "\n");
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "  edges_undir=");
+    print_num_inline(sink, m_undir);
+    print_str(sink, "  avg_k=");
+    let avg_k = if node_count > 0 { (2 * m_undir) / node_count } else { 0 };
+    print_num_inline(sink, avg_k);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in

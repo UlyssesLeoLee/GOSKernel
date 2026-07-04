@@ -3842,6 +3842,136 @@ impl GraphRuntime {
         (eloc_ppm, nodes_computed, n)
     }
 
+    /// V2.77: Graph small-world coefficient σ (Humphries–Gurney 2008).
+    ///
+    /// σ = (CC / CC_rand) / (L / L_rand)
+    ///
+    /// where:
+    ///   CC       = average clustering coefficient (per-node Watts-Strogatz, V2.75)
+    ///   CC_rand  ≈ 2·m / (n·(n−1))  — undirected density (E-R random graph baseline)
+    ///   L        = average directed path length = Wiener / reachable_pairs
+    ///   L_rand   ≈ ln(n) / ln(⟨k⟩)  — E-R baseline, ⟨k⟩ = 2·m/n (integer)
+    ///
+    /// All arithmetic is integer / fixed-point (no_std safe). ln values use a
+    /// compile-time table for x ∈ 1..=128 (covers all possible n and ⟨k⟩ in
+    /// this runtime with MAX_NODES=128).
+    ///
+    /// Returns `(sigma_ppm, cc_ppm, l_ppm, l_rand_ppm, node_count, m_undir)`:
+    ///   sigma_ppm   = σ × 1_000_000  (0 if σ cannot be computed)
+    ///   cc_ppm      = CC × 1_000_000
+    ///   l_ppm       = L × 1_000_000  (0 if no directed paths exist)
+    ///   l_rand_ppm  = L_rand × 1_000_000 (0 if ⟨k⟩ < 2)
+    ///   node_count  = total alive nodes
+    ///   m_undir     = deduplicated undirected edge count
+    ///
+    /// σ > 1: small-world structure (high local clustering, short paths)
+    /// σ ≈ 1: Erdős–Rényi random-graph-like
+    /// σ = 0: insufficient connectivity to compute the coefficient
+    pub fn graph_small_world_inner(&self) -> (u32, u32, u64, u64, usize, usize) {
+        // ln(x) × 1_000_000, truncated, for x in 1..=128.  Index 0 unused.
+        const LN_TABLE: [u32; 129] = [
+            0,
+            0,         693_147, 1_098_612, 1_386_294, 1_609_437,
+            1_791_759, 1_945_910, 2_079_441, 2_197_224, 2_302_585,
+            2_397_895, 2_484_906, 2_564_949, 2_639_057, 2_708_050,
+            2_772_588, 2_833_213, 2_890_371, 2_944_438, 2_995_732,
+            3_044_522, 3_091_042, 3_135_494, 3_178_053, 3_218_875,
+            3_258_096, 3_295_836, 3_332_204, 3_367_295, 3_401_197,
+            3_433_987, 3_465_735, 3_496_508, 3_526_360, 3_555_348,
+            3_583_518, 3_610_917, 3_637_586, 3_663_562, 3_688_879,
+            3_713_572, 3_737_669, 3_761_200, 3_784_189, 3_806_662,
+            3_828_641, 3_850_147, 3_871_201, 3_891_820, 3_912_023,
+            3_931_826, 3_951_244, 3_970_292, 3_988_984, 4_007_333,
+            4_025_351, 4_043_051, 4_060_443, 4_077_537, 4_094_344,
+            4_110_874, 4_127_134, 4_143_134, 4_158_883, 4_174_387,
+            4_189_654, 4_204_692, 4_219_507, 4_234_107, 4_248_494,
+            4_262_679, 4_276_666, 4_290_459, 4_304_064, 4_317_488,
+            4_330_733, 4_343_805, 4_356_708, 4_369_447, 4_382_026,
+            4_394_449, 4_406_719, 4_418_841, 4_430_817, 4_442_651,
+            4_454_347, 4_465_908, 4_477_337, 4_488_636, 4_499_810,
+            4_510_860, 4_521_789, 4_532_599, 4_543_294, 4_553_877,
+            4_564_348, 4_574_711, 4_584_967, 4_595_119, 4_605_170,
+            4_615_121, 4_624_972, 4_634_728, 4_644_391, 4_653_960,
+            4_663_439, 4_672_829, 4_682_131, 4_691_348, 4_700_480,
+            4_709_530, 4_718_498, 4_727_388, 4_736_198, 4_744_932,
+            4_753_590, 4_762_174, 4_770_685, 4_779_123, 4_787_491,
+            4_795_791, 4_804_021, 4_812_184, 4_820_281, 4_828_313,
+            4_836_281, 4_844_187, 4_852_030,
+        ];
+
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        if n < 2 {
+            let (cc_ppm, _, _) = self.graph_avg_clustering_inner();
+            return (0, cc_ppm, 0, 0, n, 0);
+        }
+
+        // Deduplicate directed edges → undirected edge set.
+        let mut seen_from = [NodeId::ZERO; MAX_EDGES];
+        let mut seen_to   = [NodeId::ZERO; MAX_EDGES];
+        let mut m_undir   = 0usize;
+        for edge in self.edges.iter().flatten() {
+            let u = edge.spec.from_node;
+            let v = edge.spec.to_node;
+            if u == v { continue; }
+            let already = (0..m_undir).any(|j| seen_from[j] == v && seen_to[j] == u);
+            if !already && m_undir < MAX_EDGES {
+                seen_from[m_undir] = u;
+                seen_to[m_undir]   = v;
+                m_undir += 1;
+            }
+        }
+
+        // Average clustering coefficient (CC).
+        let (cc_ppm, _, _) = self.graph_avg_clustering_inner();
+
+        // Average directed path length (L) from Wiener index.
+        let (wiener, reachable_pairs, _) = self.graph_wiener_inner();
+        let l_ppm: u64 = if reachable_pairs > 0 {
+            (wiener * 1_000_000) / reachable_pairs as u64
+        } else {
+            0
+        };
+
+        if l_ppm == 0 {
+            return (0, cc_ppm, 0, 0, n, m_undir);
+        }
+
+        // CC_rand ≈ 2·m / (n·(n−1))  [undirected density, E-R baseline].
+        let cc_rand_ppm: u32 = if n >= 2 {
+            ((m_undir as u64 * 2 * 1_000_000) / (n as u64 * (n as u64 - 1))) as u32
+        } else {
+            0
+        };
+        if cc_rand_ppm == 0 {
+            return (0, cc_ppm, l_ppm, 0, n, m_undir);
+        }
+
+        // Average degree ⟨k⟩ = 2·m / n (integer truncation).
+        let avg_k = (2 * m_undir) / n;
+        if avg_k < 2 || avg_k >= LN_TABLE.len() {
+            return (0, cc_ppm, l_ppm, 0, n, m_undir);
+        }
+
+        // L_rand ≈ ln(n) / ln(⟨k⟩)  [E-R random-graph baseline].
+        let ln_n = LN_TABLE[n.min(128)] as u64;
+        let ln_k = LN_TABLE[avg_k] as u64;
+        if ln_k == 0 {
+            return (0, cc_ppm, l_ppm, 0, n, m_undir);
+        }
+        let l_rand_ppm: u64 = (ln_n * 1_000_000) / ln_k;
+
+        // σ = (CC/CC_rand) / (L/L_rand) = (cc × l_rand × 1e6) / (cc_rand × l)
+        let numer = (cc_ppm as u128) * (l_rand_ppm as u128) * 1_000_000u128;
+        let denom = (cc_rand_ppm as u128) * (l_ppm as u128);
+        let sigma_ppm = if denom == 0 {
+            0u32
+        } else {
+            (numer / denom).min(u32::MAX as u128) as u32
+        };
+
+        (sigma_ppm, cc_ppm, l_ppm, l_rand_ppm, n, m_undir)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -8072,6 +8202,24 @@ pub fn graph_avg_clustering() -> (u32, usize, usize) {
 /// - `node_count`     — total alive nodes (denominator)
 pub fn graph_local_efficiency() -> (u32, usize, usize) {
     RUNTIME.lock().graph_local_efficiency_inner()
+}
+
+/// V2.77: Graph small-world coefficient σ (Humphries–Gurney 2008).
+///
+/// σ = (CC / CC_rand) / (L / L_rand)
+///
+/// CC_rand ≈ 2·m / (n·(n−1)) — Erdős–Rényi density baseline.
+/// L_rand  ≈ ln(n) / ln(⟨k⟩) — E-R average path baseline.
+///
+/// Returns `(sigma_ppm, cc_ppm, l_ppm, l_rand_ppm, node_count, m_undir)`:
+/// - `sigma_ppm`   — σ × 1_000_000 (0 when σ cannot be computed)
+/// - `cc_ppm`      — average clustering coefficient × 1_000_000
+/// - `l_ppm`       — average directed path length × 1_000_000
+/// - `l_rand_ppm`  — L_rand estimate × 1_000_000
+/// - `node_count`  — total alive nodes
+/// - `m_undir`     — deduplicated undirected edge count
+pub fn graph_small_world() -> (u32, u32, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_small_world_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.

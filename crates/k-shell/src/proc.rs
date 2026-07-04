@@ -1104,6 +1104,8 @@ fn dispatch_text_command(
         super::dispatch_graph_avg_clustering(sink);
     } else if cmd == "graph local efficiency" || cmd == "graph local eff" || cmd == "gleff" || cmd == "local efficiency" {
         super::dispatch_graph_local_efficiency(sink);
+    } else if cmd == "graph small world" || cmd == "graph small-world" || cmd == "gsmallworld" || cmd == "small world" {
+        super::dispatch_graph_small_world(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))
