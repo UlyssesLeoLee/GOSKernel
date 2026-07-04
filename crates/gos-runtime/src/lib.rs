@@ -7015,6 +7015,153 @@ impl GraphRuntime {
 
         (out_vecs, art_count, node_count)
     }
+
+    /// V2.86: Iterative Tarjan disc/low-link DFS — bridge (cut-edge) detection.
+    ///
+    /// Returns (from_vecs, to_vecs, bridge_count, node_count).
+    /// A bridge is an edge whose removal increases the number of connected
+    /// components.  Bridge condition: low[child] > disc[parent] (strictly >).
+    ///
+    /// Parent tracking by edge-index (not parent-slot) so that two anti-parallel
+    /// directed edges A→B + B→A are treated as one undirected path, not a bridge.
+    pub fn graph_bridges_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+        let mut from_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut to_vecs   = [VectorAddress::new(0, 0, 0, 0); N];
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        const UNVISITED:  u32   = u32::MAX;
+        const NO_PAR_EI:  usize = MAX_EDGES;  // sentinel: no parent edge
+
+        let mut disc     = [UNVISITED; MAX_NODES];
+        let mut low      = [0u32;      MAX_NODES];
+        let mut par_ei   = [NO_PAR_EI; MAX_NODES]; // edge-index we arrived from
+        let mut par_slot = [MAX_NODES;  MAX_NODES]; // parent node slot (for emit)
+
+        let mut timer        = 0u32;
+        let mut bridge_count = 0usize;
+
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if disc[start_slot] != UNVISITED { continue; }
+
+            disc[start_slot] = timer;
+            low[start_slot]  = timer;
+            timer           += 1;
+            dfs_stack[0]     = (start_slot, 0);
+            let mut st_top   = 1usize;
+
+            while st_top > 0 {
+                let fi = st_top - 1;
+                let (cur_slot, scan_ei) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { st_top -= 1; continue; }
+                };
+
+                let mut found = false;
+                let mut ei    = scan_ei;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => { ei += 1; continue; }
+                    };
+
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        ei += 1; continue;
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // self-loop
+
+                    // Skip exactly the edge we arrived on (by index, not slot).
+                    if ei == par_ei[cur_slot] { ei += 1; continue; }
+
+                    if disc[nbr_slot] == UNVISITED {
+                        disc[nbr_slot]     = timer;
+                        low[nbr_slot]      = timer;
+                        timer             += 1;
+                        par_ei[nbr_slot]   = ei;
+                        par_slot[nbr_slot] = cur_slot;
+                        dfs_stack[fi].1    = ei + 1;
+                        dfs_stack[st_top]  = (nbr_slot, 0);
+                        st_top            += 1;
+                        found              = true;
+                        break;
+                    } else {
+                        if disc[nbr_slot] < low[cur_slot] {
+                            low[cur_slot] = disc[nbr_slot];
+                        }
+                    }
+                    ei += 1;
+                }
+
+                if !found {
+                    st_top -= 1;
+                    let p = par_slot[cur_slot];
+                    if p != MAX_NODES {
+                        if low[cur_slot] < low[p] {
+                            low[p] = low[cur_slot];
+                        }
+                        // Bridge: low[child] > disc[parent] (strictly >)
+                        if low[cur_slot] > disc[p] && bridge_count < N {
+                            if let (Some(pr), Some(cr)) =
+                                (self.nodes[p], self.nodes[cur_slot])
+                            {
+                                let a = pr.vector;
+                                let b = cr.vector;
+                                if a.as_u64() <= b.as_u64() {
+                                    from_vecs[bridge_count] = a;
+                                    to_vecs[bridge_count]   = b;
+                                } else {
+                                    from_vecs[bridge_count] = b;
+                                    to_vecs[bridge_count]   = a;
+                                }
+                                bridge_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Insertion sort by (from.as_u64(), to.as_u64()).
+        for i in 1..bridge_count {
+            let mut j = i;
+            while j > 0 {
+                let a = (from_vecs[j - 1].as_u64(), to_vecs[j - 1].as_u64());
+                let b = (from_vecs[j].as_u64(),     to_vecs[j].as_u64());
+                if a > b {
+                    from_vecs.swap(j - 1, j);
+                    to_vecs.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        (from_vecs, to_vecs, bridge_count, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -9159,6 +9306,25 @@ pub fn graph_attractor<const N: usize>() -> ([VectorAddress; N], [u8; N], usize,
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_articulation<const N: usize>() -> ([VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_articulation_inner()
+}
+
+/// V2.86: Find all bridge edges (cut edges) in the undirected projection of
+/// the live kernel graph.
+///
+/// Returns (from_vecs, to_vecs, bridge_count, node_count).
+/// Each bridge is reported as a canonicalized pair (smaller.as_u64() first).
+/// Sorted ascending by (from.as_u64(), to.as_u64()).
+///
+/// A bridge is an edge whose removal increases connected components.
+/// Algorithm: iterative Tarjan disc/low-link DFS, O(V+E).
+/// Parent tracked by edge-index (not slot) to correctly handle anti-parallel
+/// directed pairs (A→B + B→A) which are NOT bridges.
+///
+/// OS analogy: a network link whose failure partitions the routing fabric —
+/// analogous to a single uplink between a leaf switch and the core.
+/// N controls the output buffer depth (cap at MAX_EDGES = 512).
+pub fn graph_bridges<const N: usize>() -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_bridges_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

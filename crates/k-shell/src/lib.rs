@@ -6899,6 +6899,73 @@ pub fn dispatch_graph_articulation(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.86: `graph bridges` — cut-edge detection.
+/// Displays all bridges (edges whose removal disconnects the graph) in the
+/// undirected projection of the live kernel graph.
+/// OS analogy: identifying single uplinks between network segments — a link
+/// whose failure partitions the routing fabric into isolated islands.
+pub fn dispatch_graph_bridges(sink: &ConsoleSink) {
+    let (from_vecs, to_vecs, bridge_count, node_count) =
+        gos_runtime::graph_bridges::<{ gos_runtime::MAX_NODES }>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph bridges (cut edges)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if bridge_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  no bridges (graph is 2-edge-connected or acyclic-free)\n");
+    } else {
+        for i in 0..bridge_count {
+            set_color(sink, 12, 0); // red — critical edge
+            print_str(sink, "  bridge  ");
+            let mut buf = LineBuf::<20>::new();
+            buf.push_vector(from_vecs[i]);
+            let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+            print_str(sink, s);
+            set_color(sink, 8, 0);
+            print_str(sink, "  \u{2500}\u{2500}  ");
+            set_color(sink, 12, 0);
+            let mut buf2 = LineBuf::<20>::new();
+            buf2.push_vector(to_vecs[i]);
+            let s2 = core::str::from_utf8(buf2.as_slice()).unwrap_or("?");
+            print_str(sink, s2);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, bridge_count);
+    print_str(sink, " bridge");
+    if bridge_count != 1 { print_str(sink, "s"); }
+    print_str(sink, "  of  ");
+    print_num_inline(sink, node_count);
+    print_str(sink, " node(s)  link resilience: ");
+    if bridge_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "2-edge-connected");
+    } else if bridge_count * 4 <= node_count {
+        set_color(sink, 14, 0);
+        print_str(sink, "moderate risk");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "high risk");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
