@@ -3341,6 +3341,104 @@ pub fn dispatch_graph_power_law(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.82: `graph diameter` / `gdiameter` — combined center + peripheral view.
+///
+/// Displays the graph's diameter (max eccentricity), radius (min nonzero eccentricity),
+/// center nodes (ecc == radius, green) and peripheral nodes (ecc == diameter, red)
+/// in a single panel — the structural "core vs. boundary" summary.
+pub fn dispatch_graph_diameter(sink: &ConsoleSink) {
+    let (p_vecs, p_ecc, periph_count, p_node_count, diameter) =
+        gos_runtime::graph_peripheral::<64>();
+    let (c_vecs, c_ecc, center_count, _c_node_count, radius) =
+        gos_runtime::graph_center::<64>();
+    let node_count = p_node_count;
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph diameter view\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if diameter == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  all nodes isolated \u{2014} diameter=0, radius=0\n");
+        print_str(sink, "  nodes=");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Column header.
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              ecc   role\n");
+    set_color(sink, 7, 0);
+
+    // Center nodes (ecc == radius) in green.
+    let mut i = 0usize;
+    while i < center_count {
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(c_vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+
+        set_color(sink, 10, 0);
+        print_str(sink, "  ");
+        print_str(sink, vec_str);
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+        print_str(sink, " ");
+        print_num_right6(sink, c_ecc[i] as usize);
+        print_str(sink, "  center\n");
+        set_color(sink, 7, 0);
+        i += 1;
+    }
+
+    // Peripheral nodes (ecc == diameter) in red.
+    // Skip any that are also center nodes (radius == diameter) to avoid double-listing.
+    if radius != diameter {
+        let mut j = 0usize;
+        while j < periph_count {
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(p_vecs[j]);
+            let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+
+            set_color(sink, 12, 0);
+            print_str(sink, "  ");
+            print_str(sink, vec_str);
+            let vlen = vec_str.len();
+            for _ in vlen..16 { print_str(sink, " "); }
+            print_str(sink, " ");
+            print_num_right6(sink, p_ecc[j] as usize);
+            print_str(sink, "  peripheral\n");
+            set_color(sink, 7, 0);
+            j += 1;
+        }
+    }
+
+    // Footer.
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    print_str(sink, "  radius=");
+    print_num_inline(sink, radius as usize);
+    print_str(sink, "  diameter=");
+    print_num_inline(sink, diameter as usize);
+    print_str(sink, "  center=");
+    print_num_inline(sink, center_count);
+    print_str(sink, "  periph=");
+    print_num_inline(sink, periph_count);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.79: `graph summary` / `gsummary` / `topology summary`
 ///
 /// One-shot topology report: gathers density, transitivity, avg clustering,
