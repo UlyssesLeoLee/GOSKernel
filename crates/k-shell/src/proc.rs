@@ -632,6 +632,14 @@ fn dispatch_text_command(
         super::print_str(sink, "  gleff              alias for graph local efficiency\n");
         super::print_str(sink, "  graph shortest <v> Dijkstra shortest paths from node <v> (directed, weighted)\n");
         super::print_str(sink, "  shortest <v>       alias for graph shortest\n");
+        super::print_str(sink, "  graph articulation cut vertices whose removal disconnects the graph\n");
+        super::print_str(sink, "  garticulate        alias for graph articulation\n");
+        super::print_str(sink, "  graph bridges      cut edges whose removal disconnects the graph\n");
+        super::print_str(sink, "  gbridges           alias for graph bridges\n");
+        super::print_str(sink, "  graph eulerian     Eulerian circuit/path existence (visit every edge once)\n");
+        super::print_str(sink, "  geulerian / euler  aliases for graph eulerian\n");
+        super::print_str(sink, "  graph dag longest  longest directed path (critical path) in the DAG\n");
+        super::print_str(sink, "  gdaglongest / critical path  aliases for graph dag longest\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1132,6 +1140,8 @@ fn dispatch_text_command(
         super::dispatch_graph_bridges(sink);
     } else if cmd == "graph eulerian" || cmd == "geulerian" || cmd == "eulerian" || cmd == "euler" {
         super::dispatch_graph_eulerian(sink);
+    } else if cmd == "graph dag longest" || cmd == "gdaglongest" || cmd == "critical path" || cmd == "graph critical" || cmd == "gcritical" {
+        super::dispatch_graph_dag_longest(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph predict ")
         .or_else(|| cmd.strip_prefix("gpredict "))

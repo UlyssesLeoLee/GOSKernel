@@ -7312,6 +7312,141 @@ impl GraphRuntime {
         let end_vec   = self.nodes[end_slot].map(|r| r.vector).unwrap_or(zero);
         (false, true, start_vec, end_vec, node_count)
     }
+
+    /// V2.88: Longest path (critical path) in a DAG — Kahn BFS + distance DP.
+    ///
+    /// Returns `(path_hops, is_dag, start_vec, end_vec, node_count)`:
+    ///   - `path_hops`  — hop count of the longest directed path (0 when no edges,
+    ///                    or when the graph has a directed cycle).
+    ///   - `is_dag`     — true iff the directed graph is acyclic (no directed cycles).
+    ///                    Self-loops count as cycles (is_dag = false).
+    ///   - `start_vec`  — source end of a longest path (zero when no path or cycle).
+    ///   - `end_vec`    — sink end of a longest path (zero when no path or cycle).
+    ///   - `node_count` — total live nodes.
+    ///
+    /// Algorithm: Kahn's BFS topological sort with a simultaneous max-distance DP.
+    /// O(V + E), no_std safe, fixed stack arrays only.
+    ///
+    /// Tie-breaking: when multiple paths share the same maximum length, the node
+    /// with the smallest slot index is chosen as the end node (deterministic).
+    ///
+    /// OS analogy: critical path in a kernel boot-dependency graph — the minimum
+    /// serial depth that any parallel initialisation must still traverse.
+    /// Equivalent to `systemd-analyze critical-chain` for graph-native subsystems.
+    pub fn graph_dag_longest_inner(
+        &self,
+    ) -> (u32, bool, VectorAddress, VectorAddress, usize) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+
+        // Compact live nodes.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return (0, true, zero, zero, 0);
+        }
+
+        // Compute in-degrees.  Self-loops (fs==ts) count here so Kahn's BFS
+        // can never drain them — a self-loop node stays stuck at in_deg≥1 and
+        // is never emitted, causing processed<node_count → is_dag=false.
+        let mut in_deg = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let _ = fs; // self-loops: fs==ts is intentional
+            in_deg[ts] = in_deg[ts].saturating_add(1);
+        }
+
+        // Distance and predecessor arrays.
+        let mut dist = [0u32; MAX_NODES];  // max hops from any source
+        let mut pred = [MAX_NODES; MAX_NODES]; // predecessor slot for path reconstruction
+
+        // Kahn's BFS queue: seed with all in-degree-0 nodes.
+        let mut queue  = [0usize; MAX_NODES];
+        let mut q_head = 0usize;
+        let mut q_tail = 0usize;
+        for ki in 0..node_count {
+            let s = node_slots[ki];
+            if in_deg[s] == 0 {
+                queue[q_tail] = s;
+                q_tail += 1;
+            }
+        }
+
+        let mut processed = 0usize;
+
+        while q_head < q_tail {
+            let cur_slot = queue[q_head];
+            q_head += 1;
+            processed += 1;
+
+            let cur_id = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+
+            // Relax all outgoing edges.
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; } // skip self-loops
+
+                let new_dist = dist[cur_slot].saturating_add(1);
+                if new_dist > dist[nbr_slot] {
+                    dist[nbr_slot] = new_dist;
+                    pred[nbr_slot] = cur_slot;
+                }
+
+                if in_deg[nbr_slot] > 0 {
+                    in_deg[nbr_slot] -= 1;
+                    if in_deg[nbr_slot] == 0 && q_tail < MAX_NODES {
+                        queue[q_tail] = nbr_slot;
+                        q_tail += 1;
+                    }
+                }
+            }
+        }
+
+        // If not all nodes processed → cycle exists.
+        let is_dag = processed == node_count;
+        if !is_dag {
+            return (0, false, zero, zero, node_count);
+        }
+
+        // Find node with maximum distance (tie-break: smallest slot index).
+        let mut max_dist  = 0u32;
+        let mut end_slot  = MAX_NODES;
+        for ki in 0..node_count {
+            let s = node_slots[ki];
+            if dist[s] > max_dist {
+                max_dist = dist[s];
+                end_slot = s;
+            }
+        }
+
+        // No edges at all → path_hops = 0.
+        if max_dist == 0 || end_slot == MAX_NODES {
+            return (0, true, zero, zero, node_count);
+        }
+
+        // Trace predecessor chain back to the path source.
+        let mut cur = end_slot;
+        loop {
+            let p = pred[cur];
+            if p >= MAX_NODES { break; } // cur is the source (no predecessor)
+            cur = p;
+        }
+        let start_slot = cur;
+
+        let start_vec = self.nodes[start_slot].map(|r| r.vector).unwrap_or(zero);
+        let end_vec   = self.nodes[end_slot].map(|r| r.vector).unwrap_or(zero);
+        (max_dist, true, start_vec, end_vec, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -9501,6 +9636,27 @@ pub fn graph_bridges<const N: usize>() -> ([VectorAddress; N], [VectorAddress; N
 /// (path)?  Equivalent to asking whether a network audit walk is possible.
 pub fn graph_eulerian() -> (bool, bool, VectorAddress, VectorAddress, usize) {
     RUNTIME.lock().graph_eulerian_inner()
+}
+
+/// V2.88: Longest directed path (critical path) in the graph's DAG projection.
+///
+/// Returns `(path_hops, is_dag, start_vec, end_vec, node_count)`:
+///   - `path_hops`  — hop count of the longest directed path; 0 if no edges,
+///                    no unique longest path, or if a directed cycle is present.
+///   - `is_dag`     — true iff the graph has no directed cycles (self-loops
+///                    included).  False means the graph is not a DAG.
+///   - `start_vec`  — source end of a critical path (zero when no path found).
+///   - `end_vec`    — sink end of a critical path (zero when no path found).
+///   - `node_count` — total live nodes.
+///
+/// Algorithm: Kahn's BFS topological sort with simultaneous max-distance DP.
+/// O(V+E), no_std safe.
+///
+/// OS analogy: `systemd-analyze critical-chain` — the minimum serial depth
+/// that any parallel boot sequence must still traverse in a DAG of service
+/// dependencies.
+pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize) {
+    RUNTIME.lock().graph_dag_longest_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

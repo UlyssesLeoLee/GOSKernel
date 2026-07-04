@@ -7030,6 +7030,73 @@ pub fn dispatch_graph_eulerian(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.88: `graph dag longest` — critical path (longest directed path) in the DAG.
+/// Analogous to `systemd-analyze critical-chain` for graph-native subsystems.
+pub fn dispatch_graph_dag_longest(sink: &ConsoleSink) {
+    let (path_hops, is_dag, start_vec, end_vec, node_count) =
+        gos_runtime::graph_dag_longest();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph dag longest\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_dag {
+        set_color(sink, 12, 0);
+        print_str(sink, "  \u{2717} graph has directed cycles (not a DAG)\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  critical path is undefined for cyclic graphs\n");
+        print_str(sink, "  use `graph cycles` or `graph scc` to inspect cycles\n");
+    } else if path_hops == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{2014} no directed edges (trivial DAG)\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  all nodes are isolated; critical path length = 0\n");
+    } else {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{2713} DAG  critical path: ");
+        print_num_inline(sink, path_hops as usize);
+        print_str(sink, " hop");
+        if path_hops != 1 { print_str(sink, "s"); }
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  start  ");
+        set_color(sink, 10, 0);
+        let mut buf = LineBuf::<20>::new();
+        buf.push_vector(start_vec);
+        let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+        print_str(sink, s);
+        set_color(sink, 7, 0);
+        print_str(sink, "   end  ");
+        set_color(sink, 14, 0);
+        let mut buf2 = LineBuf::<20>::new();
+        buf2.push_vector(end_vec);
+        let s2 = core::str::from_utf8(buf2.as_slice()).unwrap_or("?");
+        print_str(sink, s2);
+        print_str(sink, "\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  (minimum serial depth any parallel schedule must traverse)\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    let dag_str = if is_dag { "yes" } else { "no" };
+    print_str(sink, "  is_dag: ");
+    print_str(sink, dag_str);
+    print_str(sink, "   nodes: ");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
