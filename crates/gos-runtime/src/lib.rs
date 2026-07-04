@@ -7447,6 +7447,120 @@ impl GraphRuntime {
         let end_vec   = self.nodes[end_slot].map(|r| r.vector).unwrap_or(zero);
         (max_dist, true, start_vec, end_vec, node_count)
     }
+
+    pub fn graph_dag_layers_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize, u32, bool) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut out_vecs   = [zero; N];
+        let mut out_layers = [0u32; N];
+
+        // Compact live nodes.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return (out_vecs, out_layers, 0, 0, true);
+        }
+
+        // Compute in-degrees.  Self-loops count → those nodes never reach in_deg=0
+        // in Kahn's BFS, so if processed < node_count after BFS → is_dag = false.
+        let mut in_deg = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+            in_deg[ts] = in_deg[ts].saturating_add(1);
+        }
+
+        // layer[slot] = BFS layer from all in-degree-0 sources simultaneously.
+        let mut layer = [0u32; MAX_NODES];
+        // u32::MAX means the node was never reached (cycle member).
+        for ki in 0..node_count { layer[node_slots[ki]] = u32::MAX; }
+
+        // Kahn's BFS: seed all in-degree-0 nodes at layer 0.
+        let mut queue  = [0usize; MAX_NODES];
+        let mut q_head = 0usize;
+        let mut q_tail = 0usize;
+        for ki in 0..node_count {
+            let s = node_slots[ki];
+            if in_deg[s] == 0 {
+                layer[s] = 0;
+                queue[q_tail] = s;
+                q_tail += 1;
+            }
+        }
+
+        let mut processed = 0usize;
+        let mut max_layer = 0u32;
+
+        while q_head < q_tail {
+            let cur_slot = queue[q_head];
+            q_head += 1;
+            processed += 1;
+            let cur_id    = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            let cur_layer = layer[cur_slot];
+
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; } // skip self-loops in relaxation
+
+                if in_deg[nbr_slot] > 0 {
+                    in_deg[nbr_slot] -= 1;
+                    // Propagate max layer: nbr_layer = max(nbr_layer, cur_layer + 1).
+                    let new_layer = cur_layer.saturating_add(1);
+                    if layer[nbr_slot] == u32::MAX || new_layer > layer[nbr_slot] {
+                        layer[nbr_slot] = new_layer;
+                    }
+                    if in_deg[nbr_slot] == 0 && q_tail < MAX_NODES {
+                        if layer[nbr_slot] > max_layer { max_layer = layer[nbr_slot]; }
+                        queue[q_tail] = nbr_slot;
+                        q_tail += 1;
+                    }
+                }
+            }
+        }
+
+        // Cycle check.
+        let is_dag = processed == node_count;
+        if !is_dag {
+            return (out_vecs, out_layers, node_count, 0, false);
+        }
+
+        // Sort by ascending layer (then by as_u64() within a layer) for stable output.
+        let mut order = [0usize; MAX_NODES];
+        for ki in 0..node_count { order[ki] = node_slots[ki]; }
+        for i in 1..node_count {
+            let mut j = i;
+            while j > 0 {
+                let a = order[j - 1];
+                let b = order[j];
+                let la = layer[a];
+                let lb = layer[b];
+                let va = self.nodes[a].map(|r| r.vector.as_u64()).unwrap_or(0);
+                let vb = self.nodes[b].map(|r| r.vector.as_u64()).unwrap_or(0);
+                if la > lb || (la == lb && va > vb) {
+                    order.swap(j, j - 1);
+                    j -= 1;
+                } else { break; }
+            }
+        }
+
+        let n_out = node_count.min(N);
+        for i in 0..n_out {
+            let s = order[i];
+            out_vecs[i]   = self.nodes[s].map(|r| r.vector).unwrap_or(zero);
+            out_layers[i] = layer[s];
+        }
+
+        let layer_count = max_layer.saturating_add(1); // 0-indexed → count
+        (out_vecs, out_layers, node_count, layer_count, true)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -9657,6 +9771,28 @@ pub fn graph_eulerian() -> (bool, bool, VectorAddress, VectorAddress, usize) {
 /// dependencies.
 pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize) {
     RUNTIME.lock().graph_dag_longest_inner()
+}
+
+/// V2.89: DAG topological layer assignment — assigns each node its earliest
+/// parallel-execution level in the DAG (Kahn BFS multi-source layering).
+///
+/// Returns `(vecs, layers, node_count, layer_count, is_dag)`:
+///   - `vecs[0..node_count]`   — live node vectors, sorted ascending by layer then VectorAddress.
+///   - `layers[0..node_count]` — layer number for each node (0 = source, 1 = one hop from source, …).
+///   - `node_count`            — total live nodes.
+///   - `layer_count`           — number of distinct layers (= max_layer + 1); 0 if cyclic.
+///   - `is_dag`                — false iff the graph contains a directed cycle (layers undefined).
+///
+/// Algorithm: multi-source Kahn BFS with layer propagation, O(V+E), no_std safe.
+/// All in-degree-0 nodes are seeded at layer 0; each subsequent layer is the max
+/// predecessor layer + 1.  Unlike DAG longest path (V2.88) which finds a single
+/// critical path, this assigns EVERY node its minimum possible depth.
+///
+/// OS analogy: `systemd --analyze` dependency levels — which services can boot in
+/// parallel (same layer) and which must wait for the previous layer to complete.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_dag_layers<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, u32, bool) {
+    RUNTIME.lock().graph_dag_layers_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

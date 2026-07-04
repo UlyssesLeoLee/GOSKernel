@@ -640,6 +640,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  geulerian / euler  aliases for graph eulerian\n");
         super::print_str(sink, "  graph dag longest  longest directed path (critical path) in the DAG\n");
         super::print_str(sink, "  gdaglongest / critical path  aliases for graph dag longest\n");
+        super::print_str(sink, "  graph dag layers   topological level per node (parallel execution layers)\n");
+        super::print_str(sink, "  gdaglayers / glayers  aliases for graph dag layers\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1142,6 +1144,8 @@ fn dispatch_text_command(
         super::dispatch_graph_eulerian(sink);
     } else if cmd == "graph dag longest" || cmd == "gdaglongest" || cmd == "critical path" || cmd == "graph critical" || cmd == "gcritical" {
         super::dispatch_graph_dag_longest(sink);
+    } else if cmd == "graph dag layers" || cmd == "gdaglayers" || cmd == "glayers" || cmd == "dag layers" {
+        super::dispatch_graph_dag_layers(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph predict ")
         .or_else(|| cmd.strip_prefix("gpredict "))

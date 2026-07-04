@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gos-graph-bipartite-harness"
+name = "gos-graph-dag-layers-harness"
 version = "0.1.0"
 dependencies = [
  "gos-cypher-mut",

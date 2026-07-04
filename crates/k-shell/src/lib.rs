@@ -7097,6 +7097,79 @@ pub fn dispatch_graph_dag_longest(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.89: `graph dag layers` — topological level assignment for all DAG nodes.
+/// Each node gets its minimum parallel-execution layer (0 = source, 1 = one hop, …).
+/// Analogous to `systemd --analyze` dependency levels — which services start in parallel.
+pub fn dispatch_graph_dag_layers(sink: &ConsoleSink) {
+    let (vecs, layers, node_count, layer_count, is_dag) =
+        gos_runtime::graph_dag_layers::<64>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph dag layers\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_dag {
+        set_color(sink, 12, 0);
+        print_str(sink, "  \u{2717} graph has directed cycles (not a DAG)\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  topological layers are undefined for cyclic graphs\n");
+        print_str(sink, "  use `graph scc` or `graph dag longest` to inspect structure\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  nodes: ");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        return;
+    }
+
+    set_color(sink, 7, 0);
+    print_str(sink, "  layer  vector\n");
+    set_color(sink, 8, 0);
+    print_str(sink, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    let n_show = node_count.min(64);
+    let mut prev_layer = u32::MAX;
+    for i in 0..n_show {
+        let lyr = layers[i];
+        // Print a blank separator between different layers for readability.
+        if lyr != prev_layer && prev_layer != u32::MAX {
+            print_str(sink, "\n");
+        }
+        prev_layer = lyr;
+        set_color(sink, if lyr == 0 { 14 } else if lyr % 2 == 0 { 10 } else { 11 }, 0);
+        print_str(sink, "  ");
+        if lyr < 10   { print_str(sink, "    "); }
+        else if lyr < 100  { print_str(sink, "   "); }
+        else { print_str(sink, "  "); }
+        print_num_inline(sink, lyr as usize);
+        print_str(sink, "  ");
+        let mut buf = LineBuf::<20>::new();
+        buf.push_vector(vecs[i]);
+        let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+        print_str(sink, s);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  nodes: ");
+    print_num_inline(sink, node_count);
+    print_str(sink, "   layers: ");
+    print_num_inline(sink, layer_count as usize);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
