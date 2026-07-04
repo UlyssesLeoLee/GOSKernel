@@ -3972,6 +3972,108 @@ impl GraphRuntime {
         (sigma_ppm, cc_ppm, l_ppm, l_rand_ppm, n, m_undir)
     }
 
+    /// V2.78: Degree heterogeneity index κ = ⟨k²⟩/⟨k⟩ for scale-free detection.
+    ///
+    /// Undirected degree k_v = |distinct undirected neighbours of v| (self-loops excluded).
+    ///
+    /// Returns `(kappa_ppm, max_degree, avg_degree_ppm, node_count, m_undir)`.
+    /// - kappa_ppm     = ⟨k²⟩ × 1_000_000 / ⟨k⟩  (0 when no edges)
+    /// - max_degree    = maximum undirected degree (k_max)
+    /// - avg_degree_ppm = ⟨k⟩ × 1_000_000         (sum_k × 1_000_000 / n)
+    /// - node_count    = number of alive nodes
+    /// - m_undir       = deduplicated undirected edge count
+    ///
+    /// Scale-free heuristic: κ >> ⟨k⟩  ↔  kappa_ppm >> avg_degree_ppm.
+    ///   kappa_ppm > 3 × avg_degree_ppm  →  "likely scale-free"
+    ///   kappa_ppm > 2 × avg_degree_ppm  →  "heterogeneous"
+    ///   otherwise                        →  "homogeneous (regular/random-like)"
+    pub fn graph_scale_free_inner(&self) -> (u32, u32, u32, usize, usize) {
+        // Count alive nodes.
+        let n = self.nodes.iter().filter(|s| s.is_some()).count();
+        if n == 0 {
+            return (0, 0, 0, 0, 0);
+        }
+
+        // Compute undirected degree for each alive node.
+        let mut deg = [0u32; MAX_NODES];
+        let mut slot_ids = [NodeId::ZERO; MAX_NODES];
+        let mut n_counted = 0usize;
+        for slot in 0..MAX_NODES {
+            if let Some(ref r) = self.nodes[slot] {
+                slot_ids[slot] = r.spec.node_id;
+                n_counted += 1;
+            }
+        }
+        let _ = n_counted;
+
+        for slot in 0..MAX_NODES {
+            if self.nodes[slot].is_none() { continue; }
+            let vid = slot_ids[slot];
+            let mut neighbors = [NodeId::ZERO; MAX_NODES];
+            let mut nb = 0usize;
+            for edge in self.edges.iter().flatten() {
+                let other = if edge.spec.from_node == vid {
+                    edge.spec.to_node
+                } else if edge.spec.to_node == vid {
+                    edge.spec.from_node
+                } else {
+                    continue;
+                };
+                if other == vid { continue; }
+                if !neighbors[..nb].contains(&other) {
+                    neighbors[nb] = other;
+                    nb += 1;
+                    if nb >= MAX_NODES { break; }
+                }
+            }
+            deg[slot] = nb as u32;
+        }
+
+        // Aggregate: sum_k, sum_k2, max_k.
+        let mut sum_k:  u64 = 0;
+        let mut sum_k2: u64 = 0;
+        let mut max_k:  u32 = 0;
+        for slot in 0..MAX_NODES {
+            if self.nodes[slot].is_none() { continue; }
+            let k = deg[slot] as u64;
+            sum_k  += k;
+            sum_k2 += k * k;
+            if deg[slot] > max_k { max_k = deg[slot]; }
+        }
+
+        // Deduplicated undirected edge count (mirrors graph_small_world_inner).
+        let mut seen_from = [NodeId::ZERO; MAX_EDGES];
+        let mut seen_to   = [NodeId::ZERO; MAX_EDGES];
+        let mut m_undir = 0usize;
+        for edge in self.edges.iter().flatten() {
+            let u = edge.spec.from_node;
+            let v = edge.spec.to_node;
+            if u == v { continue; }
+            let already = (0..m_undir).any(|j| seen_from[j] == v && seen_to[j] == u);
+            if !already && m_undir < MAX_EDGES {
+                seen_from[m_undir] = u;
+                seen_to[m_undir]   = v;
+                m_undir += 1;
+            }
+        }
+
+        // kappa_ppm = ⟨k²⟩ × 1_000_000 / ⟨k⟩ = sum_k2 × 1_000_000 / sum_k.
+        let kappa_ppm: u32 = if sum_k == 0 {
+            0
+        } else {
+            (sum_k2 * 1_000_000 / sum_k).min(u32::MAX as u64) as u32
+        };
+
+        // avg_degree_ppm = sum_k × 1_000_000 / n.
+        let avg_degree_ppm: u32 = if n == 0 {
+            0
+        } else {
+            (sum_k * 1_000_000 / n as u64).min(u32::MAX as u64) as u32
+        };
+
+        (kappa_ppm, max_k, avg_degree_ppm, n, m_undir)
+    }
+
     /// V2.41: Graph eccentricity — max shortest-path distance from each node.
     ///
     /// ecc[v] = max d(v, u) over all u reachable from v via directed edges (u ≠ v).
@@ -8220,6 +8322,27 @@ pub fn graph_local_efficiency() -> (u32, usize, usize) {
 /// - `m_undir`     — deduplicated undirected edge count
 pub fn graph_small_world() -> (u32, u32, u64, u64, usize, usize) {
     RUNTIME.lock().graph_small_world_inner()
+}
+
+/// V2.78: Degree heterogeneity index κ = ⟨k²⟩/⟨k⟩ for scale-free detection.
+///
+/// κ is the ratio of the second moment to the first moment of the undirected degree
+/// distribution.  For a scale-free (power-law) network κ >> ⟨k⟩; for an Erdős–Rényi
+/// random graph κ ≈ ⟨k⟩ + 1; for a k-regular graph κ = ⟨k⟩.
+///
+/// Returns `(kappa_ppm, max_degree, avg_degree_ppm, node_count, m_undir)`:
+/// - `kappa_ppm`       — κ × 1_000_000  (0 when no edges exist)
+/// - `max_degree`      — maximum undirected degree k_max
+/// - `avg_degree_ppm`  — ⟨k⟩ × 1_000_000  (average undirected degree)
+/// - `node_count`      — total alive nodes
+/// - `m_undir`         — deduplicated undirected edge count
+///
+/// Heuristic classification (shell output):
+///   kappa_ppm > 3 × avg_degree_ppm  →  "likely scale-free"
+///   kappa_ppm > 2 × avg_degree_ppm  →  "heterogeneous"
+///   otherwise                        →  "homogeneous (regular/random-like)"
+pub fn graph_scale_free() -> (u32, u32, u32, usize, usize) {
+    RUNTIME.lock().graph_scale_free_inner()
 }
 
 /// V2.41: Graph eccentricity and graph radius / diameter.

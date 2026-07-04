@@ -1106,6 +1106,8 @@ fn dispatch_text_command(
         super::dispatch_graph_local_efficiency(sink);
     } else if cmd == "graph small world" || cmd == "graph small-world" || cmd == "gsmallworld" || cmd == "small world" {
         super::dispatch_graph_small_world(sink);
+    } else if cmd == "graph scale free" || cmd == "graph scale-free" || cmd == "gscalefree" || cmd == "scale free" {
+        super::dispatch_graph_scale_free(sink);
     } else if let Some(k_str) = cmd
         .strip_prefix("graph rich club ")
         .or_else(|| cmd.strip_prefix("richclub "))

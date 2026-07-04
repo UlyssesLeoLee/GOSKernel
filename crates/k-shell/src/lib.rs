@@ -3174,6 +3174,91 @@ pub fn dispatch_graph_small_world(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.78: `graph scale free` / `gscalefree` / `scale free`
+///
+/// Displays the degree heterogeneity index κ = ⟨k²⟩/⟨k⟩ and classifies the graph
+/// topology as scale-free, heterogeneous, or homogeneous (regular/random-like).
+pub fn dispatch_graph_scale_free(sink: &ConsoleSink) {
+    let (kappa_ppm, max_degree, avg_degree_ppm, node_count, m_undir) =
+        gos_runtime::graph_scale_free();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph scale-free detection\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03ba}: undefined (empty graph)\n");
+        print_str(sink, "  nodes=0\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Helper: print a ppm value as W.XXXXXX (6 decimal places).
+    fn print_ppm6(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm % 1_000_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10           { print_str(sink, "00000"); }
+        else if frac < 100     { print_str(sink, "0000"); }
+        else if frac < 1_000   { print_str(sink, "000"); }
+        else if frac < 10_000  { print_str(sink, "00"); }
+        else if frac < 100_000 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // κ value.
+    set_color(sink, 10, 0);
+    print_str(sink, "  \u{03ba}        = ");
+    if kappa_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undefined");
+        set_color(sink, 10, 0);
+        print_str(sink, "  (no edges)\n");
+    } else {
+        print_ppm6(sink, kappa_ppm as u64);
+        print_str(sink, "\n");
+    }
+
+    // ⟨k⟩ (average degree).
+    set_color(sink, 7, 0);
+    print_str(sink, "  \u{27e8}k\u{27e9}      = ");
+    print_ppm6(sink, avg_degree_ppm as u64);
+    print_str(sink, "\n");
+
+    // k_max.
+    print_str(sink, "  k_max    = ");
+    print_num_inline(sink, max_degree as usize);
+    print_str(sink, "\n");
+
+    // Classification.
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    // kappa > 3 * avg_k → likely scale-free; > 2 → heterogeneous; else homogeneous.
+    let threshold3 = (avg_degree_ppm as u64).saturating_mul(3);
+    let threshold2 = (avg_degree_ppm as u64).saturating_mul(2);
+    if kappa_ppm as u64 > threshold3 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  topology: likely scale-free (\u{03ba} >> \u{27e8}k\u{27e9})\n");
+    } else if kappa_ppm as u64 > threshold2 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  topology: heterogeneous (\u{03ba} > 2\u{27e8}k\u{27e9})\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  topology: homogeneous (regular/random-like)\n");
+    }
+    set_color(sink, 8, 0);
+    print_str(sink, "  nodes=");
+    print_num_inline(sink, node_count);
+    print_str(sink, "  edges_undir=");
+    print_num_inline(sink, m_undir);
+    print_str(sink, "\n");
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
