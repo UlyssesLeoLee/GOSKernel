@@ -6872,6 +6872,149 @@ impl GraphRuntime {
 
         (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count)
     }
+
+    /// V2.85: Articulation point detection on the undirected projection.
+    ///
+    /// Returns `(art_vecs, art_count, node_count)`:
+    /// - `art_vecs[0..art_count]` — cut-vertex vectors sorted ascending by as_u64().
+    /// - `art_count`              — number of articulation points found.
+    /// - `node_count`             — total live node count.
+    ///
+    /// Algorithm: iterative Tarjan (disc/low-link DFS), O(V+E).
+    pub fn graph_articulation_inner<const N: usize>(&self) -> ([VectorAddress; N], usize, usize) {
+        let mut out_vecs = [VectorAddress::new(0, 0, 0, 0); N];
+
+        // Collect live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        const UNVISITED: u32 = u32::MAX;
+        const NO_PAR: usize  = MAX_NODES;
+
+        // Per-slot DFS state.
+        let mut disc        = [UNVISITED; MAX_NODES]; // discovery time
+        let mut low         = [0u32;      MAX_NODES]; // low-link value
+        let mut par         = [NO_PAR;    MAX_NODES]; // DFS parent slot
+        let mut dfs_children= [0u8;       MAX_NODES]; // DFS-tree child count (for root check)
+        let mut is_ap       = [false;     MAX_NODES]; // articulation point flag
+
+        let mut timer = 0u32;
+
+        // Iterative DFS stack: (slot, edge_scan_start).
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if disc[start_slot] != UNVISITED { continue; }
+
+            disc[start_slot] = timer;
+            low[start_slot]  = timer;
+            timer           += 1;
+            dfs_stack[0]     = (start_slot, 0);
+            let mut st_top   = 1usize;
+
+            while st_top > 0 {
+                let fi = st_top - 1;
+                let (cur_slot, scan_ei) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { st_top -= 1; continue; }
+                };
+
+                let mut found = false;
+                let mut ei    = scan_ei;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+
+                    // Treat edge as undirected: take whichever endpoint is the neighbour.
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        ei += 1; continue;
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // self-loop
+
+                    if disc[nbr_slot] == UNVISITED {
+                        // Tree edge: push child.
+                        disc[nbr_slot]      = timer;
+                        low[nbr_slot]       = timer;
+                        timer              += 1;
+                        par[nbr_slot]       = cur_slot;
+                        dfs_children[cur_slot] = dfs_children[cur_slot].saturating_add(1);
+                        dfs_stack[fi].1     = ei + 1; // resume after this edge
+                        dfs_stack[st_top]   = (nbr_slot, 0);
+                        st_top             += 1;
+                        found               = true;
+                        break;
+                    } else if nbr_slot != par[cur_slot] {
+                        // Back edge: update low.
+                        if disc[nbr_slot] < low[cur_slot] {
+                            low[cur_slot] = disc[nbr_slot];
+                        }
+                    }
+                    ei += 1;
+                }
+
+                if !found {
+                    // Pop: propagate low to parent and check AP condition.
+                    st_top -= 1;
+                    let p = par[cur_slot];
+                    if p != NO_PAR {
+                        if low[cur_slot] < low[p] {
+                            low[p] = low[cur_slot];
+                        }
+                        // Non-root AP: low[child] >= disc[parent].
+                        if low[cur_slot] >= disc[p] && par[p] != NO_PAR {
+                            is_ap[p] = true;
+                        }
+                    }
+                }
+            }
+
+            // Root AP: root of a DFS tree with ≥ 2 tree children.
+            if dfs_children[start_slot] >= 2 {
+                is_ap[start_slot] = true;
+            }
+        }
+
+        // Collect and sort articulation points by as_u64() ascending.
+        let mut art_count = 0usize;
+        for ki in 0..node_count {
+            let slot = node_slots[ki];
+            if is_ap[slot] {
+                if let Some(r) = self.nodes[slot] {
+                    if art_count < N {
+                        out_vecs[art_count] = r.vector;
+                        art_count += 1;
+                    }
+                }
+            }
+        }
+        // Insertion sort ascending by as_u64().
+        for i in 1..art_count {
+            let mut j = i;
+            while j > 0 && out_vecs[j - 1].as_u64() > out_vecs[j].as_u64() {
+                out_vecs.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+
+        (out_vecs, art_count, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -8996,6 +9139,26 @@ pub fn graph_between<const N: usize>() -> ([VectorAddress; N], [u32; N], usize) 
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_attractor<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
     RUNTIME.lock().graph_attractor_inner()
+}
+
+/// V2.85: Articulation points (cut vertices) of the live kernel graph.
+///
+/// Returns `(art_vecs, art_count, node_count)`:
+/// - `art_vecs[0..art_count]` — cut-vertex vectors sorted ascending by as_u64().
+/// - `art_count`              — number of articulation points found.
+/// - `node_count`             — total live node count.
+///
+/// An articulation point is a node whose removal increases the number of
+/// connected components in the undirected projection of the graph.
+/// Equivalently: a node v is a cut vertex iff there exist s, t ≠ v such that
+/// every undirected path from s to t passes through v.
+///
+/// Algorithm: iterative Tarjan disc/low-link DFS, O(V+E).
+/// OS analogy: identifying single-point-of-failure kernel subsystems whose
+/// removal would partition the dependency graph into disconnected islands.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_articulation<const N: usize>() -> ([VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_articulation_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

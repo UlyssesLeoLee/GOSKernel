@@ -1126,6 +1126,8 @@ fn dispatch_text_command(
         super::dispatch_graph_snapshot(sink);
     } else if cmd == "graph compare" || cmd == "gcompare" {
         super::dispatch_graph_compare(sink);
+    } else if cmd == "graph articulation" || cmd == "garticulate" || cmd == "cut vertices" || cmd == "gcutv" {
+        super::dispatch_graph_articulation(sink);
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph predict ")
         .or_else(|| cmd.strip_prefix("gpredict "))

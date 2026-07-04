@@ -6838,6 +6838,67 @@ pub fn dispatch_graph_predict(sink: &ConsoleSink, u: VectorAddress, v: VectorAdd
     print_str(sink, "\n");
 }
 
+/// V2.85: `graph articulation` — cut vertices of the live kernel graph.
+/// An articulation point (cut vertex) is a node whose removal increases the
+/// number of connected components in the undirected projection.
+/// OS analogy: `systemctl list-dependencies --reverse` identifying
+/// single-point-of-failure subsystems with no redundant dependency path.
+pub fn dispatch_graph_articulation(sink: &ConsoleSink) {
+    let (art_vecs, art_count, node_count) =
+        gos_runtime::graph_articulation::<128>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph articulation points\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if art_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  no single points of failure (fully biconnected)\n");
+    } else {
+        for i in 0..art_count {
+            let fg: u8 = 12; // red — critical node
+            set_color(sink, fg, 0);
+            print_str(sink, "  cut vertex  ");
+            let mut buf = LineBuf::<20>::new();
+            buf.push_vector(art_vecs[i]);
+            let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+            print_str(sink, s);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, art_count);
+    print_str(sink, " cut ");
+    if art_count == 1 { print_str(sink, "vertex"); } else { print_str(sink, "vertices"); }
+    print_str(sink, "  of  ");
+    print_num_inline(sink, node_count);
+    print_str(sink, " node(s)  resilience: ");
+    if art_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "fully biconnected");
+    } else if art_count * 4 <= node_count {
+        set_color(sink, 14, 0);
+        print_str(sink, "moderate risk");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "high risk");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
