@@ -3355,6 +3355,7 @@ pub fn dispatch_graph_summary(sink: &ConsoleSink) {
     let (leff_ppm,    _nodes_le,   _)                      = gos_runtime::graph_local_efficiency();
     let (sigma_ppm,   _cc_sw, _l_sw, _lr_sw, _, m_undir)  = gos_runtime::graph_small_world();
     let (kappa_ppm,   max_k,  avg_k_ppm, _,   _)          = gos_runtime::graph_scale_free();
+    let (gamma_ppm,   _n_fit, _)                           = gos_runtime::graph_power_law();
 
     set_color(sink, 11, 0);
     print_str(sink, " graph topology summary\n");
@@ -3438,6 +3439,14 @@ pub fn dispatch_graph_summary(sink: &ConsoleSink) {
     } else {
         print_ppm3(sink, kappa_ppm as u64);
     }
+    print_str(sink, "\n  \u{03b3}\u{0302} (power-law)  = ");
+    if gamma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undef");
+        set_color(sink, 7, 0);
+    } else {
+        print_ppm3(sink, gamma_ppm as u64);
+    }
     print_str(sink, "\n");
 
     // ── Classification banner ─────────────────────────────────────────────────
@@ -3467,6 +3476,20 @@ pub fn dispatch_graph_summary(sink: &ConsoleSink) {
     } else {
         set_color(sink, 7, 0);
         print_str(sink, "  \u{03ba}\u{2248}\u{27e8}k\u{27e9}: homogeneous (regular/random-like)\n");
+    }
+    // Power-law exponent γ̂ classification.
+    if gamma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03b3}\u{0302}: MLE undefined (all non-isolated k=1 or no edges)\n");
+    } else if gamma_ppm <= 3_000_000 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{03b3}\u{0302}\u{2208}[1,3]: compatible with power-law / scale-free tail\n");
+    } else if gamma_ppm <= 4_000_000 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  \u{03b3}\u{0302}\u{2208}(3,4]: steep tail; weakly heterogeneous\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  \u{03b3}\u{0302}>4: not consistent with power-law degree distribution\n");
     }
     set_color(sink, 7, 0);
 }
