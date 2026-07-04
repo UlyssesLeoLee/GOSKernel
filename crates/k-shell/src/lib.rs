@@ -3259,6 +3259,136 @@ pub fn dispatch_graph_scale_free(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// V2.79: `graph summary` / `gsummary` / `topology summary`
+///
+/// One-shot topology report: gathers density, transitivity, avg clustering,
+/// global efficiency, local efficiency, small-world σ, and scale-free κ in
+/// a single human-readable panel.
+pub fn dispatch_graph_summary(sink: &ConsoleSink) {
+    // Gather all metrics (each takes its own RUNTIME lock; all pure reads).
+    let (density_ppm, edge_count, node_count)              = gos_runtime::graph_density();
+    let (trans_ppm,   _tri, _trip, _)                      = gos_runtime::graph_transitivity();
+    let (avgcc_ppm,   _nodes_cc,   _)                      = gos_runtime::graph_avg_clustering();
+    let (geff_ppm,    _pairs,      _)                      = gos_runtime::graph_global_efficiency();
+    let (leff_ppm,    _nodes_le,   _)                      = gos_runtime::graph_local_efficiency();
+    let (sigma_ppm,   _cc_sw, _l_sw, _lr_sw, _, m_undir)  = gos_runtime::graph_small_world();
+    let (kappa_ppm,   max_k,  avg_k_ppm, _,   _)          = gos_runtime::graph_scale_free();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph topology summary\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph — no nodes)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Helper: print ppm as W.XXX (3 decimal places; compact for tabular view).
+    fn print_ppm3(sink: &ConsoleSink, ppm: u64) {
+        let whole = (ppm / 1_000_000) as usize;
+        let frac  = (ppm / 1_000 % 1_000) as usize;
+        print_num_inline(sink, whole);
+        print_str(sink, ".");
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // ── Structure ─────────────────────────────────────────────────────────────
+    set_color(sink, 14, 0);
+    print_str(sink, "  [structure]\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  nodes        = ");
+    print_num_inline(sink, node_count);
+    print_str(sink, "\n  edges_undir  = ");
+    print_num_inline(sink, m_undir);
+    print_str(sink, "\n  edges_dir    = ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, "\n  density      = ");
+    print_ppm3(sink, density_ppm as u64);
+    print_str(sink, "\n  k_max        = ");
+    print_num_inline(sink, max_k as usize);
+    print_str(sink, "\n  avg_k        = ");
+    print_ppm3(sink, avg_k_ppm as u64);
+    print_str(sink, "\n");
+
+    // ── Clustering / transitivity ─────────────────────────────────────────────
+    set_color(sink, 14, 0);
+    print_str(sink, "  [clustering]\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  global CC    = ");
+    print_ppm3(sink, trans_ppm as u64);
+    print_str(sink, "  (transitivity)\n  avg CC       = ");
+    print_ppm3(sink, avgcc_ppm as u64);
+    print_str(sink, "  (Watts-Strogatz)\n");
+
+    // ── Efficiency ───────────────────────────────────────────────────────────
+    set_color(sink, 14, 0);
+    print_str(sink, "  [efficiency]\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  E_global     = ");
+    print_ppm3(sink, geff_ppm as u64);
+    print_str(sink, "\n  E_local      = ");
+    print_ppm3(sink, leff_ppm as u64);
+    print_str(sink, "\n");
+
+    // ── Small-world & scale-free ──────────────────────────────────────────────
+    set_color(sink, 14, 0);
+    print_str(sink, "  [network model]\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  \u{03c3} (small-world) = ");
+    if sigma_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undef");
+        set_color(sink, 7, 0);
+    } else {
+        print_ppm3(sink, sigma_ppm as u64);
+    }
+    print_str(sink, "\n  \u{03ba} (heterogen.)  = ");
+    if kappa_ppm == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "undef");
+        set_color(sink, 7, 0);
+    } else {
+        print_ppm3(sink, kappa_ppm as u64);
+    }
+    print_str(sink, "\n");
+
+    // ── Classification banner ─────────────────────────────────────────────────
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    // Small-world label.
+    if sigma_ppm > 1_000_000 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{03c3}>1: small-world network");
+    } else if sigma_ppm > 0 {
+        set_color(sink, 7, 0);
+        print_str(sink, "  \u{03c3}\u{2248}1: random-like topology");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{03c3}: insufficient connectivity for small-world test");
+    }
+    print_str(sink, "\n");
+    // Scale-free label.
+    let avg3 = (avg_k_ppm as u64).saturating_mul(3);
+    let avg2 = (avg_k_ppm as u64).saturating_mul(2);
+    if kappa_ppm as u64 > avg3 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  \u{03ba}\u{226b}\u{27e8}k\u{27e9}: likely scale-free\n");
+    } else if kappa_ppm as u64 > avg2 {
+        set_color(sink, 14, 0);
+        print_str(sink, "  \u{03ba}>2\u{27e8}k\u{27e9}: heterogeneous degree distribution\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  \u{03ba}\u{2248}\u{27e8}k\u{27e9}: homogeneous (regular/random-like)\n");
+    }
+    set_color(sink, 7, 0);
+}
+
 /// V2.60: `node attr list u8` / `nattr list u8` — show all nodes with a u8 attribute set.
 ///
 /// Prints a table of (VectorAddress, decimal val) for every occupied slot in
