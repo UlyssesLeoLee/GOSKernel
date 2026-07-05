@@ -7170,6 +7170,95 @@ pub fn dispatch_graph_dag_layers(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.90: `graph domtree <start>` — dominator tree from a given entry node.
+/// Reports each reachable node and its immediate dominator (closest mandatory
+/// predecessor on all paths from `start`).  The start node lists itself as
+/// its own dominator.
+///
+/// OS analogy: which kernel subsystem must be running (with no bypass) before
+/// each component can start — like `systemd-analyze critical-chain --all`
+/// but giving every service its immediate mandatory antecedent.
+pub fn dispatch_graph_domtree(sink: &ConsoleSink, start: gos_protocol::VectorAddress) {
+    let (vecs, idoms, node_count, reachable_count) =
+        gos_runtime::graph_domtree::<64>(start);
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph domtree  [start: ");
+    let mut sbuf = LineBuf::<20>::new();
+    sbuf.push_vector(start);
+    let ss = core::str::from_utf8(sbuf.as_slice()).unwrap_or("?");
+    print_str(sink, ss);
+    print_str(sink, "]\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if reachable_count == 0 {
+        set_color(sink, 12, 0);
+        print_str(sink, "  start node not found in graph\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        print_str(sink, "  nodes: ");
+        print_num_inline(sink, node_count);
+        print_str(sink, "\n");
+        return;
+    }
+
+    set_color(sink, 7, 0);
+    print_str(sink, "  node           immediate dominator\n");
+    set_color(sink, 8, 0);
+    print_str(sink, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}   \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    let n_show = reachable_count.min(64);
+    for i in 0..n_show {
+        let is_root = vecs[i] == idoms[i];
+        if is_root {
+            set_color(sink, 14, 0); // yellow for root
+        } else {
+            set_color(sink, 10, 0); // green for dominated nodes
+        }
+        print_str(sink, "  ");
+        let mut nbuf = LineBuf::<20>::new();
+        nbuf.push_vector(vecs[i]);
+        let ns = core::str::from_utf8(nbuf.as_slice()).unwrap_or("?");
+        print_str(sink, ns);
+        // Pad to column 16.
+        let nlen = nbuf.len();
+        let pad  = if nlen < 14 { 14 - nlen } else { 1 };
+        for _ in 0..pad { print_str(sink, " "); }
+        set_color(sink, if is_root { 8 } else { 7 }, 0);
+        let mut dbuf = LineBuf::<20>::new();
+        dbuf.push_vector(idoms[i]);
+        let ds = core::str::from_utf8(dbuf.as_slice()).unwrap_or("?");
+        print_str(sink, ds);
+        if is_root {
+            print_str(sink, "  \u{2190} root");
+        }
+        print_str(sink, "\n");
+    }
+    if reachable_count > 64 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  ... (truncated at 64)\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  nodes: ");
+    print_num_inline(sink, node_count);
+    print_str(sink, "   reachable: ");
+    print_num_inline(sink, reachable_count);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

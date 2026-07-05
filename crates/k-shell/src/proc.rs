@@ -642,6 +642,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gdaglongest / critical path  aliases for graph dag longest\n");
         super::print_str(sink, "  graph dag layers   topological level per node (parallel execution layers)\n");
         super::print_str(sink, "  gdaglayers / glayers  aliases for graph dag layers\n");
+        super::print_str(sink, "  graph domtree <v>  dominator tree from entry <v> (immediate dominator per node)\n");
+        super::print_str(sink, "  gdomtree <v> / dominator <v>  aliases for graph domtree\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1146,6 +1148,20 @@ fn dispatch_text_command(
         super::dispatch_graph_dag_longest(sink);
     } else if cmd == "graph dag layers" || cmd == "gdaglayers" || cmd == "glayers" || cmd == "dag layers" {
         super::dispatch_graph_dag_layers(sink);
+    } else if let Some(vec_str) = cmd
+        .strip_prefix("graph domtree ")
+        .or_else(|| cmd.strip_prefix("gdomtree "))
+        .or_else(|| cmd.strip_prefix("dominator "))
+        .or_else(|| cmd.strip_prefix("gdom "))
+    {
+        match gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            Some(start) => super::dispatch_graph_domtree(sink, start),
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " graph domtree: expected <start> vector (e.g. graph domtree 1.0.0.1)\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
     } else if let Some(pair_str) = cmd
         .strip_prefix("graph predict ")
         .or_else(|| cmd.strip_prefix("gpredict "))

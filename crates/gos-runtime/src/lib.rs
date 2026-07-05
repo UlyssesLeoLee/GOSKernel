@@ -7448,6 +7448,178 @@ impl GraphRuntime {
         (max_dist, true, start_vec, end_vec, node_count)
     }
 
+    /// V2.90: DAG transitive reach — ancestor and descendant counts for each node.
+    ///
+    /// For every live node v in a DAG:
+    ///   - `anc[v]`  = number of nodes that can reach v   (transitive predecessors)
+    ///   - `desc[v]` = number of nodes reachable from v   (transitive successors)
+    ///
+    /// Returns `(vecs, anc_counts, desc_counts, node_count, is_dag)`:
+    ///   - `vecs[0..node_count]`       — live node vectors, sorted descending by desc_count.
+    ///   - `anc_counts[0..node_count]` — ancestor count per node.
+    ///   - `desc_counts[0..node_count]`— descendant count per node.
+    ///   - `node_count`                — total live nodes.
+    ///   - `is_dag`                    — false iff the graph contains a directed cycle.
+    ///
+    /// Algorithm: Kahn BFS topological sort → bitset propagation in two passes.
+    ///   Pass 1 (reverse topo): desc bitsets propagated from sinks to sources.
+    ///   Pass 2 (forward topo): anc bitsets propagated from sources to sinks.
+    ///   Each pass is O(V*(V+E)/64); total O(V*(V+E)/64), no_std safe.
+    ///
+    /// Bitset encoding: one u128 per node (MAX_NODES=128 fits exactly in 128 bits).
+    /// Self-loops count toward in-degree, preventing Kahn drain → is_dag=false.
+    ///
+    /// OS analogy: `systemctl list-dependencies --reverse <unit>` counts how many
+    /// transitive dependents a service has (desc); its transitive dependencies (anc).
+    pub fn graph_dag_reach_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], [u32; N], usize, bool) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut out_vecs = [zero; N];
+        let mut out_anc  = [0u32; N];
+        let mut out_desc = [0u32; N];
+
+        // Compact live nodes.
+        let mut node_slots  = [0usize; MAX_NODES];
+        let mut node_count  = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return (out_vecs, out_anc, out_desc, 0, true);
+        }
+
+        // Map slot → rank (index within node_slots) for bitset indexing.
+        let mut slot_to_rank = [usize::MAX; MAX_NODES];
+        for ki in 0..node_count {
+            slot_to_rank[node_slots[ki]] = ki;
+        }
+
+        // In-degrees: self-loops included so Kahn BFS can't drain them → cycle detected.
+        let mut in_deg = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+            in_deg[ts] = in_deg[ts].saturating_add(1);
+        }
+
+        // Kahn BFS → topological order in `topo_order`.
+        let mut topo_order = [0usize; MAX_NODES];
+        let mut queue      = [0usize; MAX_NODES];
+        let mut q_head     = 0usize;
+        let mut q_tail     = 0usize;
+        let mut topo_len   = 0usize;
+
+        for ki in 0..node_count {
+            let s = node_slots[ki];
+            if in_deg[s] == 0 {
+                queue[q_tail] = s;
+                q_tail += 1;
+            }
+        }
+
+        while q_head < q_tail {
+            let cur_slot = queue[q_head];
+            q_head += 1;
+            topo_order[topo_len] = cur_slot;
+            topo_len += 1;
+
+            let cur_id = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; } // self-loops already accounted in in_deg
+                if in_deg[nbr_slot] > 0 {
+                    in_deg[nbr_slot] -= 1;
+                    if in_deg[nbr_slot] == 0 && q_tail < MAX_NODES {
+                        queue[q_tail] = nbr_slot;
+                        q_tail += 1;
+                    }
+                }
+            }
+        }
+
+        let is_dag = topo_len == node_count;
+        if !is_dag {
+            return (out_vecs, out_anc, out_desc, node_count, false);
+        }
+
+        // Bitset propagation.
+        // reach_from[slot]: u128 bitset where bit k=1 means rank-k node is reachable FROM slot.
+        // reach_to[slot]:   u128 bitset where bit k=1 means rank-k node can reach slot.
+        let mut reach_from = [0u128; MAX_NODES];
+        let mut reach_to   = [0u128; MAX_NODES];
+
+        // Pass 1 — reverse topological order: propagate descendant bitsets (sinks → sources).
+        // When we process cur_slot, all its successors are already processed (they appeared
+        // later in topological order, hence earlier in reverse).
+        let mut ki = topo_len;
+        while ki > 0 {
+            ki -= 1;
+            let cur_slot = topo_order[ki];
+            let cur_id   = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; }
+                let rank_nbr = slot_to_rank[nbr_slot];
+                if rank_nbr >= MAX_NODES { continue; }
+                // cur_slot can reach nbr_slot and everything nbr_slot can reach.
+                reach_from[cur_slot] |= (1u128 << rank_nbr) | reach_from[nbr_slot];
+            }
+        }
+
+        // Pass 2 — forward topological order: propagate ancestor bitsets (sources → sinks).
+        // When we process cur_slot, all its predecessors' reach_to are already finalised.
+        for ki in 0..topo_len {
+            let cur_slot = topo_order[ki];
+            let cur_id   = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            let rank_cur = slot_to_rank[cur_slot];
+            if rank_cur >= MAX_NODES { continue; }
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if nbr_slot == cur_slot { continue; }
+                // cur_slot is a direct ancestor of nbr_slot; all of cur_slot's ancestors too.
+                reach_to[nbr_slot] |= (1u128 << rank_cur) | reach_to[cur_slot];
+            }
+        }
+
+        // Build output: sort by descending desc_count; ties broken by ascending as_u64().
+        let mut order = [0usize; MAX_NODES];
+        for ki in 0..node_count { order[ki] = node_slots[ki]; }
+        for i in 1..node_count {
+            let mut j = i;
+            while j > 0 {
+                let a = order[j - 1];
+                let b = order[j];
+                let da = reach_from[a].count_ones();
+                let db = reach_from[b].count_ones();
+                let va = self.nodes[a].map(|r| r.vector.as_u64()).unwrap_or(0);
+                let vb = self.nodes[b].map(|r| r.vector.as_u64()).unwrap_or(0);
+                if da < db || (da == db && va > vb) {
+                    order.swap(j, j - 1);
+                    j -= 1;
+                } else { break; }
+            }
+        }
+
+        let n_out = node_count.min(N);
+        for i in 0..n_out {
+            let s = order[i];
+            out_vecs[i] = self.nodes[s].map(|r| r.vector).unwrap_or(zero);
+            out_anc[i]  = reach_to[s].count_ones();
+            out_desc[i] = reach_from[s].count_ones();
+        }
+
+        (out_vecs, out_anc, out_desc, node_count, true)
+    }
+
     pub fn graph_dag_layers_inner<const N: usize>(&self) -> ([VectorAddress; N], [u32; N], usize, u32, bool) {
         let zero = VectorAddress::new(0, 0, 0, 0);
         let mut out_vecs   = [zero; N];
@@ -7560,6 +7732,164 @@ impl GraphRuntime {
 
         let layer_count = max_layer.saturating_add(1); // 0-indexed → count
         (out_vecs, out_layers, node_count, layer_count, true)
+    }
+
+    /// V2.90: Cooper, Harvey & Kennedy 2001 simple iterative dominator algorithm.
+    /// Computes the immediate dominator (idom) of every node reachable from `start`.
+    /// Node D dominates node N when every directed path from `start` to N passes
+    /// through D.  The immediate dominator is the closest such D ≠ N.
+    ///
+    /// Returns `(vecs, idoms, node_count, reachable_count)`:
+    ///   - `vecs[0..reachable_count]`  — reachable nodes in RPO order.
+    ///   - `idoms[0..reachable_count]` — immediate dominator vector per node.
+    ///   - For `start`: `idoms[i] == vecs[i]` (start dominates itself).
+    ///   - `node_count`      — total live nodes.
+    ///   - `reachable_count` — nodes reachable from `start` (including start).
+    pub fn graph_domtree_inner<const N: usize>(
+        &self,
+        start: VectorAddress,
+    ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+        const UNDEF: usize = usize::MAX;
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut out_vecs  = [zero; N];
+        let mut out_idoms = [zero; N];
+
+        // Compact live nodes.
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() { node_count += 1; }
+        }
+        if node_count == 0 {
+            return (out_vecs, out_idoms, 0, 0);
+        }
+
+        let start_slot = match self.node_slot_by_vec(start) {
+            Some(s) => s,
+            None => return (out_vecs, out_idoms, node_count, 0),
+        };
+
+        // --- Step 1: iterative DFS post-order → reverse = RPO. ---
+        let mut rpo_slots = [0usize; MAX_NODES]; // rpo_slots[rpo_i] = slot
+        let mut rpo_num   = [UNDEF;  MAX_NODES]; // rpo_num[slot]    = rpo_i
+
+        let mut stk_slot   = [0usize; MAX_NODES];
+        let mut stk_cursor = [0usize; MAX_NODES]; // next edge-array index to check
+        let mut stk_depth  = 1usize;
+        let mut visited    = [false; MAX_NODES];
+        let mut post_buf   = [0usize; MAX_NODES]; // post-order sequence
+        let mut post_count = 0usize;
+
+        stk_slot[0]         = start_slot;
+        stk_cursor[0]       = 0;
+        visited[start_slot] = true;
+
+        'dfs: while stk_depth > 0 {
+            let cur    = stk_slot[stk_depth - 1];
+            let cur_id = match self.nodes[cur] {
+                Some(r) => r.spec.node_id,
+                None    => { stk_depth -= 1; continue; }
+            };
+            let mut ei = stk_cursor[stk_depth - 1];
+            while ei < MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                if edge.spec.from_node == cur_id {
+                    let nbr = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+                    if nbr != cur && !visited[nbr] {
+                        stk_cursor[stk_depth - 1] = ei + 1;
+                        visited[nbr]              = true;
+                        stk_slot[stk_depth]       = nbr;
+                        stk_cursor[stk_depth]     = 0;
+                        stk_depth                += 1;
+                        continue 'dfs;
+                    }
+                }
+                ei += 1;
+            }
+            // All successors visited — emit in post-order then pop.
+            if post_count < MAX_NODES {
+                post_buf[post_count] = cur;
+                post_count          += 1;
+            }
+            stk_depth -= 1;
+        }
+
+        // Reverse post-order.
+        let rpo_count = post_count;
+        for i in 0..rpo_count {
+            let s       = post_buf[rpo_count - 1 - i];
+            rpo_slots[i] = s;
+            rpo_num[s]   = i;
+        }
+
+        // --- Step 2: idom initialisation. ---
+        let mut idom = [UNDEF; MAX_NODES]; // idom[slot] = immediate-dominator slot
+        idom[start_slot] = start_slot;
+
+        // --- Step 3: iterate until convergence (Cooper et al. 2001). ---
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for rpo_i in 1..rpo_count { // skip start (position 0)
+                let b    = rpo_slots[rpo_i];
+                let b_id = match self.nodes[b] { Some(r) => r.spec.node_id, None => continue };
+                let mut new_idom = UNDEF;
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                    if edge.spec.to_node != b_id { continue; }
+                    let p = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+                    if p == b { continue; }          // skip self-loops
+                    if idom[p] == UNDEF { continue; } // predecessor not yet processed
+
+                    if new_idom == UNDEF {
+                        new_idom = p;
+                    } else {
+                        // Lattice join: walk up dominator chains to find LCA.
+                        let mut a  = p;
+                        let mut bb = new_idom;
+                        let mut guard = 0usize;
+                        while a != bb && guard < MAX_NODES * 2 {
+                            while a != UNDEF && bb != UNDEF && rpo_num[a] != UNDEF && rpo_num[bb] != UNDEF && rpo_num[a] > rpo_num[bb] {
+                                a = idom[a];
+                            }
+                            if a == UNDEF { break; }
+                            while a != UNDEF && bb != UNDEF && rpo_num[a] != UNDEF && rpo_num[bb] != UNDEF && rpo_num[bb] > rpo_num[a] {
+                                bb = idom[bb];
+                            }
+                            if bb == UNDEF { break; }
+                            guard += 1;
+                        }
+                        if a != UNDEF && bb != UNDEF && a == bb {
+                            new_idom = a;
+                        }
+                    }
+                }
+
+                if new_idom != UNDEF && idom[b] != new_idom {
+                    idom[b] = new_idom;
+                    changed  = true;
+                }
+            }
+        }
+
+        // --- Step 4: pack results in RPO order. ---
+        let reachable_count = (0..rpo_count).filter(|&i| idom[rpo_slots[i]] != UNDEF).count();
+        let n_out = reachable_count.min(N);
+        let mut out_i = 0usize;
+        for rpo_i in 0..rpo_count {
+            if out_i >= n_out { break; }
+            let s = rpo_slots[rpo_i];
+            if idom[s] == UNDEF { continue; }
+            out_vecs[out_i]  = self.nodes[s].map(|r| r.vector).unwrap_or(zero);
+            let id_s = idom[s];
+            out_idoms[out_i] = self.nodes[id_s].map(|r| r.vector).unwrap_or(zero);
+            out_i += 1;
+        }
+
+        (out_vecs, out_idoms, node_count, reachable_count)
     }
 }
 
@@ -9793,6 +10123,31 @@ pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize) {
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_dag_layers<const N: usize>() -> ([VectorAddress; N], [u32; N], usize, u32, bool) {
     RUNTIME.lock().graph_dag_layers_inner()
+}
+
+/// V2.90: Graph dominator tree — Cooper, Harvey & Kennedy 2001 simple iterative
+/// algorithm.  For every node reachable from `start`, computes its immediate
+/// dominator: the closest node that lies on every directed path from `start`.
+///
+/// Returns `(vecs, idoms, node_count, reachable_count)`:
+///   - `vecs[0..reachable_count]`  — reachable nodes in RPO order.
+///   - `idoms[0..reachable_count]` — immediate dominator vector per node.
+///   - For `start`: `idoms[i] == vecs[i]` (start dominates itself).
+///   - `node_count`      — total live nodes in the graph.
+///   - `reachable_count` — nodes reachable from `start` (including start).
+///
+/// If `start` is not in the graph, returns `(_, _, node_count, 0)`.
+/// Unreachable nodes (no directed path from `start`) are excluded from output.
+///
+/// OS analogy: compiler CFG dominator analysis — which kernel subsystem must
+/// be initialised (with no alternative path) before this component can run.
+/// Like `systemd-analyze critical-chain --all` but reports the single mandatory
+/// predecessor for each service, not just the root chain.
+/// N caps output depth (max MAX_NODES = 128).
+pub fn graph_domtree<const N: usize>(
+    start: VectorAddress,
+) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_domtree_inner(start)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
