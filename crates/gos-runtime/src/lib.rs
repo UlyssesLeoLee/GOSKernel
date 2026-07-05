@@ -7891,6 +7891,131 @@ impl GraphRuntime {
 
         (out_vecs, out_idoms, node_count, reachable_count)
     }
+
+    /// V2.91: Directed back-edges (feedback arc set) via iterative DFS 3-coloring.
+    ///
+    /// Returns (from_vecs, to_vecs, arc_count, node_count).
+    /// Each entry is one directed edge (from → to) whose presence creates a cycle.
+    /// Removing these arcs leaves the graph acyclic (a DAG).
+    ///
+    /// Algorithm: iterative DFS with UNVISITED/IN_STACK/DONE coloring, O(V+E).
+    /// A back-edge is any directed edge (u→v) where v is currently on the DFS
+    /// stack (color = IN_STACK / "gray").  Self-loops (u→u) are included: they
+    /// are trivially cyclic and are caught by the same IN_STACK check.
+    /// Cross/forward edges (v = DONE) are not feedback arcs and are skipped.
+    ///
+    /// The result is a valid FAS (not necessarily minimum — the min-FAS problem
+    /// is NP-hard in general).  DFS-based FAS is the standard O(V+E) approximation.
+    /// Output sorted ascending by (from.as_u64(), to.as_u64()) for determinism.
+    pub fn graph_feedback_arc_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut from_vecs = [zero; N];
+        let mut to_vecs   = [zero; N];
+
+        // Compact live nodes.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // 3-colour DFS: UNVISITED → IN_STACK (gray) → DONE (black).
+        const UNVISITED: u8 = 0;
+        const IN_STACK:  u8 = 1;
+        const DONE:      u8 = 2;
+
+        let mut color     = [UNVISITED; MAX_NODES];
+        let mut arc_count = 0usize;
+
+        // Iterative DFS stack: (slot, next_edge_index_to_scan).
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if color[start_slot] != UNVISITED { continue; }
+
+            color[start_slot] = IN_STACK;
+            dfs_stack[0] = (start_slot, 0);
+            let mut st_top = 1usize;
+
+            while st_top > 0 {
+                let fi = st_top - 1;
+                let (cur_slot, scan_ei) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { color[cur_slot] = DONE; st_top -= 1; continue; }
+                };
+
+                let mut found_child = false;
+                let mut ei          = scan_ei;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    if edge.spec.from_node != cur_id { ei += 1; continue; }
+
+                    let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+
+                    // Self-loops (nbr_slot == cur_slot): cur_slot is IN_STACK, so they
+                    // naturally fall into the IN_STACK arm below and are recorded as arcs.
+
+                    match color[nbr_slot] {
+                        UNVISITED => {
+                            // Tree edge: push neighbour and resume cur after this edge.
+                            color[nbr_slot]   = IN_STACK;
+                            dfs_stack[fi].1   = ei + 1;
+                            dfs_stack[st_top] = (nbr_slot, 0);
+                            st_top           += 1;
+                            found_child       = true;
+                            break;
+                        }
+                        IN_STACK => {
+                            // Back-edge: directed cycle detected — record as feedback arc.
+                            if arc_count < N {
+                                if let (Some(rf), Some(rt)) = (
+                                    self.nodes[cur_slot],
+                                    self.nodes[nbr_slot],
+                                ) {
+                                    from_vecs[arc_count] = rf.vector;
+                                    to_vecs[arc_count]   = rt.vector;
+                                    arc_count           += 1;
+                                }
+                            }
+                        }
+                        _ => {} // DONE: forward/cross edge — not a back-edge.
+                    }
+                    ei += 1;
+                }
+
+                if !found_child {
+                    color[cur_slot] = DONE;
+                    st_top -= 1;
+                }
+            }
+        }
+
+        // Sort ascending by (from.as_u64(), to.as_u64()) for determinism.
+        for i in 1..arc_count {
+            let mut j = i;
+            while j > 0
+                && (from_vecs[j - 1].as_u64(), to_vecs[j - 1].as_u64())
+                   > (from_vecs[j].as_u64(), to_vecs[j].as_u64())
+            {
+                from_vecs.swap(j - 1, j);
+                to_vecs.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+
+        (from_vecs, to_vecs, arc_count, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -10148,6 +10273,35 @@ pub fn graph_domtree<const N: usize>(
     start: VectorAddress,
 ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_domtree_inner(start)
+}
+
+/// V2.91: Directed back-edges that form the feedback arc set (FAS) of the
+/// live kernel graph.
+///
+/// Returns `(from_vecs, to_vecs, arc_count, node_count)`:
+///   - `from_vecs[0..arc_count]` / `to_vecs[0..arc_count]` — feedback arcs,
+///     sorted ascending by (from.as_u64(), to.as_u64()).
+///   - `arc_count`  — number of feedback arcs found.
+///   - `node_count` — total live nodes.
+///
+/// A feedback arc is a directed edge (u→v) whose removal (along with all such
+/// arcs) leaves the graph acyclic.  Self-loops are included (trivially cyclic).
+/// Removing all returned arcs yields a DAG (a valid topological-sort ordering
+/// then exists).
+///
+/// Algorithm: iterative 3-colour DFS (UNVISITED → IN_STACK → DONE), O(V+E).
+/// Each edge to an IN_STACK ("gray") node is a back-edge = feedback arc.
+/// Cross/forward edges (neighbour is DONE) are not arcs and are skipped.
+/// The result is a valid FAS; minimum-FAS is NP-hard and not claimed here.
+///
+/// OS analogy: `tsort --debug` or `systemd --show-environment` cycle report —
+/// the exact dependency edges that introduce circular boot-order requirements.
+/// Removing all returned arcs permits a clean topological initialisation of
+/// every kernel subsystem, with no deadlocked wait cycles.
+/// N controls the output buffer depth (cap at MAX_EDGES = 512).
+pub fn graph_feedback_arc<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_feedback_arc_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

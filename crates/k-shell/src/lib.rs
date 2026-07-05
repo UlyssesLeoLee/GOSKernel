@@ -7259,6 +7259,82 @@ pub fn dispatch_graph_domtree(sink: &ConsoleSink, start: gos_protocol::VectorAdd
     print_str(sink, "\n");
 }
 
+/// V2.91: `graph feedback arc` — feedback arc set (directed cycle-causing edges).
+/// Lists every directed back-edge found by iterative DFS 3-coloring.
+/// Removing these arcs makes the graph acyclic (a valid DAG).
+/// OS analogy: circular kernel module dependencies — the exact edges that create
+/// boot-order deadlocks; equivalent to what `tsort` prints as "cycle detected".
+pub fn dispatch_graph_feedback_arc(sink: &ConsoleSink) {
+    let (from_vecs, to_vecs, arc_count, node_count) =
+        gos_runtime::graph_feedback_arc::<{ gos_runtime::MAX_EDGES }>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph feedback arc\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if arc_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  no feedback arcs (graph is a DAG)\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  from              \u{2192}  to\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}     \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        let n_show = arc_count.min(gos_runtime::MAX_EDGES);
+        for i in 0..n_show {
+            set_color(sink, 12, 0);
+            print_str(sink, "  ");
+            let mut fbuf = LineBuf::<20>::new();
+            fbuf.push_vector(from_vecs[i]);
+            let fs = core::str::from_utf8(fbuf.as_slice()).unwrap_or("?");
+            print_str(sink, fs);
+            let flen = fbuf.len();
+            let pad  = if flen < 16 { 16 - flen } else { 1 };
+            for _ in 0..pad { print_str(sink, " "); }
+            set_color(sink, 8, 0);
+            print_str(sink, "\u{2192}  ");
+            set_color(sink, 12, 0);
+            let mut tbuf = LineBuf::<20>::new();
+            tbuf.push_vector(to_vecs[i]);
+            let ts = core::str::from_utf8(tbuf.as_slice()).unwrap_or("?");
+            print_str(sink, ts);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, arc_count);
+    print_str(sink, " feedback arc");
+    if arc_count != 1 { print_str(sink, "s"); }
+    print_str(sink, "  of  ");
+    print_num_inline(sink, node_count);
+    print_str(sink, " node(s)  dag status: ");
+    if arc_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "acyclic");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "cyclic (");
+        print_num_inline(sink, arc_count);
+        print_str(sink, " arc");
+        if arc_count != 1 { print_str(sink, "s"); }
+        print_str(sink, " to remove)");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
