@@ -7495,6 +7495,98 @@ pub fn dispatch_graph_2ecc(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.94: `graph truss` — k-truss decomposition (edge-triangle cohesion).
+///
+/// Complements k-core (V2.64): while k-core measures per-node degree within
+/// a subgraph, k-truss measures per-EDGE triangle participation.
+/// A node's trussness = max k such that it has an incident edge in the k-truss.
+///   trussness 0 = isolated node
+///   trussness 2 = has edges but no triangle (a "bridge" node)
+///   trussness k ≥ 3 = participates in tightly-knit triangle cluster
+///
+/// OS analogy: subsystems with high trussness have redundant mutual dependencies
+/// (multiple paths through shared intermediaries); hard to isolate by removing
+/// any single node — like bonded/redundant kernel module clusters.
+pub fn dispatch_graph_truss(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, trussness, total, max_truss) = gos_runtime::graph_truss::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph truss  (k-truss decomposition)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              k     role\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..total.min(MAX_N) {
+        let t = trussness[i];
+        let is_core = max_truss > 0 && t == max_truss;
+        let is_iso  = t == 0;
+        let is_leaf = t == 2; // edge but no triangle
+
+        if is_core {
+            set_color(sink, 10, 0); // bright green — densest truss
+        } else if is_iso {
+            set_color(sink, 8, 0);  // grey — isolated
+        } else if is_leaf {
+            set_color(sink, 14, 0); // yellow — leaf (edge, no triangle)
+        } else {
+            set_color(sink, 11, 0); // cyan — inner truss
+        }
+
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        let vlen = vec_str.len();
+        for _ in vlen..16 { print_str(sink, " "); }
+
+        print_str(sink, " ");
+        print_num_right6(sink, t as usize);
+        print_str(sink, "  ");
+
+        if is_core {
+            set_color(sink, 10, 0);
+            print_str(sink, "truss-core");
+        } else if is_iso {
+            set_color(sink, 8, 0);
+            print_str(sink, "isolated");
+        } else if is_leaf {
+            set_color(sink, 14, 0);
+            print_str(sink, "leaf");
+        } else {
+            set_color(sink, 11, 0);
+            print_str(sink, "inner");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  truss-number=");
+    set_color(sink, 10, 0);
+    print_num_inline(sink, max_truss as usize);
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

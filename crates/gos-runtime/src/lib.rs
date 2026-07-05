@@ -8425,6 +8425,210 @@ impl GraphRuntime {
 
         (vecs, comp_ids, node_count, comp_count)
     }
+
+    /// V2.94: k-truss decomposition (edge-peeling, Wang & Cheng 2012 simplified).
+    ///
+    /// Assigns each live node a "trussness" = max k such that the node has an
+    /// incident edge in the k-truss.  The k-truss is the maximal subgraph where
+    /// every edge participates in ≥ k−2 triangles **within** the subgraph.
+    ///
+    /// Strictly finer than k-core: every k-truss ⊆ (k−1)-core.
+    /// Isolated nodes (no edges) → trussness = 0.
+    /// Any edge (no triangles) → trussness = 2.
+    /// Triangle edge → trussness ≥ 3 (≥ 1 triangle).
+    ///
+    /// Algorithm:
+    ///   1. Build undirected deduped edge list.
+    ///   2. For each edge (u,v) compute support = |N(u) ∩ N(v)| (triangle count).
+    ///   3. For k = 3, 4, …: iteratively remove active edges with support < k−2,
+    ///      decrementing support of surviving edges that shared a triangle.
+    ///   4. Edges that survive all rounds get trussness = k_final.
+    ///      Edges removed at round k get trussness = k−1.
+    ///   5. Node trussness = max trussness of incident edges.
+    ///
+    /// Returns (vecs, trussness, node_count, max_trussness):
+    ///   vecs[0..n]      — nodes sorted trussness-descending, then as_u64 ascending
+    ///   trussness[0..n] — per-node trussness (0 = isolated)
+    ///   node_count      — total live nodes
+    ///   max_trussness   — graph truss number
+    pub fn graph_truss_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, u8) {
+        const ZERO: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+        // Collect live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        if nc == 0 {
+            return ([ZERO; N], [0u8; N], 0, 0);
+        }
+
+        // Build undirected edge list: eu[i] = lower slot, ev[i] = higher slot.
+        let mut eu = [0u8; MAX_EDGES];
+        let mut ev = [0u8; MAX_EDGES];
+        let mut ec = 0usize;
+
+        'edge_scan: for i in 0..MAX_EDGES {
+            let edge = match self.edges[i] {
+                Some(e) => e,
+                None => continue,
+            };
+            let us = match self.node_slot_by_id(edge.spec.from_node) {
+                Some(s) => s,
+                None => continue,
+            };
+            let vs = match self.node_slot_by_id(edge.spec.to_node) {
+                Some(s) => s,
+                None => continue,
+            };
+            if us == vs { continue; } // self-loop
+            let (a, b) = if us < vs {
+                (us as u8, vs as u8)
+            } else {
+                (vs as u8, us as u8)
+            };
+            // Dedup: skip if already added.
+            for k in 0..ec {
+                if eu[k] == a && ev[k] == b { continue 'edge_scan; }
+            }
+            if ec < MAX_EDGES {
+                eu[ec] = a;
+                ev[ec] = b;
+                ec += 1;
+            }
+        }
+
+        // Compute initial triangle support: support[ei] = |N(a) ∩ N(b)|.
+        let mut sup    = [0u8; MAX_EDGES];
+        let mut active = [true; MAX_EDGES];
+
+        for ei in 0..ec {
+            let a = eu[ei] as usize;
+            let b = ev[ei] as usize;
+            let mut cnt = 0u8;
+            // For each edge ej incident to a (other than ei), get other endpoint w.
+            for ej in 0..ec {
+                if ej == ei { continue; }
+                let x = eu[ej] as usize;
+                let y = ev[ej] as usize;
+                let w = if x == a { y } else if y == a { x } else { continue };
+                if w == b { continue; }
+                // Check if (b, w) is also in the edge list.
+                for ek in 0..ec {
+                    if ek == ei { continue; }
+                    let px = eu[ek] as usize;
+                    let py = ev[ek] as usize;
+                    if (px == b && py == w) || (px == w && py == b) {
+                        cnt = cnt.saturating_add(1);
+                        break;
+                    }
+                }
+            }
+            sup[ei] = cnt;
+        }
+
+        // Truss peeling.
+        let mut edge_truss = [2u8; MAX_EDGES]; // baseline: every edge is in 2-truss
+
+        let mut k = 3u32;
+        loop {
+            let thresh = (k - 2) as u8;
+            // Cascade: remove all active edges with support < thresh.
+            let mut any_removed = true;
+            while any_removed {
+                any_removed = false;
+                for ei in 0..ec {
+                    if !active[ei] { continue; }
+                    if sup[ei] >= thresh { continue; }
+
+                    active[ei] = false;
+                    edge_truss[ei] = (k - 1) as u8;
+                    any_removed = true;
+
+                    // Decrement support of edges sharing a triangle with (a, b).
+                    let a = eu[ei] as usize;
+                    let b = ev[ei] as usize;
+                    for ej in 0..ec {
+                        if !active[ej] { continue; }
+                        let x = eu[ej] as usize;
+                        let y = ev[ej] as usize;
+                        let w = if x == a { y } else if y == a { x } else { continue };
+                        if w == b { continue; }
+                        // (a, w) is edge ej; find active edge (b, w).
+                        for bwk in 0..ec {
+                            if !active[bwk] { continue; }
+                            let px = eu[bwk] as usize;
+                            let py = ev[bwk] as usize;
+                            if (px == b && py == w) || (px == w && py == b) {
+                                if sup[ej]  > 0 { sup[ej]  -= 1; }
+                                if sup[bwk] > 0 { sup[bwk] -= 1; }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // All remaining active edges have support >= thresh → they are in k-truss.
+            let has_active = {
+                let mut found = false;
+                for i in 0..ec { if active[i] { found = true; break; } }
+                found
+            };
+            if !has_active { break; }
+            if k >= 254 { break; }
+            // Mark remaining edges with current k (may be updated later).
+            for ei in 0..ec {
+                if active[ei] { edge_truss[ei] = k as u8; }
+            }
+            k += 1;
+        }
+
+        // Per-node trussness = max over incident edge trussness values.
+        let mut node_truss = [0u8; MAX_NODES];
+        for ei in 0..ec {
+            let t = edge_truss[ei];
+            let a = eu[ei] as usize;
+            let b = ev[ei] as usize;
+            if t > node_truss[a] { node_truss[a] = t; }
+            if t > node_truss[b] { node_truss[b] = t; }
+        }
+
+        // Sort: trussness descending, then as_u64 ascending (stable tie-break).
+        let mut sorted = node_slots;
+        for i in 1..nc {
+            let s = sorted[i];
+            let t = node_truss[s];
+            let v = self.nodes[s].map(|r| r.vector.as_u64()).unwrap_or(u64::MAX);
+            let mut j = i;
+            while j > 0 {
+                let ps = sorted[j - 1];
+                let pt = node_truss[ps];
+                let pv = self.nodes[ps].map(|r| r.vector.as_u64()).unwrap_or(u64::MAX);
+                if pt < t || (pt == t && pv > v) {
+                    sorted[j] = sorted[j - 1];
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            sorted[j] = s;
+        }
+
+        let copy_len = nc.min(N);
+        let mut out_vecs  = [ZERO; N];
+        let mut out_truss = [0u8; N];
+        for i in 0..copy_len {
+            let slot = sorted[i];
+            out_vecs[i]  = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO);
+            out_truss[i] = node_truss[slot];
+        }
+        let max_truss = if copy_len > 0 { out_truss[0] } else { 0 };
+        (out_vecs, out_truss, nc, max_truss)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -10756,6 +10960,19 @@ pub fn graph_bipartite_match<const N: usize>(
 /// failure — analogous to bonded NICs or RAID-1 paths in storage fabric.
 pub fn graph_2ecc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
     RUNTIME.lock().graph_2ecc_inner()
+}
+
+/// V2.94: k-truss decomposition — edge-triangle cohesion.
+///
+/// Returns (vecs, trussness, node_count, max_trussness).
+///   vecs[0..n]     — nodes sorted trussness-descending
+///   trussness[i]   — max k such that node has an incident edge in the k-truss
+///                    (0 = isolated; 2 = has edges but no triangles; ≥ 3 = in triangles)
+///   max_trussness  — graph truss number (highest node trussness)
+///
+/// Strictly finer than k-core: a k-truss ⊆ (k−1)-core.
+pub fn graph_truss<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
+    RUNTIME.lock().graph_truss_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

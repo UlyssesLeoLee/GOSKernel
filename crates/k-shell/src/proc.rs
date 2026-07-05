@@ -1160,6 +1160,8 @@ fn dispatch_text_command(
         super::dispatch_graph_bipartite_match(sink);
     } else if cmd == "graph 2ecc" || cmd == "g2ecc" || cmd == "2ecc" || cmd == "edge connected components" {
         super::dispatch_graph_2ecc(sink);
+    } else if cmd == "graph truss" || cmd == "gtruss" || cmd == "truss" || cmd == "k-truss" || cmd == "ktruss" {
+        super::dispatch_graph_truss(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))
