@@ -7414,6 +7414,87 @@ pub fn dispatch_graph_bipartite_match(sink: &ConsoleSink) {
     }
 }
 
+/// V2.93: `graph 2ecc` — 2-edge-connected components.
+///
+/// Shows every 2ECC with its member nodes grouped by component ID.
+/// Each component is a maximal set of nodes where any single edge failure
+/// cannot partition the group (≥2 edge-disjoint paths exist between all pairs).
+pub fn dispatch_graph_2ecc(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, comp_ids, node_count, comp_count) =
+        gos_runtime::graph_2ecc::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph 2-edge-connected components\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Print nodes grouped by component ID (output is already sorted by comp_id)
+    let mut cur_cid = u8::MAX;
+    let mut cid_size = 0usize;
+    let mut i = 0usize;
+    while i <= node_count.min(MAX_N) {
+        let flush = i == node_count.min(MAX_N)
+            || comp_ids[i] != cur_cid;
+
+        if flush && cur_cid != u8::MAX {
+            print_str(sink, "\n");
+        }
+
+        if i == node_count.min(MAX_N) { break; }
+
+        if comp_ids[i] != cur_cid {
+            cur_cid  = comp_ids[i];
+            cid_size = 0;
+            // Count size of this component
+            let mut k = i;
+            while k < node_count.min(MAX_N) && comp_ids[k] == cur_cid {
+                cid_size += 1;
+                k += 1;
+            }
+            set_color(sink, 14, 0);
+            print_str(sink, "  comp ");
+            print_num_inline(sink, cur_cid as usize);
+            set_color(sink, 8, 0);
+            print_str(sink, "  [");
+            print_num_inline(sink, cid_size);
+            print_str(sink, " node");
+            if cid_size != 1 { print_str(sink, "s"); }
+            print_str(sink, "]\n");
+            set_color(sink, 7, 0);
+            print_str(sink, "    ");
+        } else {
+            print_str(sink, "  ");
+        }
+
+        let mut buf = LineBuf::<20>::new();
+        buf.push_vector(vecs[i]);
+        let s = core::str::from_utf8(buf.as_slice()).unwrap_or("?");
+        print_str(sink, s);
+        i += 1;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, comp_count);
+    print_str(sink, " component");
+    if comp_count != 1 { print_str(sink, "s"); }
+    print_str(sink, " across ");
+    print_num_inline(sink, node_count);
+    print_str(sink, " node");
+    if node_count != 1 { print_str(sink, "s"); }
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

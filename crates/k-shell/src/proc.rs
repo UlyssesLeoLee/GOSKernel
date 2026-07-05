@@ -648,6 +648,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gfas / feedback arc / gcycledges  aliases for graph feedback arc\n");
         super::print_str(sink, "  graph bipartite match  maximum bipartite matching (Kuhn, optimal A\u{2194}B pairing)\n");
         super::print_str(sink, "  gbimatch / bipartite match  aliases for graph bipartite match\n");
+        super::print_str(sink, "  graph 2ecc  2-edge-connected components (nodes resilient to any single link failure)\n");
+        super::print_str(sink, "  g2ecc / 2ecc / edge connected components  aliases for graph 2ecc\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1156,6 +1158,8 @@ fn dispatch_text_command(
         super::dispatch_graph_feedback_arc(sink);
     } else if cmd == "graph bipartite match" || cmd == "gbimatch" || cmd == "bipartite match" {
         super::dispatch_graph_bipartite_match(sink);
+    } else if cmd == "graph 2ecc" || cmd == "g2ecc" || cmd == "2ecc" || cmd == "edge connected components" {
+        super::dispatch_graph_2ecc(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))

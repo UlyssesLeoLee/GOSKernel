@@ -8205,6 +8205,226 @@ impl GraphRuntime {
 
         (left_vecs, right_vecs, match_count, true, node_count)
     }
+
+    /// V2.93: 2-edge-connected components (2ECCs) of the live kernel graph.
+    ///
+    /// Two nodes u, v are in the same 2ECC iff there exist ≥2 edge-disjoint
+    /// paths between them (i.e., no single edge removal can disconnect them).
+    /// Every vertex belongs to exactly one 2ECC; bridges are the inter-component
+    /// boundary edges.
+    ///
+    /// Returns `(vecs, comp_ids, node_count, comp_count)`:
+    ///   - `vecs[0..node_count]`     — live nodes sorted by (comp_id, as_u64()).
+    ///   - `comp_ids[0..node_count]` — 0-indexed 2ECC ID for each node.
+    ///   - `node_count`              — total live nodes.
+    ///   - `comp_count`              — number of distinct 2ECCs.
+    ///
+    /// Algorithm: Phase 1 — Tarjan low-link bridge detection on the undirected
+    /// projection, O(V+E).  Phase 2 — BFS ignoring bridge edges to label each
+    /// connected component, O(V+E).  Total O(V+E), no_std safe.
+    ///
+    /// Self-loops are ignored (they can never be bridges and don't affect
+    /// 2ECC membership).  A single isolated node forms its own singleton 2ECC.
+    ///
+    /// OS analogy: groups of kernel subsystems where any single IPC link can
+    /// fail without partitioning the group — analogous to bonded network
+    /// interfaces or redundant bus paths in a fault-tolerant system fabric.
+    pub fn graph_2ecc_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, usize) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut vecs     = [zero; N];
+        let mut comp_ids = [0u8;  N];
+
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        if node_count == 0 {
+            return (vecs, comp_ids, 0, 0);
+        }
+
+        // ── Phase 1: Tarjan bridge-finding (undirected projection) ──────────
+        const UNVISITED: u32   = u32::MAX;
+        const NO_PAR_EI: usize = MAX_EDGES;
+
+        let mut disc      = [UNVISITED; MAX_NODES];
+        let mut low       = [0u32;      MAX_NODES];
+        let mut par_ei    = [NO_PAR_EI; MAX_NODES]; // edge we arrived on
+        let mut par_slot  = [MAX_NODES;  MAX_NODES]; // parent node slot
+        let mut is_bridge = [false;     MAX_EDGES];  // edge-index → bridge?
+
+        let mut timer = 0u32;
+        let mut dfs_stack: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if disc[start_slot] != UNVISITED { continue; }
+
+            disc[start_slot] = timer;
+            low[start_slot]  = timer;
+            timer           += 1;
+            dfs_stack[0]     = (start_slot, 0);
+            let mut st_top   = 1usize;
+
+            while st_top > 0 {
+                let fi = st_top - 1;
+                let (cur_slot, scan_ei) = dfs_stack[fi];
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { st_top -= 1; continue; }
+                };
+
+                let mut found = false;
+                let mut ei    = scan_ei;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => { ei += 1; continue; }
+                    };
+
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        ei += 1; continue;
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // self-loop
+                    if ei == par_ei[cur_slot] { ei += 1; continue; } // parent edge
+
+                    if disc[nbr_slot] == UNVISITED {
+                        disc[nbr_slot]     = timer;
+                        low[nbr_slot]      = timer;
+                        timer             += 1;
+                        par_ei[nbr_slot]   = ei;
+                        par_slot[nbr_slot] = cur_slot;
+                        dfs_stack[fi].1    = ei + 1;
+                        dfs_stack[st_top]  = (nbr_slot, 0);
+                        st_top            += 1;
+                        found              = true;
+                        break;
+                    } else {
+                        if disc[nbr_slot] < low[cur_slot] {
+                            low[cur_slot] = disc[nbr_slot];
+                        }
+                        ei += 1;
+                    }
+                }
+
+                if !found {
+                    st_top -= 1;
+                    let p = par_slot[cur_slot];
+                    if p != MAX_NODES {
+                        if low[cur_slot] < low[p] {
+                            low[p] = low[cur_slot];
+                        }
+                        // Bridge: low[child] > disc[parent] (strictly >)
+                        if low[cur_slot] > disc[p] {
+                            let ei_b = par_ei[cur_slot];
+                            if ei_b < MAX_EDGES {
+                                is_bridge[ei_b] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Phase 2: BFS on non-bridge undirected edges ─────────────────────
+        let mut comp_slot: [u8; MAX_NODES]    = [u8::MAX; MAX_NODES];
+        let mut bfs_queue: [usize; MAX_NODES] = [0;       MAX_NODES];
+        let mut comp_count = 0usize;
+
+        for ki in 0..node_count {
+            let start_slot = node_slots[ki];
+            if comp_slot[start_slot] != u8::MAX { continue; }
+
+            let cid = comp_count.min(254) as u8;
+            comp_count += 1;
+            comp_slot[start_slot] = cid;
+
+            bfs_queue[0] = start_slot;
+            let mut bfs_head = 0usize;
+            let mut bfs_tail = 1usize;
+
+            while bfs_head < bfs_tail {
+                let cur_slot = bfs_queue[bfs_head];
+                bfs_head += 1;
+
+                let cur_id = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    if is_bridge[ei] { continue; }
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        continue;
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => continue,
+                    };
+                    if nbr_slot == cur_slot { continue; } // self-loop
+
+                    if comp_slot[nbr_slot] == u8::MAX {
+                        comp_slot[nbr_slot] = cid;
+                        if bfs_tail < MAX_NODES {
+                            bfs_queue[bfs_tail] = nbr_slot;
+                            bfs_tail += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Phase 3: build output sorted by (comp_id, vecs.as_u64()) ────────
+        let out_count = node_count.min(N);
+        for ki in 0..out_count {
+            let slot = node_slots[ki];
+            if let Some(node) = self.nodes[slot] {
+                vecs[ki]     = node.vector;
+                comp_ids[ki] = comp_slot[slot];
+            }
+        }
+
+        for i in 1..out_count {
+            let mut j = i;
+            while j > 0 {
+                let a = (comp_ids[j - 1], vecs[j - 1].as_u64());
+                let b = (comp_ids[j],     vecs[j].as_u64());
+                if a > b {
+                    comp_ids.swap(j - 1, j);
+                    vecs.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        (vecs, comp_ids, node_count, comp_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -10515,6 +10735,27 @@ pub fn graph_feedback_arc<const N: usize>(
 pub fn graph_bipartite_match<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], usize, bool, usize) {
     RUNTIME.lock().graph_bipartite_match_inner()
+}
+
+/// V2.93: 2-edge-connected components (2ECCs) of the live kernel graph.
+///
+/// Two nodes are in the same 2ECC iff no single edge removal can disconnect
+/// them (∃ ≥2 edge-disjoint paths between them).  Every vertex belongs to
+/// exactly one 2ECC.  Bridges are the boundary edges between components.
+///
+/// Returns `(vecs, comp_ids, node_count, comp_count)`:
+///   - `vecs[0..node_count]`     — live nodes sorted by (comp_id, VectorAddress).
+///   - `comp_ids[0..node_count]` — 0-indexed 2ECC ID for each node.
+///   - `node_count`              — total live nodes.
+///   - `comp_count`              — number of distinct 2ECCs.
+///
+/// Algorithm: Tarjan bridge-finding + BFS on non-bridge undirected edges,
+/// O(V+E), no_std safe.
+///
+/// OS analogy: kernel subsystem clusters resilient to any single IPC link
+/// failure — analogous to bonded NICs or RAID-1 paths in storage fabric.
+pub fn graph_2ecc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
+    RUNTIME.lock().graph_2ecc_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
