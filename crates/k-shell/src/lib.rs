@@ -476,6 +476,10 @@ impl<const N: usize> LineBuf<N> {
     fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+
+    fn len(&self) -> usize {
+        self.len
+    }
 }
 
 unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut ShellState {
