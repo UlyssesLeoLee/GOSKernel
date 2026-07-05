@@ -646,6 +646,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gdomtree <v> / dominator <v>  aliases for graph domtree\n");
         super::print_str(sink, "  graph feedback arc  feedback arcs (back-edges that cause cycles in the graph)\n");
         super::print_str(sink, "  gfas / feedback arc / gcycledges  aliases for graph feedback arc\n");
+        super::print_str(sink, "  graph bipartite match  maximum bipartite matching (Kuhn, optimal A\u{2194}B pairing)\n");
+        super::print_str(sink, "  gbimatch / bipartite match  aliases for graph bipartite match\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1152,6 +1154,8 @@ fn dispatch_text_command(
         super::dispatch_graph_dag_layers(sink);
     } else if cmd == "graph feedback arc" || cmd == "gfas" || cmd == "feedback arc" || cmd == "gcycledges" {
         super::dispatch_graph_feedback_arc(sink);
+    } else if cmd == "graph bipartite match" || cmd == "gbimatch" || cmd == "bipartite match" {
+        super::dispatch_graph_bipartite_match(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))

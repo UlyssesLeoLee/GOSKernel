@@ -8016,6 +8016,195 @@ impl GraphRuntime {
 
         (from_vecs, to_vecs, arc_count, node_count)
     }
+
+    /// V2.92: Maximum bipartite matching — Kuhn's iterative DFS augmenting paths, O(V·E).
+    ///
+    /// Returns `(left_vecs, right_vecs, match_count, is_bipartite, node_count)`:
+    /// - `left_vecs[0..match_count]`  — matched side-A (color 0) nodes.
+    /// - `right_vecs[0..match_count]` — matched side-B (color 1) nodes.
+    /// - `match_count`                — maximum matching size; 0 if not bipartite.
+    /// - `is_bipartite`               — false if an odd-length cycle was detected.
+    /// - `node_count`                 — total live nodes.
+    ///
+    /// Algorithm: BFS 2-colouring to build bipartition, then for each free
+    /// side-A node an iterative DFS finds an augmenting alternating path and
+    /// updates the matching in-place.  Vertex-disjoint augmenting paths are
+    /// guaranteed by the `visited_b` mask reset between free-node attempts.
+    pub fn graph_bipartite_match_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [VectorAddress; N], usize, bool, usize) {
+        const NIL: usize = usize::MAX;
+
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut left_vecs  = [zero; N];
+        let mut right_vecs = [zero; N];
+
+        // Compact live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // ── Step 1: BFS 2-colouring (undirected) ────────────────────────────
+        const UNCOLORED: u8 = u8::MAX;
+        let mut slot_color = [UNCOLORED; MAX_NODES];
+        let mut is_bipartite = true;
+        {
+            let mut q  = [0usize; MAX_NODES];
+            let mut qh = 0usize;
+            let mut qt = 0usize;
+
+            'outer: for ki in 0..node_count {
+                let start = node_slots[ki];
+                if slot_color[start] != UNCOLORED { continue; }
+
+                slot_color[start] = 0;
+                q[qt] = start;
+                qt += 1;
+
+                while qh < qt {
+                    let cur = q[qh];
+                    qh += 1;
+                    let cur_color  = slot_color[cur];
+                    let next_color = 1 - cur_color;
+                    let cur_id = match self.nodes[cur] { Some(r) => r.spec.node_id, None => continue };
+
+                    for ei in 0..MAX_EDGES {
+                        let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                        let nbr_id = if edge.spec.from_node == cur_id {
+                            edge.spec.to_node
+                        } else if edge.spec.to_node == cur_id {
+                            edge.spec.from_node
+                        } else {
+                            continue
+                        };
+                        let nbr = match self.node_slot_by_id(nbr_id) { Some(s) => s, None => continue };
+                        if nbr == cur { continue; } // self-loop
+                        if slot_color[nbr] == UNCOLORED {
+                            slot_color[nbr] = next_color;
+                            if qt < MAX_NODES { q[qt] = nbr; qt += 1; }
+                        } else if slot_color[nbr] == cur_color {
+                            is_bipartite = false;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !is_bipartite {
+            return (left_vecs, right_vecs, 0, false, node_count);
+        }
+
+        // ── Step 2: Kuhn's augmenting-path matching ──────────────────────────
+        // match_a[slot] = matched B-slot for A-nodes (color 0); NIL if free.
+        // match_b[slot] = matched A-slot for B-nodes (color 1); NIL if free.
+        let mut match_a = [NIL; MAX_NODES];
+        let mut match_b = [NIL; MAX_NODES];
+        let mut match_count = 0usize;
+
+        for ki in 0..node_count {
+            let start_a = node_slots[ki];
+            if slot_color[start_a] != 0 { continue; }  // only side-A nodes
+            if match_a[start_a] != NIL  { continue; }  // already matched
+
+            // visited_b[b]: true once this B-node has been explored in this DFS.
+            let mut visited_b = [false; MAX_NODES];
+
+            // Iterative DFS stack: (a_slot, edge_scan_start).
+            let mut dfs_stk:  [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+            // chosen_b[level]: the B-slot chosen at this DFS level (to reconstruct path).
+            let mut chosen_b: [usize; MAX_NODES] = [NIL; MAX_NODES];
+            let mut st_top = 1usize;
+            dfs_stk[0] = (start_a, 0);
+            let mut augmented = false;
+
+            'dfs: while st_top > 0 {
+                let lvl = st_top - 1;
+                let (a_slot, mut ei) = dfs_stk[lvl];
+                let a_id = match self.nodes[a_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { st_top -= 1; continue; }
+                };
+
+                let mut found_next = false;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] { Some(e) => e, None => { ei += 1; continue; } };
+                    let nbr_id = if edge.spec.from_node == a_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == a_id {
+                        edge.spec.from_node
+                    } else {
+                        ei += 1; continue;
+                    };
+                    let b_slot = match self.node_slot_by_id(nbr_id) { Some(s) => s, None => { ei += 1; continue; } };
+                    if b_slot == a_slot       { ei += 1; continue; } // self-loop
+                    if slot_color[b_slot] != 1 { ei += 1; continue; } // only B-nodes
+                    if visited_b[b_slot]      { ei += 1; continue; } // already tried
+                    visited_b[b_slot] = true;
+                    ei += 1;
+
+                    if match_b[b_slot] == NIL {
+                        // Free B-node: augment path from level 0 up to lvl.
+                        chosen_b[lvl] = b_slot;
+                        let mut cur_b  = b_slot;
+                        let mut cur_lv = lvl;
+                        loop {
+                            let cur_a = dfs_stk[cur_lv].0;
+                            match_a[cur_a] = cur_b;
+                            match_b[cur_b] = cur_a;
+                            if cur_lv == 0 { break; }
+                            cur_lv -= 1;
+                            cur_b = chosen_b[cur_lv];
+                        }
+                        augmented = true;
+                        match_count += 1;
+                        break 'dfs;
+                    } else {
+                        // Matched B-node: push its matched A-node onto DFS stack.
+                        let next_a = match_b[b_slot];
+                        chosen_b[lvl]     = b_slot;
+                        dfs_stk[lvl].1    = ei; // save scan position for backtrack
+                        if st_top < MAX_NODES {
+                            dfs_stk[st_top] = (next_a, 0);
+                            st_top += 1;
+                        }
+                        found_next = true;
+                        break;
+                    }
+                }
+
+                if !found_next && !augmented {
+                    // No viable path through this A-node: backtrack.
+                    st_top -= 1;
+                }
+            }
+            let _ = augmented; // suppress unused warning
+        }
+
+        // ── Step 3: collect matched pairs (sorted by left vec for determinism) ─
+        let mut out_count = 0usize;
+        for ki in 0..node_count {
+            let a_slot = node_slots[ki];
+            if slot_color[a_slot] != 0 { continue; }
+            let b_slot = match_a[a_slot];
+            if b_slot == NIL { continue; }
+            if out_count < N {
+                if let (Some(a_rec), Some(b_rec)) = (self.nodes[a_slot], self.nodes[b_slot]) {
+                    left_vecs[out_count]  = a_rec.vector;
+                    right_vecs[out_count] = b_rec.vector;
+                    out_count += 1;
+                }
+            }
+        }
+
+        (left_vecs, right_vecs, match_count, true, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -10302,6 +10491,30 @@ pub fn graph_domtree<const N: usize>(
 pub fn graph_feedback_arc<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_feedback_arc_inner()
+}
+
+/// V2.92: Maximum bipartite matching — Kuhn's iterative DFS, O(V·E).
+///
+/// Returns `(left_vecs, right_vecs, match_count, is_bipartite, node_count)`:
+/// - `left_vecs[0..match_count]`  — matched side-A (color 0) nodes.
+/// - `right_vecs[0..match_count]` — matched side-B (color 1) nodes.
+/// - `match_count`                — maximum matching size; 0 if not bipartite.
+/// - `is_bipartite`               — false if an odd-length cycle was detected.
+/// - `node_count`                 — total live nodes.
+///
+/// Edges are treated as undirected; the bipartition is determined by BFS
+/// 2-colouring.  For each free side-A node, an iterative DFS explores
+/// alternating paths and augments the matching when a free side-B node is
+/// reached.  Removing both the left_vecs and right_vecs arrays from the result
+/// and cross-referencing by index gives the full matched pair list.
+///
+/// OS analogy: `taskset` / `numactl --cpunodebind` optimal CPU↔task assignment —
+/// maximum number of tasks that can each be exclusively bound to a distinct CPU,
+/// given a bipartite affinity graph of which task can run on which CPU.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_bipartite_match<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], usize, bool, usize) {
+    RUNTIME.lock().graph_bipartite_match_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

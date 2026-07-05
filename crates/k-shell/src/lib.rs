@@ -7335,6 +7335,81 @@ pub fn dispatch_graph_feedback_arc(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.92: `graph bipartite match` — maximum bipartite matching (Kuhn's algorithm).
+///
+/// Displays the matched side-A / side-B pairs and the matching size.
+/// If the graph is not bipartite, reports the conflict.
+/// OS analogy: `taskset` optimal CPU↔task affinity assignment.
+pub fn dispatch_graph_bipartite_match(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (left_vecs, right_vecs, match_count, is_bipartite, node_count) =
+        gos_runtime::graph_bipartite_match::<MAX_N>();
+
+    set_color(sink, 11, 0);
+    print_str(sink, " graph bipartite match\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_bipartite {
+        set_color(sink, 12, 0);
+        print_str(sink, "  NOT bipartite  (odd-length cycle detected)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  hint: use 'graph bipartite' to inspect the partition, 'graph cycles' for cycles\n");
+    } else if match_count == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "  bipartite graph with no edges  (empty matching)\n");
+    } else {
+        set_color(sink, 7, 0);
+        print_str(sink, "  side A              \u{2194}  side B\n");
+        set_color(sink, 8, 0);
+        print_str(sink, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}     \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        for i in 0..match_count.min(MAX_N) {
+            set_color(sink, 14, 0);
+            print_str(sink, "  ");
+            let mut lbuf = LineBuf::<20>::new();
+            lbuf.push_vector(left_vecs[i]);
+            let ls = core::str::from_utf8(lbuf.as_slice()).unwrap_or("?");
+            print_str(sink, ls);
+            let llen = lbuf.len();
+            let pad = if llen < 16 { 16 - llen } else { 1 };
+            for _ in 0..pad { print_str(sink, " "); }
+            set_color(sink, 8, 0);
+            print_str(sink, "\u{2194}  ");
+            set_color(sink, 14, 0);
+            let mut rbuf = LineBuf::<20>::new();
+            rbuf.push_vector(right_vecs[i]);
+            let rs = core::str::from_utf8(rbuf.as_slice()).unwrap_or("?");
+            print_str(sink, rs);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    if is_bipartite {
+        print_str(sink, "  max matching: ");
+        print_num_inline(sink, match_count);
+        print_str(sink, " pair");
+        if match_count != 1 { print_str(sink, "s"); }
+        print_str(sink, "  of  ");
+        print_num_inline(sink, node_count);
+        print_str(sink, " node(s)\n");
+    } else {
+        print_str(sink, "  ");
+        print_num_inline(sink, node_count);
+        print_str(sink, " node(s) checked\n");
+    }
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
