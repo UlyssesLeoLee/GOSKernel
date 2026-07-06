@@ -8731,6 +8731,93 @@ pub fn dispatch_graph_entropy(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.11: `graph zagreb` — Zagreb indices M1/M2, Randić R, and Albertson irregularity I.
+/// Gutman & Trinajstić 1972 (M1/M2) / Randić 1975 (R) / Albertson 1997 (I).
+pub fn dispatch_graph_zagreb(sink: &ConsoleSink) {
+    let (m1, m2, randic_ppm, irregularity, edge_count, node_count) =
+        gos_runtime::graph_zagreb();
+
+    set_color(sink, 11, 0); // bright-cyan — chemical/topological index theme
+    print_str(sink, " graph zagreb  (M1 + M2 + Rand\u{00ed}c R + Albertson I)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_zg(sink: &ConsoleSink, ppm: u32) {
+        let whole = ppm / 1_000_000;
+        let frac  = (ppm % 1_000_000) / 1_000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // M1 — integer, no ppm
+        set_color(sink, 8, 0);
+        print_str(sink, "  first Zagreb   M\u{2081}  =  ");
+        set_color(sink, 14, 0); // bright-yellow
+        print_num_inline(sink, m1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} deg(v)\u{00b2}]");
+        if irregularity == 0 { print_str(sink, "   (regular graph)"); }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // M2 — integer, no ppm
+        set_color(sink, 8, 0);
+        print_str(sink, "  second Zagreb  M\u{2082}  =  ");
+        set_color(sink, 14, 0);
+        print_num_inline(sink, m2 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} deg(u)\u{00d7}deg(v)]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Randić
+        set_color(sink, 8, 0);
+        print_str(sink, "  Rand\u{00ed}c index  R   =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_zg(sink, randic_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/\u{221a}(deg(u)\u{00d7}deg(v))]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Albertson irregularity
+        set_color(sink, 8, 0);
+        print_str(sink, "  irregularity   I   =  ");
+        if irregularity == 0 {
+            set_color(sink, 10, 0); // green — regular
+            print_num_inline(sink, 0);
+            set_color(sink, 8, 0);
+            print_str(sink, "   [\u{03a3} |deg(u)\u{2212}deg(v)|]   regular graph");
+        } else {
+            set_color(sink, 12, 0); // bright-red — irregular
+            print_num_inline(sink, irregularity as usize);
+            set_color(sink, 8, 0);
+            print_str(sink, "   [\u{03a3} |deg(u)\u{2212}deg(v)|]");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Gutman & Trinajsti\u{0107} 1972  Rand\u{00ed}c 1975");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

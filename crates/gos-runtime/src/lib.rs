@@ -11384,6 +11384,92 @@ impl GraphRuntime {
 
         (entropy_ppm, normalized_ppm, nc)
     }
+
+    /// V3.11: Zagreb indices M1/M2, Randić connectivity R, and Albertson irregularity I.
+    ///
+    /// M1(G) = Σ_v deg(v)²                              (Gutman & Trinajstić 1972)
+    /// M2(G) = Σ_{uv∈E} deg(u)×deg(v)                  (second Zagreb index)
+    /// R(G)  = Σ_{uv∈E} 1/√(deg(u)×deg(v)) × 10^6      (Randić 1975, integer ppm)
+    /// I(G)  = Σ_{uv∈E} |deg(u)−deg(v)|                 (Albertson 1997)
+    ///
+    /// All arithmetic uses undirected edges (directed→undirected dedup, self-loops excluded).
+    /// Randić is computed with six-digit precision: sqrt via Newton-Raphson on (p × 10^12).
+    pub fn graph_zagreb_inner(&self) -> (u64, u64, u32, u32, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Undirected degree per compact-index node.
+        let mut deg = [0u32; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones();
+        }
+
+        // 4. M1 = Σ_v deg(v)²
+        let mut m1: u64 = 0;
+        for ci in 0..nc {
+            m1 += (deg[ci] as u64) * (deg[ci] as u64);
+        }
+
+        // Newton-Raphson integer sqrt: returns floor(sqrt(p × 10^12)).
+        // Gives six decimal digits of sqrt(p), enabling precise ppm Randić computation.
+        fn isqrt_ppm(p: u64) -> u64 {
+            if p == 0 { return 0; }
+            let n = p.saturating_mul(1_000_000_000_000u64);
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        // 5. Scan undirected edges (a < b canonical): accumulate M2, R, I, edge_count.
+        let mut m2:           u64 = 0;
+        let mut randic_acc:   u64 = 0;
+        let mut irregularity: u64 = 0;
+        let mut edge_count:   usize = 0;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b <= a { continue; } // each undirected edge counted once (a < b)
+                let da = deg[a] as u64;
+                let db = deg[b] as u64;
+                m2 += da * db;
+                irregularity += if da > db { da - db } else { db - da };
+                let s = isqrt_ppm(da * db); // floor(sqrt(da*db) × 10^6)
+                if s > 0 { randic_acc += 1_000_000_000_000u64 / s; }
+                edge_count += 1;
+            }
+        }
+
+        let randic_ppm   = randic_acc.min(u32::MAX as u64) as u32;
+        let irregularity = irregularity.min(u32::MAX as u64) as u32;
+        (m1, m2, randic_ppm, irregularity, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14125,6 +14211,19 @@ pub fn graph_spectral() -> (u32, u32, usize) {
 /// Algorithm: undirected degree histogram → integer LN_TABLE accumulation, O(V+E).
 pub fn graph_entropy() -> (u32, u32, usize) {
     RUNTIME.lock().graph_entropy_inner()
+}
+
+/// V3.11: Zagreb indices M1/M2, Randić connectivity R(G), and Albertson irregularity I(G).
+///
+/// Returns `(m1, m2, randic_ppm, irregularity, edge_count, node_count)`:
+/// - m1            = Σ_v deg(v)²  (first Zagreb index; Gutman & Trinajstić 1972)
+/// - m2            = Σ_{uv∈E} deg(u)×deg(v)  (second Zagreb index)
+/// - randic_ppm    = R(G) × 10^6 where R = Σ_{uv∈E} 1/√(deg(u)×deg(v))  (Randić 1975)
+/// - irregularity  = I(G) = Σ_{uv∈E} |deg(u)−deg(v)|  (Albertson 1997; 0 iff regular)
+/// - edge_count    = undirected edge count (directed→undirected dedup, self-loops excluded)
+/// - node_count    = live node count
+pub fn graph_zagreb() -> (u64, u64, u32, u32, usize, usize) {
+    RUNTIME.lock().graph_zagreb_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
