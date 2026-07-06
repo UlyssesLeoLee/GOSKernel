@@ -10323,6 +10323,144 @@ impl GraphRuntime {
         }
         (out_vecs, nc, has_circuit, true, node_count)
     }
+
+    /// V3.04: Chordal graph recognition — LexBFS + PEO verification.
+    ///
+    /// A graph is chordal iff every cycle of length ≥ 4 has a chord.
+    /// Returns `(peo_vecs, is_chordal, node_count)`.
+    pub fn graph_chordal_inner<const N: usize>(&self) -> ([VectorAddress; N], bool, usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL: usize = usize::MAX;
+        let mut out_vecs = [ZERO_VEC; N];
+
+        // ── 1. Compact live nodes ─────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (out_vecs, true, 0); }
+        if nc <= 2 {
+            let copy_len = nc.min(N);
+            for i in 0..copy_len {
+                out_vecs[i] = self.nodes[node_slots[i]].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            }
+            return (out_vecs, true, nc);
+        }
+
+        // ── 2. Build undirected adjacency bitmasks (by compact index) ─────
+        // A→B and B→A both contribute the undirected edge {A,B}.
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; }
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs];
+            let tci = slot_to_ci[ts];
+            if fci == NIL || tci == NIL || fci >= 128 || tci >= 128 { continue; }
+            adj[fci] |= 1u128 << tci;
+            adj[tci] |= 1u128 << fci;
+        }
+
+        // ── 3. LexBFS — compute Perfect Elimination Ordering ──────────────
+        // label[ci] = bitmask of PEO positions of already-numbered neighbours.
+        // At each step, pick unnumbered node with lex-max label (= max u128).
+        let mut label    = [0u128; MAX_NODES];
+        let mut numbered = [false; MAX_NODES];
+        let mut peo      = [NIL;   MAX_NODES]; // peo[pos] = ci
+        let mut pos_of   = [NIL;   MAX_NODES]; // pos_of[ci] = PEO position
+
+        for pos in 0..nc {
+            // Pick unnumbered ci with maximum label.
+            let mut best_ci    = NIL;
+            let mut best_label = 0u128;
+            for ci in 0..nc {
+                if !numbered[ci] && (best_ci == NIL || label[ci] > best_label) {
+                    best_ci    = ci;
+                    best_label = label[ci];
+                }
+            }
+            if best_ci == NIL { break; }
+
+            numbered[best_ci] = true;
+            peo[pos]          = best_ci;
+            pos_of[best_ci]   = pos;
+
+            // Mark this position in each unnumbered neighbour's label.
+            let mut nbr_mask = adj[best_ci];
+            while nbr_mask != 0 {
+                let nci   = nbr_mask.trailing_zeros() as usize;
+                nbr_mask &= !(1u128 << nci);
+                if nci < nc && !numbered[nci] && pos < 128 {
+                    label[nci] |= 1u128 << pos;
+                }
+            }
+        }
+
+        // ── 4. PEO verification (Fulkerson & Gross 1965) ──────────────────
+        // For each node v = peo[pos], let N+(v) = neighbours numbered BEFORE v
+        // (i.e., pos_of[u] < pos).  N+(v) is a clique iff N+(v)\{w} ⊆ adj[w],
+        // where w is the member of N+(v) with the LARGEST pos_of (the most
+        // recently numbered among v's earlier neighbours).
+        let mut is_chordal = true;
+        'peo_check: for pos in 0..nc {
+            let vci = peo[pos];
+            if vci == NIL { continue; }
+
+            // Collect N+(v) = earlier-numbered neighbours.
+            let mut nplus = 0u128;
+            let mut nbr   = adj[vci];
+            while nbr != 0 {
+                let uci  = nbr.trailing_zeros() as usize;
+                nbr     &= !(1u128 << uci);
+                let u_pos = pos_of[uci];
+                if u_pos != NIL && u_pos < pos {
+                    nplus |= 1u128 << uci;
+                }
+            }
+
+            if nplus.count_ones() < 2 { continue; } // trivially a clique
+
+            // Find w: node in N+(v) with the LARGEST pos_of (most recently numbered).
+            let mut w_ci  = NIL;
+            let mut w_pos = 0usize;
+            let mut tmp   = nplus;
+            while tmp != 0 {
+                let uci  = tmp.trailing_zeros() as usize;
+                tmp     &= !(1u128 << uci);
+                let u_pos = pos_of[uci];
+                if w_ci == NIL || u_pos > w_pos {
+                    w_ci  = uci;
+                    w_pos = u_pos;
+                }
+            }
+
+            // N+(v) \ {w} must all be adjacent to w.
+            if w_ci < 128 {
+                let rest = nplus & !(1u128 << w_ci);
+                if rest & adj[w_ci] != rest {
+                    is_chordal = false;
+                    break 'peo_check;
+                }
+            }
+        }
+
+        // ── 5. Build output in PEO order ──────────────────────────────────
+        let copy_len = nc.min(N);
+        for i in 0..copy_len {
+            let ci = peo[i];
+            if ci == NIL { continue; }
+            let slot = node_slots[ci];
+            out_vecs[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO_VEC);
+        }
+        (out_vecs, is_chordal, nc)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -12810,6 +12948,32 @@ pub fn graph_min_cut<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u
 /// Directed graph. Self-loops excluded. Single node: trivially Ham. circuit.
 pub fn graph_hamiltonian<const N: usize>() -> ([VectorAddress; N], usize, bool, bool, usize) {
     RUNTIME.lock().graph_hamiltonian_inner()
+}
+
+/// V3.04: Chordal graph recognition — LexBFS + PEO verification.
+///
+/// A graph is *chordal* iff every cycle of length ≥ 4 has a chord (an edge
+/// connecting two non-adjacent cycle vertices).  Equivalently, it admits a
+/// Perfect Elimination Ordering (PEO): an ordering v₁, …, vₙ where each vᵢ's
+/// later neighbours form a clique.
+///
+/// Returns `(peo_vecs, is_chordal, node_count)`:
+/// - `peo_vecs[0..node_count]` — LexBFS perfect elimination ordering.
+/// - `is_chordal` — true iff the graph is chordal (the LexBFS PEO is valid).
+/// - `node_count` — total live nodes.
+///
+/// Undirected projection: A→B and B→A together count as one undirected edge.
+/// Self-loops are excluded.  Empty and ≤ 2-node graphs are trivially chordal.
+///
+/// Algorithm: LexBFS (Rose, Tarjan & Lueker 1976), O(V+E).
+/// PEO check: N⁺(v) = earlier-numbered neighbours; N⁺(v)\{w} ⊆ N(w) where w
+/// is the most-recently-numbered member of N⁺(v) (Fulkerson & Gross 1965).
+///
+/// OS analogy: a chordal dependency graph admits a perfect elimination order
+/// for bringing subsystems online/offline — each removed subsystem sees its
+/// remaining peers all mutually inter-operating, enabling zero-surprise isolation.
+pub fn graph_chordal<const N: usize>() -> ([VectorAddress; N], bool, usize) {
+    RUNTIME.lock().graph_chordal_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

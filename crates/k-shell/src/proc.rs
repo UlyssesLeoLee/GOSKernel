@@ -656,6 +656,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gmincut / min cut / edge connectivity  aliases for graph min cut\n");
         super::print_str(sink, "  graph hamiltonian  Hamiltonian path/circuit (visits every node exactly once)\n");
         super::print_str(sink, "  gham / hamiltonian  aliases for graph hamiltonian\n");
+        super::print_str(sink, "  graph chordal  chordal recognition: every 4+ cycle has a chord (LexBFS PEO)\n");
+        super::print_str(sink, "  gchordal / chordal  aliases for graph chordal\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1184,6 +1186,8 @@ fn dispatch_text_command(
         super::dispatch_graph_min_cut(sink);
     } else if cmd == "graph hamiltonian" || cmd == "gham" || cmd == "hamiltonian" || cmd == "graph ham" || cmd == "ghamiltonian" || cmd == "ham circuit" || cmd == "hamiltonian path" {
         super::dispatch_graph_hamiltonian(sink);
+    } else if cmd == "graph chordal" || cmd == "gchordal" || cmd == "chordal" || cmd == "graph chord" || cmd == "gchord" {
+        super::dispatch_graph_chordal(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

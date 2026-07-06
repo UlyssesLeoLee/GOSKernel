@@ -8250,6 +8250,84 @@ pub fn dispatch_graph_hamiltonian(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.04: `graph chordal` — chordal graph recognition (LexBFS + PEO check).
+pub fn dispatch_graph_chordal(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, is_chordal, node_count) = gos_runtime::graph_chordal::<MAX_N>();
+
+    set_color(sink, 11, 0); // bright-cyan header
+    print_str(sink, " graph chordal  (chordal graph recognition)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+    } else {
+        // ── Chordal status line ──────────────────────────────────────────
+        if is_chordal {
+            set_color(sink, 10, 0); // bright-green
+            print_str(sink, "  \u{2713} chordal");
+            set_color(sink, 8, 0);
+            print_str(sink, "  (every cycle \u{2265}4 has a chord; PEO valid)\n");
+        } else {
+            set_color(sink, 12, 0); // bright-red
+            print_str(sink, "  \u{2717} not chordal");
+            set_color(sink, 8, 0);
+            print_str(sink, "  (chordless cycle of length \u{2265}4 detected)\n");
+        }
+
+        // ── PEO table ────────────────────────────────────────────────────
+        set_color(sink, 8, 0);
+        print_str(sink, "\n  LexBFS elimination ordering:\n");
+        print_str(sink, "  pos  vector\n");
+        for i in 0..node_count.min(MAX_N) {
+            if is_chordal {
+                set_color(sink, 11, 0); // bright-cyan
+            } else {
+                set_color(sink, 13, 0); // bright-magenta
+            }
+            print_str(sink, "  ");
+            let pos = i + 1;
+            if pos < 10 {
+                print_str(sink, "  ");
+            } else if pos < 100 {
+                print_str(sink, " ");
+            }
+            print_num_inline(sink, pos);
+            print_str(sink, "  ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    if is_chordal {
+        set_color(sink, 10, 0);
+        print_str(sink, "chordal");
+        set_color(sink, 8, 0);
+        print_str(sink, "  PEO valid  LexBFS (Rose, Tarjan & Lueker 1976)");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "not chordal");
+        set_color(sink, 8, 0);
+        print_str(sink, "  chordless 4+ cycle  LexBFS (Rose, Tarjan & Lueker 1976)");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
