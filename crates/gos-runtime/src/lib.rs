@@ -10890,6 +10890,198 @@ impl GraphRuntime {
         }
         (out_from, out_to, out_score, copy_len)
     }
+
+    // ── V3.07: Vertex Connectivity ────────────────────────────────────────────
+    pub fn graph_vertex_connectivity_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], usize, u32, u32) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL:      usize         = usize::MAX;
+
+        // ── 1. Compact live nodes ─────────────────────────────────────────────
+        let mut node_slots = [0usize;  MAX_NODES]; // ci → slot
+        let mut slot_to_ci = [NIL;     MAX_NODES]; // slot → ci
+        let mut nc         = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i]  = nc;
+                node_slots[nc] = i;
+                nc            += 1;
+            }
+        }
+        let mut out_vecs = [ZERO_VEC; N];
+        if nc == 0 { return (out_vecs, 0, 0, 0); }
+
+        // ── 2. Build undirected adjacency bitmask (compact-index space) ───────
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_slot = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_slot = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci   = slot_to_ci[f_slot];
+            let t_ci   = slot_to_ci[t_slot];
+            if f_ci == NIL || t_ci == NIL || f_ci == t_ci { continue; }
+            adj[f_ci] |= 1u128 << t_ci;
+            adj[t_ci] |= 1u128 << f_ci; // undirected projection
+        }
+
+        // ── 3. Minimum undirected degree ──────────────────────────────────────
+        let all_mask = if nc >= 128 { u128::MAX } else { (1u128 << nc) - 1 };
+        let mut min_deg = u32::MAX;
+        let mut s_ci    = 0usize;
+        for ci in 0..nc {
+            let deg = (adj[ci] & all_mask).count_ones();
+            if deg < min_deg { min_deg = deg; s_ci = ci; }
+        }
+
+        // Build sorted output (shared by all early-return paths)
+        let copy_n = nc.min(N);
+        for ci in 0..copy_n {
+            out_vecs[ci] = self.nodes[node_slots[ci]].map(|r| r.vector).unwrap_or(ZERO_VEC);
+        }
+        for i in 0..copy_n {
+            for j in (i + 1)..copy_n {
+                if out_vecs[i].as_u64() > out_vecs[j].as_u64() { out_vecs.swap(i, j); }
+            }
+        }
+
+        if nc == 1 { return (out_vecs, 1, 0, 0); }
+
+        // ── 4. Connectivity check (BFS on undirected adjacency) ───────────────
+        {
+            let mut vis = [false; MAX_NODES];
+            let mut q   = [0usize; MAX_NODES];
+            let mut qh  = 0usize; let mut qt = 0usize;
+            vis[0] = true; q[qt] = 0; qt += 1;
+            while qh < qt {
+                let u = q[qh]; qh += 1;
+                let mut nbrs = adj[u] & all_mask;
+                while nbrs != 0 {
+                    let v = nbrs.trailing_zeros() as usize;
+                    nbrs &= nbrs - 1;
+                    if !vis[v] { vis[v] = true; q[qt] = v; qt += 1; }
+                }
+            }
+            let mut connected = true;
+            for ci in 0..nc { if !vis[ci] { connected = false; break; } }
+            if !connected { return (out_vecs, copy_n, 0, min_deg); }
+        }
+
+        // ── 5. Complete-graph check: κ = n-1 ─────────────────────────────────
+        let mut is_complete = true;
+        for ci in 0..nc {
+            if (adj[ci] & all_mask).count_ones() as usize != nc - 1 { is_complete = false; break; }
+        }
+        if is_complete { return (out_vecs, copy_n, (nc - 1) as u32, (nc - 1) as u32); }
+
+        // ── 6. Even's algorithm: κ = min_{t ∉ N(s)} flow(s, t) ──────────────
+        // Fix s = min-degree vertex (has at least one non-neighbour since not K_n).
+        let s_adj  = adj[s_ci] & all_mask;
+        let mut kappa = min_deg; // upper bound: κ ≤ δ
+
+        for t_ci in 0..nc {
+            if t_ci == s_ci { continue; }
+            if (s_adj >> t_ci) & 1 != 0 { continue; } // adjacent: skip
+            let f = vertex_conn_maxflow(&adj, nc, s_ci, t_ci);
+            if f < kappa { kappa = f; }
+            if kappa == 0 { break; }
+        }
+
+        (out_vecs, copy_n, kappa, min_deg)
+    }
+}
+
+// ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
+//
+// Builds the standard node-split network for the undirected graph given by
+// `adj_und[ci]` bitmasks (compact-index space, n nodes).  Virtual node
+// numbering: 2*ci = ci_in, 2*ci+1 = ci_out.  Internal edges (ci_in→ci_out,
+// cap=1) are added for all non-terminal nodes.  Cross-edges (u_out→v_in and
+// v_out→u_in, cap=INF) are added for every undirected edge {u,v}.  Runs
+// Edmonds-Karp BFS augmentation; each augmenting path carries exactly 1 unit
+// of flow (unit-capacity internal edges).  The final max-flow equals the
+// maximum number of internally vertex-disjoint s-t paths (Menger 1927).
+//
+// Edge pairs are always added in order (forward at index 2k, backward at 2k+1)
+// so the backward edge of any edge `ei` is always `ei ^ 1`.
+fn vertex_conn_maxflow(
+    adj_und: &[u128; MAX_NODES],
+    n:       usize,
+    s_ci:    usize,
+    t_ci:    usize,
+) -> u32 {
+    const ME:  usize = 2560; // edge-list capacity (128 internal + 4×512 cross ≤ 2300)
+    const MV:  usize = 256;  // virtual-node capacity (2 × MAX_NODES)
+    const INF: u8    = 127;  // "infinite" cap; max flow ≤ n-2 ≤ 126 < 127
+
+    let mut ef = [0u8; ME]; // edge from (virtual node)
+    let mut et = [0u8; ME]; // edge to   (virtual node)
+    let mut ec = [0u8; ME]; // residual capacity
+    let mut ne = 0usize;    // edge count (always even: pairs)
+
+    // Internal edges (cap=1) for non-terminal nodes
+    for ci in 0..n {
+        if ci == s_ci || ci == t_ci { continue; }
+        if ne + 2 > ME { break; }
+        ef[ne] = (2 * ci) as u8;     et[ne] = (2 * ci + 1) as u8; ec[ne] = 1;   ne += 1;
+        ef[ne] = (2 * ci + 1) as u8; et[ne] = (2 * ci) as u8;     ec[ne] = 0;   ne += 1;
+    }
+    // Cross-edges from undirected adjacency (upper-triangle to avoid duplicates)
+    for u_ci in 0..n {
+        let u_adj = adj_und[u_ci];
+        for v_ci in (u_ci + 1)..n {
+            if (u_adj >> v_ci) & 1 == 0 { continue; }
+            if ne + 4 > ME { break; }
+            ef[ne] = (2 * u_ci + 1) as u8; et[ne] = (2 * v_ci) as u8;     ec[ne] = INF; ne += 1;
+            ef[ne] = (2 * v_ci) as u8;     et[ne] = (2 * u_ci + 1) as u8; ec[ne] = 0;   ne += 1;
+            ef[ne] = (2 * v_ci + 1) as u8; et[ne] = (2 * u_ci) as u8;     ec[ne] = INF; ne += 1;
+            ef[ne] = (2 * u_ci) as u8;     et[ne] = (2 * v_ci + 1) as u8; ec[ne] = 0;   ne += 1;
+        }
+    }
+
+    let src_vn = (2 * s_ci + 1) as u8; // s_out
+    let snk_vn = (2 * t_ci) as u8;     // t_in
+    let mut flow = 0u32;
+
+    loop {
+        // BFS to find an augmenting path
+        let mut prev_e = [u16::MAX; MV];
+        let mut vis    = [false;    MV];
+        let mut q      = [0u8;      MV];
+        let mut qh     = 0usize;
+        let mut qt     = 0usize;
+
+        vis[src_vn as usize] = true;
+        q[qt] = src_vn;
+        qt += 1;
+
+        'bfs: while qh < qt {
+            let u = q[qh]; qh += 1;
+            for ei in 0..ne {
+                if ef[ei] != u || ec[ei] == 0 { continue; }
+                let v = et[ei];
+                if vis[v as usize] { continue; }
+                vis[v as usize]    = true;
+                prev_e[v as usize] = ei as u16;
+                if v == snk_vn { break 'bfs; }
+                if qt < MV { q[qt] = v; qt += 1; }
+            }
+        }
+
+        if !vis[snk_vn as usize] { break; }
+
+        // Augment by 1 unit — backward edge always at ei ^ 1 (pairs)
+        let mut cur = snk_vn;
+        while cur != src_vn {
+            let ei = prev_e[cur as usize] as usize;
+            ec[ei]     -= 1;
+            ec[ei ^ 1] += 1;
+            cur         = ef[ei];
+        }
+        flow += 1;
+    }
+
+    flow
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -13444,6 +13636,35 @@ pub fn graph_bcc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize
 pub fn graph_betweenness_edge<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
     RUNTIME.lock().graph_betweenness_edge_inner()
+}
+
+/// V3.07: Vertex connectivity κ(G) — minimum vertex cut (Even 1975 / Menger 1927).
+///
+/// Returns `(vecs, node_count, kappa, min_degree)`:
+/// - `vecs[0..node_count]`  — all live nodes sorted ascending by VectorAddress.
+/// - `node_count`           — number of live nodes.
+/// - `kappa`                — κ(G): minimum number of vertices whose removal
+///                            disconnects (or trivialises) the graph.
+/// - `min_degree`           — δ(G): minimum undirected degree.
+///
+/// Whitney invariant: κ(G) ≤ κ'(G) ≤ δ(G)
+/// (vertex connectivity ≤ edge connectivity ≤ min degree).
+///
+/// Algorithm: undirected projection of the directed graph; BFS connectivity
+/// check; complete-graph shortcut; then Even's reduction — fix the minimum-
+/// degree vertex s, and for each non-neighbour t compute max vertex-disjoint
+/// s-t paths via Edmonds-Karp on the node-split network.  O(δ · n · (n+m)).
+///
+/// Special cases:
+/// - Disconnected or empty → κ=0.
+/// - K_n → κ=n-1 (complete graph shortcut).
+/// - Single node          → κ=0.
+///
+/// OS analogy: minimum kernel subsystems to disable/mask to split the
+/// dependency graph into two isolated fault domains (compare min-cut V3.02,
+/// which counts minimum edges).
+pub fn graph_vertex_connectivity<const N: usize>() -> ([VectorAddress; N], usize, u32, u32) {
+    RUNTIME.lock().graph_vertex_connectivity_inner::<N>()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

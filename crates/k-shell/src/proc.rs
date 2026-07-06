@@ -1196,6 +1196,8 @@ fn dispatch_text_command(
         super::dispatch_graph_bcc(sink);
     } else if cmd == "graph ebc" || cmd == "gebc" || cmd == "edge between" || cmd == "edge betweenness" || cmd == "ebc" {
         super::dispatch_graph_betweenness_edge(sink);
+    } else if cmd == "graph kappa" || cmd == "gkappa" || cmd == "vertex connectivity" || cmd == "vertex conn" || cmd == "gvertconn" || cmd == "graph vertex conn" || cmd == "graph vconn" {
+        super::dispatch_graph_vertex_connectivity(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

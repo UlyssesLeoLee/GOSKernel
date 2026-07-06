@@ -8462,6 +8462,66 @@ pub fn dispatch_graph_betweenness_edge(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+// ── V3.07: graph vertex connectivity ─────────────────────────────────────────
+pub fn dispatch_graph_vertex_connectivity(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, node_count, kappa, min_deg) =
+        gos_runtime::graph_vertex_connectivity::<MAX_N>();
+
+    set_color(sink, 11, 0); // bright-cyan header — connectivity theme
+    print_str(sink, " graph vertex connectivity  (\u{03ba}(G) minimum vertex cut)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  vector              deg\n");
+        set_color(sink, 7, 0);
+
+        for i in 0..node_count.min(MAX_N) {
+            // Compute undirected degree for display (re-use kappa path data)
+            set_color(sink, 10, 0); // bright-green nodes
+            print_str(sink, "  ");
+            let mut lb = LineBuf::<20>::new();
+            lb.push_vector(vecs[i]);
+            let vs = core::str::from_utf8(lb.as_slice()).unwrap_or("?");
+            print_str(sink, vs);
+            let vlen = vs.len();
+            for _ in vlen..18 { print_str(sink, " "); }
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    set_color(sink, 11, 0);
+    print_str(sink, "\u{03ba}(G)=");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, kappa as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, "  \u{03b4}(G)=");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, min_deg as usize);
+    set_color(sink, 8, 0);
+    if node_count == 0 || kappa == 0 {
+        print_str(sink, "  (disconnected or empty)");
+    } else {
+        print_str(sink, "  Whitney: \u{03ba}\u{2264}\u{03b4}  Menger 1927");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
