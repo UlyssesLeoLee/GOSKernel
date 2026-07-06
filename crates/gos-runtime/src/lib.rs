@@ -8826,6 +8826,190 @@ impl GraphRuntime {
 
         (out_vecs, best_size, clique_count, nc)
     }
+
+    pub fn graph_independent_set_inner<const N: usize>(&self) -> ([VectorAddress; N], usize, usize, usize) {
+        const ZERO: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const BK_MAX: usize = 128;
+
+        // ── 1. Collect live node slots ───────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        if nc == 0 {
+            return ([ZERO; N], 0, 0, 0);
+        }
+
+        // ── 2. Build index→slot mapping and undirected adjacency bitsets ─────
+        let mut slot_to_idx = [u8::MAX; MAX_NODES];
+        for (idx, &s) in node_slots[..nc].iter().enumerate() {
+            slot_to_idx[s] = idx as u8;
+        }
+        let mut adj = [0u128; MAX_NODES];
+        for i in 0..MAX_EDGES {
+            let edge = match self.edges[i] {
+                Some(e) => e,
+                None    => continue,
+            };
+            let us = match self.node_slot_by_id(edge.spec.from_node) {
+                Some(s) => s,
+                None    => continue,
+            };
+            let vs = match self.node_slot_by_id(edge.spec.to_node) {
+                Some(s) => s,
+                None    => continue,
+            };
+            if us == vs { continue; }
+            let ui = slot_to_idx[us];
+            let vi = slot_to_idx[vs];
+            if ui == u8::MAX || vi == u8::MAX { continue; }
+            let ui = ui as usize;
+            let vi = vi as usize;
+            adj[ui] |= 1u128 << vi;
+            adj[vi] |= 1u128 << ui;
+        }
+
+        // ── 3. Build complement adjacency ────────────────────────────────────
+        // comp[i] = all_nodes except i itself and its original-graph neighbours.
+        // Max IS in G = max clique in complement graph G̅.
+        let all_nodes: u128 = if nc >= 128 { u128::MAX } else { (1u128 << nc) - 1 };
+        let mut comp = [0u128; MAX_NODES];
+        for i in 0..nc {
+            comp[i] = all_nodes & !adj[i] & !(1u128 << i);
+        }
+
+        // ── 4. Iterative Bron-Kerbosch with Tomita pivot on G̅ ───────────────
+        #[derive(Copy, Clone)]
+        struct BkFrame {
+            r:           u128,
+            p:           u128,
+            x:           u128,
+            to_try:      u128,
+            came_from_v: u8,
+        }
+
+        fn choose_pivot_comp(p_x: u128, p: u128, comp: &[u128; MAX_NODES]) -> usize {
+            let mut best     = p_x.trailing_zeros() as usize;
+            let mut best_cnt = 0u32;
+            let mut mask = p_x;
+            while mask != 0 {
+                let u   = mask.trailing_zeros() as usize;
+                mask   &= mask.wrapping_sub(1);
+                let cnt = (p & comp[u]).count_ones();
+                if cnt > best_cnt {
+                    best_cnt = cnt;
+                    best     = u;
+                }
+            }
+            best
+        }
+
+        let pivot0  = choose_pivot_comp(all_nodes, all_nodes, &comp);
+        let to_try0 = all_nodes & !comp[pivot0];
+
+        let zero_frame = BkFrame { r: 0, p: 0, x: 0, to_try: 0, came_from_v: 0xFF };
+        let mut stk    = [zero_frame; BK_MAX];
+        stk[0] = BkFrame { r: 0, p: all_nodes, x: 0, to_try: to_try0, came_from_v: 0xFF };
+        let mut depth  = 1usize;
+
+        let mut best_r   = 0u128;
+        let mut best_size = 0usize;
+        let mut is_count  = 0usize;
+
+        while depth > 0 {
+            let fi = depth - 1;
+
+            if stk[fi].p == 0 {
+                if stk[fi].x == 0 {
+                    let size = stk[fi].r.count_ones() as usize;
+                    if size > best_size {
+                        best_size = size;
+                        best_r    = stk[fi].r;
+                        is_count  = 1;
+                    } else if size == best_size && size > 0 {
+                        is_count = is_count.saturating_add(1);
+                    }
+                }
+                depth -= 1;
+                if depth > 0 && stk[fi].came_from_v != 0xFF {
+                    let v   = stk[fi].came_from_v as usize;
+                    let pfi = depth - 1;
+                    stk[pfi].p &= !(1u128 << v);
+                    stk[pfi].x |=   1u128 << v;
+                }
+                continue;
+            }
+
+            if stk[fi].to_try == 0 {
+                depth -= 1;
+                if depth > 0 && stk[fi].came_from_v != 0xFF {
+                    let v   = stk[fi].came_from_v as usize;
+                    let pfi = depth - 1;
+                    stk[pfi].p &= !(1u128 << v);
+                    stk[pfi].x |=   1u128 << v;
+                }
+                continue;
+            }
+
+            let v = stk[fi].to_try.trailing_zeros() as usize;
+            stk[fi].to_try &= !(1u128 << v);
+
+            let new_r  = stk[fi].r | (1u128 << v);
+            let new_p  = stk[fi].p & comp[v];
+            let new_x  = stk[fi].x & comp[v];
+            let new_to_try = if new_p == 0 {
+                0
+            } else {
+                let new_px = new_p | new_x;
+                let cpivot = choose_pivot_comp(new_px, new_p, &comp);
+                new_p & !comp[cpivot]
+            };
+
+            if depth < BK_MAX {
+                stk[depth] = BkFrame {
+                    r:           new_r,
+                    p:           new_p,
+                    x:           new_x,
+                    to_try:      new_to_try,
+                    came_from_v: v as u8,
+                };
+                depth += 1;
+            }
+        }
+
+        // ── 5. Reconstruct and sort IS VectorAddresses ───────────────────────
+        let mut is_raw = [ZERO; MAX_NODES];
+        let mut raw_n  = 0usize;
+        let mut mask   = best_r;
+        while mask != 0 && raw_n < MAX_NODES {
+            let idx   = mask.trailing_zeros() as usize;
+            mask     &= mask.wrapping_sub(1);
+            let slot  = node_slots[idx];
+            is_raw[raw_n] = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO);
+            raw_n += 1;
+        }
+        for i in 1..raw_n {
+            let key   = is_raw[i];
+            let key_u = key.as_u64();
+            let mut j = i;
+            while j > 0 && is_raw[j - 1].as_u64() > key_u {
+                is_raw[j] = is_raw[j - 1];
+                j -= 1;
+            }
+            is_raw[j] = key;
+        }
+        let mut out_vecs = [ZERO; N];
+        let copy_len     = raw_n.min(N);
+        for i in 0..copy_len {
+            out_vecs[i] = is_raw[i];
+        }
+
+        (out_vecs, best_size, is_count, nc)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -11193,6 +11377,10 @@ pub fn graph_truss<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8)
 /// N controls the output buffer depth (cap at MAX_NODES = 128).
 pub fn graph_clique<const N: usize>() -> ([VectorAddress; N], usize, usize, usize) {
     RUNTIME.lock().graph_clique_inner()
+}
+
+pub fn graph_independent_set<const N: usize>() -> ([VectorAddress; N], usize, usize, usize) {
+    RUNTIME.lock().graph_independent_set_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
