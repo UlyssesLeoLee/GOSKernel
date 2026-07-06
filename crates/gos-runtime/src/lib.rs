@@ -11470,6 +11470,96 @@ impl GraphRuntime {
         let irregularity = irregularity.min(u32::MAX as u64) as u32;
         (m1, m2, randic_ppm, irregularity, edge_count, nc)
     }
+
+    /// V3.12: Sum-connectivity (SC), geometric-arithmetic (GA), and augmented Zagreb (AZI) indices.
+    ///
+    /// Returns `(sc_ppm, ga_ppm, azi_milli, edge_count, node_count)`:
+    /// - `sc_ppm`    = SC × 10^6  where SC  = Σ_{uv∈E} 1/√(deg(u)+deg(v))         (Zhou 2009)
+    /// - `ga_ppm`    = GA × 10^6  where GA  = Σ_{uv∈E} 2√(deg(u)·deg(v))/(deg(u)+deg(v)) (Vukičević 2009)
+    /// - `azi_milli` = AZI × 1000 where AZI = Σ_{uv∈E,q>0} (deg(u)·deg(v)/(deg(u)+deg(v)−2))³
+    ///                                                                                (Furtula 2010)
+    /// All three use the same O(V+E) undirected edge scan with integer Newton-Raphson isqrt.
+    /// Pendant-pendant edges (both deg=1, q=0) contribute 0 to AZI (undefined term skipped).
+    pub fn graph_topo_indices_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Undirected degree per compact-index node.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones() as u64;
+        }
+
+        // floor(√p × 10^6) via Newton-Raphson on p × 10^12 (same helper as graph_zagreb).
+        fn isqrt_ppm(p: u64) -> u64 {
+            if p == 0 { return 0; }
+            let n = p.saturating_mul(1_000_000_000_000u64);
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        // 4. Scan undirected edges (a < b canonical): accumulate SC, GA, AZI.
+        let mut sc_acc:     u64 = 0;
+        let mut ga_acc:     u64 = 0;
+        let mut azi_acc:    u64 = 0;
+        let mut edge_count: usize = 0;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b <= a { continue; } // each undirected edge once (a < b)
+
+                let da = deg[a];
+                let db = deg[b];
+                let p  = da * db; // product
+                let s  = da + db; // sum
+
+                // SC: floor(10^6 / √s) = floor(10^12 / isqrt_ppm(s))
+                let sqrt_s = isqrt_ppm(s);
+                if sqrt_s > 0 { sc_acc += 1_000_000_000_000u64 / sqrt_s; }
+
+                // GA: floor(2√p / s × 10^6) = 2 × isqrt_ppm(p) / s
+                ga_acc += 2 * isqrt_ppm(p) / s;
+
+                // AZI: (p/q)³ × 1000; q = s−2. Skip pendant-pendant edges (q=0).
+                let q = s.saturating_sub(2);
+                if q > 0 {
+                    azi_acc += (p * p * p) * 1_000 / (q * q * q);
+                }
+
+                edge_count += 1;
+            }
+        }
+
+        (sc_acc, ga_acc, azi_acc, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14224,6 +14314,22 @@ pub fn graph_entropy() -> (u32, u32, usize) {
 /// - node_count    = live node count
 pub fn graph_zagreb() -> (u64, u64, u32, u32, usize, usize) {
     RUNTIME.lock().graph_zagreb_inner()
+}
+
+/// V3.12: Sum-connectivity (SC), geometric-arithmetic (GA), and augmented Zagreb (AZI) indices.
+///
+/// Returns `(sc_ppm, ga_ppm, azi_milli, edge_count, node_count)`:
+/// - `sc_ppm`    = SC × 10^6  (Zhou & Trinajstić 2009; SC = Σ 1/√(deg(u)+deg(v)))
+/// - `ga_ppm`    = GA × 10^6  (Vukičević & Furtula 2009; GA = Σ 2√(deg(u)·deg(v))/(deg(u)+deg(v)))
+/// - `azi_milli` = AZI × 1000 (Furtula, Graovac & Vukičević 2010; AZI = Σ (deg·deg/(deg+deg−2))³)
+/// - `edge_count` = undirected edge count
+/// - `node_count` = alive node count
+///
+/// GA = |E| iff the graph is regular (all nodes have the same degree).
+/// AZI skips pendant-pendant edges (both endpoints have degree 1, denominator = 0).
+/// All indices use integer Newton-Raphson isqrt for ppm/milli precision, O(V+E).
+pub fn graph_topo_indices() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

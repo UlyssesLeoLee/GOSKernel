@@ -1214,6 +1214,8 @@ fn dispatch_text_command(
         super::dispatch_graph_entropy(sink);
     } else if cmd == "graph zagreb" || cmd == "gzagreb" || cmd == "zagreb" || cmd == "zagreb index" || cmd == "graph topo index" || cmd == "randic" || cmd == "graph randic" {
         super::dispatch_graph_zagreb(sink);
+    } else if cmd == "graph topo" || cmd == "gtopo" || cmd == "sum connectivity" || cmd == "gsc" || cmd == "geometric arithmetic" || cmd == "gga" || cmd == "augmented zagreb" || cmd == "gazi" || cmd == "sci ga azi" {
+        super::dispatch_graph_topo_indices(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

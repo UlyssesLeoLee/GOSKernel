@@ -8818,6 +8818,91 @@ pub fn dispatch_graph_zagreb(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.12: `graph topo` — SC, GA, AZI degree-based topological indices.
+/// Zhou & Trinajstić 2009 (SC) / Vukičević & Furtula 2009 (GA) / Furtula et al. 2010 (AZI).
+pub fn dispatch_graph_topo_indices(sink: &ConsoleSink) {
+    let (sc_ppm, ga_ppm, azi_milli, edge_count, node_count) =
+        gos_runtime::graph_topo_indices();
+
+    set_color(sink, 14, 0); // bright-yellow — chemical index theme
+    print_str(sink, " graph topo  (SC + GA + AZI degree-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    // Print a u64 ppm value as "X.XXX" (3 decimal places).
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    // Print a u64 milli value as "X.XXX" (3 decimal places).
+    fn print_milli3(sink: &ConsoleSink, milli: u64) {
+        let whole = milli / 1_000;
+        let frac  = (milli % 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // SC index
+        set_color(sink, 8, 0);
+        print_str(sink, "  sum-connectivity   SC  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, sc_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/\u{221a}(deg(u)+deg(v))]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // GA index
+        set_color(sink, 8, 0);
+        print_str(sink, "  geom-arithmetic    GA  =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, ga_ppm);
+        set_color(sink, 8, 0);
+        if edge_count > 0 && ga_ppm == edge_count as u64 * 1_000_000 {
+            print_str(sink, "   [\u{03a3} 2\u{221a}(d\u{22c5}d)/(d+d)]   (regular graph: GA=|E|)");
+        } else {
+            print_str(sink, "   [\u{03a3} 2\u{221a}(deg(u)\u{22c5}deg(v))/(deg(u)+deg(v))]");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // AZI index
+        set_color(sink, 8, 0);
+        print_str(sink, "  augmented Zagreb   AZI =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_milli3(sink, azi_milli);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (d\u{22c5}d/(d+d\u{2212}2))\u{00b3}]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Zhou 2009  Vuki\u{010d}evi\u{0107} 2009  Furtula 2010");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
