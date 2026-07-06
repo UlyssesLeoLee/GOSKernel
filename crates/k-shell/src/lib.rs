@@ -8581,6 +8581,75 @@ pub fn dispatch_graph_edge_color(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.09: `graph spectral` — spectral radius ρ(A) and algebraic connectivity λ₂(L).
+/// Fiedler 1973 / power iteration (60 steps per phase).
+pub fn dispatch_graph_spectral(sink: &ConsoleSink) {
+    let (rho_ppm, lambda2_ppm, node_count) = gos_runtime::graph_spectral();
+
+    set_color(sink, 9, 0); // bright-blue — spectral theme
+    print_str(sink, " graph spectral  (\u{03c1}(A) + \u{03bb}\u{2082}(L) via power iteration)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    // Print helper: value_ppm as "W.XXX" (integer.3-decimal).
+    fn print_ppm3_spectral(sink: &ConsoleSink, ppm: u32) {
+        let whole = ppm / 1_000_000;
+        let frac  = (ppm % 1_000_000) / 1_000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  spectral radius  \u{03c1}(A)  =  ");
+        set_color(sink, 14, 0); // bright-yellow value
+        print_ppm3_spectral(sink, rho_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   epidemic threshold: 1/\u{03c1}");
+        if rho_ppm > 0 {
+            print_str(sink, " = ");
+            set_color(sink, 11, 0);
+            let thresh = 1_000_000u64 * 1_000_000 / rho_ppm as u64;
+            print_ppm3_spectral(sink, thresh.min(u32::MAX as u64) as u32);
+            set_color(sink, 8, 0);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        set_color(sink, 8, 0);
+        print_str(sink, "  algebraic conn  \u{03bb}\u{2082}(L) =  ");
+        if lambda2_ppm == 0 {
+            set_color(sink, 12, 0); // bright-red — disconnected
+            print_str(sink, "0.000");
+            set_color(sink, 8, 0);
+            print_str(sink, "   graph is disconnected");
+        } else {
+            set_color(sink, 10, 0); // bright-green — connected
+            print_ppm3_spectral(sink, lambda2_ppm);
+            set_color(sink, 8, 0);
+            print_str(sink, "   Cheeger bound: h \u{2265} \u{03bb}\u{2082}/2");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  power iteration (60 steps)  Fiedler 1973");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

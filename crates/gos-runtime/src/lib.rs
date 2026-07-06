@@ -11096,6 +11096,206 @@ impl GraphRuntime {
 
         (out_from, out_to, out_colors, ec, chromatic_index)
     }
+
+    /// V3.09: Spectral radius ρ(A) and algebraic connectivity λ₂(L) via power iteration.
+    ///
+    /// Returns `(spectral_radius_ppm, algebraic_connectivity_ppm, node_count)`:
+    /// - `spectral_radius_ppm`         — ρ(A) × 1_000_000: largest eigenvalue of the
+    ///   (undirected) adjacency matrix A.  For d-regular graphs ρ=d; K_n: ρ=n-1;
+    ///   star K_{1,k}: ρ=√k.  Epidemic threshold: β < 1/ρ → cascade dies out.
+    /// - `algebraic_connectivity_ppm`  — λ₂(L) × 1_000_000: second-smallest eigenvalue of
+    ///   the Laplacian L = D−A.  λ₂=0 iff the graph is disconnected; larger λ₂ means
+    ///   faster consensus / better fault tolerance.  Cheeger: h(G) ≥ λ₂/2.
+    /// - `node_count`                  — live nodes (undirected projection).
+    ///
+    /// Algorithm: three-phase power iteration, 60/60/80 steps, O(m) per step.
+    ///   Normalization uses the infinity-norm (max absolute value) to avoid
+    ///   computing sqrt in no_std; the Rayleigh quotient gives the eigenvalue.
+    ///   Phase 1: ρ(A) — iterate A·x with inf-norm normalize; Rayleigh quotient → ρ.
+    ///   Phase 2: λₙ(L) — iterate L·x with mean-centering (deflates zero eigenspace).
+    ///   Phase 3: λ₂(L) — iterate B·x, B=(λₙ+1)I−L, with mean-centering; converges
+    ///            to B's next-dominant eigenvalue = (λₙ+1)−λ₂ ⇒ λ₂=(λₙ+1)−result.
+    ///
+    /// Special cases: empty/single node → (0, 0, n). Disconnected → λ₂=0.
+    pub fn graph_spectral_inner(&self) -> (u32, u32, usize) {
+        const NIL: usize = usize::MAX;
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [NIL; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + degree (self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        let mut deg = [0u32;  MAX_NODES];
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == NIL || t_ci == NIL || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                deg[f_ci] += 1;
+                deg[t_ci] += 1;
+            }
+        }
+
+        // Advance bit cursor through a u128 bitmask.
+        #[inline(always)]
+        fn next_bit(bits: &mut u128) -> usize {
+            let j = bits.trailing_zeros() as usize;
+            *bits &= *bits - 1;
+            j
+        }
+
+        // Inf-norm (max absolute value) over the active slice.
+        #[inline(always)]
+        fn inf_norm(v: &[f32], n: usize) -> f32 {
+            let mut m = 0.0f32;
+            for i in 0..n { let a = v[i].abs(); if a > m { m = a; } }
+            m
+        }
+
+        // Rayleigh quotient R(x, w) = (x·w) / (x·x).
+        #[inline(always)]
+        fn rayleigh(x: &[f32], w: &[f32], n: usize) -> f32 {
+            let mut xw = 0.0f32;
+            let mut xx = 0.0f32;
+            for i in 0..n { xw += x[i] * w[i]; xx += x[i] * x[i]; }
+            if xx > 1e-20 { xw / xx } else { 0.0f32 }
+        }
+
+        // Phase 1 — ρ(A): iterate A² (two A-multiplications per step) to avoid
+        // ±λ oscillation for graphs like P₃ (λ=±√2) or stars (λ=±√k).
+        // Rayleigh quotient R(x, A²x) converges to ρ(A²) = ρ(A)².
+        // ρ(A) is recovered via integer Newton-Raphson isqrt — no f32::sqrt needed.
+        #[inline(always)]
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        let mut x = [0.0f32; MAX_NODES];
+        for i in 0..nc { x[i] = 1.0f32; }
+
+        let mut rho_sq = 0.0f32;
+        for _ in 0..60 {
+            let mut w1 = [0.0f32; MAX_NODES];
+            for i in 0..nc {
+                let mut s = 0.0f32;
+                let mut b = adj[i];
+                while b != 0 { s += x[next_bit(&mut b)]; }
+                w1[i] = s;
+            }
+            let mut w2 = [0.0f32; MAX_NODES];
+            for i in 0..nc {
+                let mut s = 0.0f32;
+                let mut b = adj[i];
+                while b != 0 { s += w1[next_bit(&mut b)]; }
+                w2[i] = s;
+            }
+            rho_sq = rayleigh(&x, &w2, nc);
+            let m = inf_norm(&w2, nc);
+            if m < 1e-9 { break; }
+            for i in 0..nc { x[i] = w2[i] / m; }
+        }
+
+        // Phase 2 — λₙ(L): iterate L·x, deflate zero eigenspace by mean-centering.
+        // L·x[i] = deg[i]·x[i] − Σ_{j∈N(i)} x[j]
+        let mut xl = [0.0f32; MAX_NODES];
+        for i in 0..nc { xl[i] = if i & 1 == 0 { 1.0f32 } else { -1.0f32 }; }
+
+        let mut lambda_max = 0.0f32;
+        for _ in 0..60 {
+            let mut w = [0.0f32; MAX_NODES];
+            for i in 0..nc {
+                let mut s = deg[i] as f32 * xl[i];
+                let mut b = adj[i];
+                while b != 0 { s -= xl[next_bit(&mut b)]; }
+                w[i] = s;
+            }
+            let mean = {
+                let mut r = 0.0f32;
+                for i in 0..nc { r += w[i]; }
+                r / nc as f32
+            };
+            for i in 0..nc { w[i] -= mean; }
+            lambda_max = rayleigh(&xl, &w, nc);
+            let m = inf_norm(&w, nc);
+            if m < 1e-9 { break; }
+            for i in 0..nc { xl[i] = w[i] / m; }
+        }
+
+        // λ₂ is only defined for graphs with ≥ 2 nodes.
+        // For nc=1: the Laplacian has a single eigenvalue 0 — no λ₂ exists.
+        if nc <= 1 {
+            let rho_sq_u = (rho_sq.max(0.0f32) * 1_000_000.0f32) as u64;
+            let rho_ppm  = isqrt64(rho_sq_u.saturating_mul(1_000_000u64)) as u32;
+            return (rho_ppm, 0, nc);
+        }
+
+        // Phase 3 — λ₂(L): iterate B·x, B = μI − L, deflating all-ones direction.
+        // B's eigenvalues = μ−λᵢ. The largest (= μ, from zero eigenspace of L) is
+        // deflated via mean-centering; convergence then finds μ−λ₂.
+        let mu = lambda_max + 1.0f32;
+
+        // Init x2 half-positive / half-negative to avoid alignment with all-ones.
+        let mut x2 = [0.0f32; MAX_NODES];
+        for i in 0..nc { x2[i] = if i < (nc + 1) / 2 { 1.0f32 } else { -1.0f32 }; }
+        {
+            let mean = {
+                let mut r = 0.0f32;
+                for i in 0..nc { r += x2[i]; }
+                r / nc as f32
+            };
+            for i in 0..nc { x2[i] -= mean; }
+            let m = inf_norm(&x2, nc);
+            if m > 1e-9 { for i in 0..nc { x2[i] /= m; } }
+        }
+
+        let mut mu_minus_lambda2 = mu;
+        for _ in 0..80 {
+            let mut w = [0.0f32; MAX_NODES];
+            // B·x[i] = (μ − deg[i])·x[i] + Σ_{j∈N(i)} x[j]
+            for i in 0..nc {
+                let mut s = (mu - deg[i] as f32) * x2[i];
+                let mut b = adj[i];
+                while b != 0 { s += x2[next_bit(&mut b)]; }
+                w[i] = s;
+            }
+            let mean = {
+                let mut r = 0.0f32;
+                for i in 0..nc { r += w[i]; }
+                r / nc as f32
+            };
+            for i in 0..nc { w[i] -= mean; }
+            mu_minus_lambda2 = rayleigh(&x2, &w, nc);
+            let m = inf_norm(&w, nc);
+            if m < 1e-9 { break; }
+            for i in 0..nc { x2[i] = w[i] / m; }
+        }
+
+        let lambda2 = (mu - mu_minus_lambda2).max(0.0f32);
+
+        let rho_sq_u    = (rho_sq.max(0.0f32) * 1_000_000.0f32) as u64;
+        let rho_ppm     = isqrt64(rho_sq_u.saturating_mul(1_000_000u64)) as u32;
+        let lambda2_ppm = (lambda2 * 1_000_000.0f32).min(u32::MAX as f32) as u32;
+
+        (rho_ppm, lambda2_ppm, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -13803,6 +14003,27 @@ pub fn graph_vertex_connectivity<const N: usize>() -> ([VectorAddress; N], usize
 pub fn graph_edge_color<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, u8) {
     RUNTIME.lock().graph_edge_color_inner()
+}
+
+/// V3.09: Spectral radius ρ(A) and algebraic connectivity λ₂(L).
+///
+/// Returns `(spectral_radius_ppm, algebraic_connectivity_ppm, node_count)`:
+/// - `spectral_radius_ppm`        — ρ(A) × 1_000_000: largest eigenvalue of the
+///   undirected adjacency matrix, computed via 60-step power iteration.
+/// - `algebraic_connectivity_ppm` — λ₂(L) × 1_000_000: second-smallest eigenvalue of
+///   the Laplacian L = D − A.  Zero for disconnected graphs.
+/// - `node_count`                 — number of live nodes.
+///
+/// OS analogy: ρ(A) is the signal-amplification factor in the kernel event graph;
+/// 1/ρ is the epidemic threshold — if a fault cascades with rate β > 1/ρ it will
+/// saturate the kernel.  λ₂(L) is the mixing speed of supervisor broadcasts;
+/// low λ₂ signals a bottleneck (single-bridge topology) in the dependency graph,
+/// analogous to a slow convergence in BGP or a poorly-connected NUMA topology.
+///
+/// Literature: Fiedler 1973 (algebraic connectivity), Anderson & Morley 1985,
+/// Wang et al. 2003 (epidemic threshold), Mohar 1991 (Cheeger: h ≥ λ₂/2).
+pub fn graph_spectral() -> (u32, u32, usize) {
+    RUNTIME.lock().graph_spectral_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
