@@ -7913,6 +7913,106 @@ pub fn dispatch_graph_min_path_cover(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.00: `graph arborescence <root>` — minimum spanning arborescence
+/// (directed MST) from a given root node via Chu-Liu / Edmonds 1967.
+pub fn dispatch_graph_arborescence(sink: &ConsoleSink, root: gos_protocol::VectorAddress) {
+    const MAX_N: usize = 128;
+    let (vecs, parents, weights, total, total_w, is_conn) =
+        gos_runtime::graph_arborescence::<MAX_N>(root);
+
+    set_color(sink, 11, 0); // bright-cyan header
+    print_str(sink, " min spanning arborescence  (Chu-Liu / Edmonds)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !is_conn {
+        set_color(sink, 12, 0);
+        print_str(sink, "  not connected \u{2014} no spanning arborescence from root\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  role    weight    vector           parent\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..total {
+        let vec    = vecs[i];
+        let parent = parents[i];
+        let w_u32  = weights[i];
+        let is_root = vec == parent;
+
+        if is_root {
+            set_color(sink, 13, 0); // magenta = root
+            print_str(sink, "  root  ");
+        } else {
+            set_color(sink, 11, 0); // cyan = child
+            print_str(sink, "  child ");
+        }
+
+        set_color(sink, 14, 0);
+        let whole = w_u32 / 1000;
+        let frac  = w_u32 % 1000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10  { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+        print_str(sink, "  ");
+
+        set_color(sink, 7, 0);
+        let mut vbuf = LineBuf::<20>::new();
+        vbuf.push_vector(vec);
+        let vs = core::str::from_utf8(vbuf.as_slice()).unwrap_or("?");
+        print_str(sink, vs);
+        let vpad = 17usize.saturating_sub(vs.len());
+        for _ in 0..vpad { print_str(sink, " "); }
+
+        if is_root {
+            set_color(sink, 8, 0);
+            print_str(sink, "(root)");
+        } else {
+            set_color(sink, 7, 0);
+            let mut pbuf = LineBuf::<20>::new();
+            pbuf.push_vector(parent);
+            let ps = core::str::from_utf8(pbuf.as_slice()).unwrap_or("?");
+            print_str(sink, ps);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  MSA-weight=");
+    set_color(sink, 14, 0);
+    let w_whole = total_w / 1000;
+    let w_frac  = total_w % 1000;
+    print_num_inline(sink, w_whole as usize);
+    print_str(sink, ".");
+    if w_frac < 10  { print_str(sink, "00"); }
+    else if w_frac < 100 { print_str(sink, "0"); }
+    print_num_inline(sink, w_frac as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, "  Chu-Liu\u{2215}Edmonds");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

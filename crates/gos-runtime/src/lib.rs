@@ -9569,6 +9569,234 @@ impl GraphRuntime {
 
         (out_vecs, out_path_id, path_count, true, nc)
     }
+
+    /// V3.00: Minimum spanning arborescence (Chu-Liu / Edmonds 1967), O(V·E).
+    ///
+    /// Finds the minimum total-weight directed spanning tree rooted at `root`:
+    /// every non-root live node is reachable from `root` via a unique directed
+    /// path in the tree, and the total arborescence weight is minimised.
+    ///
+    /// Algorithm: iterative cycle-contraction (Chu-Liu 1965 / Edmonds 1967):
+    ///   1. Select minimum-weight incoming edge for every non-root super-node.
+    ///   2. If no directed cycle in the selection: it IS the MSA.
+    ///   3. Contract one cycle into a new super-node; adjust incoming-edge
+    ///      weights (subtract cycle-edge cost each external edge displaces).
+    ///   Repeat until no cycle.  Tentative parents are recorded at every round
+    ///   and overwritten at the break-point when a cycle is expanded.
+    ///
+    /// Returns `(vecs, parents, weights, node_count, total_w, is_connected)`:
+    ///   `vecs[0..nc]`    — all live nodes, root first.
+    ///   `parents[0..nc]` — parent in arborescence (self=root; zero=unreachable).
+    ///   `weights[0..nc]` — edge weight×1000 to parent (0 for root).
+    ///   `node_count`     — total live nodes.
+    ///   `total_w`        — Σ arborescence edge weights × 1000.
+    ///   `is_connected`   — true iff a spanning arborescence exists from `root`.
+    pub fn graph_arborescence_inner<const N: usize>(
+        &self,
+        root: VectorAddress,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32, bool) {
+        const NIL: usize  = usize::MAX;
+        const INF: f32    = 1.0e30_f32;
+        // Super-node space: originals 0..nc + contracted nc..2*nc.
+        const MAX_SG: usize = 256; // ≥ 2 × MAX_NODES
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut out_vecs    = [zero; N];
+        let mut out_parents = [zero; N];
+        let mut out_weights = [0u32; N];
+
+        // ── 1. Compact live nodes ──────────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        let node_count = nc;
+        if nc == 0 {
+            return (out_vecs, out_parents, out_weights, 0, 0, true);
+        }
+
+        let root_slot = self.node_slot_by_vec(root).unwrap_or(node_slots[0]);
+        let root_ci   = slot_to_ci[root_slot];
+
+        let node_vec = |ci: usize| -> VectorAddress {
+            self.nodes[node_slots[ci]].map(|r| r.vector).unwrap_or(zero)
+        };
+
+        if nc == 1 {
+            out_vecs[0]    = node_vec(root_ci);
+            out_parents[0] = node_vec(root_ci);
+            return (out_vecs, out_parents, out_weights, 1, 0, true);
+        }
+
+        // ── 2. Build directed edge list in compact-CI space ────────────────────
+        let mut ec     = 0usize;
+        let mut e_from = [0u8;    MAX_EDGES];
+        let mut e_to   = [0u8;    MAX_EDGES];
+        let mut e_wt   = [0.0f32; MAX_EDGES]; // original weight
+        let mut e_adj  = [0.0f32; MAX_EDGES]; // accumulated adjustment
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; }
+            let fs  = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts  = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs];
+            let tci = slot_to_ci[ts];
+            if fci == NIL || tci == NIL { continue; }
+            if ec < MAX_EDGES {
+                e_from[ec] = fci as u8;
+                e_to[ec]   = tci as u8;
+                e_wt[ec]   = edge.spec.weight.max(0.0);
+                ec += 1;
+            }
+        }
+
+        // ── 3. Chu-Liu / Edmonds iterative contraction ─────────────────────────
+        // group[ci] = current super-node ID.  IDs 0..nc = original; nc.. = contracted.
+        let mut group = [0usize; MAX_NODES];
+        for ci in 0..nc { group[ci] = ci; }
+        let mut num_sg = nc;
+
+        // sel_parent[ci] = parent original CI  (tentative, overwritten at break-point).
+        // sel_wt[ci]     = ORIGINAL weight of the chosen incoming edge.
+        let mut sel_parent = [NIL;    MAX_NODES];
+        let mut sel_wt     = [0.0f32; MAX_NODES];
+
+        let mut in_wt     = [INF;   MAX_SG];
+        let mut in_ei     = [NIL;   MAX_SG];
+        let mut in_sg_src = [NIL;   MAX_SG];
+        let mut color     = [0u8;   MAX_SG]; // 0=white 1=gray 2=black
+        let mut is_cyc    = [false; MAX_SG];
+
+        let mut is_connected = true;
+
+        'rounds: for _round in 0..nc {
+            let root_sg = group[root_ci];
+
+            for sg in 0..num_sg {
+                in_wt[sg]     = INF;
+                in_ei[sg]     = NIL;
+                in_sg_src[sg] = NIL;
+                color[sg]     = 0;
+            }
+
+            // Step A: min incoming edge per non-root super-node.
+            for ei in 0..ec {
+                let f_sg = group[e_from[ei] as usize];
+                let t_sg = group[e_to[ei]   as usize];
+                if f_sg == t_sg    { continue; }
+                if t_sg == root_sg { continue; }
+                let eff_w = e_wt[ei] + e_adj[ei];
+                if eff_w < in_wt[t_sg]
+                    || (eff_w == in_wt[t_sg] && in_ei[t_sg] != NIL && ei < in_ei[t_sg])
+                {
+                    in_wt[t_sg]     = eff_w;
+                    in_ei[t_sg]     = ei;
+                    in_sg_src[t_sg] = f_sg;
+                }
+            }
+
+            // Collect active non-root super-nodes; record tentative parents.
+            let mut active_sgs = [0usize; MAX_SG];
+            let mut active_n   = 0usize;
+            let mut sg_seen    = [false; MAX_SG];
+
+            for ci in 0..nc {
+                let sg = group[ci];
+                if sg == root_sg { continue; }
+                if !sg_seen[sg] {
+                    sg_seen[sg] = true;
+                    if in_ei[sg] == NIL { is_connected = false; break 'rounds; }
+                    active_sgs[active_n] = sg;
+                    active_n += 1;
+                    let ei_sel = in_ei[sg];
+                    sel_parent[e_to[ei_sel] as usize]  = e_from[ei_sel] as usize;
+                    sel_wt[e_to[ei_sel] as usize]      = e_wt[ei_sel];
+                }
+            }
+
+            if active_n == 0 { break 'rounds; }
+
+            // Step B: cycle detection via DFS coloring.
+            let mut cycle_sg = NIL;
+            'detect: for i in 0..active_n {
+                let start = active_sgs[i];
+                if color[start] != 0 { continue; }
+                let mut cur    = start;
+                let mut path   = [0usize; MAX_SG];
+                let mut path_n = 0usize;
+                loop {
+                    if cur == root_sg || in_sg_src[cur] == NIL {
+                        for j in 0..path_n { color[path[j]] = 2; }
+                        break;
+                    }
+                    if color[cur] == 2 { for j in 0..path_n { color[path[j]] = 2; } break; }
+                    if color[cur] == 1 { cycle_sg = cur; break 'detect; }
+                    color[cur] = 1;
+                    path[path_n] = cur;
+                    path_n += 1;
+                    cur = in_sg_src[cur];
+                }
+            }
+
+            if cycle_sg == NIL { break 'rounds; }
+
+            // Step C: trace full cycle.
+            for sg in 0..num_sg { is_cyc[sg] = false; }
+            { let mut cur = cycle_sg; loop { is_cyc[cur] = true; cur = in_sg_src[cur]; if cur == cycle_sg { break; } } }
+
+            // Step D: adjust incoming-edge weights before remapping.
+            for ei in 0..ec {
+                let t_sg = group[e_to[ei]   as usize];
+                let f_sg = group[e_from[ei] as usize];
+                if is_cyc[t_sg] && !is_cyc[f_sg] { e_adj[ei] -= in_wt[t_sg]; }
+            }
+
+            // Step E: remap cycle CIs to new super-node.
+            let new_sg = num_sg; num_sg += 1;
+            for ci in 0..nc { if is_cyc[group[ci]] { group[ci] = new_sg; } }
+        }
+
+        // ── 4. Build output ────────────────────────────────────────────────────
+        if !is_connected {
+            let out_n = nc.min(N);
+            if out_n > 0 { out_vecs[0] = node_vec(root_ci); out_parents[0] = node_vec(root_ci); }
+            let mut idx = 1usize;
+            for ci in 0..nc {
+                if ci == root_ci { continue; }
+                if idx >= out_n { break; }
+                out_vecs[idx] = node_vec(ci);
+                idx += 1;
+            }
+            return (out_vecs, out_parents, out_weights, node_count, 0, false);
+        }
+
+        out_vecs[0]    = node_vec(root_ci);
+        out_parents[0] = node_vec(root_ci);
+        let mut idx    = 1usize;
+        let mut total_f = 0.0f32;
+        for ci in 0..nc {
+            if ci == root_ci { continue; }
+            if idx >= N { break; }
+            out_vecs[idx] = node_vec(ci);
+            let par_ci = sel_parent[ci];
+            if par_ci < nc {
+                out_parents[idx] = node_vec(par_ci);
+                let w = sel_wt[ci];
+                out_weights[idx] = (w * 1000.0) as u32;
+                total_f += w;
+            }
+            idx += 1;
+        }
+
+        let total_u32 = (total_f * 1000.0).min(u32::MAX as f32) as u32;
+        (out_vecs, out_parents, out_weights, node_count, total_u32, true)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -11990,6 +12218,34 @@ pub fn graph_dominating_set<const N: usize>() -> ([VectorAddress; N], usize, usi
 pub fn graph_min_path_cover<const N: usize>(
 ) -> ([VectorAddress; N], [u8; N], usize, bool, usize) {
     RUNTIME.lock().graph_min_path_cover_inner()
+}
+
+/// V3.00: Minimum spanning arborescence (directed MST) from `root`.
+///
+/// Uses the Chu-Liu / Edmonds 1967 algorithm: iteratively selects minimum
+/// incoming edges per super-node and contracts directed cycles until no cycles
+/// remain, giving the minimum total-weight spanning arborescence.
+///
+/// Returns `(vecs, parents, weights, node_count, total_w, is_connected)`:
+///   `vecs[0..nc]`    — all live nodes, root first.
+///   `parents[0..nc]` — parent in arborescence (self=root; zero=unreachable).
+///   `weights[0..nc]` — edge weight×1000 to parent (0 for root).
+///   `node_count`     — total live nodes.
+///   `total_w`        — Σ arborescence edge weights × 1000.
+///   `is_connected`   — true iff a spanning arborescence exists from `root`.
+///
+/// OS analogy: minimum total-latency directed dependency tree from a boot
+/// controller — the cheapest way to propagate a startup signal from one kernel
+/// module to every other module exactly once, following directed IPC edges.
+/// Equivalent to `systemd-analyze critical-chain` but minimises total weight
+/// rather than just depth.
+///
+/// Literature: Chu & Liu 1965; Edmonds 1967 ("Optimum branchings");
+///             Tarjan 1977 (O(E log V) improvement).
+pub fn graph_arborescence<const N: usize>(
+    root: VectorAddress,
+) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32, bool) {
+    RUNTIME.lock().graph_arborescence_inner(root)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

@@ -1173,6 +1173,21 @@ fn dispatch_text_command(
     } else if cmd == "graph mpc" || cmd == "gmpc" || cmd == "min path cover" || cmd == "graph min path cover" || cmd == "path cover" || cmd == "gdagcover" || cmd == "graph path cover" {
         super::dispatch_graph_min_path_cover(sink);
     } else if let Some(vec_str) = cmd
+        .strip_prefix("graph arborescence ")
+        .or_else(|| cmd.strip_prefix("garborescence "))
+        .or_else(|| cmd.strip_prefix("arborescence "))
+        .or_else(|| cmd.strip_prefix("gmsa "))
+        .or_else(|| cmd.strip_prefix("min arborescence "))
+    {
+        match gos_protocol::VectorAddress::parse(vec_str.trim()) {
+            Some(root) => super::dispatch_graph_arborescence(sink, root),
+            None => {
+                super::set_color(sink, 12, 0);
+                super::print_str(sink, " graph arborescence: expected <root> vector (e.g. graph arborescence 1.0.0.1)\n");
+                super::set_color(sink, 7, 0);
+            }
+        }
+    } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))
         .or_else(|| cmd.strip_prefix("dominator "))
