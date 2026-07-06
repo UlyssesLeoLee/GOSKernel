@@ -10461,6 +10461,239 @@ impl GraphRuntime {
         }
         (out_vecs, is_chordal, nc)
     }
+
+    /// V3.05: Biconnected components — iterative Tarjan edge-stack BCC.
+    ///
+    /// Returns `(vecs, bcc_ids, node_count, bcc_count)`:
+    ///   - `vecs[0..node_count]`    — live nodes sorted (bcc_id asc, vec asc).
+    ///   - `bcc_ids[0..node_count]` — BCC index (0-based) for each node.
+    ///     Nodes in exactly one BCC carry their BCC index.
+    ///     Nodes in 2+ BCCs (articulation points) carry 255.
+    ///     Isolated nodes each get their own singleton BCC.
+    ///   - `node_count`  — total live nodes.
+    ///   - `bcc_count`   — total biconnected components (edge-BCCs + isolated-singletons).
+    pub fn graph_bcc_inner<const N: usize>(&self) -> ([VectorAddress; N], [u8; N], usize, usize) {
+        const ZERO_VEC:   VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL:        usize         = usize::MAX;
+        const UNVISITED:  u32           = u32::MAX;
+
+        let mut out_vecs = [ZERO_VEC; N];
+        let mut out_ids  = [0u8; N];
+
+        // ── 1. Compact live nodes ─────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES]; // ci → slot
+        let mut slot_to_ci = [NIL;    MAX_NODES]; // slot → ci
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i]  = nc;
+                node_slots[nc] = i;
+                nc            += 1;
+            }
+        }
+        if nc == 0 { return (out_vecs, out_ids, 0, 0); }
+
+        // ── 2. DFS state (per compact index) ─────────────────────────────
+        let mut disc  = [UNVISITED; MAX_NODES]; // discovery time
+        let mut low   = [0u32;      MAX_NODES]; // low-link value
+        let mut par   = [NIL;       MAX_NODES]; // parent ci (NIL = root)
+
+        // BCC membership:
+        //   bcc_primary[ci] = first BCC id assigned to ci (255 = none yet)
+        //   bcc_mult[ci]    = ci belongs to 2+ BCCs (is an articulation point)
+        let mut bcc_primary = [255u8; MAX_NODES];
+        let mut bcc_mult    = [false; MAX_NODES];
+
+        // ── 3. Edge stack: (ci_u, ci_v) as u8 pairs ──────────────────────
+        // Each undirected edge pushed at most once (tree edges when child discovered,
+        // back edges when disc[nbr] < disc[cur]).
+        let mut edge_stk: [(u8, u8); MAX_EDGES] = [(0, 0); MAX_EDGES];
+        let mut esp = 0usize;
+
+        // ── 4. DFS stack: (ci, next_edge_scan_index) ─────────────────────
+        let mut dfs_stk: [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+
+        let mut timer     = 0u32;
+        let mut bcc_count = 0usize;
+
+        for start_ci in 0..nc {
+            if disc[start_ci] != UNVISITED { continue; }
+
+            let esp_before   = esp; // safety anchor for root's pop-cleanup
+            disc[start_ci]   = timer;
+            low[start_ci]    = timer;
+            timer           += 1;
+            dfs_stk[0]       = (start_ci, 0);
+            let mut st_top   = 1;
+
+            'dfs: while st_top > 0 {
+                let fi          = st_top - 1;
+                let (cur_ci, scan_ei) = dfs_stk[fi];
+                let cur_slot    = node_slots[cur_ci];
+                let cur_id      = match self.nodes[cur_slot] {
+                    Some(r) => r.spec.node_id,
+                    None    => { st_top -= 1; continue 'dfs; }
+                };
+
+                let mut found = false;
+                let mut ei    = scan_ei;
+
+                while ei < MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => { ei += 1; continue; }
+                    };
+
+                    // Undirected projection: take the other endpoint.
+                    let nbr_id = if edge.spec.from_node == cur_id {
+                        edge.spec.to_node
+                    } else if edge.spec.to_node == cur_id {
+                        edge.spec.from_node
+                    } else {
+                        ei += 1; continue;
+                    };
+
+                    let nbr_slot = match self.node_slot_by_id(nbr_id) {
+                        Some(s) => s,
+                        None    => { ei += 1; continue; }
+                    };
+                    if nbr_slot == cur_slot { ei += 1; continue; } // self-loop
+
+                    let nbr_ci = slot_to_ci[nbr_slot];
+                    if nbr_ci == NIL { ei += 1; continue; }
+
+                    if disc[nbr_ci] == UNVISITED {
+                        // Tree edge: push to edge stack, recurse into child.
+                        disc[nbr_ci]    = timer;
+                        low[nbr_ci]     = timer;
+                        timer          += 1;
+                        par[nbr_ci]     = cur_ci;
+
+                        if esp < MAX_EDGES {
+                            edge_stk[esp] = (cur_ci as u8, nbr_ci as u8);
+                            esp          += 1;
+                        }
+
+                        dfs_stk[fi].1   = ei + 1; // resume after this edge on return
+                        dfs_stk[st_top] = (nbr_ci, 0);
+                        st_top         += 1;
+                        found           = true;
+                        break;
+
+                    } else if nbr_ci != par[cur_ci] {
+                        // Back edge to an already-visited non-parent: update low.
+                        if disc[nbr_ci] < low[cur_ci] {
+                            low[cur_ci] = disc[nbr_ci];
+                        }
+                        // Push only if nbr is an ancestor (disc[nbr] < disc[cur]).
+                        // This ensures each undirected back-edge is pushed exactly once —
+                        // the reverse scan from the ancestor's side has disc[cur] > disc[anc]
+                        // so it fails this guard.
+                        if disc[nbr_ci] < disc[cur_ci] && esp < MAX_EDGES {
+                            edge_stk[esp] = (cur_ci as u8, nbr_ci as u8);
+                            esp          += 1;
+                        }
+                    }
+                    ei += 1;
+                }
+
+                if !found {
+                    st_top -= 1;
+                    let p = par[cur_ci];
+
+                    if p < nc {
+                        // Non-root: propagate low, then check BCC boundary.
+                        if low[cur_ci] < low[p] {
+                            low[p] = low[cur_ci];
+                        }
+                        // BCC condition: low[cur] >= disc[par] means no back-edge
+                        // from cur's subtree can reach strictly above par — par is
+                        // the BCC boundary (an articulation point, or root).
+                        if low[cur_ci] >= disc[p] && bcc_count < 254 {
+                            let bid = bcc_count as u8;
+                            bcc_count += 1;
+                            // Pop edges until the tree edge (p → cur_ci) is popped.
+                            while esp > 0 {
+                                esp -= 1;
+                                let (ea, eb) = edge_stk[esp];
+                                let ea = ea as usize;
+                                let eb = eb as usize;
+                                // Mark ea in this BCC.
+                                if bcc_primary[ea] == 255 {
+                                    bcc_primary[ea] = bid;
+                                } else if bcc_primary[ea] != bid {
+                                    bcc_mult[ea] = true;
+                                }
+                                // Mark eb in this BCC.
+                                if bcc_primary[eb] == 255 {
+                                    bcc_primary[eb] = bid;
+                                } else if bcc_primary[eb] != bid {
+                                    bcc_mult[eb] = true;
+                                }
+                                // Stop after popping the boundary tree edge.
+                                if (ea == p && eb == cur_ci) || (eb == p && ea == cur_ci) {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Root popped: safety-net — pop any leftover edges as a BCC.
+                        // Normally the root's edges are fully consumed by the child
+                        // pops above, but isolated-root components leave nothing here.
+                        if esp > esp_before && bcc_count < 254 {
+                            let bid = bcc_count as u8;
+                            bcc_count += 1;
+                            while esp > esp_before {
+                                esp -= 1;
+                                let (ea, eb) = edge_stk[esp];
+                                let ea = ea as usize;
+                                let eb = eb as usize;
+                                if bcc_primary[ea] == 255 { bcc_primary[ea] = bid; } else if bcc_primary[ea] != bid { bcc_mult[ea] = true; }
+                                if bcc_primary[eb] == 255 { bcc_primary[eb] = bid; } else if bcc_primary[eb] != bid { bcc_mult[eb] = true; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 5. Isolated nodes → each gets its own singleton BCC ───────────
+        for ci in 0..nc {
+            if bcc_primary[ci] == 255 && bcc_count < 254 {
+                bcc_primary[ci]  = bcc_count as u8;
+                bcc_count       += 1;
+            }
+        }
+
+        // ── 6. Build output arrays ────────────────────────────────────────
+        let out_n = nc.min(N);
+        for ci in 0..out_n {
+            let slot = node_slots[ci];
+            if let Some(r) = self.nodes[slot] {
+                out_vecs[ci] = r.vector;
+                out_ids[ci]  = if bcc_mult[ci] { 255 } else { bcc_primary[ci] };
+            }
+        }
+
+        // Insertion sort: primary key = bcc_id asc, secondary = vec.as_u64() asc.
+        // AP nodes (bcc_id=255) naturally sort last.
+        for i in 1..out_n {
+            let mut j = i;
+            while j > 0 {
+                let ka = (out_ids[j - 1] as u64, out_vecs[j - 1].as_u64());
+                let kb = (out_ids[j]     as u64, out_vecs[j].as_u64());
+                if ka > kb {
+                    out_vecs.swap(j - 1, j);
+                    out_ids.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        (out_vecs, out_ids, out_n, bcc_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -12974,6 +13207,33 @@ pub fn graph_hamiltonian<const N: usize>() -> ([VectorAddress; N], usize, bool, 
 /// remaining peers all mutually inter-operating, enabling zero-surprise isolation.
 pub fn graph_chordal<const N: usize>() -> ([VectorAddress; N], bool, usize) {
     RUNTIME.lock().graph_chordal_inner()
+}
+
+/// V3.05: Biconnected components (BCCs) of the live kernel graph's undirected
+/// projection — iterative Tarjan edge-stack algorithm, O(V+E).
+///
+/// Returns `(vecs, bcc_ids, node_count, bcc_count)`:
+///   - `vecs[0..node_count]`    — all live nodes, sorted (bcc_id asc, vec asc).
+///   - `bcc_ids[0..node_count]` — biconnected component index per node.
+///     Regular nodes carry their BCC index (0-based).
+///     Articulation points — nodes that appear in 2+ BCCs — carry `255`.
+///     Each isolated node gets its own singleton BCC.
+///   - `node_count`  — total live nodes.
+///   - `bcc_count`   — total BCCs (edge-BCCs + isolated-singletons).
+///
+/// A biconnected component is a maximal 2-vertex-connected subgraph: removing
+/// any single vertex within it does not disconnect it.  Articulation points
+/// (cut vertices from `graph_articulation`) are exactly the nodes with
+/// `bcc_id == 255` in this output.
+///
+/// OS analogy: BCCs are the fault-isolation "blocks" of the kernel dependency
+/// graph — within a block, any subsystem can crash without partitioning the
+/// block's connectivity.  Articulation points (bcc_id=255) are the single
+/// points-of-failure bridging two or more blocks.
+///
+/// Literature: Tarjan 1972 (low-link DFS), Hopcroft & Tarjan 1973.
+pub fn graph_bcc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
+    RUNTIME.lock().graph_bcc_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

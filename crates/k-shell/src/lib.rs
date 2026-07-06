@@ -8328,6 +8328,84 @@ pub fn dispatch_graph_chordal(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.05: `graph bcc` — biconnected components.
+/// Shows each node's BCC id and flags articulation points (bcc_id=255).
+pub fn dispatch_graph_bcc(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, bcc_ids, node_count, bcc_count) = gos_runtime::graph_bcc::<MAX_N>();
+
+    set_color(sink, 14, 0); // bright-yellow header
+    print_str(sink, " graph bcc  (biconnected components)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  bcc  role          vector\n");
+
+        for i in 0..node_count.min(MAX_N) {
+            let bid = bcc_ids[i];
+            if bid == 255 {
+                // Articulation point: bright-red label
+                set_color(sink, 12, 0);
+                print_str(sink, "  AP   cut-vertex    ");
+            } else {
+                // Regular BCC member: cycle through 6 colours per BCC
+                let colour: u8 = match bid % 6 {
+                    0 => 10, // bright-green
+                    1 => 11, // bright-cyan
+                    2 => 13, // bright-magenta
+                    3 => 9,  // bright-blue
+                    4 => 14, // bright-yellow
+                    _ => 15, // bright-white
+                };
+                set_color(sink, colour, 0);
+                print_str(sink, "  ");
+                if (bid as usize) < 10  { print_str(sink, "  "); }
+                else if (bid as usize) < 100 { print_str(sink, " "); }
+                print_num_inline(sink, bid as usize);
+                print_str(sink, "   BCC-member    ");
+            }
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    // Count AP nodes for footer
+    let mut ap_count = 0usize;
+    for i in 0..node_count.min(MAX_N) {
+        if bcc_ids[i] == 255 { ap_count += 1; }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, bcc_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " BCC(s)  ");
+    if ap_count > 0 {
+        set_color(sink, 12, 0);
+        print_num_inline(sink, ap_count);
+        set_color(sink, 8, 0);
+        print_str(sink, " AP(s)  ");
+    }
+    print_str(sink, "Tarjan 1972");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

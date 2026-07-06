@@ -658,6 +658,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gham / hamiltonian  aliases for graph hamiltonian\n");
         super::print_str(sink, "  graph chordal  chordal recognition: every 4+ cycle has a chord (LexBFS PEO)\n");
         super::print_str(sink, "  gchordal / chordal  aliases for graph chordal\n");
+        super::print_str(sink, "  graph bcc  biconnected components (Tarjan; APs marked 255)\n");
+        super::print_str(sink, "  gbcc / biconnected / bcc  aliases for graph bcc\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1188,6 +1190,8 @@ fn dispatch_text_command(
         super::dispatch_graph_hamiltonian(sink);
     } else if cmd == "graph chordal" || cmd == "gchordal" || cmd == "chordal" || cmd == "graph chord" || cmd == "gchord" {
         super::dispatch_graph_chordal(sink);
+    } else if cmd == "graph bcc" || cmd == "gbcc" || cmd == "biconnected" || cmd == "gbiconn" || cmd == "graph biconnected" || cmd == "bcc" {
+        super::dispatch_graph_bcc(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
