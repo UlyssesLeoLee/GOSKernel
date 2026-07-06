@@ -7777,6 +7777,65 @@ pub fn dispatch_graph_vertex_cover(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.98 — `graph domset` / `gdomset` — minimum dominating set (greedy).
+///
+/// Displays the greedy dominating set D and summary statistics.
+/// γ(G) = |D| (minimum dominating set size).
+/// Greedy achieves ≤ H(Δ)+1 ≈ ln(Δ)+1 approximation.
+/// OS analogy: minimum monitor deployment — fewest subsystems to instrument so
+/// every uninstrumented module has at least one directly-adjacent instrumented neighbour.
+pub fn dispatch_graph_dominating_set(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, dom_size, total) =
+        gos_runtime::graph_dominating_set::<MAX_N>();
+
+    set_color(sink, 14, 0); // bright-yellow header
+    print_str(sink, " graph dominating set  (\u{3b3}(G) minimum dominating set)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              role\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..dom_size.min(MAX_N) {
+        set_color(sink, 11, 0); // bright-cyan — dominator
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        let vlen = vec_str.len();
+        for _ in vlen..18 { print_str(sink, " "); }
+        print_str(sink, "dominator");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  \u{3b3}(G)=");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, dom_size);
+    set_color(sink, 8, 0);
+    print_str(sink, "  greedy \u{2264} ln(\u{394})+1 approx");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

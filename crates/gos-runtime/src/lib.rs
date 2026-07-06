@@ -9281,6 +9281,121 @@ impl GraphRuntime {
             (cover_vecs, cover_size, false, node_count)
         }
     }
+
+    // V2.98 — minimum dominating set (greedy ln(Δ)+1 approximation)
+    //
+    // A dominating set D ⊆ V satisfies: every v ∉ D has at least one neighbour in D.
+    // Equivalently: V = D ∪ N(D).  γ(G) denotes the minimum size.
+    //
+    // Algorithm: greedy — at each step select the node that dominates the most
+    // currently-undominated vertices (including itself), then remove all newly-
+    // dominated nodes from the undominated set.  Achieves ≤ H(Δ)+1 ≈ ln(Δ)+1
+    // approximation ratio (where Δ = max degree).
+    //
+    // Bitmask representation: each compact-index ci has a u128 `dominated[ci]`
+    // encoding the set {ci} ∪ undirected-neighbours of ci.  At most 128 nodes.
+    //
+    // Special cases:
+    //   - Isolated nodes have no neighbour; only they can dominate themselves,
+    //     so they are always forced into D by the greedy.
+    //   - Complete K_n: any single node dominates all → γ=1.
+    //   - Star K_{1,k}: centre dominates all → γ=1.
+    //   - Path P_n: γ = ⌈n/3⌉ (greedy achieves the optimum for paths).
+    //
+    // Returns (dom_vecs, dom_size, node_count).
+    //   dom_vecs[0..dom_size] = dominating set nodes, sorted ascending by as_u64().
+    pub fn graph_dominating_set_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], usize, usize) {
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut dom_vecs = [zero; N];
+
+        // 1. Compact live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+        if node_count == 0 {
+            return (dom_vecs, 0, 0);
+        }
+
+        // 2. Map slot → compact index for bitmask operations.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        for ci in 0..node_count {
+            slot_to_ci[node_slots[ci]] = ci;
+        }
+
+        // 3. Build dominated[ci] = {ci} ∪ undirected-neighbours (bitmask over CIs).
+        let mut dominated = [0u128; 128];
+        for ci in 0..node_count {
+            dominated[ci] |= 1u128 << ci; // every node dominates itself
+        }
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; } // self-loop
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs];
+            let tci = slot_to_ci[ts];
+            if fci == usize::MAX || tci == usize::MAX { continue; }
+            // Undirected: each endpoint dominates the other.
+            dominated[fci] |= 1u128 << tci;
+            dominated[tci] |= 1u128 << fci;
+        }
+
+        // 4. Greedy selection — always pick the node that covers the most undominated CIs.
+        let all_mask: u128 = if node_count >= 128 { u128::MAX } else { (1u128 << node_count) - 1 };
+        let mut undominated: u128 = all_mask;
+        let mut in_domset = [false; 128];
+        let mut dom_size  = 0usize;
+
+        while undominated != 0 && dom_size < node_count {
+            let mut best_ci    = 0usize;
+            let mut best_count = 0u32;
+            for ci in 0..node_count {
+                if in_domset[ci] { continue; }
+                let coverage = (dominated[ci] & undominated).count_ones();
+                if coverage > best_count {
+                    best_count = coverage;
+                    best_ci    = ci;
+                }
+            }
+            in_domset[best_ci] = true;
+            undominated &= !dominated[best_ci];
+            dom_size += 1;
+        }
+
+        // 5. Collect result, sort ascending by vector.as_u64().
+        let mut sort_buf = [(0u64, zero); 128];
+        let mut sort_n   = 0usize;
+        for ci in 0..node_count {
+            if in_domset[ci] {
+                let slot = node_slots[ci];
+                let vec  = self.nodes[slot].map(|r| r.vector).unwrap_or(zero);
+                sort_buf[sort_n] = (vec.as_u64(), vec);
+                sort_n += 1;
+            }
+        }
+        for i in 1..sort_n {
+            let key = sort_buf[i];
+            let mut j = i;
+            while j > 0 && sort_buf[j - 1].0 > key.0 {
+                sort_buf[j] = sort_buf[j - 1];
+                j -= 1;
+            }
+            sort_buf[j] = key;
+        }
+        let out_n = sort_n.min(N);
+        for i in 0..out_n {
+            dom_vecs[i] = sort_buf[i].1;
+        }
+
+        (dom_vecs, dom_size, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -11671,6 +11786,14 @@ pub fn graph_independent_set<const N: usize>() -> ([VectorAddress; N], usize, us
 /// communication in the system dependency graph.
 pub fn graph_vertex_cover<const N: usize>() -> ([VectorAddress; N], usize, bool, usize) {
     RUNTIME.lock().graph_vertex_cover_inner()
+}
+
+/// V2.98 — minimum dominating set (greedy ln(Δ)+1 approximation).
+///
+/// Returns (dom_vecs, dom_size, node_count).
+/// dom_vecs[0..dom_size] = dominating set, sorted ascending by VectorAddress.as_u64().
+pub fn graph_dominating_set<const N: usize>() -> ([VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_dominating_set_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
