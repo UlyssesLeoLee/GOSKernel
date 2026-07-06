@@ -9797,6 +9797,159 @@ impl GraphRuntime {
         let total_u32 = (total_f * 1000.0).min(u32::MAX as f32) as u32;
         (out_vecs, out_parents, out_weights, node_count, total_u32, true)
     }
+
+    /// V3.01: Feedback vertex set (FVS) — greedy Kahn-based algorithm.
+    ///
+    /// Returns `(fvs_vecs, fvs_size, node_count)`:
+    /// - `fvs_vecs[0..fvs_size]`: nodes whose removal makes the graph acyclic,
+    ///   sorted ascending by `VectorAddress.as_u64()`.
+    /// - `fvs_size`: number of nodes in the FVS (greedy upper bound on min-FVS).
+    /// - `node_count`: total live nodes in the graph.
+    ///
+    /// Algorithm: iterative Kahn BFS.  Each round:
+    ///   (A) compute in-degree and out-degree for live nodes (self-loops counted);
+    ///   (B) build undirected adj bitmask excluding self-loops;
+    ///   (C) Kahn BFS: drain in-degree-0 nodes, decrement successors;
+    ///   (D) if all drained → acyclic, done;
+    ///   (E) else pick undrained node with max `in_deg × out_deg` → FVS, remove.
+    ///
+    /// Self-loops: always yield in_deg ≥ 1; Kahn never drains them → picked first.
+    /// Acyclicity guarantee: removing the returned FVS nodes leaves a DAG.
+    pub fn graph_fvs_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], usize, usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL: usize = usize::MAX;
+        let mut out_vecs = [ZERO_VEC; N];
+
+        // ── 1. Compact live nodes ──────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        let node_count = nc;
+        if nc == 0 {
+            return (out_vecs, 0, 0);
+        }
+
+        // ── 2. Greedy FVS loop ─────────────────────────────────────────────
+        let mut live     = [true; MAX_NODES]; // live[ci]: not yet in FVS
+        let mut fvs_cis  = [0u8;  MAX_NODES]; // FVS compact-indices
+        let mut fvs_size = 0usize;
+
+        loop {
+            // Count live nodes.
+            let mut live_count = 0usize;
+            for ci in 0..nc {
+                if live[ci] { live_count += 1; }
+            }
+            if live_count == 0 { break; }
+
+            // Build in-degree, out-degree, and adj bitmask for live nodes.
+            // Self-loops count toward in-/out-degree but NOT toward adj.
+            let mut in_deg  = [0u32;  MAX_NODES];
+            let mut out_deg = [0u32;  MAX_NODES];
+            let mut adj     = [0u128; MAX_NODES];
+
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+                let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+                let fci = slot_to_ci[fs];
+                let tci = slot_to_ci[ts];
+                if fci == NIL || tci == NIL { continue; }
+                if !live[fci] || !live[tci]  { continue; }
+                in_deg[tci]  = in_deg[tci].saturating_add(1);
+                out_deg[fci] = out_deg[fci].saturating_add(1);
+                if fci != tci && tci < 128 {
+                    adj[fci] |= 1u128 << tci;
+                }
+            }
+
+            // Kahn BFS: drain zero-in-degree nodes.
+            let mut queue    = [0u8;   MAX_NODES];
+            let mut q_head   = 0usize;
+            let mut q_tail   = 0usize;
+            let mut in_queue = [false; MAX_NODES];
+            let mut processed = 0usize;
+
+            for ci in 0..nc {
+                if live[ci] && in_deg[ci] == 0 {
+                    in_queue[ci] = true;
+                    queue[q_tail] = ci as u8;
+                    q_tail += 1;
+                }
+            }
+
+            while q_head < q_tail {
+                let ci = queue[q_head] as usize;
+                q_head += 1;
+                processed += 1;
+                let mut nbrs = adj[ci];
+                while nbrs != 0 {
+                    let tci = nbrs.trailing_zeros() as usize;
+                    nbrs &= nbrs - 1;
+                    if in_deg[tci] > 0 { in_deg[tci] -= 1; }
+                    if in_deg[tci] == 0 && !in_queue[tci] {
+                        in_queue[tci] = true;
+                        queue[q_tail] = tci as u8;
+                        q_tail += 1;
+                    }
+                }
+            }
+
+            if processed == live_count { break; } // acyclic — done
+
+            // Find undrained node with max in_deg × out_deg score.
+            let mut best_ci    = NIL;
+            let mut best_score = 0u64;
+            for ci in 0..nc {
+                if live[ci] && !in_queue[ci] {
+                    let score = in_deg[ci] as u64 * out_deg[ci] as u64;
+                    if best_ci == NIL || score > best_score {
+                        best_score = score;
+                        best_ci    = ci;
+                    }
+                }
+            }
+            if best_ci == NIL { break; } // safety exit
+
+            if fvs_size < MAX_NODES {
+                fvs_cis[fvs_size] = best_ci as u8;
+                fvs_size += 1;
+            }
+            live[best_ci] = false;
+        }
+
+        // ── 3. Sort FVS by VectorAddress.as_u64() ascending ───────────────
+        let copy_len = fvs_size.min(N);
+        let mut tmp = [ZERO_VEC; MAX_NODES];
+        for i in 0..fvs_size {
+            let ci   = fvs_cis[i] as usize;
+            let slot = node_slots[ci];
+            tmp[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO_VEC);
+        }
+        for i in 1..fvs_size {
+            let key = tmp[i];
+            let mut j = i;
+            while j > 0 && tmp[j - 1].as_u64() > key.as_u64() {
+                tmp[j] = tmp[j - 1];
+                j -= 1;
+            }
+            tmp[j] = key;
+        }
+        for i in 0..copy_len {
+            out_vecs[i] = tmp[i];
+        }
+
+        (out_vecs, fvs_size, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -12246,6 +12399,15 @@ pub fn graph_arborescence<const N: usize>(
     root: VectorAddress,
 ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize, u32, bool) {
     RUNTIME.lock().graph_arborescence_inner(root)
+}
+
+/// V3.01: Feedback vertex set — greedy Kahn-based cycle-breaking.
+///
+/// Returns `(fvs_vecs, fvs_size, node_count)`.
+/// `fvs_vecs[0..fvs_size]` = nodes to remove to make the graph acyclic,
+/// sorted ascending by `VectorAddress.as_u64()`.
+pub fn graph_fvs<const N: usize>() -> ([VectorAddress; N], usize, usize) {
+    RUNTIME.lock().graph_fvs_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

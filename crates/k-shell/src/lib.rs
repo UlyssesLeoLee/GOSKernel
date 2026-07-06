@@ -8013,6 +8013,82 @@ pub fn dispatch_graph_arborescence(sink: &ConsoleSink, root: gos_protocol::Vecto
     print_str(sink, "\n");
 }
 
+/// V3.01: `graph fvs` — feedback vertex set (greedy Kahn-based).
+///
+/// Returns the minimum-ish set of nodes whose removal makes the directed graph
+/// acyclic.  Uses iterative Kahn BFS: each round picks the undrained node with
+/// the highest in-degree × out-degree score and removes it until no cycles remain.
+///
+/// OS analogy: minimum set of kernel subsystems to suspend / quarantine to break
+/// all boot-order dependency cycles — like `systemctl mask` targeting the
+/// cycle-causing services identified by `systemd-analyze verify`.
+pub fn dispatch_graph_fvs(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, fvs_size, node_count) = gos_runtime::graph_fvs::<MAX_N>();
+
+    set_color(sink, 12, 0); // bright-red header — "removal" theme
+    print_str(sink, " graph feedback vertex set  (FVS cycle-breaking)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if fvs_size == 0 {
+        set_color(sink, 10, 0); // green — no cycles
+        print_str(sink, "  no feedback vertices (graph is a DAG)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  vector              role\n");
+        set_color(sink, 7, 0);
+
+        for i in 0..fvs_size.min(MAX_N) {
+            set_color(sink, 12, 0); // bright-red — cycle contributor
+            print_str(sink, "  ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            let vlen = vec_str.len();
+            for _ in vlen..18 { print_str(sink, " "); }
+            print_str(sink, "fvs-member");
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  FVS=");
+    set_color(sink, 12, 0);
+    print_num_inline(sink, fvs_size);
+    set_color(sink, 8, 0);
+    print_str(sink, "  greedy in\u{2218}out score  dag-status: ");
+    if fvs_size == 0 {
+        set_color(sink, 10, 0);
+        print_str(sink, "acyclic");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "cyclic (remove ");
+        print_num_inline(sink, fvs_size);
+        print_str(sink, " node");
+        if fvs_size != 1 { print_str(sink, "s"); }
+        print_str(sink, ")");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

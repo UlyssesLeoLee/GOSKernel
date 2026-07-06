@@ -650,6 +650,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gbimatch / bipartite match  aliases for graph bipartite match\n");
         super::print_str(sink, "  graph 2ecc  2-edge-connected components (nodes resilient to any single link failure)\n");
         super::print_str(sink, "  g2ecc / 2ecc / edge connected components  aliases for graph 2ecc\n");
+        super::print_str(sink, "  graph fvs   feedback vertex set (min nodes to remove to break all cycles)\n");
+        super::print_str(sink, "  gfvs / feedback vertex set  aliases for graph fvs\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1172,6 +1174,8 @@ fn dispatch_text_command(
         super::dispatch_graph_dominating_set(sink);
     } else if cmd == "graph mpc" || cmd == "gmpc" || cmd == "min path cover" || cmd == "graph min path cover" || cmd == "path cover" || cmd == "gdagcover" || cmd == "graph path cover" {
         super::dispatch_graph_min_path_cover(sink);
+    } else if cmd == "graph fvs" || cmd == "gfvs" || cmd == "feedback vertex set" || cmd == "graph fvset" || cmd == "gfvset" || cmd == "graph feedback vertex" {
+        super::dispatch_graph_fvs(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
