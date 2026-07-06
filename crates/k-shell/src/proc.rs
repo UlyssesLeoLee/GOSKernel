@@ -662,6 +662,10 @@ fn dispatch_text_command(
         super::print_str(sink, "  gbcc / biconnected / bcc  aliases for graph bcc\n");
         super::print_str(sink, "  graph ebc  edge betweenness centrality (Brandes; link criticality)\n");
         super::print_str(sink, "  gebc / edge between / ebc  aliases for graph ebc\n");
+        super::print_str(sink, "  graph kappa  vertex connectivity k(G) (Even 1975; min vertex cut)\n");
+        super::print_str(sink, "  gkappa / vertex connectivity / gvconn  aliases for graph kappa\n");
+        super::print_str(sink, "  graph edge color  edge colouring chi'(G): min IPC slots (Vizing 1964)\n");
+        super::print_str(sink, "  gedgecolor / edge color / gec  aliases for graph edge color\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1198,6 +1202,8 @@ fn dispatch_text_command(
         super::dispatch_graph_betweenness_edge(sink);
     } else if cmd == "graph kappa" || cmd == "gkappa" || cmd == "vertex connectivity" || cmd == "vertex conn" || cmd == "gvertconn" || cmd == "graph vertex conn" || cmd == "graph vconn" {
         super::dispatch_graph_vertex_connectivity(sink);
+    } else if cmd == "graph edge color" || cmd == "gedgecolor" || cmd == "edge color" || cmd == "gec" || cmd == "graph ecolor" || cmd == "gecolor" {
+        super::dispatch_graph_edge_color(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

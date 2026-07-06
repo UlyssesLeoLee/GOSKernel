@@ -8522,6 +8522,65 @@ pub fn dispatch_graph_vertex_connectivity(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+// ── V3.08: Edge Colouring ─────────────────────────────────────────────────────
+pub fn dispatch_graph_edge_color(sink: &ConsoleSink) {
+    const MAX_N: usize = 512;
+    let (from_vecs, to_vecs, edge_colors, edge_count, chromatic_index) =
+        gos_runtime::graph_edge_color::<MAX_N>();
+
+    set_color(sink, 10, 0); // bright-green — coloring theme
+    print_str(sink, " graph edge color  (\u{03c7}'(G) chromatic index, Vizing 1964)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if edge_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no edges)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  slot  from              \u{2014}  to\n");
+        set_color(sink, 7, 0);
+
+        const SLOT_COLOURS: [u8; 6] = [10, 11, 13, 9, 14, 15];
+        for i in 0..edge_count.min(MAX_N) {
+            let col = SLOT_COLOURS[edge_colors[i] as usize % 6];
+            set_color(sink, col, 0);
+            let sc = edge_colors[i] as usize;
+            if sc < 10 { print_str(sink, "   "); } else { print_str(sink, "  "); }
+            print_num_inline(sink, sc);
+            print_str(sink, "  ");
+            let mut fl = LineBuf::<20>::new();
+            fl.push_vector(from_vecs[i]);
+            let fs = core::str::from_utf8(fl.as_slice()).unwrap_or("?");
+            print_str(sink, fs);
+            let flen = fs.len();
+            for _ in flen..18 { print_str(sink, " "); }
+            print_str(sink, "  \u{2014}  ");
+            let mut tl = LineBuf::<20>::new();
+            tl.push_vector(to_vecs[i]);
+            print_str(sink, core::str::from_utf8(tl.as_slice()).unwrap_or("?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, edge_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " undirected edge(s)  ");
+    set_color(sink, 10, 0);
+    print_str(sink, "\u{03c7}'(G)=");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, chromatic_index as usize);
+    set_color(sink, 8, 0);
+    print_str(sink, "  Vizing 1964");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

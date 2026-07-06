@@ -10989,6 +10989,113 @@ impl GraphRuntime {
 
         (out_vecs, copy_n, kappa, min_deg)
     }
+
+    // ── V3.08: Edge Colouring (Vizing 1964) ───────────────────────────────────
+    pub fn graph_edge_color_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, u8) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL: usize = usize::MAX;
+
+        // 1. Compact node index: ci → slot and slot → ci.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc         = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i]  = nc;
+                node_slots[nc] = i;
+                nc            += 1;
+            }
+        }
+        let _ = node_slots;
+
+        let mut out_from   = [ZERO_VEC; N];
+        let mut out_to     = [ZERO_VEC; N];
+        let mut out_colors = [0u8;      N];
+
+        if nc == 0 { return (out_from, out_to, out_colors, 0, 0); }
+
+        // 2. Build undirected edge list (self-loops excluded; A–B deduplicated
+        //    against B–A via seen_adj bitmask; canonical a < b by compact index).
+        let mut eu       = [0u8;      MAX_EDGES]; // compact-index a (a < b)
+        let mut ev       = [0u8;      MAX_EDGES]; // compact-index b
+        let mut ef       = [ZERO_VEC; MAX_EDGES]; // VectorAddress for a
+        let mut et       = [ZERO_VEC; MAX_EDGES]; // VectorAddress for b
+        let mut seen_adj = [0u128;    MAX_NODES]; // bit b set in seen_adj[a] ↔ {a,b} seen
+        let mut ec       = 0usize;
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == NIL || t_ci == NIL || f_ci == t_ci { continue; }
+            let (a, b)       = if f_ci < t_ci { (f_ci, t_ci) } else { (t_ci, f_ci) };
+            let (a_sl, b_sl) = if f_ci < t_ci { (f_sl,  t_sl) } else { (t_sl,  f_sl) };
+            if (seen_adj[a] >> b) & 1 != 0 { continue; }
+            seen_adj[a] |= 1u128 << b;
+            if ec >= MAX_EDGES { break; }
+            eu[ec] = a as u8;
+            ev[ec] = b as u8;
+            ef[ec] = self.nodes[a_sl].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            et[ec] = self.nodes[b_sl].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            ec    += 1;
+        }
+
+        if ec == 0 { return (out_from, out_to, out_colors, 0, 0); }
+
+        // 3. Greedy edge colouring.
+        //    node_colors[ci]: bit k set ⟹ colour k already on an incident edge.
+        //    trailing_ones(forbidden) = index of lowest 0 bit = lowest free colour.
+        let mut node_colors = [0u128; MAX_NODES];
+        let mut edge_color  = [0u8;   MAX_EDGES];
+        let mut max_color   = 0u8;
+
+        for i in 0..ec {
+            let a         = eu[i] as usize;
+            let b         = ev[i] as usize;
+            let forbidden = node_colors[a] | node_colors[b];
+            let color     = forbidden.trailing_ones() as u8;
+            edge_color[i]  = color;
+            node_colors[a] |= 1u128 << color;
+            node_colors[b] |= 1u128 << color;
+            if color > max_color { max_color = color; }
+        }
+
+        let chromatic_index = max_color + 1;
+
+        // 4. Sort by (colour ASC, from.as_u64() ASC, to.as_u64() ASC) and pack.
+        let mut order = [0usize; MAX_EDGES];
+        for i in 0..ec { order[i] = i; }
+        for i in 1..ec {
+            let key = order[i];
+            let mut j = i;
+            while j > 0 {
+                let p    = order[j - 1];
+                let swap = if edge_color[key] != edge_color[p] {
+                    edge_color[key] < edge_color[p]
+                } else if ef[key].as_u64() != ef[p].as_u64() {
+                    ef[key].as_u64() < ef[p].as_u64()
+                } else {
+                    et[key].as_u64() < et[p].as_u64()
+                };
+                if swap { order[j] = p; j -= 1; } else { break; }
+            }
+            order[j] = key;
+        }
+
+        let copy_len = ec.min(N);
+        for i in 0..copy_len {
+            let oi         = order[i];
+            out_from[i]   = ef[oi];
+            out_to[i]     = et[oi];
+            out_colors[i] = edge_color[oi];
+        }
+
+        (out_from, out_to, out_colors, ec, chromatic_index)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -13665,6 +13772,37 @@ pub fn graph_betweenness_edge<const N: usize>(
 /// which counts minimum edges).
 pub fn graph_vertex_connectivity<const N: usize>() -> ([VectorAddress; N], usize, u32, u32) {
     RUNTIME.lock().graph_vertex_connectivity_inner::<N>()
+}
+
+/// V3.08: Graph edge colouring — greedy χ'(G) (Vizing 1964).
+///
+/// Assigns a colour to every undirected edge so that no two edges sharing
+/// a common endpoint receive the same colour.  By Vizing's theorem (1964),
+/// the chromatic index χ'(G) is either Δ(G) or Δ(G)+1.  König (1916) shows
+/// that bipartite graphs always achieve χ'(G) = Δ(G) (class 1).
+///
+/// Returns `(from_vecs, to_vecs, edge_colors, edge_count, chromatic_index)`:
+/// - `from_vecs[0..edge_count]`   — canonical "from" vector for each edge.
+/// - `to_vecs[0..edge_count]`     — canonical "to" vector.
+/// - `edge_colors[0..edge_count]` — 0-indexed colour assigned to each edge.
+/// - `edge_count`                 — total undirected edges (self-loops excluded).
+/// - `chromatic_index`            — χ'(G) = max colour used + 1; 0 if no edges.
+///
+/// Sort: ascending (colour, from.as_u64(), to.as_u64()).
+///
+/// Algorithm: greedy — for each edge (a,b) assign the lowest colour not
+/// already used by any edge incident to a or b.  Uses a u128 bitmask per
+/// node; `trailing_ones(node_colors[a] | node_colors[b])` gives the lowest
+/// free colour in O(1).  O(E) time, O(V+E) space.
+///
+/// OS analogy: minimum number of non-conflicting time-slots to schedule all
+/// IPC channels so no two channels sharing a kernel-subsystem endpoint are
+/// active in the same slot — the epoch width for contention-free round-robin
+/// syscall dispatch (analogous to O_DIRECT I/O slot multiplexing or NIC
+/// transmit-queue striping without head-of-line blocking).
+pub fn graph_edge_color<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], [u8; N], usize, u8) {
+    RUNTIME.lock().graph_edge_color_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
