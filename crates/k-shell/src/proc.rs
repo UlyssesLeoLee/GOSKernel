@@ -1162,6 +1162,8 @@ fn dispatch_text_command(
         super::dispatch_graph_2ecc(sink);
     } else if cmd == "graph truss" || cmd == "gtruss" || cmd == "truss" || cmd == "k-truss" || cmd == "ktruss" {
         super::dispatch_graph_truss(sink);
+    } else if cmd == "graph clique" || cmd == "gclique" || cmd == "clique" || cmd == "max clique" || cmd == "maxclique" {
+        super::dispatch_graph_clique(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))

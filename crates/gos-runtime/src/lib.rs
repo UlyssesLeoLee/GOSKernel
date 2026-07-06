@@ -8629,6 +8629,203 @@ impl GraphRuntime {
         let max_truss = if copy_len > 0 { out_truss[0] } else { 0 };
         (out_vecs, out_truss, nc, max_truss)
     }
+
+    /// V2.95: Maximum clique — iterative Bron-Kerbosch with Tomita pivot.
+    ///
+    /// Returns `(clique_vecs, clique_size, clique_count, node_count)`:
+    ///   - `clique_vecs[0..clique_size]` — a representative maximum clique,
+    ///     sorted ascending by VectorAddress.
+    ///   - `clique_size`  — ω(G), the clique number (0 if no nodes).
+    ///   - `clique_count` — number of distinct maximum-size cliques found.
+    ///   - `node_count`   — total live nodes.
+    ///
+    /// Undirected projection: both A→B and B→A are treated as edge A–B.
+    /// Self-loops are excluded.  Invariant: clique_size ≥ max_kcore (every
+    /// k-clique is a (k-1)-core) and clique_size ≥ max_truss − 1.
+    pub fn graph_clique_inner<const N: usize>(&self) -> ([VectorAddress; N], usize, usize, usize) {
+        const ZERO: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        // Practical BK depth bound: ω(G) ≤ 128; in practice ≤ 30 for most graphs.
+        const BK_MAX: usize = 128;
+
+        // ── 1. Collect live node slots ───────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        if nc == 0 {
+            return ([ZERO; N], 0, 0, 0);
+        }
+
+        // ── 2. Build index→slot mapping and undirected adjacency bitsets ─────
+        let mut slot_to_idx = [u8::MAX; MAX_NODES];
+        for (idx, &s) in node_slots[..nc].iter().enumerate() {
+            slot_to_idx[s] = idx as u8;
+        }
+        // adj[i] = bitmask of undirected neighbours of node-index i
+        let mut adj = [0u128; MAX_NODES];
+        for i in 0..MAX_EDGES {
+            let edge = match self.edges[i] {
+                Some(e) => e,
+                None    => continue,
+            };
+            let us = match self.node_slot_by_id(edge.spec.from_node) {
+                Some(s) => s,
+                None    => continue,
+            };
+            let vs = match self.node_slot_by_id(edge.spec.to_node) {
+                Some(s) => s,
+                None    => continue,
+            };
+            if us == vs { continue; } // self-loop
+            let ui = slot_to_idx[us];
+            let vi = slot_to_idx[vs];
+            if ui == u8::MAX || vi == u8::MAX { continue; }
+            let ui = ui as usize;
+            let vi = vi as usize;
+            adj[ui] |= 1u128 << vi;
+            adj[vi] |= 1u128 << ui;
+        }
+
+        // ── 3. Iterative Bron-Kerbosch with Tomita pivot ─────────────────────
+        // Frame stores state for one recursive BK call level.
+        #[derive(Copy, Clone)]
+        struct BkFrame {
+            r:           u128, // current partial clique (bitmask of node indices)
+            p:           u128, // remaining candidates
+            x:           u128, // excluded (already processed at this level or above)
+            to_try:      u128, // P \ N(pivot) — subset of P still to branch on
+            came_from_v: u8,   // node index that created this frame; 0xFF = root
+        }
+
+        // Tomita pivot: u from P∪X maximising |P ∩ N(u)|.
+        fn choose_pivot(p_x: u128, p: u128, adj: &[u128; MAX_NODES]) -> usize {
+            let mut best     = p_x.trailing_zeros() as usize;
+            let mut best_cnt = 0u32;
+            let mut mask = p_x;
+            while mask != 0 {
+                let u   = mask.trailing_zeros() as usize;
+                mask   &= mask.wrapping_sub(1);
+                let cnt = (p & adj[u]).count_ones();
+                if cnt > best_cnt {
+                    best_cnt = cnt;
+                    best     = u;
+                }
+            }
+            best
+        }
+
+        let all_p: u128 = if nc >= 128 { u128::MAX } else { (1u128 << nc) - 1 };
+        let pivot0   = choose_pivot(all_p, all_p, &adj);
+        let to_try0  = all_p & !adj[pivot0];
+
+        let zero_frame = BkFrame { r: 0, p: 0, x: 0, to_try: 0, came_from_v: 0xFF };
+        let mut stk    = [zero_frame; BK_MAX];
+        stk[0] = BkFrame { r: 0, p: all_p, x: 0, to_try: to_try0, came_from_v: 0xFF };
+        let mut depth  = 1usize;
+
+        let mut best_r       = 0u128;
+        let mut best_size    = 0usize;
+        let mut clique_count = 0usize;
+
+        while depth > 0 {
+            let fi = depth - 1;
+
+            // P empty → maximal clique iff X empty; always pop.
+            if stk[fi].p == 0 {
+                if stk[fi].x == 0 {
+                    let size = stk[fi].r.count_ones() as usize;
+                    if size > best_size {
+                        best_size    = size;
+                        best_r       = stk[fi].r;
+                        clique_count = 1;
+                    } else if size == best_size && size > 0 {
+                        clique_count = clique_count.saturating_add(1);
+                    }
+                }
+                depth -= 1;
+                if depth > 0 && stk[fi].came_from_v != 0xFF {
+                    let v   = stk[fi].came_from_v as usize;
+                    let pfi = depth - 1;
+                    stk[pfi].p &= !(1u128 << v);
+                    stk[pfi].x |=   1u128 << v;
+                }
+                continue;
+            }
+
+            // to_try empty → all necessary branches at this level exhausted; pop.
+            if stk[fi].to_try == 0 {
+                depth -= 1;
+                if depth > 0 && stk[fi].came_from_v != 0xFF {
+                    let v   = stk[fi].came_from_v as usize;
+                    let pfi = depth - 1;
+                    stk[pfi].p &= !(1u128 << v);
+                    stk[pfi].x |=   1u128 << v;
+                }
+                continue;
+            }
+
+            // Pick the lowest-index vertex from to_try and branch on it.
+            let v = stk[fi].to_try.trailing_zeros() as usize;
+            stk[fi].to_try &= !(1u128 << v);
+
+            let new_r  = stk[fi].r | (1u128 << v);
+            let new_p  = stk[fi].p & adj[v];
+            let new_x  = stk[fi].x & adj[v];
+            let new_to_try = if new_p == 0 {
+                0
+            } else {
+                let new_px     = new_p | new_x;
+                let cpivot     = choose_pivot(new_px, new_p, &adj);
+                new_p & !adj[cpivot]
+            };
+
+            if depth < BK_MAX {
+                stk[depth] = BkFrame {
+                    r:           new_r,
+                    p:           new_p,
+                    x:           new_x,
+                    to_try:      new_to_try,
+                    came_from_v: v as u8,
+                };
+                depth += 1;
+            }
+            // depth overflow: skip this branch (safety cap; ω ≤ 128 always)
+        }
+
+        // ── 4. Reconstruct and sort clique VectorAddresses ───────────────────
+        let mut clique_raw = [ZERO; MAX_NODES];
+        let mut raw_n      = 0usize;
+        let mut mask       = best_r;
+        while mask != 0 && raw_n < MAX_NODES {
+            let idx    = mask.trailing_zeros() as usize;
+            mask      &= mask.wrapping_sub(1);
+            let slot   = node_slots[idx];
+            clique_raw[raw_n] = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO);
+            raw_n += 1;
+        }
+        // Insertion sort ascending by VectorAddress.as_u64()
+        for i in 1..raw_n {
+            let key   = clique_raw[i];
+            let key_u = key.as_u64();
+            let mut j = i;
+            while j > 0 && clique_raw[j - 1].as_u64() > key_u {
+                clique_raw[j] = clique_raw[j - 1];
+                j -= 1;
+            }
+            clique_raw[j] = key;
+        }
+        let mut out_vecs = [ZERO; N];
+        let copy_len     = raw_n.min(N);
+        for i in 0..copy_len {
+            out_vecs[i] = clique_raw[i];
+        }
+
+        (out_vecs, best_size, clique_count, nc)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -10973,6 +11170,29 @@ pub fn graph_2ecc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usiz
 /// Strictly finer than k-core: a k-truss ⊆ (k−1)-core.
 pub fn graph_truss<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u8) {
     RUNTIME.lock().graph_truss_inner()
+}
+
+/// V2.95: Maximum clique — Bron-Kerbosch with Tomita pivot, O(3^{n/3}).
+///
+/// Returns `(clique_vecs, clique_size, clique_count, node_count)`:
+///   - `clique_vecs[0..clique_size]` — a representative maximum clique,
+///     sorted ascending by VectorAddress.
+///   - `clique_size`  — ω(G), the clique number (0 if graph is empty).
+///   - `clique_count` — number of distinct maximum-size cliques found.
+///   - `node_count`   — total live nodes.
+///
+/// Works on the undirected projection (both A→B and B→A → edge A–B).
+/// Self-loops excluded.
+///
+/// Density hierarchy: clique ⊇ truss ⊇ core:
+///   ω(G) ≥ max_truss − 1  and  ω(G) ≥ max_kcore (not always tight).
+///
+/// OS analogy: the tightest cluster of kernel subsystems where every module
+/// directly depends on every other — the hardest coupling to decouple for
+/// hot-patching or fault isolation.
+/// N controls the output buffer depth (cap at MAX_NODES = 128).
+pub fn graph_clique<const N: usize>() -> ([VectorAddress; N], usize, usize, usize) {
+    RUNTIME.lock().graph_clique_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
