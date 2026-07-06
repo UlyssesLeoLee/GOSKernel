@@ -8650,6 +8650,87 @@ pub fn dispatch_graph_spectral(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.10: `graph entropy` — Shannon entropy H of the undirected degree distribution.
+/// Shannon 1948 / Dehmer & Mowshowitz 2011.
+pub fn dispatch_graph_entropy(sink: &ConsoleSink) {
+    let (entropy_ppm, normalized_ppm, node_count) = gos_runtime::graph_entropy();
+
+    set_color(sink, 13, 0); // bright-magenta — information-theoretic theme
+    print_str(sink, " graph entropy  (H = \u{2212}\u{03a3} p(d) ln p(d)  degree distribution)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_ent(sink: &ConsoleSink, ppm: u32) {
+        let whole = ppm / 1_000_000;
+        let frac  = (ppm % 1_000_000) / 1_000;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac as usize);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // Row 1: H (entropy in nats)
+        set_color(sink, 8, 0);
+        print_str(sink, "  entropy      H   =  ");
+        set_color(sink, 14, 0); // bright-yellow
+        print_ppm3_ent(sink, entropy_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   nat");
+        if entropy_ppm == 0 {
+            print_str(sink, "   (regular: all nodes share one degree)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Row 2: H' = H / ln(n) normalised
+        set_color(sink, 8, 0);
+        print_str(sink, "  normalised  H\u{2019}  =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_ent(sink, normalized_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [H / ln(n)]   ");
+        if normalized_ppm >= 900_000 {
+            print_str(sink, "high diversity");
+        } else if normalized_ppm >= 500_000 {
+            print_str(sink, "moderate diversity");
+        } else if normalized_ppm > 0 {
+            print_str(sink, "low diversity");
+        } else {
+            print_str(sink, "uniform (one degree class)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Row 3: max entropy ln(n) — recover from entropy_ppm / normalized_ppm when both > 0
+        if entropy_ppm > 0 && normalized_ppm > 0 {
+            let max_ppm = (entropy_ppm as u64 * 1_000_000 / normalized_ppm as u64) as u32;
+            set_color(sink, 8, 0);
+            print_str(sink, "  max entropy     =  ");
+            set_color(sink, 11, 0); // bright-cyan
+            print_ppm3_ent(sink, max_ppm);
+            set_color(sink, 8, 0);
+            print_str(sink, "   [ln(n)]");
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  Shannon 1948  Dehmer & Mowshowitz 2011");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

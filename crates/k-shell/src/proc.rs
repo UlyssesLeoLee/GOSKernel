@@ -668,6 +668,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gedgecolor / edge color / gec  aliases for graph edge color\n");
         super::print_str(sink, "  graph spectral  rho(A) spectral radius + lambda2(L) algebraic connectivity\n");
         super::print_str(sink, "  gspectral / spectral radius / spectral / gspectrum  aliases for graph spectral\n");
+        super::print_str(sink, "  graph entropy  H=\u{2212}\u{03a3}p(d)ln(p(d)) Shannon entropy of degree distribution\n");
+        super::print_str(sink, "  gentropy / degree entropy  aliases for graph entropy\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1208,6 +1210,8 @@ fn dispatch_text_command(
         super::dispatch_graph_edge_color(sink);
     } else if cmd == "graph spectral" || cmd == "gspectral" || cmd == "spectral radius" || cmd == "spectral" || cmd == "gspectrum" || cmd == "graph spectrum" {
         super::dispatch_graph_spectral(sink);
+    } else if cmd == "graph entropy" || cmd == "gentropy" || cmd == "degree entropy" || cmd == "graph deg entropy" {
+        super::dispatch_graph_entropy(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

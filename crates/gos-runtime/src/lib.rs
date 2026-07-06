@@ -11296,6 +11296,94 @@ impl GraphRuntime {
 
         (rho_ppm, lambda2_ppm, nc)
     }
+
+    pub fn graph_entropy_inner(&self) -> (u32, u32, usize) {
+        const LN_TABLE: [u32; 129] = [
+            0,
+            0,         693_147, 1_098_612, 1_386_294, 1_609_437,
+            1_791_759, 1_945_910, 2_079_441, 2_197_224, 2_302_585,
+            2_397_895, 2_484_906, 2_564_949, 2_639_057, 2_708_050,
+            2_772_588, 2_833_213, 2_890_371, 2_944_438, 2_995_732,
+            3_044_522, 3_091_042, 3_135_494, 3_178_053, 3_218_875,
+            3_258_096, 3_295_836, 3_332_204, 3_367_295, 3_401_197,
+            3_433_987, 3_465_735, 3_496_508, 3_526_360, 3_555_348,
+            3_583_518, 3_610_917, 3_637_586, 3_663_562, 3_688_879,
+            3_713_572, 3_737_669, 3_761_200, 3_784_189, 3_806_662,
+            3_828_641, 3_850_147, 3_871_201, 3_891_820, 3_912_023,
+            3_931_826, 3_951_244, 3_970_292, 3_988_984, 4_007_333,
+            4_025_351, 4_043_051, 4_060_443, 4_077_537, 4_094_344,
+            4_110_874, 4_127_134, 4_143_134, 4_158_883, 4_174_387,
+            4_189_654, 4_204_692, 4_219_507, 4_234_107, 4_248_494,
+            4_262_679, 4_276_666, 4_290_459, 4_304_064, 4_317_488,
+            4_330_733, 4_343_805, 4_356_708, 4_369_447, 4_382_026,
+            4_394_449, 4_406_719, 4_418_841, 4_430_817, 4_442_651,
+            4_454_347, 4_465_908, 4_477_337, 4_488_636, 4_499_810,
+            4_510_860, 4_521_789, 4_532_599, 4_543_294, 4_553_877,
+            4_564_348, 4_574_711, 4_584_967, 4_595_119, 4_605_170,
+            4_615_121, 4_624_972, 4_634_728, 4_644_391, 4_653_960,
+            4_663_439, 4_672_829, 4_682_131, 4_691_348, 4_700_480,
+            4_709_530, 4_718_498, 4_727_388, 4_736_198, 4_744_932,
+            4_753_590, 4_762_174, 4_770_685, 4_779_123, 4_787_491,
+            4_795_791, 4_804_021, 4_812_184, 4_820_281, 4_828_313,
+            4_836_281, 4_844_187, 4_852_030,
+        ];
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (self-loops excluded, deduped).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Degree histogram: deg_count[d] = # nodes with undirected degree d.
+        let mut deg_count = [0u32; MAX_NODES];
+        for ci in 0..nc {
+            let d = adj[ci].count_ones() as usize;
+            deg_count[d] += 1;
+        }
+
+        // 4. Shannon entropy H = -Σ p(d) ln p(d) = (1/n) Σ count[d] (ln n - ln count[d])
+        //    entropy_scaled = Σ_{d:count>0} count[d] × (LN_TABLE[nc] - LN_TABLE[count[d]])
+        //    entropy_ppm    = entropy_scaled / nc  ≈ H × 10^6  (nats × 10^6)
+        let nc_ln = LN_TABLE[nc.min(128)];
+        let mut entropy_scaled: u64 = 0;
+        for d in 0..nc {
+            let cnt = deg_count[d];
+            if cnt == 0 { continue; }
+            let cnt_u = (cnt as usize).min(128);
+            entropy_scaled += cnt as u64 * (nc_ln - LN_TABLE[cnt_u]) as u64;
+        }
+        let entropy_ppm = (entropy_scaled / nc as u64) as u32;
+
+        // 5. Normalized entropy H' = H / ln(n) ∈ [0, 1]; 1_000_000 = maximum diversity.
+        //    H = 0 for regular graphs; H = ln(n) when all degrees distinct.
+        let normalized_ppm = if nc > 1 && nc_ln > 0 {
+            (entropy_ppm as u64 * 1_000_000 / nc_ln as u64) as u32
+        } else {
+            0
+        };
+
+        (entropy_ppm, normalized_ppm, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14024,6 +14112,19 @@ pub fn graph_edge_color<const N: usize>(
 /// Wang et al. 2003 (epidemic threshold), Mohar 1991 (Cheeger: h ≥ λ₂/2).
 pub fn graph_spectral() -> (u32, u32, usize) {
     RUNTIME.lock().graph_spectral_inner()
+}
+
+/// V3.10: Shannon entropy of the undirected degree distribution.
+///
+/// Returns `(entropy_ppm, normalized_ppm, node_count)`:
+/// - `entropy_ppm`    = H × 10^6  where H = −Σ p(d) ln p(d)  (nats)
+/// - `normalized_ppm` = H/ln(n) × 10^6  ∈ [0, 1_000_000]  (1_000_000 = max diversity)
+/// - `node_count`     = number of alive nodes
+///
+/// H = 0 for regular graphs (all same degree); H = ln(n) when all degrees distinct.
+/// Algorithm: undirected degree histogram → integer LN_TABLE accumulation, O(V+E).
+pub fn graph_entropy() -> (u32, u32, usize) {
+    RUNTIME.lock().graph_entropy_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
