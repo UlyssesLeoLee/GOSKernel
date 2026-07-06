@@ -8903,6 +8903,78 @@ pub fn dispatch_graph_topo_indices(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.13: `graph topo2` — H + ABC + F degree-based topological indices.
+/// Analogous to `ethtool -S` showing per-interface chemical bond metrics.
+///   H   = Zhong 2012 (harmonic index)
+///   ABC = Estrada et al. 2008 (atom-bond connectivity)
+///   F   = Furtula & Gutman 2015 (forgotten topological index)
+pub fn dispatch_graph_topo_indices2(sink: &ConsoleSink) {
+    let (h_ppm, abc_ppm, f_index, edge_count, node_count) =
+        gos_runtime::graph_topo_indices2();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo2  (H + ABC + F degree-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // H index
+        set_color(sink, 8, 0);
+        print_str(sink, "  harmonic index     H   =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, h_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 2/(deg(u)+deg(v))]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // ABC index
+        set_color(sink, 8, 0);
+        print_str(sink, "  atom-bond conn     ABC =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, abc_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} \u{221a}((d+d\u{2212}2)/(d\u{22c5}d))]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // F index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  forgotten index    F   =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, f_index as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v deg(v)\u{00b3}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Zhong 2012  Estrada et al. 2008  Furtula & Gutman 2015");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

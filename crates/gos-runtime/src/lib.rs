@@ -11560,6 +11560,100 @@ impl GraphRuntime {
 
         (sc_acc, ga_acc, azi_acc, edge_count, nc)
     }
+
+    /// V3.13: H + ABC + F degree-based topological indices.
+    ///
+    /// Returns (h_ppm, abc_ppm, f_index, edge_count, node_count).
+    ///   h_ppm   = H × 10^6 where H   = Σ_{uv∈E} 2/(deg(u)+deg(v))          (Zhong 2012)
+    ///   abc_ppm = ABC × 10^6 where ABC= Σ_{uv∈E} √((deg(u)+deg(v)−2)/(deg(u)·deg(v)))
+    ///                                                                         (Estrada et al. 2008)
+    ///   f_index = F(G) = Σ_v deg(v)³  (exact integer)                        (Furtula & Gutman 2015)
+    ///
+    /// H:   contribution = floor(2_000_000 / s)  where s = da+db  (error ≤ 1 ppm per edge)
+    /// ABC: contribution = floor(√((s−2)×10^12 / p))  where p = da·db; 0 when s=2 (pendant-pendant)
+    /// F:   exact; node scan of deg³.  Isolated nodes contribute 0.
+    pub fn graph_topo_indices2_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Undirected degree per compact-index node.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones() as u64;
+        }
+
+        // Integer floor-sqrt via Newton-Raphson.
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        // 4. Scan undirected edges (a < b canonical): accumulate H and ABC.
+        let mut h_acc:      u64 = 0;
+        let mut abc_acc:    u64 = 0;
+        let mut edge_count: usize = 0;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b <= a { continue; } // each undirected edge once (a < b)
+
+                let da = deg[a];
+                let db = deg[b];
+                let p  = da * db; // product
+                let s  = da + db; // sum
+
+                // H: floor(2_000_000 / s)
+                h_acc += 2_000_000 / s;
+
+                // ABC: floor(√((s-2) × 10^12 / p)); 0 when s=2 (pendant-pendant)
+                if s > 2 && p > 0 {
+                    let numer = (s - 2).saturating_mul(1_000_000_000_000u64);
+                    abc_acc += isqrt64(numer / p);
+                }
+                // s == 2 means da=db=1; (s-2)=0; ABC contribution = 0.
+
+                edge_count += 1;
+            }
+        }
+
+        // 5. F-index: node scan — Σ_v deg(v)³.
+        let mut f_index: u64 = 0;
+        for ci in 0..nc {
+            let d = deg[ci];
+            f_index += d * d * d;
+        }
+
+        (h_acc, abc_acc, f_index, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14330,6 +14424,19 @@ pub fn graph_zagreb() -> (u64, u64, u32, u32, usize, usize) {
 /// All indices use integer Newton-Raphson isqrt for ppm/milli precision, O(V+E).
 pub fn graph_topo_indices() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices_inner()
+}
+
+/// V3.13: H + ABC + F degree-based topological indices.
+///
+/// Returns (h_ppm, abc_ppm, f_index, edge_count, node_count).
+///   h_ppm   = H(G) × 10^6   where H   = Σ_{uv∈E} 2/(deg(u)+deg(v))         (Zhong 2012)
+///   abc_ppm = ABC(G) × 10^6 where ABC = Σ_{uv∈E} √((s−2)/p), s=deg-sum, p=deg-product
+///                                                                              (Estrada et al. 2008)
+///   f_index = F(G) = Σ_v deg(v)³  (exact integer)                            (Furtula & Gutman 2015)
+///   edge_count = undirected non-self-loop edges
+///   node_count = alive nodes
+pub fn graph_topo_indices2() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices2_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
