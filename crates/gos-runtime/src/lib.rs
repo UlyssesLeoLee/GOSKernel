@@ -10694,6 +10694,202 @@ impl GraphRuntime {
 
         (out_vecs, out_ids, out_n, bcc_count)
     }
+
+    // V3.06: Edge Betweenness Centrality — Brandes (2001).
+    // For each directed non-self-loop edge, computes the number of shortest
+    // paths (over all ordered source-target pairs) that traverse that edge.
+    // Uses the same Dijkstra + back-propagation pass as graph_between_inner
+    // but accumulates contribution on edges rather than nodes.
+    //
+    // Returns (from_vecs, to_vecs, scores, edge_count) sorted descending by
+    // score.  Score = raw betweenness (unit: 1 path-pair count).  Edges with
+    // equal score are further sorted by (from.as_u64(), to.as_u64()) ascending
+    // for deterministic output.
+    pub fn graph_betweenness_edge_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
+        const SCALE: u64 = 1_000_000;
+        const EPS:   f32 = 1e-6;
+
+        // Compact list of live node slots.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+
+        // Live non-self-loop edge slots.
+        let mut edge_slots = [0usize; MAX_EDGES];
+        let mut edge_count = 0usize;
+        for i in 0..MAX_EDGES {
+            if let Some(e) = self.edges[i] {
+                if e.spec.from_node != e.spec.to_node {
+                    edge_slots[edge_count] = i;
+                    edge_count += 1;
+                }
+            }
+        }
+
+        // Per-edge betweenness accumulator (indexed by edge slot).
+        let mut edge_bet = [0u64; MAX_EDGES];
+
+        // Brandes + Dijkstra — one pass per source.
+        for si in 0..node_count {
+            let s = node_slots[si];
+
+            let mut dist    = [f32::MAX; MAX_NODES];
+            let mut sigma   = [0u64;     MAX_NODES];
+            let mut visited = [false;    MAX_NODES];
+            let mut stk     = [0usize;   MAX_NODES];
+            let mut stk_len = 0usize;
+
+            dist[s]  = 0.0;
+            sigma[s] = 1;
+
+            for _ in 0..node_count {
+                let mut u     = usize::MAX;
+                let mut u_dst = f32::MAX;
+                for ni in 0..node_count {
+                    let sl = node_slots[ni];
+                    if !visited[sl] && dist[sl] < u_dst {
+                        u     = sl;
+                        u_dst = dist[sl];
+                    }
+                }
+                if u == usize::MAX || u_dst >= f32::MAX { break; }
+                visited[u] = true;
+
+                if stk_len < MAX_NODES {
+                    stk[stk_len] = u;
+                    stk_len += 1;
+                }
+
+                let u_id = match self.nodes[u] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.from_node != u_id { continue; }
+                    let v = match self.node_slot_by_id(edge.spec.to_node) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+                    if v == u { continue; }
+                    let w  = edge.spec.weight.max(0.0);
+                    let nd = u_dst + w;
+                    if nd < dist[v] - EPS {
+                        dist[v]  = nd;
+                        sigma[v] = sigma[u];
+                    } else if (nd - dist[v]).abs() <= EPS && dist[v] < f32::MAX {
+                        sigma[v] = sigma[v].saturating_add(sigma[u]);
+                    }
+                }
+            }
+
+            // Back-propagation: accumulate delta and edge betweenness.
+            let mut delta = [0u64; MAX_NODES];
+            for bi in (0..stk_len).rev() {
+                let w = stk[bi];
+                if w == s || sigma[w] == 0 { continue; }
+
+                let w_id = match self.nodes[w] {
+                    Some(r) => r.spec.node_id,
+                    None    => continue,
+                };
+
+                for ei in 0..MAX_EDGES {
+                    let edge = match self.edges[ei] {
+                        Some(e) => e,
+                        None    => continue,
+                    };
+                    if edge.spec.to_node != w_id { continue; }
+                    let v = match self.node_slot_by_id(edge.spec.from_node) {
+                        Some(sl) => sl,
+                        None     => continue,
+                    };
+                    if sigma[v] == 0 { continue; }
+                    if dist[v] >= f32::MAX { continue; }
+                    let ew = edge.spec.weight.max(0.0);
+                    if (dist[v] + ew - dist[w]).abs() > EPS { continue; }
+
+                    // Contribution to v's delta AND to edge (v→w) betweenness.
+                    let contribution = sigma[v]
+                        .saturating_mul(SCALE.saturating_add(delta[w]))
+                        / sigma[w];
+                    delta[v]      = delta[v].saturating_add(contribution);
+                    edge_bet[ei]  = edge_bet[ei].saturating_add(contribution);
+                }
+            }
+        }
+
+        // Sort edge_slots by descending edge_bet, then (from_u64, to_u64) asc.
+        let mut sorted_e = edge_slots;
+        for i in 1..edge_count {
+            let key_ei  = sorted_e[i];
+            let key_bet = edge_bet[key_ei];
+            let key_from = self.edges[key_ei]
+                .and_then(|e| self.node_slot_by_id(e.spec.from_node))
+                .and_then(|sl| self.nodes[sl])
+                .map(|r| r.vector.as_u64())
+                .unwrap_or(u64::MAX);
+            let key_to = self.edges[key_ei]
+                .and_then(|e| self.node_slot_by_id(e.spec.to_node))
+                .and_then(|sl| self.nodes[sl])
+                .map(|r| r.vector.as_u64())
+                .unwrap_or(u64::MAX);
+            let mut j = i;
+            loop {
+                if j == 0 { break; }
+                let cmp_ei  = sorted_e[j - 1];
+                let cmp_bet = edge_bet[cmp_ei];
+                let cmp_from = self.edges[cmp_ei]
+                    .and_then(|e| self.node_slot_by_id(e.spec.from_node))
+                    .and_then(|sl| self.nodes[sl])
+                    .map(|r| r.vector.as_u64())
+                    .unwrap_or(u64::MAX);
+                let cmp_to = self.edges[cmp_ei]
+                    .and_then(|e| self.node_slot_by_id(e.spec.to_node))
+                    .and_then(|sl| self.nodes[sl])
+                    .map(|r| r.vector.as_u64())
+                    .unwrap_or(u64::MAX);
+                // Descending bet, then ascending (from, to).
+                let should_swap = cmp_bet < key_bet
+                    || (cmp_bet == key_bet && (cmp_from, cmp_to) > (key_from, key_to));
+                if !should_swap { break; }
+                sorted_e[j] = sorted_e[j - 1];
+                j -= 1;
+            }
+            sorted_e[j] = key_ei;
+        }
+
+        // Pack output arrays.
+        let copy_len = edge_count.min(N);
+        let mut out_from  = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_to    = [VectorAddress::new(0, 0, 0, 0); N];
+        let mut out_score = [0u32; N];
+        for i in 0..copy_len {
+            let ei = sorted_e[i];
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            out_from[i] = self.node_slot_by_id(edge.spec.from_node)
+                .and_then(|sl| self.nodes[sl])
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_to[i] = self.node_slot_by_id(edge.spec.to_node)
+                .and_then(|sl| self.nodes[sl])
+                .map(|r| r.vector)
+                .unwrap_or(VectorAddress::new(0, 0, 0, 0));
+            out_score[i] = (edge_bet[ei] / SCALE) as u32;
+        }
+        (out_from, out_to, out_score, copy_len)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -13234,6 +13430,20 @@ pub fn graph_chordal<const N: usize>() -> ([VectorAddress; N], bool, usize) {
 /// Literature: Tarjan 1972 (low-link DFS), Hopcroft & Tarjan 1973.
 pub fn graph_bcc<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize) {
     RUNTIME.lock().graph_bcc_inner()
+}
+
+/// V3.06: Edge Betweenness Centrality — Brandes (2001).
+///
+/// Returns `(from_vecs, to_vecs, scores, edge_count)`:
+/// - `from_vecs[0..edge_count]` / `to_vecs[0..edge_count]` — directed edge endpoints.
+/// - `scores[0..edge_count]` — betweenness count for each edge (# ordered source-target
+///   pairs whose unique shortest path traverses this edge).
+/// - `edge_count` — number of live non-self-loop directed edges.
+///
+/// Output is sorted descending by score; ties broken by (from.as_u64(), to.as_u64()) asc.
+pub fn graph_betweenness_edge<const N: usize>(
+) -> ([VectorAddress; N], [VectorAddress; N], [u32; N], usize) {
+    RUNTIME.lock().graph_betweenness_edge_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

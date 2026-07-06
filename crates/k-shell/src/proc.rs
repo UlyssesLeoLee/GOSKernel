@@ -660,6 +660,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  gchordal / chordal  aliases for graph chordal\n");
         super::print_str(sink, "  graph bcc  biconnected components (Tarjan; APs marked 255)\n");
         super::print_str(sink, "  gbcc / biconnected / bcc  aliases for graph bcc\n");
+        super::print_str(sink, "  graph ebc  edge betweenness centrality (Brandes; link criticality)\n");
+        super::print_str(sink, "  gebc / edge between / ebc  aliases for graph ebc\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1192,6 +1194,8 @@ fn dispatch_text_command(
         super::dispatch_graph_chordal(sink);
     } else if cmd == "graph bcc" || cmd == "gbcc" || cmd == "biconnected" || cmd == "gbiconn" || cmd == "graph biconnected" || cmd == "bcc" {
         super::dispatch_graph_bcc(sink);
+    } else if cmd == "graph ebc" || cmd == "gebc" || cmd == "edge between" || cmd == "edge betweenness" || cmd == "ebc" {
+        super::dispatch_graph_betweenness_edge(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

@@ -8406,6 +8406,62 @@ pub fn dispatch_graph_bcc(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.06: Edge Betweenness Centrality — directed graph link criticality.
+/// Each edge's score = number of ordered source-target pairs whose unique
+/// shortest path traverses that edge.  High-score edges are critical links.
+pub fn dispatch_graph_betweenness_edge(sink: &ConsoleSink) {
+    const MAX_N: usize = 512;
+    let (from_vecs, to_vecs, scores, edge_count) =
+        gos_runtime::graph_betweenness_edge::<MAX_N>();
+
+    set_color(sink, 14, 0);
+    print_str(sink, " graph ebc  (edge betweenness centrality)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if edge_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no directed edges)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  score     from              to\n");
+
+        const COLOURS: [u8; 6] = [10, 11, 13, 9, 14, 15];
+        for i in 0..edge_count.min(MAX_N) {
+            let col = COLOURS[i % 6];
+            set_color(sink, col, 0);
+            // Right-align score in 6 chars.
+            let sc = scores[i] as usize;
+            if sc < 10      { print_str(sink, "       "); }
+            else if sc < 100  { print_str(sink, "      "); }
+            else if sc < 1000 { print_str(sink, "     "); }
+            else if sc < 10000 { print_str(sink, "    "); }
+            else              { print_str(sink, "   "); }
+            print_num_inline(sink, sc);
+            print_str(sink, "  ");
+            let mut fl = LineBuf::<20>::new();
+            fl.push_vector(from_vecs[i]);
+            print_str(sink, core::str::from_utf8(fl.as_slice()).unwrap_or("?"));
+            print_str(sink, "  \u{2192}  ");
+            let mut tl = LineBuf::<20>::new();
+            tl.push_vector(to_vecs[i]);
+            print_str(sink, core::str::from_utf8(tl.as_slice()).unwrap_or("?"));
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, edge_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " directed edge(s)  Brandes 2001");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
