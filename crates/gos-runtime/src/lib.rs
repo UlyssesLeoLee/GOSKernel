@@ -9950,6 +9950,219 @@ impl GraphRuntime {
 
         (out_vecs, fvs_size, node_count)
     }
+
+    /// V3.02: Global minimum cut — Stoer-Wagner 1997.
+    ///
+    /// Returns `(vecs, sides, node_count, min_cut, side_b_size)`:
+    /// - `vecs[0..node_count]` — all live nodes; side-A (sides==0) first, side-B (sides==1) after.
+    /// - `sides[0..node_count]` — partition assignment: 0=side A, 1=side B.
+    /// - `node_count` — total live nodes.
+    /// - `min_cut` — minimum undirected edge cut (= edge connectivity κ'(G)).
+    /// - `side_b_size` — count of nodes on side B.
+    ///
+    /// Uses the undirected projection: A→B and B→A count as one edge.
+    /// Disconnected graphs return `min_cut = 0`.
+    pub fn graph_min_cut_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u8; N], usize, u32, usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL: usize = usize::MAX;
+        let mut out_vecs  = [ZERO_VEC; N];
+        let mut out_sides = [0u8; N];
+
+        // ── 1. Compact live nodes ──────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        let node_count = nc;
+        if nc == 0 { return (out_vecs, out_sides, 0, 0, 0); }
+        if nc == 1 {
+            out_vecs[0]  = self.nodes[node_slots[0]].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            out_sides[0] = 0;
+            return (out_vecs, out_sides, 1, 0, 0);
+        }
+
+        // ── 2. Build undirected edge list (each unordered pair once) ───────
+        // Normalise: uf[i] < ut[i]; use seen_adj bitmask to dedup A↔B pairs.
+        let mut uf       = [0u8;   MAX_EDGES];
+        let mut ut       = [0u8;   MAX_EDGES];
+        let mut uw       = [0u16;  MAX_EDGES]; // weight; starts at 1, accumulates after merges
+        let mut ue_live  = [true;  MAX_EDGES];
+        let mut ue_count = 0usize;
+        // seen_adj[a] bit b = 1 iff undirected pair {a,b} already added (a < b)
+        let mut seen_adj = [0u128; MAX_NODES];
+
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; }
+            let fs  = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts  = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs];
+            let tci = slot_to_ci[ts];
+            if fci == NIL || tci == NIL { continue; }
+            let (a, b) = if fci < tci { (fci, tci) } else { (tci, fci) };
+            if b >= 128 { continue; }
+            if (seen_adj[a] >> b) & 1 != 0 { continue; }
+            seen_adj[a] |= 1u128 << b;
+            if ue_count < MAX_EDGES {
+                uf[ue_count]      = a as u8;
+                ut[ue_count]      = b as u8;
+                uw[ue_count]      = 1;
+                ue_live[ue_count] = true;
+                ue_count         += 1;
+            }
+        }
+
+        // ── 3. Stoer-Wagner global min-cut phases ──────────────────────────
+        // Each phase: maximum-adjacency ordering → cut-of-phase → merge s+t.
+        let mut node_active = [false; MAX_NODES];
+        for i in 0..nc { node_active[i] = true; }
+        let mut active_count = nc;
+
+        // group_mbrs[si]: u128 bitmask of original compact-indices in super-node si
+        let mut group_mbrs = [0u128; MAX_NODES];
+        for i in 0..nc { group_mbrs[i] = 1u128 << i; }
+
+        let mut min_cut     = u32::MAX;
+        let mut best_b_mask = 0u128;
+
+        while active_count > 1 {
+            // Maximum adjacency ordering
+            let mut key   = [0u16; MAX_NODES];
+            let mut in_a  = [false; MAX_NODES];
+            let mut last_s = 0usize; // second-to-last added (valid after ≥2 steps)
+            let mut last_t = 0usize; // last added
+
+            for _step in 0..active_count {
+                // Pick active non-A node with max key; smallest ci breaks ties.
+                let mut best   = NIL;
+                let mut best_k = 0u16;
+                for si in 0..nc {
+                    if node_active[si] && !in_a[si] {
+                        if best == NIL || key[si] > best_k
+                            || (key[si] == best_k && si < best)
+                        {
+                            best   = si;
+                            best_k = key[si];
+                        }
+                    }
+                }
+                if best == NIL { break; }
+                in_a[best] = true;
+                last_s     = last_t;
+                last_t     = best;
+                // Update keys for active non-A nodes adjacent to best.
+                for ei in 0..ue_count {
+                    if !ue_live[ei] { continue; }
+                    let a = uf[ei] as usize;
+                    let b = ut[ei] as usize;
+                    let w = uw[ei];
+                    if a == best && node_active[b] && !in_a[b] {
+                        key[b] = key[b].saturating_add(w);
+                    } else if b == best && node_active[a] && !in_a[a] {
+                        key[a] = key[a].saturating_add(w);
+                    }
+                }
+            }
+
+            // cut-of-phase = total weight of edges from last_t to the rest of V
+            let cop = key[last_t] as u32;
+            if cop < min_cut {
+                min_cut     = cop;
+                best_b_mask = group_mbrs[last_t];
+            }
+
+            // Merge last_t into last_s: redirect last_t endpoints → last_s,
+            // kill self-loops, then deduplicate parallel edges by adding weights.
+            for ei in 0..ue_count {
+                if !ue_live[ei] { continue; }
+                let a = uf[ei] as usize;
+                let b = ut[ei] as usize;
+                let na = if a == last_t { last_s } else { a };
+                let nb = if b == last_t { last_s } else { b };
+                if na == nb { ue_live[ei] = false; continue; } // self-loop
+                let (na, nb) = if na < nb { (na, nb) } else { (nb, na) };
+                uf[ei] = na as u8;
+                ut[ei] = nb as u8;
+            }
+            for i in 0..ue_count {
+                if !ue_live[i] { continue; }
+                for j in (i + 1)..ue_count {
+                    if !ue_live[j] { continue; }
+                    if uf[i] == uf[j] && ut[i] == ut[j] {
+                        uw[i] = uw[i].saturating_add(uw[j]);
+                        ue_live[j] = false;
+                    }
+                }
+            }
+            group_mbrs[last_s] |= group_mbrs[last_t];
+            node_active[last_t] = false;
+            active_count       -= 1;
+        }
+
+        // u32::MAX means no phase ran (nc < 2, already handled above); treat as 0.
+        if min_cut == u32::MAX { min_cut = 0; }
+
+        // ── 4. Build output ────────────────────────────────────────────────
+        // Collect side-A and side-B nodes separately, then insertion-sort each.
+        let mut tmp_a = [ZERO_VEC; MAX_NODES];
+        let mut tmp_b = [ZERO_VEC; MAX_NODES];
+        let mut cnt_a = 0usize;
+        let mut cnt_b = 0usize;
+
+        for ci in 0..nc {
+            let slot = node_slots[ci];
+            let vec  = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            if (best_b_mask >> ci) & 1 == 1 {
+                if cnt_b < MAX_NODES { tmp_b[cnt_b] = vec; cnt_b += 1; }
+            } else {
+                if cnt_a < MAX_NODES { tmp_a[cnt_a] = vec; cnt_a += 1; }
+            }
+        }
+        let side_b_size = cnt_b;
+
+        // Sort side-A ascending by as_u64()
+        for i in 1..cnt_a {
+            let k = tmp_a[i]; let mut j = i;
+            while j > 0 && tmp_a[j - 1].as_u64() > k.as_u64() {
+                tmp_a[j] = tmp_a[j - 1]; j -= 1;
+            }
+            tmp_a[j] = k;
+        }
+        // Sort side-B ascending by as_u64()
+        for i in 1..cnt_b {
+            let k = tmp_b[i]; let mut j = i;
+            while j > 0 && tmp_b[j - 1].as_u64() > k.as_u64() {
+                tmp_b[j] = tmp_b[j - 1]; j -= 1;
+            }
+            tmp_b[j] = k;
+        }
+
+        // Pack: side-A then side-B into out_vecs / out_sides
+        let copy_len = nc.min(N);
+        let mut out_i = 0usize;
+        for i in 0..cnt_a {
+            if out_i >= copy_len { break; }
+            out_vecs[out_i]  = tmp_a[i];
+            out_sides[out_i] = 0;
+            out_i += 1;
+        }
+        for i in 0..cnt_b {
+            if out_i >= copy_len { break; }
+            out_vecs[out_i]  = tmp_b[i];
+            out_sides[out_i] = 1;
+            out_i += 1;
+        }
+
+        (out_vecs, out_sides, node_count, min_cut, side_b_size)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -12408,6 +12621,21 @@ pub fn graph_arborescence<const N: usize>(
 /// sorted ascending by `VectorAddress.as_u64()`.
 pub fn graph_fvs<const N: usize>() -> ([VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_fvs_inner()
+}
+
+/// V3.02: Global minimum cut — Stoer-Wagner 1997.
+///
+/// Returns `(vecs, sides, node_count, min_cut, side_b_size)`:
+/// - `vecs[0..node_count]` — all live nodes; side-A first (sides==0), then side-B (sides==1).
+/// - `sides[0..node_count]` — 0=side A, 1=side B.
+/// - `node_count` — total live nodes.
+/// - `min_cut` — minimum undirected edge cut (edge connectivity κ'(G)).
+/// - `side_b_size` — count of side-B nodes.
+///
+/// Undirected projection: A→B and B→A count as one edge.
+/// Disconnected graphs return `min_cut = 0`.
+pub fn graph_min_cut<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u32, usize) {
+    RUNTIME.lock().graph_min_cut_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

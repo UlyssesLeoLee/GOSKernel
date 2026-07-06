@@ -652,6 +652,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  g2ecc / 2ecc / edge connected components  aliases for graph 2ecc\n");
         super::print_str(sink, "  graph fvs   feedback vertex set (min nodes to remove to break all cycles)\n");
         super::print_str(sink, "  gfvs / feedback vertex set  aliases for graph fvs\n");
+        super::print_str(sink, "  graph min cut  global minimum edge cut (Stoer-Wagner; edge connectivity \u{03ba}')\n");
+        super::print_str(sink, "  gmincut / min cut / edge connectivity  aliases for graph min cut\n");
         super::print_str(sink, "  uname              kernel version + capacity limits (like uname -a + sysctl kern.*)\n");
         super::print_str(sink, "  ver / version      alias for uname\n");
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
@@ -1176,6 +1178,8 @@ fn dispatch_text_command(
         super::dispatch_graph_min_path_cover(sink);
     } else if cmd == "graph fvs" || cmd == "gfvs" || cmd == "feedback vertex set" || cmd == "graph fvset" || cmd == "gfvset" || cmd == "graph feedback vertex" {
         super::dispatch_graph_fvs(sink);
+    } else if cmd == "graph min cut" || cmd == "gmincut" || cmd == "min cut" || cmd == "edge connectivity" || cmd == "gedge connectivity" || cmd == "graph cut" || cmd == "gcut" {
+        super::dispatch_graph_min_cut(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

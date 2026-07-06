@@ -8022,6 +8022,84 @@ pub fn dispatch_graph_arborescence(sink: &ConsoleSink, root: gos_protocol::Vecto
 /// OS analogy: minimum set of kernel subsystems to suspend / quarantine to break
 /// all boot-order dependency cycles — like `systemctl mask` targeting the
 /// cycle-causing services identified by `systemd-analyze verify`.
+/// V3.02: `graph min cut` — Stoer-Wagner global minimum edge cut.
+/// Analogous to `ip route show` finding the minimum bottleneck partition —
+/// the fewest IPC channels to sever to split the kernel into two isolated fault domains.
+pub fn dispatch_graph_min_cut(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, sides, node_count, min_cut, side_b_size) =
+        gos_runtime::graph_min_cut::<MAX_N>();
+
+    set_color(sink, 11, 0); // bright-cyan header — partition theme
+    print_str(sink, " graph min cut  (Stoer-Wagner global minimum edge cut)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    let side_a_size = node_count - side_b_size;
+
+    // Header row
+    set_color(sink, 8, 0);
+    print_str(sink, "  vector              side\n");
+    set_color(sink, 7, 0);
+
+    for i in 0..node_count.min(MAX_N) {
+        if sides[i] == 0 {
+            set_color(sink, 10, 0); // bright-green for side A
+        } else {
+            set_color(sink, 13, 0); // bright-magenta for side B
+        }
+        print_str(sink, "  ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        let vlen = vec_str.len();
+        for _ in vlen..18 { print_str(sink, " "); }
+        if sides[i] == 0 {
+            print_str(sink, "side-A");
+        } else {
+            print_str(sink, "side-B");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  A=");
+    set_color(sink, 10, 0);
+    print_num_inline(sink, side_a_size);
+    set_color(sink, 8, 0);
+    print_str(sink, "  B=");
+    set_color(sink, 13, 0);
+    print_num_inline(sink, side_b_size);
+    set_color(sink, 8, 0);
+    print_str(sink, "  \u{03ba}'(G)=");
+    set_color(sink, 11, 0);
+    print_num_inline(sink, min_cut as usize);
+    set_color(sink, 8, 0);
+    if min_cut == 0 {
+        print_str(sink, "  (disconnected or empty)");
+    } else {
+        print_str(sink, "  Stoer-Wagner 1997");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_fvs(sink: &ConsoleSink) {
     const MAX_N: usize = 128;
     let (vecs, fvs_size, node_count) = gos_runtime::graph_fvs::<MAX_N>();
