@@ -8167,6 +8167,89 @@ pub fn dispatch_graph_fvs(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_hamiltonian(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, path_len, has_circuit, has_path, node_count) =
+        gos_runtime::graph_hamiltonian::<MAX_N>();
+
+    set_color(sink, 10, 0); // bright-green header — "path found" theme
+    print_str(sink, " graph hamiltonian  (Hamiltonian path/circuit detection)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if !has_path {
+        set_color(sink, 12, 0); // bright-red — not found
+        print_str(sink, "  no Hamiltonian path or circuit found\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  pos  vector\n");
+        set_color(sink, 7, 0);
+
+        for i in 0..path_len.min(MAX_N) {
+            if has_circuit {
+                set_color(sink, 10, 0); // bright-green for circuit
+            } else {
+                set_color(sink, 14, 0); // bright-yellow for path-only
+            }
+            print_str(sink, "  ");
+            // Position number (1-indexed), right-aligned to 3 chars
+            let pos = i + 1;
+            if pos < 10 {
+                print_str(sink, "  ");
+            } else if pos < 100 {
+                print_str(sink, " ");
+            }
+            print_num_inline(sink, pos);
+            print_str(sink, "  ");
+            let mut line = LineBuf::<20>::new();
+            line.push_vector(vecs[i]);
+            let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+            print_str(sink, vec_str);
+            set_color(sink, 7, 0);
+            print_str(sink, "\n");
+        }
+        if has_circuit {
+            // Show the closing edge back to start
+            set_color(sink, 8, 0);
+            print_str(sink, "  \u{21ba} back to start (circuit)\n");
+            set_color(sink, 7, 0);
+        }
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    if has_circuit {
+        set_color(sink, 10, 0);
+        print_str(sink, "Hamiltonian circuit");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (visits every node once, returns to start)");
+    } else if has_path {
+        set_color(sink, 14, 0);
+        print_str(sink, "Hamiltonian path");
+        set_color(sink, 8, 0);
+        print_str(sink, "  (visits every node once, no circuit)");
+    } else {
+        set_color(sink, 12, 0);
+        print_str(sink, "no Hamiltonian path");
+    }
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

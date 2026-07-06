@@ -10163,6 +10163,166 @@ impl GraphRuntime {
 
         (out_vecs, out_sides, node_count, min_cut, side_b_size)
     }
+
+    /// V3.03: Hamiltonian path/circuit detection — iterative backtracking DFS.
+    ///
+    /// Returns `(path_vecs, path_len, has_circuit, has_path, node_count)`:
+    /// - `path_vecs[0..path_len]` — the found Hamiltonian path or circuit nodes in order.
+    /// - `path_len` — equals `node_count` if a Ham. path was found; 0 if none found.
+    /// - `has_circuit` — true iff a directed Hamiltonian circuit was found (path_len > 0).
+    /// - `has_path` — true iff a directed Hamiltonian path was found (has_circuit ⇒ has_path).
+    /// - `node_count` — total live nodes.
+    ///
+    /// Directed graph: edge A→B does NOT imply B→A. Self-loops excluded.
+    /// Single node: trivially has_circuit=true, has_path=true.
+    ///
+    /// Uses iterative DFS with u128 visited bitmask + dead-end pruning.
+    /// Step limit: 5 000 000 (avoids hanging; sparse OS graphs terminate well below this).
+    pub fn graph_hamiltonian_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], usize, bool, bool, usize) {
+        const ZERO_VEC: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+        const NIL: usize = usize::MAX;
+        let mut out_vecs = [ZERO_VEC; N];
+
+        // ── 1. Compact live nodes ──────────────────────────────────────────
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut slot_to_ci = [NIL;    MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                node_slots[nc] = i;
+                nc += 1;
+            }
+        }
+        let node_count = nc;
+        if nc == 0 { return (out_vecs, 0, false, false, 0); }
+        if nc == 1 {
+            let v0 = self.nodes[node_slots[0]].map(|r| r.vector).unwrap_or(ZERO_VEC);
+            out_vecs[0] = v0;
+            return (out_vecs, 1, true, true, 1);
+        }
+
+        // ── 2. Build directed adjacency bitmasks ───────────────────────────
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; }
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs];
+            let tci = slot_to_ci[ts];
+            if fci == NIL || tci == NIL { continue; }
+            if tci < 128 { adj[fci] |= 1u128 << tci; }
+        }
+
+        // all_mask: bitmask of compact indices 0..nc
+        let all_mask: u128 = if nc >= 128 { u128::MAX } else { (1u128 << nc) - 1 };
+
+        // ── 3. Iterative backtracking DFS ──────────────────────────────────
+        // Invariant: path[0..depth] are placed; visited = bitmask of placed nodes.
+        // cand[d] = remaining successors of path[d] not yet tried for position d+1.
+
+        let mut path      = [0u8;   MAX_NODES];
+        let mut cand      = [0u128; MAX_NODES];
+        let mut depth     = 0usize;
+        let mut visited   = 0u128;
+
+        let mut has_circuit = false;
+        let mut has_path    = false;
+        let mut best_path   = [0u8;  MAX_NODES];
+
+        let mut steps: u64 = 0;
+        const STEP_LIMIT: u64 = 5_000_000;
+
+        'start_loop: for start_ci in 0..nc {
+            if has_circuit { break; }
+
+            path[0]  = start_ci as u8;
+            visited  = 1u128 << start_ci;
+            cand[0]  = adj[start_ci] & !visited;
+            depth    = 1;
+
+            'inner: loop {
+                steps += 1;
+                if steps > STEP_LIMIT { break 'start_loop; }
+
+                if depth == nc {
+                    // All nc nodes placed — Hamiltonian path found.
+                    if !has_path {
+                        has_path = true;
+                        best_path[..nc].copy_from_slice(&path[..nc]);
+                    }
+                    // Check for circuit: last node has an edge back to start.
+                    let last_ci = path[nc - 1] as usize;
+                    if (adj[last_ci] >> start_ci) & 1 != 0 {
+                        has_circuit = true;
+                        best_path[..nc].copy_from_slice(&path[..nc]);
+                        break 'start_loop;
+                    }
+                    // Not a circuit; backtrack to try other path endings.
+                    depth  -= 1;
+                    visited &= !(1u128 << path[depth]);
+                    continue 'inner;
+                }
+
+                let d = depth - 1; // cand[d] = candidates extending from path[d]
+                if cand[d] == 0 {
+                    // No more candidates here; backtrack.
+                    if depth == 1 { break 'inner; }
+                    depth  -= 1;
+                    visited &= !(1u128 << path[depth]);
+                } else {
+                    // Pick and remove the next candidate.
+                    let v     = cand[d].trailing_zeros() as usize;
+                    cand[d]  &= cand[d] - 1;
+
+                    // Dead-end pruning: if ≥2 unvisited nodes (after pushing v)
+                    // have no successors within the remaining unvisited set, we
+                    // cannot route through all of them (at most one can be last).
+                    let next_visited    = visited | (1u128 << v);
+                    let unvisited_after = all_mask & !next_visited;
+                    let remaining       = nc.saturating_sub(depth + 1);
+                    let prune = if remaining > 1 {
+                        let mut dead_ends = 0usize;
+                        let mut um = unvisited_after;
+                        let mut found_prune = false;
+                        while um != 0 {
+                            let w = um.trailing_zeros() as usize;
+                            um &= um - 1;
+                            if adj[w] & unvisited_after == 0 {
+                                dead_ends += 1;
+                                if dead_ends > 1 { found_prune = true; break; }
+                            }
+                        }
+                        found_prune
+                    } else {
+                        false
+                    };
+                    if prune { continue 'inner; }
+
+                    // Extend path with v.
+                    path[depth]  = v as u8;
+                    visited      = next_visited;
+                    cand[depth]  = adj[v] & !visited;
+                    depth       += 1;
+                }
+            }
+        }
+
+        // ── 4. Build output ────────────────────────────────────────────────
+        if !has_path {
+            return (out_vecs, 0, false, false, node_count);
+        }
+        let copy_len = nc.min(N);
+        for i in 0..copy_len {
+            let ci   = best_path[i] as usize;
+            let slot = node_slots[ci];
+            out_vecs[i] = self.nodes[slot].map(|r| r.vector).unwrap_or(ZERO_VEC);
+        }
+        (out_vecs, nc, has_circuit, true, node_count)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -12636,6 +12796,20 @@ pub fn graph_fvs<const N: usize>() -> ([VectorAddress; N], usize, usize) {
 /// Disconnected graphs return `min_cut = 0`.
 pub fn graph_min_cut<const N: usize>() -> ([VectorAddress; N], [u8; N], usize, u32, usize) {
     RUNTIME.lock().graph_min_cut_inner()
+}
+
+/// V3.03: Hamiltonian path/circuit detection.
+///
+/// Returns `(path_vecs, path_len, has_circuit, has_path, node_count)`:
+/// - `path_vecs[0..path_len]` — nodes in the found Hamiltonian path/circuit order.
+/// - `path_len` — equals `node_count` if found, 0 if not found.
+/// - `has_circuit` — true iff a directed Hamiltonian circuit exists.
+/// - `has_path` — true iff a directed Hamiltonian path exists (has_circuit ⇒ has_path).
+/// - `node_count` — total live nodes.
+///
+/// Directed graph. Self-loops excluded. Single node: trivially Ham. circuit.
+pub fn graph_hamiltonian<const N: usize>() -> ([VectorAddress; N], usize, bool, bool, usize) {
+    RUNTIME.lock().graph_hamiltonian_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
