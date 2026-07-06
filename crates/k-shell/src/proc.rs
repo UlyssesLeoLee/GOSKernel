@@ -1218,6 +1218,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices(sink);
     } else if cmd == "graph topo2" || cmd == "gtopo2" || cmd == "harmonic index" || cmd == "gh index" || cmd == "atom bond connectivity" || cmd == "gabc" || cmd == "forgotten index" || cmd == "gforgotten" || cmd == "ghabcf" {
         super::dispatch_graph_topo_indices2(sink);
+    } else if cmd == "graph topo3" || cmd == "gtopo3" || cmd == "symmetric division deg" || cmd == "gsdd" || cmd == "inverse sum indeg" || cmd == "gisi" || cmd == "nirmala index" || cmd == "gnirmala" || cmd == "gsddisini" {
+        super::dispatch_graph_topo_indices3(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
