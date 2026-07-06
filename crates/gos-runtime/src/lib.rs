@@ -9010,6 +9010,277 @@ impl GraphRuntime {
 
         (out_vecs, best_size, is_count, nc)
     }
+
+    /// V2.97: Minimum vertex cover of the live kernel graph.
+    ///
+    /// Returns `(cover_vecs, cover_size, is_exact, node_count)`:
+    /// - `cover_vecs[0..cover_size]` — cover vertices sorted ascending by as_u64().
+    /// - `cover_size`                — |min vertex cover|; exact for bipartite, ≤2× opt for general.
+    /// - `is_exact`                  — true iff graph is bipartite (König gives exact min cover).
+    /// - `node_count`                — total live nodes.
+    ///
+    /// Bipartite: BFS 2-colouring + Kuhn's max matching + König construction:
+    ///   T = (A \ Z_A) ∪ Z_B  where Z is alternating-path reachability from unmatched A-nodes.
+    ///   |T| = |max matching| = τ(G) exactly.  Gallai: α(G) + τ(G) = node_count.
+    ///
+    /// General (non-bipartite): greedy maximal matching — add both endpoints of each
+    /// uncovered edge; result is a valid cover with cover_size ≤ 2 × τ(G).
+    pub fn graph_vertex_cover_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], usize, bool, usize) {
+        const NIL: usize = usize::MAX;
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut cover_vecs = [zero; N];
+
+        // ── 1. Compact live node slots ───────────────────────────────────────
+        let mut node_slots  = [0usize; MAX_NODES];
+        let mut node_count  = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+        if node_count == 0 {
+            return (cover_vecs, 0, true, 0);
+        }
+
+        // ── 2. BFS 2-colouring (undirected) ─────────────────────────────────
+        const UNCOLORED: u8 = u8::MAX;
+        let mut slot_color  = [UNCOLORED; MAX_NODES];
+        let mut is_bipartite = true;
+        {
+            let mut q  = [0usize; MAX_NODES];
+            let mut qh = 0usize;
+            let mut qt = 0usize;
+
+            'outer: for ki in 0..node_count {
+                let start = node_slots[ki];
+                if slot_color[start] != UNCOLORED { continue; }
+                slot_color[start] = 0;
+                q[qt] = start; qt += 1;
+                while qh < qt {
+                    let cur        = q[qh]; qh += 1;
+                    let cur_color  = slot_color[cur];
+                    let next_color = 1 - cur_color;
+                    let cur_id = match self.nodes[cur] {
+                        Some(r) => r.spec.node_id,
+                        None    => continue,
+                    };
+                    for ei in 0..MAX_EDGES {
+                        let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                        let nbr_id = if edge.spec.from_node == cur_id {
+                            edge.spec.to_node
+                        } else if edge.spec.to_node == cur_id {
+                            edge.spec.from_node
+                        } else {
+                            continue
+                        };
+                        let nbr = match self.node_slot_by_id(nbr_id) {
+                            Some(s) => s,
+                            None    => continue,
+                        };
+                        if nbr == cur { continue; } // self-loop
+                        if slot_color[nbr] == UNCOLORED {
+                            slot_color[nbr] = next_color;
+                            if qt < MAX_NODES { q[qt] = nbr; qt += 1; }
+                        } else if slot_color[nbr] == cur_color {
+                            is_bipartite = false;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if is_bipartite {
+            // ── 3. Kuhn's augmenting-path matching (identical to bipartite_match_inner) ──
+            let mut match_a = [NIL; MAX_NODES]; // A-slot → matched B-slot
+            let mut match_b = [NIL; MAX_NODES]; // B-slot → matched A-slot
+
+            for ki in 0..node_count {
+                let start_a = node_slots[ki];
+                if slot_color[start_a] != 0 { continue; } // only A-side (color 0)
+                if match_a[start_a] != NIL  { continue; } // already matched
+
+                let mut visited_b = [false; MAX_NODES];
+                let mut dfs_stk:  [(usize, usize); MAX_NODES] = [(0, 0); MAX_NODES];
+                let mut chosen_b: [usize; MAX_NODES] = [NIL; MAX_NODES];
+                let mut st_top    = 1usize;
+                dfs_stk[0]        = (start_a, 0);
+                let mut augmented = false;
+
+                'dfs: while st_top > 0 {
+                    let lvl             = st_top - 1;
+                    let (a_slot, mut ei) = dfs_stk[lvl];
+                    let a_id = match self.nodes[a_slot] {
+                        Some(r) => r.spec.node_id,
+                        None    => { st_top -= 1; continue; }
+                    };
+                    let mut found_next = false;
+                    while ei < MAX_EDGES {
+                        let edge = match self.edges[ei] {
+                            Some(e) => e,
+                            None    => { ei += 1; continue; }
+                        };
+                        let nbr_id = if edge.spec.from_node == a_id {
+                            edge.spec.to_node
+                        } else if edge.spec.to_node == a_id {
+                            edge.spec.from_node
+                        } else {
+                            ei += 1; continue;
+                        };
+                        let b_slot = match self.node_slot_by_id(nbr_id) {
+                            Some(s) => s,
+                            None    => { ei += 1; continue; }
+                        };
+                        if b_slot == a_slot        { ei += 1; continue; } // self-loop
+                        if slot_color[b_slot] != 1 { ei += 1; continue; } // only B-side
+                        if visited_b[b_slot]       { ei += 1; continue; }
+                        visited_b[b_slot] = true;
+                        ei += 1;
+                        if match_b[b_slot] == NIL {
+                            // Free B-node: augment from level lvl back to 0.
+                            chosen_b[lvl] = b_slot;
+                            let mut cur_b  = b_slot;
+                            let mut cur_lv = lvl;
+                            loop {
+                                let cur_a = dfs_stk[cur_lv].0;
+                                match_a[cur_a] = cur_b;
+                                match_b[cur_b] = cur_a;
+                                if cur_lv == 0 { break; }
+                                cur_lv -= 1;
+                                cur_b   = chosen_b[cur_lv];
+                            }
+                            augmented = true;
+                            break 'dfs;
+                        } else {
+                            let next_a      = match_b[b_slot];
+                            chosen_b[lvl]   = b_slot;
+                            dfs_stk[lvl].1  = ei;
+                            if st_top < MAX_NODES {
+                                dfs_stk[st_top] = (next_a, 0);
+                                st_top += 1;
+                            }
+                            found_next = true;
+                            break;
+                        }
+                    }
+                    if !found_next && !augmented { st_top -= 1; }
+                }
+                let _ = augmented;
+            }
+
+            // ── 4. König's construction: alternating-path BFS from unmatched A-nodes ──
+            // Z = nodes reachable by alternating paths:
+            //   A-side → follow unmatched edges to B (b != match_a[a])
+            //   B-side → follow matched edge back to A (a = match_b[b])
+            // Cover = (A \ Z_A) ∪ Z_B
+            let mut in_z = [false; MAX_NODES];
+            let mut q    = [0usize; MAX_NODES];
+            let mut qh   = 0usize;
+            let mut qt   = 0usize;
+
+            for ki in 0..node_count {
+                let s = node_slots[ki];
+                if slot_color[s] == 0 && match_a[s] == NIL {
+                    in_z[s] = true;
+                    q[qt] = s; qt += 1;
+                }
+            }
+            while qh < qt {
+                let cur    = q[qh]; qh += 1;
+                let cur_id = match self.nodes[cur] { Some(r) => r.spec.node_id, None => continue };
+                if slot_color[cur] == 0 {
+                    // A-node in Z: follow unmatched edges to B-side.
+                    for ei in 0..MAX_EDGES {
+                        let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                        let nbr_id = if edge.spec.from_node == cur_id {
+                            edge.spec.to_node
+                        } else if edge.spec.to_node == cur_id {
+                            edge.spec.from_node
+                        } else {
+                            continue
+                        };
+                        let b = match self.node_slot_by_id(nbr_id) { Some(s) => s, None => continue };
+                        if b == cur { continue; }              // self-loop
+                        if slot_color[b] != 1 { continue; }   // only B-side
+                        if match_a[cur] == b { continue; }     // skip the matched edge
+                        if !in_z[b] {
+                            in_z[b] = true;
+                            if qt < MAX_NODES { q[qt] = b; qt += 1; }
+                        }
+                    }
+                } else {
+                    // B-node in Z: follow matched edge to A-side.
+                    let a = match_b[cur];
+                    if a != NIL && !in_z[a] {
+                        in_z[a] = true;
+                        if qt < MAX_NODES { q[qt] = a; qt += 1; }
+                    }
+                }
+            }
+
+            // Build cover = (A not in Z) + (B in Z), sorted by as_u64().
+            let mut cover_slots = [0usize; MAX_NODES];
+            let mut n_cover     = 0usize;
+            for ki in 0..node_count {
+                let s = node_slots[ki];
+                let in_cover = if slot_color[s] == 0 { !in_z[s] } else { in_z[s] };
+                if in_cover { cover_slots[n_cover] = s; n_cover += 1; }
+            }
+            for i in 1..n_cover {
+                let mut j = i;
+                while j > 0 {
+                    let sj  = cover_slots[j];
+                    let sjm = cover_slots[j - 1];
+                    let vj  = self.nodes[sj] .map(|r| r.vector.as_u64()).unwrap_or(0);
+                    let vjm = self.nodes[sjm].map(|r| r.vector.as_u64()).unwrap_or(0);
+                    if vj < vjm { cover_slots.swap(j, j - 1); j -= 1; } else { break; }
+                }
+            }
+            let cover_size = n_cover.min(N);
+            for i in 0..cover_size {
+                cover_vecs[i] = self.nodes[cover_slots[i]].map(|r| r.vector).unwrap_or(zero);
+            }
+            (cover_vecs, cover_size, true, node_count)
+        } else {
+            // ── 3. 2-approximation: greedy maximal matching ──────────────────
+            // For each edge (u,v) with neither endpoint covered, cover both.
+            let mut covered     = [false; MAX_NODES];
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node == edge.spec.to_node { continue; } // self-loop
+                let us = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+                let vs = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+                if covered[us] || covered[vs] { continue; }
+                covered[us] = true;
+                covered[vs] = true;
+            }
+
+            let mut cover_slots = [0usize; MAX_NODES];
+            let mut n_cover     = 0usize;
+            for ki in 0..node_count {
+                let s = node_slots[ki];
+                if covered[s] { cover_slots[n_cover] = s; n_cover += 1; }
+            }
+            for i in 1..n_cover {
+                let mut j = i;
+                while j > 0 {
+                    let sj  = cover_slots[j];
+                    let sjm = cover_slots[j - 1];
+                    let vj  = self.nodes[sj] .map(|r| r.vector.as_u64()).unwrap_or(0);
+                    let vjm = self.nodes[sjm].map(|r| r.vector.as_u64()).unwrap_or(0);
+                    if vj < vjm { cover_slots.swap(j, j - 1); j -= 1; } else { break; }
+                }
+            }
+            let cover_size = n_cover.min(N);
+            for i in 0..cover_size {
+                cover_vecs[i] = self.nodes[cover_slots[i]].map(|r| r.vector).unwrap_or(zero);
+            }
+            (cover_vecs, cover_size, false, node_count)
+        }
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -11381,6 +11652,25 @@ pub fn graph_clique<const N: usize>() -> ([VectorAddress; N], usize, usize, usiz
 
 pub fn graph_independent_set<const N: usize>() -> ([VectorAddress; N], usize, usize, usize) {
     RUNTIME.lock().graph_independent_set_inner()
+}
+
+/// V2.97: Minimum vertex cover of the live kernel graph.
+///
+/// Returns `(cover_vecs, cover_size, is_exact, node_count)`:
+/// - `cover_vecs[0..cover_size]` — cover vertices sorted ascending by as_u64().
+/// - `cover_size`                — |vertex cover|; exact for bipartite, ≤2× opt for general.
+/// - `is_exact`                  — true iff bipartite (König exact); false = 2-approximation.
+/// - `node_count`                — total live nodes.
+///
+/// Bipartite: Kuhn matching + König construction; |T| = ν(G) = τ(G).
+/// General: greedy maximal matching (cover both endpoints of each selected edge).
+/// Key invariants: Gallai α+τ=n (bipartite); König τ=ν (bipartite).
+///
+/// OS analogy: minimum set of kernel modules each supervising at least one side of
+/// every IPC channel — the smallest possible audit-checkpoint set for all cross-module
+/// communication in the system dependency graph.
+pub fn graph_vertex_cover<const N: usize>() -> ([VectorAddress; N], usize, bool, usize) {
+    RUNTIME.lock().graph_vertex_cover_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

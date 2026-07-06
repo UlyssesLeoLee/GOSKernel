@@ -1166,6 +1166,8 @@ fn dispatch_text_command(
         super::dispatch_graph_clique(sink);
     } else if cmd == "graph independent set" || cmd == "graph indep" || cmd == "gindep" || cmd == "independent set" || cmd == "indep" {
         super::dispatch_graph_independent_set(sink);
+    } else if cmd == "graph vertex cover" || cmd == "gvc" || cmd == "vertex cover" || cmd == "gvertexcover" || cmd == "min vertex cover" || cmd == "gmincover" {
+        super::dispatch_graph_vertex_cover(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))
