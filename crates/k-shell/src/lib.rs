@@ -7836,6 +7836,83 @@ pub fn dispatch_graph_dominating_set(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V2.99: minimum path cover of the live kernel graph (DAG only).
+pub fn dispatch_graph_min_path_cover(sink: &ConsoleSink) {
+    const MAX_N: usize = 128;
+    let (vecs, path_ids, path_count, is_dag, total) =
+        gos_runtime::graph_min_path_cover::<MAX_N>();
+
+    set_color(sink, 14, 0); // bright-yellow header
+    print_str(sink, " minimum path cover  (MPC \u{2014} DAG only)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if !is_dag {
+        set_color(sink, 12, 0);
+        print_str(sink, "  graph has cycles \u{2014} MPC undefined (not a DAG)\n");
+        set_color(sink, 8, 0);
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    if total == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no nodes registered)\n");
+        print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // Path color palette — cycles through 6 distinct bright colors.
+    const PATH_COLORS: [u8; 6] = [10, 11, 13, 9, 14, 12];
+
+    set_color(sink, 8, 0);
+    print_str(sink, "  path  vector\n");
+    set_color(sink, 7, 0);
+
+    let mut prev_pid: u8 = u8::MAX;
+    for i in 0..total.min(MAX_N) {
+        let pid = path_ids[i];
+        if pid != prev_pid && prev_pid != u8::MAX {
+            set_color(sink, 8, 0);
+            print_str(sink, "  \u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\n");
+            set_color(sink, 7, 0);
+        }
+        prev_pid = pid;
+        let color = PATH_COLORS[(pid as usize) % 6];
+        set_color(sink, color, 0);
+        print_str(sink, "  P");
+        print_num_inline(sink, pid as usize);
+        print_str(sink, "    ");
+        let mut line = LineBuf::<20>::new();
+        line.push_vector(vecs[i]);
+        let vec_str = core::str::from_utf8(line.as_slice()).unwrap_or("?");
+        print_str(sink, vec_str);
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_str(sink, "  ");
+    print_num_inline(sink, total);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  MPC=");
+    set_color(sink, 14, 0);
+    print_num_inline(sink, path_count);
+    set_color(sink, 8, 0);
+    print_str(sink, "  (n\u{2212}\u{3bd}=");
+    print_num_inline(sink, total);
+    print_str(sink, "\u{2212}");
+    print_num_inline(sink, total - path_count);
+    print_str(sink, ")  K\u{f6}nig\u{2215}Dilworth");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

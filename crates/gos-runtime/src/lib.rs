@@ -9396,6 +9396,179 @@ impl GraphRuntime {
 
         (dom_vecs, dom_size, node_count)
     }
+
+    /// V2.99: Minimum path cover (MPC) of a DAG — Kahn BFS + bipartite
+    /// expansion (Kuhn matching, u128 bitmasks), O(V·E).
+    ///
+    /// Returns `(path_vecs, path_ids, path_count, is_dag, node_count)`:
+    ///   - `path_vecs[0..node_count]` — all live nodes in path-then-topo order.
+    ///   - `path_ids[0..node_count]`  — 0-indexed path ID per node.
+    ///   - `path_count`               — n − ν(B(G)) paths (König / Dilworth).
+    ///   - `is_dag`                   — false if directed cycle detected.
+    ///   - `node_count`               — total live nodes.
+    ///
+    /// If not a DAG, returns (_, _, 0, false, node_count).
+    pub fn graph_min_path_cover_inner<const N: usize>(
+        &self,
+    ) -> ([VectorAddress; N], [u8; N], usize, bool, usize) {
+        const NIL: usize = usize::MAX;
+        let zero = VectorAddress::new(0, 0, 0, 0);
+        let mut out_vecs    = [zero; N];
+        let mut out_path_id = [0u8; N];
+
+        // 1. Compact live nodes.
+        let mut node_slots = [0usize; MAX_NODES];
+        let mut node_count = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                node_slots[node_count] = i;
+                node_count += 1;
+            }
+        }
+        if node_count == 0 {
+            return (out_vecs, out_path_id, 0, true, 0);
+        }
+        let nc = node_count;
+
+        // slot → compact index
+        let mut slot_to_ci = [NIL; MAX_NODES];
+        for ci in 0..nc { slot_to_ci[node_slots[ci]] = ci; }
+
+        // 2. Kahn's BFS — verify is_dag, record topological order.
+        //    Self-loops keep in_deg > 0, so Kahn never drains them → is_dag=false.
+        let mut in_deg = [0u16; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+            in_deg[ts] = in_deg[ts].saturating_add(1);
+        }
+        let mut topo_order = [0usize; MAX_NODES];
+        let mut queue  = [0usize; MAX_NODES];
+        let mut q_head = 0usize;
+        let mut q_tail = 0usize;
+        for ci in 0..nc {
+            let s = node_slots[ci];
+            if in_deg[s] == 0 { queue[q_tail] = s; q_tail += 1; }
+        }
+        let mut processed = 0usize;
+        while q_head < q_tail {
+            let cur_slot = queue[q_head]; q_head += 1;
+            topo_order[processed] = cur_slot; processed += 1;
+            let cur_id = match self.nodes[cur_slot] { Some(r) => r.spec.node_id, None => continue };
+            for ei in 0..MAX_EDGES {
+                let edge = match self.edges[ei] { Some(e) => e, None => continue };
+                if edge.spec.from_node != cur_id { continue; }
+                if edge.spec.from_node == edge.spec.to_node { continue; }
+                let nbr_slot = match self.node_slot_by_id(edge.spec.to_node) { Some(s) => s, None => continue };
+                if in_deg[nbr_slot] > 0 {
+                    in_deg[nbr_slot] -= 1;
+                    if in_deg[nbr_slot] == 0 && q_tail < MAX_NODES {
+                        queue[q_tail] = nbr_slot; q_tail += 1;
+                    }
+                }
+            }
+        }
+        if processed != nc {
+            return (out_vecs, out_path_id, 0, false, nc);
+        }
+
+        // 3. Build bipartite expansion B(G) as bitmask adjacency.
+        //    right_adj[u_ci] = bitmask of right-side CIs v where (u,v) ∈ G.
+        let mut right_adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            if edge.spec.from_node == edge.spec.to_node { continue; }
+            let fs = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let ts = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let fci = slot_to_ci[fs]; let tci = slot_to_ci[ts];
+            if fci == NIL || tci == NIL { continue; }
+            right_adj[fci] |= 1u128 << tci;
+        }
+
+        // 4. Kuhn's augmenting-path matching on B(G).
+        //    match_l[ci] = right_ci paired with left_ci; NIL = free.
+        //    match_r[ci] = left_ci paired with right_ci; NIL = free.
+        let mut match_l = [NIL; MAX_NODES];
+        let mut match_r = [NIL; MAX_NODES];
+        let mut match_count = 0usize;
+
+        for ti in 0..nc {
+            let start_ci = slot_to_ci[topo_order[ti]];
+            if start_ci == NIL           { continue; }
+            if match_l[start_ci] != NIL { continue; } // already matched
+
+            let mut visited_r = 0u128; // right nodes visited in this DFS
+            let mut dfs_lci:  [usize; MAX_NODES] = [NIL; MAX_NODES];
+            let mut dfs_rem:  [u128;  128]        = [0;   128];
+            let mut chosen_r: [usize; MAX_NODES]  = [NIL; MAX_NODES];
+            let mut st_top = 1usize;
+            dfs_lci[0] = start_ci;
+            dfs_rem[0] = right_adj[start_ci];
+            let mut augmented = false;
+
+            'dfs: while st_top > 0 {
+                let lvl = st_top - 1;
+                let _l_ci = dfs_lci[lvl];
+                let avail = dfs_rem[lvl] & !visited_r;
+                if avail == 0 { st_top -= 1; continue; } // backtrack
+
+                let r_ci = avail.trailing_zeros() as usize;
+                dfs_rem[lvl]  &= !(1u128 << r_ci);
+                visited_r     |=   1u128 << r_ci;
+
+                if match_r[r_ci] == NIL {
+                    // Free right node — augment path bottom-up.
+                    chosen_r[lvl] = r_ci;
+                    let (mut cur_r, mut cur_lv) = (r_ci, lvl);
+                    loop {
+                        let cur_l = dfs_lci[cur_lv];
+                        match_l[cur_l] = cur_r; match_r[cur_r] = cur_l;
+                        if cur_lv == 0 { break; }
+                        cur_lv -= 1; cur_r = chosen_r[cur_lv];
+                    }
+                    augmented = true; match_count += 1;
+                    break 'dfs;
+                } else {
+                    // Matched right — push its left partner for continuation.
+                    let next_l = match_r[r_ci];
+                    chosen_r[lvl] = r_ci;
+                    if st_top < MAX_NODES {
+                        dfs_lci[st_top] = next_l;
+                        dfs_rem[st_top] = right_adj[next_l];
+                        st_top += 1;
+                    }
+                }
+            }
+            let _ = augmented;
+        }
+
+        // 5. path_count = n − match_count  (König / Dilworth theorem).
+        let path_count = nc - match_count;
+
+        // 6. Reconstruct paths by following match_l[] successor chains.
+        //    Path start = a node whose right-side copy is unmatched (match_r[ci] == NIL).
+        //    Enumerate starts in topological order → natural top-down path IDs.
+        let mut out_count      = 0usize;
+        let mut path_id_ctr    = 0u8;
+        for ti in 0..nc {
+            let ci = slot_to_ci[topo_order[ti]];
+            if ci == NIL          { continue; }
+            if match_r[ci] != NIL { continue; } // has a predecessor — not a start
+
+            let pid = path_id_ctr;
+            if path_id_ctr < u8::MAX { path_id_ctr += 1; }
+            let mut cur_ci = ci;
+            while cur_ci != NIL && out_count < N {
+                let slot = node_slots[cur_ci];
+                out_vecs[out_count]    = self.nodes[slot].map(|r| r.vector).unwrap_or(zero);
+                out_path_id[out_count] = pid;
+                out_count += 1;
+                cur_ci = match_l[cur_ci];
+            }
+        }
+
+        (out_vecs, out_path_id, path_count, true, nc)
+    }
 }
 
 fn map_legacy_state(state: NodeState) -> NodeLifecycle {
@@ -11794,6 +11967,29 @@ pub fn graph_vertex_cover<const N: usize>() -> ([VectorAddress; N], usize, bool,
 /// dom_vecs[0..dom_size] = dominating set, sorted ascending by VectorAddress.as_u64().
 pub fn graph_dominating_set<const N: usize>() -> ([VectorAddress; N], usize, usize) {
     RUNTIME.lock().graph_dominating_set_inner()
+}
+
+/// V2.99: Minimum path cover (MPC) of the live kernel graph (DAG only).
+///
+/// Returns `(path_vecs, path_ids, path_count, is_dag, node_count)`:
+/// - `path_vecs[0..node_count]` — all live nodes concatenated in path order.
+/// - `path_ids[0..node_count]`  — 0-indexed path ID per node.
+/// - `path_count`               — minimum number of vertex-disjoint directed paths
+///                                covering every node; `path_count = n − ν(B(G))`
+///                                (König / Dilworth theorem).
+/// - `is_dag`                   — false if directed cycle detected (MPC undefined).
+/// - `node_count`               — total live nodes.
+///
+/// Algorithm: Kahn BFS (DAG check + topo order) → bipartite expansion B(G)
+/// (left_u → right_v for each directed edge u→v) → Kuhn augmenting-path
+/// matching with u128 bitmasks, O(V·E).
+///
+/// OS analogy: the minimum number of sequential install/upgrade chains
+/// needed to deploy a kernel patch across all modules in a dependency DAG —
+/// like `make -j<path_count>` where each job is one ordered dependency chain.
+pub fn graph_min_path_cover<const N: usize>(
+) -> ([VectorAddress; N], [u8; N], usize, bool, usize) {
+    RUNTIME.lock().graph_min_path_cover_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

@@ -1170,6 +1170,8 @@ fn dispatch_text_command(
         super::dispatch_graph_vertex_cover(sink);
     } else if cmd == "graph domset" || cmd == "gdomset" || cmd == "dominating set" || cmd == "graph dominating set" || cmd == "gdominate" || cmd == "min domset" {
         super::dispatch_graph_dominating_set(sink);
+    } else if cmd == "graph mpc" || cmd == "gmpc" || cmd == "min path cover" || cmd == "graph min path cover" || cmd == "path cover" || cmd == "gdagcover" || cmd == "graph path cover" {
+        super::dispatch_graph_min_path_cover(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph domtree ")
         .or_else(|| cmd.strip_prefix("gdomtree "))
