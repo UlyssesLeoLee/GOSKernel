@@ -11831,6 +11831,104 @@ impl GraphRuntime {
 
         (so_acc, rm2_acc, sigma_acc, edge_count, nc)
     }
+
+    /// V3.16: Hyper-Zagreb HM₁ + HM₂ + Arithmetic-Geometric AG degree-based indices.
+    ///
+    /// Returns (hm1, hm2, ag_ppm, edge_count, node_count).
+    ///   hm1    = HM₁(G) = Σ_{uv∈E} (da+db)²                      (exact; Shirdel et al. 2013)
+    ///   hm2    = HM₂(G) = Σ_{uv∈E} (da·db)²                      (exact; Das & Trinajstić 2011)
+    ///   ag_ppm = AG(G) × 10^6 where AG = Σ_{uv∈E} (da+db)/(2√(da·db))  (Zheng et al. 2020)
+    ///
+    /// HM₁: contribution = (s)² where s = da + db
+    ///   HM₁ = 4·|E|·Δ² for Δ-regular
+    /// HM₂: contribution = (p)² where p = da · db
+    ///   HM₂ = |E|·Δ⁴ for Δ-regular
+    /// AG:  contribution = floor(s·10^12 / (2·isqrt64(p·10^12)))
+    ///   AG = |E| (= m) iff graph is regular (AM = GM when da = db); AG ≥ m always (AM-GM)
+    ///
+    /// KEY CROSS-CHECKS:
+    ///   K₃ (Δ=2): HM₁=3×16=48; HM₂=3×16=48; AG=3_000_000 (regular, AM=GM)
+    ///   K₄ (Δ=3): HM₁=6×36=216; HM₂=6×81=486; AG=6_000_000 (regular)
+    ///   K_{1,4}: HM₁=4×25=100; HM₂=4×16=64; AG=4×1_250_000=5_000_000
+    ///   K_{2,3}: HM₁=6×25=150; HM₂=6×36=216; AG=6×1_020_620=6_123_720
+    pub fn graph_topo_indices5_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Undirected degree per compact-index node.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones() as u64;
+        }
+
+        // Integer floor-sqrt via Newton-Raphson.
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        // 4. Scan undirected edges (a < b canonical): accumulate HM₁, HM₂, AG.
+        let mut hm1_acc:    u64 = 0;
+        let mut hm2_acc:    u64 = 0;
+        let mut ag_acc:     u64 = 0;
+        let mut edge_count: usize = 0;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b <= a { continue; } // each undirected edge once (a < b)
+
+                let da = deg[a];
+                let db = deg[b];
+                let p  = da * db; // product (> 0 since d ≥ 1 for vertices with edges)
+                let s  = da + db; // sum
+
+                // HM₁: (da+db)² = s²
+                hm1_acc += s * s;
+
+                // HM₂: (da·db)² = p²
+                hm2_acc += p * p;
+
+                // AG: floor(s × 10^12 / (2 × isqrt64(p × 10^12)))
+                // = floor((da+db) × 10^6 / (2 × √(da·db)))
+                // Denominator 2·x where x = isqrt64(p·10^12) ≥ 1 always (p ≥ 1).
+                let x = isqrt64(p * 1_000_000_000_000u64);
+                ag_acc += (s * 1_000_000_000_000u64) / (2 * x);
+
+                edge_count += 1;
+            }
+        }
+
+        (hm1_acc, hm2_acc, ag_acc, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14634,6 +14732,16 @@ pub fn graph_topo_indices3() -> (u64, u64, u64, usize, usize) {
 ///   sigma  = σ(G)       where σ   = Σ_{uv∈E} (da-db)²        (Gutman et al. 2014)
 pub fn graph_topo_indices4() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices4_inner()
+}
+
+/// V3.16: Hyper-Zagreb HM₁ + HM₂ + Arithmetic-Geometric AG degree-based indices.
+///
+/// Returns (hm1, hm2, ag_ppm, edge_count, node_count).
+///   hm1    = HM₁(G)    where HM₁ = Σ_{uv∈E} (da+db)²                    (Shirdel et al. 2013)
+///   hm2    = HM₂(G)    where HM₂ = Σ_{uv∈E} (da·db)²                    (Das & Trinajstić 2011)
+///   ag_ppm = AG × 10^6 where AG  = Σ_{uv∈E} (da+db)/(2√(da·db))         (Zheng et al. 2020)
+pub fn graph_topo_indices5() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices5_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

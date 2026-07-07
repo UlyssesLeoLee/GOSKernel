@@ -9133,6 +9133,82 @@ pub fn dispatch_graph_topo_indices4(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.16: `graph topo5` — HM₁ + HM₂ + AG degree-based topological indices.
+///   HM₁ = Shirdel et al. 2013 (Hyper-Zagreb index, exact integer)
+///   HM₂ = Das & Trinajstić 2011 (Second Hyper-Zagreb index, exact integer)
+///   AG  = Zheng et al. 2020 (Arithmetic-Geometric index, ppm via isqrt)
+pub fn dispatch_graph_topo_indices5(sink: &ConsoleSink) {
+    let (hm1, hm2, ag_ppm, edge_count, node_count) =
+        gos_runtime::graph_topo_indices5();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo5  (HM\u{2081} + HM\u{2082} + AG degree-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // HM₁ (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  hyper-zagreb 1st   HM\u{2081}=  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, hm1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{03a3} (d+d)\u{00b2}]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // HM₂ (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  hyper-zagreb 2nd   HM\u{2082}=  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, hm2 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{03a3} (d\u{00b7}d)\u{00b2}]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // AG index (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  arith-geo index    AG  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, ag_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (d+d)/(2\u{221a}d\u{00b7}d)]");
+        if edge_count > 0 && ag_ppm == edge_count as u64 * 1_000_000 {
+            set_color(sink, 10, 0); // bright-green: regular annotation
+            print_str(sink, "  (regular: AG=m)");
+            set_color(sink, 8, 0);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Shirdel et al. 2013  Das & Trinajsti\u{0107} 2011  Zheng et al. 2020");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

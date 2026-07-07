@@ -1222,6 +1222,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices3(sink);
     } else if cmd == "graph topo4" || cmd == "gtopo4" || cmd == "sombor index" || cmd == "gsombor" || cmd == "reduced zagreb" || cmd == "grm2" || cmd == "sigma index" || cmd == "gsigma" || cmd == "gsomborrm2sigma" {
         super::dispatch_graph_topo_indices4(sink);
+    } else if cmd == "graph topo5" || cmd == "gtopo5" || cmd == "hyper zagreb" || cmd == "ghm1" || cmd == "hm2 index" || cmd == "ghm2" || cmd == "arithmetic geometric" || cmd == "gag" || cmd == "ghm1hm2ag" {
+        super::dispatch_graph_topo_indices5(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
