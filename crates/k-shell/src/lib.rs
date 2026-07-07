@@ -9449,6 +9449,79 @@ pub fn dispatch_graph_topo_indices8(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.20: `graph topo9` — Schultz MTI + Gutman Index + Connective Eccentric Index.
+///   W_S  = Schultz MTI   = Σ_{u<v} (deg(u)+deg(v))×d(u,v)   (exact; Schultz 1989)
+///   W_G  = Gutman index  = Σ_{u<v} deg(u)×deg(v)×d(u,v)     (exact; Gutman 1994)
+///   CξE  = connective eccentric = Σ_v deg(v)/ecc(v) × 10^6   (floor ppm; Gupta et al. 2000)
+/// Disconnected pairs contribute 0. Isolated nodes contribute 0 to CξE.
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn dispatch_graph_topo_indices9(sink: &ConsoleSink) {
+    let (ws, wg, cxe_ppm, edge_count, node_count) =
+        gos_runtime::graph_topo_indices9();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo9  (W_S + W_G + CxiE degree-distance hybrid indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // W_S: Schultz MTI (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  schultz mti      W\u{209b} =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, ws as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} (d\u{1d64}+d\u{1d65})\u{22c5}d(u,v), u<v]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // W_G: Gutman index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  gutman index     W\u{1d33} =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, wg as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} d\u{1d64}\u{22c5}d\u{1d65}\u{22c5}d(u,v), u<v]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // CξE: connective eccentric index (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  conn. eccentric C\u{03be}E =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, cxe_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} deg(v)/ecc(v)]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Schultz 1989  Gutman 1994  Gupta et al. 2000");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -1230,6 +1230,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices7(sink);
     } else if cmd == "graph topo8" || cmd == "gtopo8" || cmd == "eccentric connectivity" || cmd == "geci" || cmd == "graph eci" || cmd == "graph diameter" || cmd == "gdiameter" || cmd == "graph radius" || cmd == "gradius" || cmd == "gecidrc" {
         super::dispatch_graph_topo_indices8(sink);
+    } else if cmd == "graph topo9" || cmd == "gtopo9" || cmd == "schultz mti" || cmd == "gws" || cmd == "gutman index" || cmd == "gwg" || cmd == "connective eccentric" || cmd == "gcxe" || cmd == "gwsgwgcxe" {
+        super::dispatch_graph_topo_indices9(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

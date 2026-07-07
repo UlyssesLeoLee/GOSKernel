@@ -12191,6 +12191,103 @@ impl GraphRuntime {
 
         (wiener, harary_ppm, hyper_wiener, edge_count, nc)
     }
+
+    pub fn graph_topo_indices9_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // Degree-distance hybrid topological indices:
+        //   W_S  = Schultz MTI  = Σ_{u<v} (deg(u)+deg(v)) × d(u,v)   (exact; Schultz 1989)
+        //   W_G  = Gutman index = Σ_{u<v} deg(u)×deg(v)×d(u,v)        (exact; Gutman 1994)
+        //   CξE  = Connective eccentric = Σ_v deg(v)/ecc(v) × 10^6    (floor ppm; Gupta et al. 2000)
+        // Disconnected pairs (d=∞): contribute 0 to W_S and W_G.
+        // Isolated nodes (ecc=0): contribute 0 to CξE (deg=0 as well).
+        // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + degree array.
+        let mut adj       = [0u128; MAX_NODES];
+        let mut deg       = [0u32;  MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                deg[f_ci] += 1;
+                deg[t_ci] += 1;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source; accumulate W_S, W_G over pairs (src < v); record ecc[src].
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+        let mut ecc   = [0u32; MAX_NODES];
+
+        let mut ws: u64 = 0;
+        let mut wg: u64 = 0;
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            let mut max_d = 0u32;
+            for v in 0..nc {
+                if v == src { continue; }
+                let d8 = dist[v];
+                if d8 == INF { continue; }
+                let d = d8 as u64;
+                if d as u32 > max_d { max_d = d as u32; }
+                if v > src {
+                    let ds = (deg[src] as u64) + (deg[v] as u64);
+                    let dp = (deg[src] as u64) * (deg[v] as u64);
+                    ws += ds * d;
+                    wg += dp * d;
+                }
+            }
+            ecc[src] = max_d;
+        }
+
+        // 4. Connective eccentric index CξE = Σ_v deg(v)/ecc(v) × 10^6.
+        let mut cxe_ppm: u64 = 0;
+        for ci in 0..nc {
+            let e = ecc[ci];
+            if e > 0 {
+                cxe_ppm += (deg[ci] as u64) * 1_000_000 / (e as u64);
+            }
+        }
+
+        (ws, wg, cxe_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15035,6 +15132,18 @@ pub fn graph_topo_indices7() -> (u64, u64, u64, usize, usize) {
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices8() -> (u64, u64, u32, u32, usize, usize) {
     RUNTIME.lock().graph_topo_indices8_inner()
+}
+
+/// V3.20: `graph topo9` — Schultz MTI + Gutman Index + Connective Eccentric Index (degree-distance hybrid).
+///
+/// Returns (ws, wg, cxe_ppm, edge_count, node_count).
+///   ws      = W_S(G) = Σ_{u<v} (deg(u)+deg(v))×d(u,v)    (exact u64; Schultz 1989)
+///   wg      = W_G(G) = Σ_{u<v} deg(u)×deg(v)×d(u,v)      (exact u64; Gutman 1994)
+///   cxe_ppm = CξE(G)×10^6 = Σ_v deg(v)/ecc(v) × 10^6     (floor ppm; Gupta et al. 2000)
+/// Disconnected pairs (d=∞) contribute 0. Isolated nodes (ecc=0) contribute 0 to CξE.
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices9() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices9_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
