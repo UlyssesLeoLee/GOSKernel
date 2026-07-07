@@ -9051,6 +9051,88 @@ pub fn dispatch_graph_topo_indices3(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.15: `graph topo4` — Sombor + Reduced Second Zagreb + Sigma degree-based topological indices.
+///   SO  = Gutman 2021 (Sombor index)
+///   RM₂ = Furtula, Gutman & Ediz 2014 (reduced second Zagreb)
+///   σ   = Gutman et al. 2014 (sigma index / total irregularity)
+pub fn dispatch_graph_topo_indices4(sink: &ConsoleSink) {
+    let (so_ppm, rm2, sigma, edge_count, node_count) =
+        gos_runtime::graph_topo_indices4();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo4  (Sombor + RM\u{2082} + Sigma indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // SO index
+        set_color(sink, 8, 0);
+        print_str(sink, "  sombor index       SO  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, so_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} \u{221a}(d\u{00b2}+d\u{00b2})]");
+        if edge_count > 0 && sigma == 0 {
+            set_color(sink, 10, 0); // bright-green: regular annotation
+            print_str(sink, "  (regular)");
+            set_color(sink, 8, 0);
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // RM₂ index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  reduced 2nd zagreb RM\u{2082}=  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, rm2 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{03a3} (d-1)\u{22c5}(d-1)]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // σ index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  sigma index        \u{03c3}   =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, sigma as usize);
+        if sigma == 0 && edge_count > 0 {
+            set_color(sink, 10, 0); // bright-green: regular graph (σ=0)
+            print_str(sink, " (regular: \u{03c3}=0)");
+            set_color(sink, 8, 0);
+        } else {
+            set_color(sink, 8, 0);
+            print_str(sink, "        [\u{03a3} (d-d)\u{00b2}]");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Gutman 2021  Furtula & Ediz 2014  Gutman et al. 2014");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -1220,6 +1220,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices2(sink);
     } else if cmd == "graph topo3" || cmd == "gtopo3" || cmd == "symmetric division deg" || cmd == "gsdd" || cmd == "inverse sum indeg" || cmd == "gisi" || cmd == "nirmala index" || cmd == "gnirmala" || cmd == "gsddisini" {
         super::dispatch_graph_topo_indices3(sink);
+    } else if cmd == "graph topo4" || cmd == "gtopo4" || cmd == "sombor index" || cmd == "gsombor" || cmd == "reduced zagreb" || cmd == "grm2" || cmd == "sigma index" || cmd == "gsigma" || cmd == "gsomborrm2sigma" {
+        super::dispatch_graph_topo_indices4(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
