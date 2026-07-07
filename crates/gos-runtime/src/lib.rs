@@ -12014,6 +12014,106 @@ impl GraphRuntime {
         (em1_acc, abs_acc, rrr_acc, edge_count, nc)
     }
 
+    pub fn graph_topo_indices8_inner(&self) -> (u64, u64, u32, u32, usize, usize) {
+        // Eccentricity-based topological indices:
+        //   ECI = ξ(G) = Σ_v deg(v) × ecc(v)          (exact integer; Sharma, Goswami & Madan 1997)
+        //   avg_ecc_ppm = (Σ_v ecc(v)) / n × 10^6     (floor ppm; Buckley & Harary 1990)
+        //   D = diameter = max_{v} ecc(v)              (0 if nc≤1 or all isolated)
+        //   R = radius   = min{ecc(v) | ecc(v)>0}     (0 if no connected pairs)
+        //
+        // ecc(v) = max BFS distance from v to any reachable node (0 for isolated nodes).
+        // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj  = [0u128; MAX_NODES];
+        let mut deg  = [0u32; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                deg[f_ci] += 1;
+                deg[t_ci] += 1;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source; compute eccentricity ecc[src].
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+        let mut ecc   = [0u32; MAX_NODES];
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            let mut max_d = 0u32;
+            for v in 0..nc {
+                if v == src { continue; }
+                if dist[v] != INF {
+                    let d = dist[v] as u32;
+                    if d > max_d { max_d = d; }
+                }
+            }
+            ecc[src] = max_d;
+        }
+
+        // 4. Compute ECI, avg_ecc_ppm, diameter D, radius R.
+        let mut eci        = 0u64;
+        let mut ecc_sum    = 0u64;
+        let mut diameter   = 0u32;
+        let mut radius     = u32::MAX;
+        let mut has_pos    = false;
+
+        for ci in 0..nc {
+            let e = ecc[ci];
+            eci     += (deg[ci] as u64) * (e as u64);
+            ecc_sum += e as u64;
+            if e > diameter { diameter = e; }
+            if e > 0 {
+                if e < radius { radius = e; }
+                has_pos = true;
+            }
+        }
+        if !has_pos { radius = 0; }
+        let avg_ecc_ppm = if nc == 0 { 0 } else { ecc_sum * 1_000_000 / (nc as u64) };
+
+        (eci, avg_ecc_ppm, diameter, radius, edge_count, nc)
+    }
+
     pub fn graph_topo_indices7_inner(&self) -> (u64, u64, u64, usize, usize) {
         // Distance-based topological indices: Wiener W, Harary H (ppm), Hyper-Wiener WW.
         //   W  = Σ_{u<v} d(u,v)                           (exact; Wiener 1947)
@@ -14921,6 +15021,20 @@ pub fn graph_topo_indices6() -> (u64, u64, u64, usize, usize) {
 /// Disconnected pairs are excluded (d=∞ contributes 0). BFS on undirected projection.
 pub fn graph_topo_indices7() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices7_inner()
+}
+
+/// V3.19: `graph topo8` — eccentricity-based topological indices.
+///
+/// Returns (eci, avg_ecc_ppm, diameter, radius, edge_count, node_count).
+///   eci         = ξ(G) = Σ_v deg(v) × ecc(v)          (exact u64; Sharma, Goswami & Madan 1997)
+///   avg_ecc_ppm = (Σ_v ecc(v)) / n × 10^6             (floor ppm; Buckley & Harary 1990)
+///   diameter    = D(G) = max_{v} ecc(v)                (exact u32; 0 if nc≤1 or all isolated)
+///   radius      = R(G) = min{ecc(v) | ecc(v)>0}       (exact u32; 0 if no connected pairs)
+///
+/// ecc(v) = max BFS distance from v to any reachable node (0 for isolated or single node).
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices8() -> (u64, u64, u32, u32, usize, usize) {
+    RUNTIME.lock().graph_topo_indices8_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

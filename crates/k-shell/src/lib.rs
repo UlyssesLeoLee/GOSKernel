@@ -9361,6 +9361,94 @@ pub fn dispatch_graph_topo_indices7(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.19: `graph topo8` — eccentricity-based topological indices.
+///   ECI      = ξ(G) = Σ_v deg(v) × ecc(v)           (Sharma, Goswami & Madan 1997)
+///   avg_ecc  = (Σ_v ecc(v)) / n                      (Buckley & Harary 1990)
+///   D        = diameter = max eccentricity            (0 if all isolated)
+///   R        = radius   = min positive eccentricity   (0 if no connected pairs)
+/// ecc(v) = max reachable BFS distance from v; 0 for isolated nodes.
+pub fn dispatch_graph_topo_indices8(sink: &ConsoleSink) {
+    let (eci, avg_ecc_ppm, diameter, radius, edge_count, node_count) =
+        gos_runtime::graph_topo_indices8();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo8  (ECI + D + R + avg-ecc eccentricity-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // ECI: eccentric connectivity index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  eccentric conn   \u{03be}  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, eci as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} deg(v)\u{22c5}ecc(v)]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Diameter (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  diameter          D  =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, diameter as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [max ecc(v)]");
+        if diameter == 0 && node_count > 1 {
+            print_str(sink, "  (all isolated)");
+        } else if diameter > 0 && radius == diameter {
+            print_str(sink, "  (self-centered)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Radius (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  radius            R  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, radius as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [min ecc(v)>0]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Average eccentricity (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  avg eccentricity     =  ");
+        set_color(sink, 9, 0); // bright-blue
+        print_ppm3_u64(sink, avg_ecc_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} ecc(v)/n]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Sharma et al. 1997  Buckley & Harary 1990");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

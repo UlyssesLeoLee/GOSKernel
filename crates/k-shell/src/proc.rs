@@ -1228,6 +1228,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices6(sink);
     } else if cmd == "graph topo7" || cmd == "gtopo7" || cmd == "wiener index" || cmd == "gwiener" || cmd == "harary index" || cmd == "gharary" || cmd == "hyper wiener" || cmd == "ghyperw" || cmd == "gwienerhw" {
         super::dispatch_graph_topo_indices7(sink);
+    } else if cmd == "graph topo8" || cmd == "gtopo8" || cmd == "eccentric connectivity" || cmd == "geci" || cmd == "graph eci" || cmd == "graph diameter" || cmd == "gdiameter" || cmd == "graph radius" || cmd == "gradius" || cmd == "gecidrc" {
+        super::dispatch_graph_topo_indices8(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
