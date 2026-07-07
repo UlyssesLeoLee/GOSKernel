@@ -9674,6 +9674,72 @@ pub fn dispatch_graph_topo_indices11(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.23: `graph topo12` — Zagreb eccentricity indices M1* + M2* + M3*.
+///   M1*(G) = Σ_v ecc(v)²                  (exact; Vukičević & Graovac 2010)
+///   M2*(G) = Σ_{uv∈E} ecc(u)×ecc(v)       (exact; Das et al. 2013)
+///   M3*(G) = Σ_{uv∈E} |ecc(u)−ecc(v)|     (exact; Farooq & Ali 2021)
+/// ecc(v) = max BFS distance from v (0 for isolated nodes).
+pub fn dispatch_graph_topo_indices12(sink: &ConsoleSink) {
+    let (m1e, m2e, m3e, edge_count, node_count) =
+        gos_runtime::graph_topo_indices12();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo12 (M1* + M2* + M3* Zagreb eccentricity indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // M1*: First Zagreb eccentricity index (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  first Zagreb ecc.  M1* =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, m1e as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_v ecc(v)\u{00b2}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // M2*: Second Zagreb eccentricity index (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  second Zagreb ecc. M2* =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, m2e as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_{uv\u{2208}E} ecc(u)\u{00d7}ecc(v)]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // M3*: Third Zagreb eccentricity index (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  third Zagreb ecc.  M3* =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, m3e as usize);
+        set_color(sink, 8, 0);
+        if m3e == 0 {
+            print_str(sink, "  [\u{03a3} |ecc(u)\u{2212}ecc(v)|]  (M3*=0: self-centered)");
+        } else {
+            print_str(sink, "  [\u{03a3} |ecc(u)\u{2212}ecc(v)|]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Vukičević & Graovac 2010  Das et al. 2013  Farooq & Ali 2021");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

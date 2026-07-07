@@ -12534,6 +12534,102 @@ impl GraphRuntime {
 
         (j_ppm, ti, piv, edge_count, nc)
     }
+
+    pub fn graph_topo_indices12_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // Zagreb eccentricity indices (BFS on undirected projection):
+        //   m1e  = M1*(G) = Σ_v ecc(v)²                 (exact u64; Vukičević & Graovac 2010)
+        //   m2e  = M2*(G) = Σ_{uv∈E} ecc(u)×ecc(v)      (exact u64; Das et al. 2013)
+        //   m3e  = M3*(G) = Σ_{uv∈E} |ecc(u)−ecc(v)|    (exact u64; Farooq & Ali 2021)
+        //
+        // ecc(v) = max BFS distance from v to any reachable node (0 for isolated).
+        // M3* = 0 iff self-centered (all ecc equal, e.g. Kn, even cycles, K_{r,s}).
+        // M1*(Kn) = n; M2*(Kn) = m; M3*(Kn) = 0.
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source; compute eccentricity ecc[src].
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+        let mut ecc   = [0u64; MAX_NODES]; // 0 for isolated nodes
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            let mut max_d = 0u64;
+            for v in 0..nc {
+                if v != src && dist[v] != INF {
+                    let d = dist[v] as u64;
+                    if d > max_d { max_d = d; }
+                }
+            }
+            ecc[src] = max_d;
+        }
+
+        // 4. M1* (node scan), M2* and M3* (undirected edge scan via a < b).
+        let mut m1e = 0u64;
+        for ci in 0..nc {
+            m1e += ecc[ci] * ecc[ci];
+        }
+
+        let mut m2e = 0u64;
+        let mut m3e = 0u64;
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    m2e += ecc[a] * ecc[b];
+                    m3e += if ecc[a] >= ecc[b] { ecc[a] - ecc[b] } else { ecc[b] - ecc[a] };
+                }
+            }
+        }
+
+        (m1e, m2e, m3e, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15416,6 +15512,19 @@ pub fn graph_topo_indices10() -> (u64, u64, u64, usize, usize) {
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices11() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices11_inner()
+}
+
+/// V3.23 Zagreb eccentricity indices on the current graph.
+///
+/// Returns `(m1e, m2e, m3e, edge_count, node_count)`:
+///   m1e = M1*(G) = Σ_v ecc(v)²                 (exact u64; Vukičević & Graovac 2010)
+///   m2e = M2*(G) = Σ_{uv∈E} ecc(u)×ecc(v)      (exact u64; Das et al. 2013)
+///   m3e = M3*(G) = Σ_{uv∈E} |ecc(u)−ecc(v)|    (exact u64; Farooq & Ali 2021)
+/// ecc(v) = max BFS distance from v to any reachable node (0 for isolated nodes).
+/// M3* = 0 iff self-centered (all ecc equal, e.g. complete graphs, even cycles).
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices12() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices12_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
