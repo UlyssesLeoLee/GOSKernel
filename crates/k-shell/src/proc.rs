@@ -1226,6 +1226,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices5(sink);
     } else if cmd == "graph topo6" || cmd == "gtopo6" || cmd == "reformulated zagreb" || cmd == "gem1" || cmd == "atom bond sum" || cmd == "gabs" || cmd == "reduced reciprocal randic" || cmd == "grrr" || cmd == "gem1absrrr" {
         super::dispatch_graph_topo_indices6(sink);
+    } else if cmd == "graph topo7" || cmd == "gtopo7" || cmd == "wiener index" || cmd == "gwiener" || cmd == "harary index" || cmd == "gharary" || cmd == "hyper wiener" || cmd == "ghyperw" || cmd == "gwienerhw" {
+        super::dispatch_graph_topo_indices7(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

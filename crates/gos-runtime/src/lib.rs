@@ -12013,6 +12013,84 @@ impl GraphRuntime {
 
         (em1_acc, abs_acc, rrr_acc, edge_count, nc)
     }
+
+    pub fn graph_topo_indices7_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // Distance-based topological indices: Wiener W, Harary H (ppm), Hyper-Wiener WW.
+        //   W  = Σ_{u<v} d(u,v)                           (exact; Wiener 1947)
+        //   H  = Σ_{u<v} 1/d(u,v) × 10^6                 (floor ppm; Plavšić et al. 1993)
+        //   WW = (1/2) Σ_{u<v} [d(u,v) + d(u,v)²]        (exact; Klein & Randić 1993)
+        //      = Σ_{u<v} d(u,v)·(d(u,v)+1)/2  (always integer: d·(d+1) is even)
+        // Disconnected pairs (d=∞): contribute 0 to all three indices.
+        // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source; accumulate W, H_ppm, WW over pairs (src < v).
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+
+        let mut wiener:        u64 = 0;
+        let mut harary_ppm:    u64 = 0;
+        let mut hyper_wiener:  u64 = 0;
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            for v in (src + 1)..nc {
+                let d8 = dist[v];
+                if d8 == INF { continue; }
+                let d = d8 as u64;
+                wiener       += d;
+                harary_ppm   += 1_000_000 / d;
+                hyper_wiener += d * (d + 1) / 2;
+            }
+        }
+
+        (wiener, harary_ppm, hyper_wiener, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14834,6 +14912,15 @@ pub fn graph_topo_indices5() -> (u64, u64, u64, usize, usize) {
 ///   rrr_ppm = RRR×10^6  where RRR = Σ_{uv∈E} √((da-1)·(db-1))        (Li & Shi 2008)
 pub fn graph_topo_indices6() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices6_inner()
+}
+
+/// V3.18: `graph topo7` — Wiener W + Harary H + Hyper-Wiener WW distance-based topological indices.
+///   wiener       = W(G)       = Σ_{u<v} d(u,v)                             (Wiener 1947)
+///   harary_ppm   = H(G)×10^6 = Σ_{u<v} 1/d(u,v) × 10^6                   (Plavšić et al. 1993)
+///   hyper_wiener = WW(G)      = (1/2) Σ_{u<v} [d(u,v) + d(u,v)²]          (Klein & Randić 1993)
+/// Disconnected pairs are excluded (d=∞ contributes 0). BFS on undirected projection.
+pub fn graph_topo_indices7() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices7_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

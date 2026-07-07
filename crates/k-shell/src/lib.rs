@@ -9284,6 +9284,83 @@ pub fn dispatch_graph_topo_indices6(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.18: `graph topo7` — Wiener W + Harary H + Hyper-Wiener WW distance-based topological indices.
+///   W  = Wiener 1947        (sum of all pairwise shortest-path distances, exact integer)
+///   H  = Plavšić et al. 1993  (sum of reciprocal distances ×10^6, floor ppm)
+///   WW = Klein & Randić 1993  (hyper-Wiener = (1/2)Σ(d+d²), exact integer)
+/// Disconnected pairs contribute 0. BFS on undirected projection, O(n·(n+m)).
+pub fn dispatch_graph_topo_indices7(sink: &ConsoleSink) {
+    let (wiener, harary_ppm, hyper_wiener, edge_count, node_count) =
+        gos_runtime::graph_topo_indices7();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo7  (W + H + WW distance-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // W: Wiener index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  wiener            W  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, wiener as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{03a3} d(u,v), u<v]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // H: Harary index (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  harary             H  =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, harary_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/d(u,v), u<v]");
+        if node_count > 1 && wiener == 0 {
+            // all pairs disconnected
+            set_color(sink, 8, 0);
+            print_str(sink, "  (disconnected)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // WW: Hyper-Wiener index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  hyper-wiener      WW  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, hyper_wiener as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{bd}\u{03a3}(d+d\u{00b2}), u<v]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Wiener 1947  Plav\u{0161}i\u{0107} et al. 1993  Klein & Randi\u{0107} 1993");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
