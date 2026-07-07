@@ -11929,6 +11929,90 @@ impl GraphRuntime {
 
         (hm1_acc, hm2_acc, ag_acc, edge_count, nc)
     }
+
+    /// V3.17: EM₁ + ABS + RRR degree-based topological indices.
+    ///   em1    = EM₁(G)    where EM₁ = Σ_{uv∈E} (da+db-2)²               (exact u64; Milićević et al. 2004)
+    ///   abs_ppm = ABS×10^6  where ABS = Σ_{uv∈E} √((da+db-2)/(da+db))    (floor isqrt64; Chen et al. 2022)
+    ///   rrr_ppm = RRR×10^6  where RRR = Σ_{uv∈E} √((da-1)·(db-1))        (floor isqrt64; Li & Shi 2008)
+    pub fn graph_topo_indices6_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj = [0u128; MAX_NODES];
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+            }
+        }
+
+        // 3. Undirected degree per compact-index node.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones() as u64;
+        }
+
+        // Integer floor-sqrt via Newton-Raphson.
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        // 4. Scan undirected edges (a < b canonical): accumulate EM₁, ABS, RRR.
+        let mut em1_acc:    u64 = 0;
+        let mut abs_acc:    u64 = 0;
+        let mut rrr_acc:    u64 = 0;
+        let mut edge_count: usize = 0;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b <= a { continue; } // each undirected edge once (a < b)
+
+                let da = deg[a];
+                let db = deg[b];
+                let s  = da + db;       // degree sum
+                let q  = s - 2;         // s − 2  (≥ 0 since da,db ≥ 1 for connected nodes)
+                let p1 = da - 1;        // da − 1 (for RRR)
+                let p2 = db - 1;        // db − 1 (for RRR)
+
+                // EM₁: (da+db-2)² = q²  (exact integer; 0 when both pendant)
+                em1_acc += q * q;
+
+                // ABS: floor(√((s-2)/s) × 10^6) = isqrt64(q × 10^12 / s)
+                // When q=0 (da=db=1 pendant pair): isqrt64(0)=0 naturally (no skip needed).
+                abs_acc += isqrt64(q * 1_000_000_000_000u64 / s);
+
+                // RRR: floor(√((da-1)(db-1)) × 10^6) = isqrt64(p1 × p2 × 10^12)
+                // When da=1 or db=1: p1 or p2=0, isqrt64(0)=0 naturally (no skip needed).
+                rrr_acc += isqrt64(p1 * p2 * 1_000_000_000_000u64);
+
+                edge_count += 1;
+            }
+        }
+
+        (em1_acc, abs_acc, rrr_acc, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -14742,6 +14826,14 @@ pub fn graph_topo_indices4() -> (u64, u64, u64, usize, usize) {
 ///   ag_ppm = AG × 10^6 where AG  = Σ_{uv∈E} (da+db)/(2√(da·db))         (Zheng et al. 2020)
 pub fn graph_topo_indices5() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices5_inner()
+}
+
+/// V3.17: `graph topo6` — EM₁ + ABS + RRR degree-based topological indices (undirected projection).
+///   em1    = EM₁(G)    where EM₁ = Σ_{uv∈E} (da+db-2)²               (Milićević et al. 2004)
+///   abs_ppm = ABS×10^6  where ABS = Σ_{uv∈E} √((da+db-2)/(da+db))    (Chen et al. 2022)
+///   rrr_ppm = RRR×10^6  where RRR = Σ_{uv∈E} √((da-1)·(db-1))        (Li & Shi 2008)
+pub fn graph_topo_indices6() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices6_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

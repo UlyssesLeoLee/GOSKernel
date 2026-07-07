@@ -9209,6 +9209,81 @@ pub fn dispatch_graph_topo_indices5(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.17: `graph topo6` — EM₁ + ABS + RRR degree-based topological indices.
+///   EM₁ = Milićević et al. 2004 (Reformulated First Zagreb, exact integer)
+///   ABS = Chen et al. 2022 (Atom-Bond Sum Connectivity, ppm via isqrt)
+///   RRR = Li & Shi 2008 (Reduced Reciprocal Randić, ppm via isqrt)
+pub fn dispatch_graph_topo_indices6(sink: &ConsoleSink) {
+    let (em1, abs_ppm, rrr_ppm, edge_count, node_count) =
+        gos_runtime::graph_topo_indices6();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo6  (EM\u{2081} + ABS + RRR degree-based indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // EM₁ (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  ref. 1st zagreb  EM\u{2081}=  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, em1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "        [\u{03a3} (d+d-2)\u{00b2}]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // ABS (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  atom-bond sum    ABS =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, abs_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} \u{221a}((d+d-2)/(d+d))]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // RRR (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  red. recip. rand. RRR=  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, rrr_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} \u{221a}((d-1)\u{22c5}(d-1))]");
+        if edge_count > 0 && rrr_ppm == 0 {
+            set_color(sink, 8, 0);
+            print_str(sink, "  (all pendant)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Mili\u{0107}evi\u{0107} et al. 2004  Chen et al. 2022  Li & Shi 2008");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
