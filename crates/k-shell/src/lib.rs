@@ -9522,6 +9522,82 @@ pub fn dispatch_graph_topo_indices9(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.21: `graph topo10` — Szeged Sz + Revised Szeged rSz + Mostar Mo.
+///   Sz  = Σ_{uv∈E} n_u·n_v                             (exact; Gutman & Klavžar 1995)
+///   rSz = Σ_{uv∈E} (n_u+n₀/2)·(n_v+n₀/2) × 10^6      (ppm; Pisanski & Randić 2010)
+///   Mo  = Σ_{uv∈E} |n_u−n_v|                           (exact; Doslić et al. 2018)
+/// n_u, n_v, n₀ = vertex partition counts for each edge's BFS bisection.
+pub fn dispatch_graph_topo_indices10(sink: &ConsoleSink) {
+    let (sz, rsz_ppm, mo, edge_count, node_count) =
+        gos_runtime::graph_topo_indices10();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo10 (Sz + rSz + Mo edge-partition distance indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // Sz: Szeged index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  szeged index   Sz =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, sz as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} n\u{1d64}\u{22c5}n\u{1d65}, uv\u{2208}E]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // rSz: Revised Szeged (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  revised szeged rSz =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, rsz_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} (n\u{1d64}+n\u{2080}/2)\u{22c5}(n\u{1d65}+n\u{2080}/2)]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Mo: Mostar index (exact integer)
+        set_color(sink, 8, 0);
+        print_str(sink, "  mostar index   Mo =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, mo as usize);
+        set_color(sink, 8, 0);
+        if mo == 0 {
+            print_str(sink, "  [\u{03a3} |n\u{1d64}\u{2212}n\u{1d65}|]  (Mo=0: vertex-transitive)");
+        } else {
+            print_str(sink, "  [\u{03a3} |n\u{1d64}\u{2212}n\u{1d65}|]");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Gutman & Klav\u{017e}ar 1995  Pisanski & Randi\u{107} 2010  Dosli\u{107} et al. 2018");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

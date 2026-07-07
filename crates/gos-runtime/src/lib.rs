@@ -12288,6 +12288,124 @@ impl GraphRuntime {
 
         (ws, wg, cxe_ppm, edge_count, nc)
     }
+
+    pub fn graph_topo_indices10_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // Edge-partition distance topological indices (BFS on undirected projection):
+        //   Sz  = Σ_{uv∈E} n_u(uv)·n_v(uv)                        (exact; Gutman & Klavžar 1995)
+        //   rSz = Σ_{uv∈E} (n_u+n₀/2)·(n_v+n₀/2) × 10^6          (floor ppm; Pisanski & Randić 2010)
+        //   Mo  = Σ_{uv∈E} |n_u − n_v|                             (exact; Doslić et al. 2018)
+        // For each undirected edge {a,b} and each vertex w:
+        //   n_u = #{w : d(w,a) < d(w,b)},  n_v = #{w : d(w,a) > d(w,b)},
+        //   n_0 = #{w : d(w,a) = d(w,b)}  (equidistant; only occurs on cycles)
+        // Vertices in other components (both d=∞) excluded; a,b adjacent so same component.
+        // rSz: (n_u+n₀/2)(n_v+n₀/2) may be a quarter-integer; stored as 4·rSz·250_000 = rSz×10^6.
+        // Tree invariant: n₀=0 for every tree edge → Sz = rSz = Wiener index.
+        // Vertex-transitive invariant: n_u = n_v for all edges → Mo = 0.
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+        if edge_count == 0 { return (0, 0, 0, 0, nc); }
+
+        // 3. Build undirected edge list (canonical a < b).
+        let mut ue_a   = [0u8; MAX_EDGES]; // endpoint a (compact index)
+        let mut ue_b   = [0u8; MAX_EDGES]; // endpoint b (compact index)
+        let mut ue_nu  = [0u8; MAX_EDGES]; // n_u per edge (≤nc≤128, fits u8)
+        let mut ue_nv  = [0u8; MAX_EDGES]; // n_v per edge
+        let mut ue_n0  = [0u8; MAX_EDGES]; // n_0 per edge
+        let mut ue_cnt = 0usize;
+
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    ue_a[ue_cnt] = a as u8;
+                    ue_b[ue_cnt] = b as u8;
+                    ue_cnt += 1;
+                }
+            }
+        }
+
+        // 4. BFS from each vertex w; classify w for every undirected edge.
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+
+        for w in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[w] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = w as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+
+            for ei in 0..ue_cnt {
+                let da = dist[ue_a[ei] as usize];
+                let db = dist[ue_b[ei] as usize];
+                // a,b adjacent → same component: both INF (other component) or both finite.
+                if da == INF { continue; }
+                if da < db       { ue_nu[ei] += 1; }
+                else if da > db  { ue_nv[ei] += 1; }
+                else             { ue_n0[ei] += 1; }
+            }
+        }
+
+        // 5. Accumulate Sz, 4·rSz (integer), Mo.
+        let mut sz:    u64 = 0;
+        let mut rsz_4: u64 = 0;
+        let mut mo:    u64 = 0;
+
+        for ei in 0..ue_cnt {
+            let nu = ue_nu[ei] as u64;
+            let nv = ue_nv[ei] as u64;
+            let n0 = ue_n0[ei] as u64;
+            sz    += nu * nv;
+            rsz_4 += (2 * nu + n0) * (2 * nv + n0);
+            mo    += if nu >= nv { nu - nv } else { nv - nu };
+        }
+
+        // rSz_ppm = rSz × 10^6 = (4·rSz) × 250_000.
+        let rsz_ppm = rsz_4 * 250_000;
+        (sz, rsz_ppm, mo, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15144,6 +15262,19 @@ pub fn graph_topo_indices8() -> (u64, u64, u32, u32, usize, usize) {
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices9() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices9_inner()
+}
+
+/// V3.21: `graph topo10` — Szeged Sz + Revised Szeged rSz + Mostar Mo (edge-partition distance).
+///
+/// Returns (sz, rsz_ppm, mo, edge_count, node_count).
+///   sz      = Sz(G)  = Σ_{uv∈E} n_u(uv)·n_v(uv)                    (exact u64; Gutman & Klavžar 1995)
+///   rsz_ppm = rSz(G)×10^6 = Σ_{uv∈E} (n_u+n₀/2)·(n_v+n₀/2)×10^6  (floor ppm; Pisanski & Randić 2010)
+///   mo      = Mo(G)  = Σ_{uv∈E} |n_u − n_v|                         (exact u64; Doslić et al. 2018)
+/// For each edge {u,v}: n_u=#{w:d(w,u)<d(w,v)}, n_v=#{w:d(w,u)>d(w,v)}, n₀=equidistant count.
+/// Tree invariant: n₀=0 for all tree edges → Sz = rSz = Wiener index.
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices10() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices10_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
