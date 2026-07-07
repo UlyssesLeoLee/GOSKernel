@@ -9598,6 +9598,82 @@ pub fn dispatch_graph_topo_indices10(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.22: `graph topo11` — Balaban J + Transmission Irregularity TI + Vertex PI.
+///   J     = (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v)  (ppm; Balaban 1982)
+///   TI    = Σ_{uv∈E} |T_u − T_v|             (exact; Abdo & Dimitrov 2014)
+///   PI_v  = Σ_{uv∈E} (T_u + T_v)             (exact; Khalifeh et al. 2008)
+/// T_v = vertex transmittance = Σ_{w reachable} d(v,w).
+pub fn dispatch_graph_topo_indices11(sink: &ConsoleSink) {
+    let (j_ppm, ti, piv, edge_count, node_count) =
+        gos_runtime::graph_topo_indices11();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo11 (J + TI + PI_v transmission indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // J: Balaban J connectivity index (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  balaban J      J =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, j_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [(m/\u{03bc}) \u{03a3} 1/\u{221a}(T\u{1d64}\u{22c5}T\u{1d65})]");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // TI: Transmission Irregularity (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  transmis. irr. TI =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, ti as usize);
+        set_color(sink, 8, 0);
+        if ti == 0 {
+            print_str(sink, "  [\u{03a3} |T\u{1d64}\u{2212}T\u{1d65}|]  (TI=0: transmission-regular)");
+        } else {
+            print_str(sink, "  [\u{03a3} |T\u{1d64}\u{2212}T\u{1d65}|]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // PI_v: Vertex PI index (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  vertex PI    PI_v =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, piv as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3} (T\u{1d64}+T\u{1d65})]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Balaban 1982  Abdo & Dimitrov 2014  Khalifeh et al. 2008");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -12406,6 +12406,134 @@ impl GraphRuntime {
         let rsz_ppm = rsz_4 * 250_000;
         (sz, rsz_ppm, mo, edge_count, nc)
     }
+
+    pub fn graph_topo_indices11_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // Transmission-based topological indices (BFS on undirected projection):
+        //   j_ppm  = J(G)  × 10^6  (floor ppm; Balaban 1982)
+        //          J = (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v)
+        //          μ = max(1, m − n + 2)  (cyclomatic number proxy; avoids ÷0)
+        //          T_v = Σ_{w reachable} d(v,w)  (vertex transmittance)
+        //   ti     = TI(G) = Σ_{uv∈E} |T_u − T_v|  (exact; Abdo & Dimitrov 2014)
+        //   piv    = PI_v(G) = Σ_{uv∈E} (T_u + T_v) (exact; Khalifeh et al. 2008)
+        //          equivalently PI_v = Σ_v deg(v)·T_v
+        // T_v = 0 iff v is isolated (no finite-distance reachable nodes other than self,
+        //   but since {u,v} is an edge both T_u ≥ 1 and T_v ≥ 1 for any live edge).
+        // J contribution per edge: isqrt64(10^12/(T_u·T_v)) — uses identity
+        //   floor(10^6/√x) = floor(√(10^12/x)) valid for positive integer x.
+        // Disconnected: T_v counts only within-component distances (BFS only
+        //   reaches the same component); J uses μ = max(1, m−n+2) globally.
+
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+        if edge_count == 0 { return (0, 0, 0, 0, nc); }
+
+        // 3. Build undirected edge list (canonical a < b).
+        let mut ue_a   = [0u8; MAX_EDGES];
+        let mut ue_b   = [0u8; MAX_EDGES];
+        let mut ue_cnt = 0usize;
+        for a in 0..nc {
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    ue_a[ue_cnt] = a as u8;
+                    ue_b[ue_cnt] = b as u8;
+                    ue_cnt += 1;
+                }
+            }
+        }
+
+        // 4. BFS from each vertex to compute T[v] = Σ_{w reachable} d(v,w).
+        const INF: u8 = 255;
+        let mut trans = [0u64; MAX_NODES]; // T[ci] = vertex transmittance
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            for v in 0..nc {
+                if v != src && dist[v] != INF {
+                    trans[src] += dist[v] as u64;
+                }
+            }
+        }
+
+        // 5. Accumulate J (raw_sum), TI, PI_v over undirected edges.
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        let mut j_raw: u64 = 0; // Σ floor(10^6/√(T_a·T_b)) per edge
+        let mut ti:    u64 = 0;
+        let mut piv:   u64 = 0;
+
+        for ei in 0..ue_cnt {
+            let ta = trans[ue_a[ei] as usize];
+            let tb = trans[ue_b[ei] as usize];
+            // ta,tb ≥ 1 since endpoints are in same connected component.
+            let prod = ta * tb;
+            // floor(10^6/√(ta·tb)) = floor(√(10^12/(ta·tb))) via isqrt64.
+            if prod > 0 {
+                let ratio = 1_000_000_000_000u64 / prod;
+                j_raw += isqrt64(ratio);
+            }
+            ti  += if ta >= tb { ta - tb } else { tb - ta };
+            piv += ta + tb;
+        }
+
+        // J_ppm = (m/μ) × raw_sum; μ = max(1, m − n + 2).
+        let mu = if edge_count + 2 > nc { (edge_count + 2 - nc) as u64 } else { 1u64 };
+        let j_ppm = j_raw * edge_count as u64 / mu;
+
+        (j_ppm, ti, piv, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15275,6 +15403,19 @@ pub fn graph_topo_indices9() -> (u64, u64, u64, usize, usize) {
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices10() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices10_inner()
+}
+
+/// V3.22 transmission-based topological indices on the current graph.
+///
+/// Returns `(j_ppm, ti, piv, edge_count, node_count)`:
+///   j_ppm = J(G) × 10^6  (floor ppm; Balaban 1982)
+///           J = (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v)
+///           μ = max(1, m−n+2); T_v = Σ_{w reachable} d(v,w)
+///   ti    = TI(G) = Σ_{uv∈E} |T_u − T_v|  (exact u64; Abdo & Dimitrov 2014)
+///   piv   = PI_v(G) = Σ_{uv∈E} (T_u + T_v)  (exact u64; Khalifeh et al. 2008)
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices11() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices11_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
