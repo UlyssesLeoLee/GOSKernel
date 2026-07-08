@@ -13109,6 +13109,112 @@ impl GraphRuntime {
 
         (mbar1, mbar2, fbar, edge_count, nc)
     }
+
+    // ── V3.29: Neighborhood Zagreb NM₁ + NM₂ + GA₂ ──────────────────────────
+    //
+    // Let S(v) = Σ_{u∈N(v)} deg(u)  (sum of neighbor degrees; "2nd-order degree").
+    //
+    // NM₁(G) = Σ_v S(v)²                                          (Mondal et al. 2019)
+    // NM₂(G) = Σ_{uv∈E} S(u)·S(v)                                (Mondal et al. 2019)
+    // GA₂(G) = Σ_{uv∈E} 2√(S(u)·S(v))/(S(u)+S(v))              (neighborhood GA)
+    //
+    // KEY INVARIANTS:
+    //   NM₁=NM₂=GA₂=0 for empty graph or all-isolated nodes (S(v)=0 everywhere).
+    //   GA₂ = |E| × 10^6  when all S(v) are equal (S-uniform graph).
+    //   NM₁=NM₂=GA₂=0 for single isolated node.
+    //
+    // S-UNIFORM EXAMPLES (all S equal):
+    //   P₃: S(A)=S(B)=S(C)=2; K₃: S(v)=4; K₄: S(v)=9; K_{1,4}: S(v)=4; K_{2,3}: S(v)=6.
+    //
+    // Algorithm: O(V+E) — compute S(v) from adj+deg, then edge scan.
+    // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) + sv[128](u64=1KB) ≈ 4KB total.
+    pub fn graph_topo_indices18_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. S(v) = Σ_{u∈N(v)} deg(u): neighbor-degree sum.
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Newton-Raphson integer square root for u128 (no float, no_std safe).
+        //    S(v) ≤ Δ·(n-1) ≤ 127·127 = 16129; 4·S_u·S_v·10^12 ≤ 4·16129²·10^12 ≈ 10^21 — fits u128.
+        fn isqrt128(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // 6. NM₁ (node scan) + NM₂ + GA₂ (undirected edge scan a < b).
+        let mut nm1 = 0u64;
+        let mut nm2 = 0u64;
+        let mut ga2 = 0u64;
+
+        for ci in 0..nc {
+            nm1 += sv[ci] * sv[ci];
+        }
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb = sv[b];
+                    nm2 += sa * sb;
+                    let s_sum = sa + sb;
+                    if s_sum > 0 {
+                        // GA₂ per edge = floor(2√(sa·sb)/(sa+sb) × 10^6)
+                        //              = isqrt128(4·sa·sb·10^12) / (sa+sb)
+                        let p = 4u128 * sa as u128 * sb as u128 * 1_000_000_000_000u128;
+                        ga2 += (isqrt128(p) / s_sum as u128) as u64;
+                    }
+                }
+            }
+        }
+
+        (nm1, nm2, ga2, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16064,6 +16170,19 @@ pub fn graph_topo_indices16() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) degree scan; no BFS needed.
 pub fn graph_topo_indices17() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices17_inner()
+}
+
+/// V3.29: `graph topo18` — NM₁ + NM₂ + GA₂ Neighborhood Zagreb indices.
+///
+///   Returns (nm1, nm2, ga2_ppm, edge_count, node_count).
+///   Let S(v) = Σ_{u∈N(v)} deg(u)  (neighbor-degree sum; "2nd-order degree").
+///   NM₁(G) = Σ_v S(v)²                                       (Mondal et al. 2019)
+///   NM₂(G) = Σ_{uv∈E} S(u)·S(v)                             (Mondal et al. 2019)
+///   GA₂(G) × 10^6 = Σ_{uv∈E} floor(2√(S(u)·S(v))/(S(u)+S(v)) × 10^6)
+/// GA₂ = |E| × 10^6 when all S(v) are equal (S-uniform: K_n, K_{r,s}, K_{1,k}).
+/// Algorithm: O(V+E) — neighbor-degree-sum pass then edge scan; no BFS needed.
+pub fn graph_topo_indices18() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices18_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

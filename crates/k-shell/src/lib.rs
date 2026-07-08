@@ -10112,6 +10112,84 @@ pub fn dispatch_graph_topo_indices17(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.29: `graph topo18` — NM₁ + NM₂ + GA₂ Neighborhood Zagreb indices.
+///   S(v) = Σ_{u∈N(v)} deg(u): neighbor-degree sum ("2nd-order degree").
+///   NM₁(G) = Σ_v S(v)²
+///   NM₂(G) = Σ_{uv∈E} S(u)·S(v)
+///   GA₂(G) = Σ_{uv∈E} 2√(S(u)·S(v))/(S(u)+S(v))   (ppm; S-uniform → =|E|×10^6)
+pub fn dispatch_graph_topo_indices18(sink: &ConsoleSink) {
+    let (nm1, nm2, ga2_ppm, edge_count, node_count) =
+        gos_runtime::graph_topo_indices18();
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo18 (NM\u{2081} + NM\u{2082} + GA\u{2082} Neighborhood Zagreb)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        let uniform = ga2_ppm == (edge_count as u64) * 1_000_000 && edge_count > 0;
+
+        // NM₁: first Neighborhood Zagreb (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  1st neighborhood    NM\u{2081} =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nm1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_v S(v)\u{00b2}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NM₂: second Neighborhood Zagreb (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  2nd neighborhood    NM\u{2082} =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nm2 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_{uv\u{2208}E} S(u)\u{00b7}S(v)]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // GA₂: Neighborhood Geometric-Arithmetic (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighborhood GA     GA\u{2082} =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, ga2_ppm);
+        set_color(sink, 8, 0);
+        if uniform {
+            print_str(sink, "   [\u{03a3} 2\u{221a}(S\u{00b7}S)/(S+S)]  (=|E|\u{00d7}1: S-uniform)");
+        } else {
+            print_str(sink, "   [\u{03a3} 2\u{221a}(S_u\u{00b7}S_v)/(S_u+S_v)]  (ppm)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Mondal et al. 2019");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
