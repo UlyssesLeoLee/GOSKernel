@@ -9816,6 +9816,82 @@ pub fn dispatch_graph_topo_indices13(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.25: `graph topo14` — TE + EDS + GEA eccentricity-based indices.
+///   TE(G)  = Σ_v ecc(v)                                    (exact; Dankelmann et al. 2004)
+///   EDS(G) = Σ_v ecc(v)·T_v                                (exact; Gupta et al. 2008)
+///   GEA(G) = Σ_{uv∈E} 2√(ecc(u)·ecc(v))/(ecc(u)+ecc(v)) × 10^6 (floor ppm)
+/// GEA = |E|×10^6 iff graph is self-centered (all eccentricities equal).
+pub fn dispatch_graph_topo_indices14(sink: &ConsoleSink) {
+    let (te, eds, gea, edge_count, node_count) =
+        gos_runtime::graph_topo_indices14();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo14 (TE + EDS + GEA eccentricity indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // TE: total eccentricity (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  total eccentricity    TE  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, te as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_v ecc(v)]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // EDS: eccentric distance sum (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  eccentric dist. sum   EDS =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, eds as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "  [\u{03a3}_v ecc(v)\u{00b7}T_v]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // GEA: geometric-arithmetic eccentricity index (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  geom-arith. ecc.     GEA =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, gea);
+        set_color(sink, 8, 0);
+        if gea == (edge_count as u64) * 1_000_000 && edge_count > 0 {
+            print_str(sink, "  [\u{03a3} 2\u{221a}(ea\u{00b7}eb)/(ea+eb)]  (self-centered)");
+        } else {
+            print_str(sink, "  [\u{03a3} 2\u{221a}(ea\u{00b7}eb)/(ea+eb)]  (ppm)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Dankelmann et al. 2004  Gupta et al. 2008");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

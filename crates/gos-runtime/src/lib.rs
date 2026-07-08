@@ -10226,9 +10226,6 @@ impl GraphRuntime {
 
         let mut path      = [0u8;   MAX_NODES];
         let mut cand      = [0u128; MAX_NODES];
-        let mut depth     = 0usize;
-        let mut visited   = 0u128;
-
         let mut has_circuit = false;
         let mut has_path    = false;
         let mut best_path   = [0u8;  MAX_NODES];
@@ -10239,10 +10236,10 @@ impl GraphRuntime {
         'start_loop: for start_ci in 0..nc {
             if has_circuit { break; }
 
+            let mut depth    = 1usize;
+            let mut visited  = 1u128 << start_ci;
             path[0]  = start_ci as u8;
-            visited  = 1u128 << start_ci;
             cand[0]  = adj[start_ci] & !visited;
-            depth    = 1;
 
             'inner: loop {
                 steps += 1;
@@ -12745,6 +12742,121 @@ impl GraphRuntime {
         }
 
         (tm1, tm2, ga_t, edge_count, nc)
+    }
+
+    pub fn graph_topo_indices14_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source: compute ecc(v) and T_v simultaneously.
+        //    ecc(v) = max BFS distance to any reachable node (0 for isolated).
+        //    T_v    = vertex transmission = Σ_{w reachable, w≠v} d(v,w).
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+        let mut ecc   = [0u8;  MAX_NODES];
+        let mut trans = [0u64; MAX_NODES];
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            let mut max_d = 0u8;
+            let mut tv   = 0u64;
+            for v in 0..nc {
+                if v != src && dist[v] != INF {
+                    if dist[v] > max_d { max_d = dist[v]; }
+                    tv += dist[v] as u64;
+                }
+            }
+            ecc[src]   = max_d;
+            trans[src] = tv;
+        }
+
+        // 4. Newton-Raphson isqrt64 (no float, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // 5. Node scan: TE = Σ_v ecc(v);  EDS = Σ_v ecc(v)·T_v.
+        let mut te  = 0u64;
+        let mut eds = 0u64;
+        for ci in 0..nc {
+            let e = ecc[ci] as u64;
+            te  += e;
+            eds += e * trans[ci];
+        }
+
+        // 6. Edge scan (a < b): GEA = Σ_{uv∈E} 2√(ecc(u)·ecc(v))/(ecc(u)+ecc(v)) × 10^6.
+        //    Per edge: isqrt64(4·ea·eb·10^12) / (ea+eb).
+        //    4·ea·eb·10^12 ≤ 4·127²·10^12 ≈ 6.5×10^16 < u64::MAX — no overflow.
+        //    GEA = |E|×10^6 iff graph is self-centered (all ecc equal, AM=GM).
+        let mut gea = 0u64;
+        for a in 0..nc {
+            let ea = ecc[a] as u64;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let eb = ecc[b] as u64;
+                    if ea > 0 && eb > 0 {
+                        let s = ea + eb;
+                        let p = 4 * ea * eb * 1_000_000_000_000u64;
+                        gea += isqrt64(p) / s;
+                    }
+                }
+            }
+        }
+
+        (te, eds, gea, edge_count, nc)
     }
 }
 
@@ -15652,6 +15764,17 @@ pub fn graph_topo_indices12() -> (u64, u64, u64, usize, usize) {
 /// GA_t = |E|×10^6 iff all nodes have equal transmission.
 pub fn graph_topo_indices13() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices13_inner()
+}
+
+/// V3.25: Eccentricity-based topological indices — TE + EDS + GEA.
+///   Returns (te, eds, gea_ppm, edge_count, node_count)
+///   te      = TE(G)  = Σ_v ecc(v)                                    (exact u64; Dankelmann et al. 2004)
+///   eds     = EDS(G) = Σ_v ecc(v)·T_v                                (exact u64; Gupta et al. 2008)
+///   gea_ppm = GEA(G) × 10^6 = Σ_{uv∈E} 2√(ecc(u)·ecc(v))/(ecc(u)+ecc(v)) (floor ppm)
+/// ecc(v)=max BFS distance from v (0 for isolated). T_v=vertex transmission.
+/// GEA = |E|×10^6 iff graph is self-centered (all ecc equal).
+pub fn graph_topo_indices14() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices14_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

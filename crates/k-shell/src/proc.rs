@@ -1240,6 +1240,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices12(sink);
     } else if cmd == "graph topo13" || cmd == "gtopo13" || cmd == "transmission zagreb" || cmd == "gtm1tm2" || cmd == "tm1 index" || cmd == "gtm1" || cmd == "tm2 index" || cmd == "gtm2" || cmd == "geometric arithmetic transmission" || cmd == "ggat" || cmd == "gtm1tm2gat" {
         super::dispatch_graph_topo_indices13(sink);
+    } else if cmd == "graph topo14" || cmd == "gtopo14" || cmd == "total eccentricity" || cmd == "gte" || cmd == "eccentric distance sum" || cmd == "geds" || cmd == "geometric arithmetic eccentricity" || cmd == "ggea" || cmd == "gteedsge" || cmd == "gteedsegea" {
+        super::dispatch_graph_topo_indices14(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))
