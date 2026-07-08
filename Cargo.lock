@@ -374,6 +374,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "k-rope"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "libm",
+]
+
+[[package]]
 name = "k-serial"
 version = "0.2.0"
 dependencies = [

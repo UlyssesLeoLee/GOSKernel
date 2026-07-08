@@ -12858,6 +12858,95 @@ impl GraphRuntime {
 
         (te, eds, gea, edge_count, nc)
     }
+
+    pub fn graph_topo_indices15_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. BFS from each source: compute d2[src] = |{w : d(src,w) = 2}|.
+        //    d2(v) = 2-distance degree (Naji, Soner & Gutman 2017).
+        const INF: u8 = 255;
+        let mut dist  = [INF; MAX_NODES];
+        let mut queue = [0u8; MAX_NODES];
+        let mut d2    = [0u32; MAX_NODES];
+
+        for src in 0..nc {
+            for i in 0..nc { dist[i] = INF; }
+            dist[src] = 0;
+            let mut qhead = 0usize;
+            let mut qtail = 0usize;
+            queue[qtail] = src as u8; qtail += 1;
+            while qhead < qtail {
+                let cur   = queue[qhead] as usize; qhead += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if dist[nb] == INF {
+                        dist[nb] = d_cur + 1;
+                        queue[qtail] = nb as u8; qtail += 1;
+                    }
+                }
+            }
+            let mut cnt2 = 0u32;
+            for v in 0..nc {
+                if dist[v] == 2 { cnt2 += 1; }
+            }
+            d2[src] = cnt2;
+        }
+
+        // 4. Node scan: LM1 = Σ_v d2(v)².
+        let mut lm1 = 0u64;
+        for ci in 0..nc {
+            let d = d2[ci] as u64;
+            lm1 += d * d;
+        }
+
+        // 5. Edge scan (a < b): LM2 = Σ_{uv∈E} d2(u)·d2(v); LM3 = Σ_{uv∈E} (d2(u)+d2(v)).
+        let mut lm2 = 0u64;
+        let mut lm3 = 0u64;
+        for a in 0..nc {
+            let da = d2[a] as u64;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let db = d2[b] as u64;
+                    lm2 += da * db;
+                    lm3 += da + db;
+                }
+            }
+        }
+
+        (lm1, lm2, lm3, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15775,6 +15864,18 @@ pub fn graph_topo_indices13() -> (u64, u64, u64, usize, usize) {
 /// GEA = |E|×10^6 iff graph is self-centered (all ecc equal).
 pub fn graph_topo_indices14() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices14_inner()
+}
+
+/// V3.26: Leap Zagreb indices — LM₁ + LM₂ + LM₃.
+///   Returns (lm1, lm2, lm3, edge_count, node_count)
+///   lm1 = LM₁(G) = Σ_v d₂(v)²                          (exact u64; Naji et al. 2017)
+///   lm2 = LM₂(G) = Σ_{uv∈E} d₂(u)·d₂(v)               (exact u64)
+///   lm3 = LM₃(G) = Σ_{uv∈E} (d₂(u)+d₂(v))             (exact u64)
+/// d₂(v) = |{w : d(v,w) = 2}| = 2-distance degree.
+/// LM₁=LM₂=LM₃=0 for complete graphs (d₂=0 everywhere; all pairs adjacent).
+/// BFS on undirected projection, O(n·(n+m)).
+pub fn graph_topo_indices15() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices15_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

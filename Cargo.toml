@@ -40,4 +40,5 @@ members = [
     "crates/k-core",
     "crates/k-chat",
     "crates/k-nim",
+    "crates/k-rope",
 ]
