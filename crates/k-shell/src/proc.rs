@@ -1244,6 +1244,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices14(sink);
     } else if cmd == "graph topo15" || cmd == "gtopo15" || cmd == "leap zagreb" || cmd == "gleapzagreb" || cmd == "lm1 index" || cmd == "glm1" || cmd == "lm2 index" || cmd == "glm2" || cmd == "lm3 index" || cmd == "glm3" || cmd == "glm1lm2lm3" {
         super::dispatch_graph_topo_indices15(sink);
+    } else if cmd == "graph topo16" || cmd == "gtopo16" || cmd == "product connectivity" || cmd == "gpc" || cmd == "reciprocal randic" || cmd == "grr" || cmd == "lanzhou index" || cmd == "glz" || cmd == "gpcrrlz" {
+        super::dispatch_graph_topo_indices16(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

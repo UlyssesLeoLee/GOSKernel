@@ -9959,6 +9959,83 @@ pub fn dispatch_graph_topo_indices15(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.27: `graph topo16` — R_{1/2} + R_{-1} + Lanzhou Lz generalized Randić family.
+///   ir_ppm = R_{1/2}(G)×10^6 = Σ_{uv∈E} √(d_u·d_v)×10^6  (Product Connectivity; Bollobás & Erdős 1998)
+///   rr_ppm = R_{-1}(G)×10^6  = Σ_{uv∈E} 10^6/(d_u·d_v)   (Reciprocal Randić; Bollobás & Erdős 1998)
+///   lz     = Lz(G) = Σ_v d_v²·(n−1−d_v)                   (Lanzhou Index; Xia et al. 2019)
+/// IR = m·Δ·10^6 iff Δ-regular; RR = m·10^6/Δ² iff Δ-regular; Lz=0 for complete graphs.
+pub fn dispatch_graph_topo_indices16(sink: &ConsoleSink) {
+    let (ir_ppm, rr_ppm, lz, edge_count, node_count) =
+        gos_runtime::graph_topo_indices16();
+
+    // Print a u64 ppm value as "X.XXX" (3 decimal places).
+    fn print_ppm3(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10   { print_str(sink, "00"); }
+        else if frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo16 (R\u{2081}\u{2082} + R\u{208b}\u{2081} + Lz generalized Rand\u{00ed}c family)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // IR = R_{1/2} (Product Connectivity)
+        set_color(sink, 8, 0);
+        print_str(sink, "  product connect.  R\u{2081}\u{2082} =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3(sink, ir_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}\u{221a}(d\u{22c5}d)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // RR = R_{-1} (Reciprocal Randic)
+        set_color(sink, 8, 0);
+        print_str(sink, "  reciprocal rand.  R\u{208b}\u{2081} =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3(sink, rr_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/(d\u{22c5}d)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Lz = Lanzhou Index
+        set_color(sink, 8, 0);
+        print_str(sink, "  lanzhou index       Lz =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, lz as usize);
+        set_color(sink, 8, 0);
+        if lz == 0 && edge_count > 0 {
+            print_str(sink, "  [\u{03a3}_v d\u{00b2}(n\u{2212}1\u{2212}d)]  (Lz=0: complete graph)");
+        } else {
+            print_str(sink, "  [\u{03a3}_v d\u{00b2}(n\u{2212}1\u{2212}d)]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Bollob\u{00e1}s & Erd\u{0151}s 1998  Xia et al. 2019");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

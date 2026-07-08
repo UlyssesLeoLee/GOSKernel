@@ -12947,6 +12947,86 @@ impl GraphRuntime {
 
         (lm1, lm2, lm3, edge_count, nc)
     }
+
+    pub fn graph_topo_indices16_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Newton-Raphson integer sqrt (no float, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // 4. Degree array from adj bitmasks.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            deg[ci] = adj[ci].count_ones() as u64;
+        }
+
+        // 5. Node scan: Lz(G) = Σ_v d_v²·(n−1−d_v)  (Xia et al. 2019 Lanzhou Index).
+        //    d_v ≤ nc−1 by construction → (nf−1−d) ≥ 0 always.
+        let mut lz = 0u64;
+        let nf = nc as u64;
+        for ci in 0..nc {
+            let d = deg[ci];
+            lz += d * d * (nf - 1 - d);
+        }
+
+        // 6. Edge scan (a < b):
+        //    ir_ppm = R_{1/2}(G)×10^6 = Σ_{uv∈E} √(d_u·d_v)×10^6    (Product Connectivity; Bollobás & Erdős 1998)
+        //    rr_ppm = R_{-1}(G)×10^6  = Σ_{uv∈E} ⌊10^6/(d_u·d_v)⌋   (Reciprocal Randić; floor)
+        //    Overflow guard: d_u·d_v ≤ 127²=16_129; 16_129×10^12 < u64::MAX — safe.
+        let mut ir_ppm = 0u64;
+        let mut rr_ppm = 0u64;
+        for a in 0..nc {
+            let da = deg[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let db = deg[b];
+                    let p  = da * db;
+                    ir_ppm += isqrt64(p * 1_000_000_000_000u64);
+                    if p > 0 { rr_ppm += 1_000_000 / p; }
+                }
+            }
+        }
+
+        (ir_ppm, rr_ppm, lz, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15876,6 +15956,19 @@ pub fn graph_topo_indices14() -> (u64, u64, u64, usize, usize) {
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices15() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices15_inner()
+}
+
+/// V3.27: Generalized Randić family — R_{1/2} + R_{-1} + Lanzhou Lz.
+///   Returns (ir_ppm, rr_ppm, lz, edge_count, node_count)
+///   ir_ppm = R_{1/2}(G)×10^6 = Σ_{uv∈E} √(d_u·d_v)×10^6  (floor ppm; Bollobás & Erdős 1998)
+///   rr_ppm = R_{-1}(G)×10^6  = Σ_{uv∈E} ⌊10^6/(d_u·d_v)⌋ (floor ppm; Bollobás & Erdős 1998)
+///   lz     = Lz(G) = Σ_v d_v²·(n−1−d_v)                   (exact u64; Xia et al. 2019)
+/// R_{1/2} (Product Connectivity) ≥ m always; = m·Δ for Δ-regular (ppm = m·Δ·10^6).
+/// R_{-1} (Reciprocal Randić) ≤ m always; = m/Δ² for Δ-regular.
+/// Lz = 0 for complete graphs (n−1−d=0); = 0 for empty graphs.
+/// Algorithm: O(V+E) degree scan; no BFS needed.
+pub fn graph_topo_indices16() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices16_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
