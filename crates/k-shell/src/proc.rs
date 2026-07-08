@@ -1250,6 +1250,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices17(sink);
     } else if cmd == "graph topo18" || cmd == "gtopo18" || cmd == "neighborhood zagreb" || cmd == "gnm1nm2" || cmd == "nm1 index" || cmd == "gnm1" || cmd == "nm2 index" || cmd == "gnm2" || cmd == "neighborhood ga" || cmd == "gga2" || cmd == "gnm1nm2ga2" {
         super::dispatch_graph_topo_indices18(sink);
+    } else if cmd == "graph topo19" || cmd == "gtopo19" || cmd == "reverse wiener" || cmd == "grw" || cmd == "reciprocal complementary wiener" || cmd == "grcw" || cmd == "terminal wiener" || cmd == "gtw" || cmd == "grwrcwtw" {
+        super::dispatch_graph_topo_indices19(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

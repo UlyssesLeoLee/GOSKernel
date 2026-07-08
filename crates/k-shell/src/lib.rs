@@ -10190,6 +10190,85 @@ pub fn dispatch_graph_topo_indices18(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.30: `graph topo19` — Reverse Wiener Λ + Reciprocal Complementary Wiener RCW + Terminal Wiener TW.
+///   Λ(G)   = Σ_c [C(n_c,2) × D_c − W_c]                   (exact; Randić et al. 2000)
+///   RCW(G) = Σ_{u<v,conn} 1/(D_c+1−d(u,v))                (ppm; Vukičević 2010)
+///   TW(G)  = Σ_{u<v, both pendant (deg=1)} d(u,v)          (exact; Gutman et al. 2004)
+pub fn dispatch_graph_topo_indices19(sink: &ConsoleSink) {
+    let (rw, rcw_ppm, tw, edge_count, node_count) =
+        gos_runtime::graph_topo_indices19();
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo19 (\u{039b} + RCW + TW Wiener variants)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // Reverse Wiener Λ
+        set_color(sink, 8, 0);
+        print_str(sink, "  reverse wiener    \u{039b}   =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, rw as usize);
+        set_color(sink, 8, 0);
+        if rw == 0 {
+            print_str(sink, "  [\u{03a3}_c C(n_c,2)\u{00d7}D_c−W_c]  (\u{039b}=0: complete blocks)");
+        } else {
+            print_str(sink, "  [\u{03a3}_c C(n_c,2)\u{00d7}D_c−W_c]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Reciprocal Complementary Wiener RCW (ppm)
+        set_color(sink, 8, 0);
+        print_str(sink, "  reciprocal compl   RCW =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, rcw_ppm);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/(D_c+1−d)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Terminal Wiener TW
+        set_color(sink, 8, 0);
+        print_str(sink, "  terminal wiener    TW  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, tw as usize);
+        set_color(sink, 8, 0);
+        if tw == 0 {
+            print_str(sink, "  [\u{03a3}_{pend pairs} d]  (TW=0: no pendant pairs)");
+        } else {
+            print_str(sink, "  [\u{03a3}_{u,v pendant} d(u,v)]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Randi\u{0107} et al. 2000  Vuki\u{010d}evi\u{0107} 2010  Gutman et al. 2004");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

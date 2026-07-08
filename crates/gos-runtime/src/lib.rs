@@ -13215,6 +13215,178 @@ impl GraphRuntime {
 
         (nm1, nm2, ga2, edge_count, nc)
     }
+
+    // ── V3.30: Reverse Wiener Λ + Reciprocal Complementary Wiener RCW + Terminal Wiener TW ─
+    //
+    // Λ(G)   = Σ_c [C(n_c,2) × D_c − W_c]                          (exact u64; Randić et al. 2000)
+    //        = Σ_c [n_c(n_c-1)/2 × diam_c − Σ_{u<v in c} d(u,v)]
+    //        = 0 iff all components have diam=1 (K_n blocks) or are singletons.
+    //
+    // RCW(G) = Σ_{u<v, connected} floor(10^6/(D_c+1-d(u,v)))         (floor ppm)
+    //        complementary denominator D_c+1-d is maximised at d=1 (→D/1 fractional)
+    //        and equals 1 at d=D_c (→1_000_000 floor).
+    //        For complete K_n (D=1): all d=1 → denom=1 → each pair contributes 10^6.
+    //
+    // TW(G)  = Σ_{u<v, both pendant (deg=1)} d(u,v)                  (exact u64; Gutman et al. 2004)
+    //        = 0 iff fewer than 2 pendant nodes in the graph.
+    //
+    // DISCONNECTED GRAPHS: each component c contributes independently.
+    //   Λ: per-component C(n_c,2)×D_c − W_c (isolates: C(1,2)=0, contribution=0).
+    //   RCW: pairs within the same component only; per-component D_c.
+    //   TW: pendant pairs across the whole graph (regardless of component).
+    //
+    // ALGORITHM: two BFS phases O(n(n+m)) total.
+    //   Phase 0: component detection O(V+E).
+    //   Phase 1: BFS from each node → ecc[], comp_wiener[], TW.
+    //   Phase 2: BFS from each node → RCW (needs per-component D_c from phase 1).
+    //   Stack: adj[128](u128=2KB) + aux arrays (~2KB) + dist/queue(256B) ≈ 4.5KB total.
+    pub fn graph_topo_indices19_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Phase 0: connected-component detection O(V+E).
+        //    comp_id[ci]: component index (0..n_comp-1); u8::MAX = unvisited.
+        let mut comp_id   = [u8::MAX; MAX_NODES];
+        let mut comp_size = [0u64;    MAX_NODES]; // n_c per component
+        let mut n_comp    = 0usize;
+        let mut dist      = [255u8;   MAX_NODES];
+        let mut queue     = [0u8;     MAX_NODES];
+
+        for start in 0..nc {
+            if comp_id[start] != u8::MAX { continue; }
+            let c = n_comp; n_comp += 1;
+            comp_id[start] = c as u8;
+            comp_size[c]  += 1;
+            let mut qh = 0usize; let mut qt = 0usize;
+            queue[qt] = start as u8; qt += 1;
+            while qh < qt {
+                let cur = queue[qh] as usize; qh += 1;
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize; bits &= bits - 1;
+                    if comp_id[nb] == u8::MAX {
+                        comp_id[nb] = c as u8;
+                        comp_size[c] += 1;
+                        queue[qt] = nb as u8; qt += 1;
+                    }
+                }
+            }
+        }
+
+        // 4. Phase 1: BFS from each node → ecc[], comp_wiener[], TW.
+        //    Pendant detection: adj[ci].count_ones() == 1.
+        let mut ecc         = [0u8;  MAX_NODES]; // eccentricity (max BFS distance from ci)
+        let mut comp_wiener = [0u64; MAX_NODES]; // Wiener index per component
+        let mut tw          = 0u64;
+
+        for src in 0..nc {
+            if adj[src] == 0 { continue; } // isolated: no reachable pairs
+            for i in 0..nc { dist[i] = 255; }
+            dist[src] = 0;
+            let mut qh = 0usize; let mut qt = 0usize;
+            queue[qt] = src as u8; qt += 1;
+            while qh < qt {
+                let cur = queue[qh] as usize; qh += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize; bits &= bits - 1;
+                    if dist[nb] == 255 {
+                        dist[nb] = d_cur + 1;
+                        queue[qt] = nb as u8; qt += 1;
+                    }
+                }
+            }
+            let c            = comp_id[src] as usize;
+            let src_pendant  = adj[src].count_ones() == 1;
+            let mut max_d    = 0u8;
+            for v in (src + 1)..nc {
+                let d = dist[v];
+                if d == 255 { continue; }
+                if d > max_d { max_d = d; }
+                comp_wiener[c] += d as u64;
+                if src_pendant && adj[v].count_ones() == 1 {
+                    tw += d as u64;
+                }
+            }
+            if max_d > ecc[src] { ecc[src] = max_d; }
+        }
+
+        // 5. Per-component diameter: D_c = max(ecc[v]) for v in c.
+        let mut comp_diam = [0u8; MAX_NODES];
+        for ci in 0..nc {
+            let c = comp_id[ci] as usize;
+            if ecc[ci] > comp_diam[c] { comp_diam[c] = ecc[ci]; }
+        }
+
+        // 6. Phase 2: BFS from each node → RCW (uses comp_diam).
+        let mut rcw_ppm = 0u64;
+        for src in 0..nc {
+            if adj[src] == 0 { continue; }
+            for i in 0..nc { dist[i] = 255; }
+            dist[src] = 0;
+            let mut qh = 0usize; let mut qt = 0usize;
+            queue[qt] = src as u8; qt += 1;
+            while qh < qt {
+                let cur = queue[qh] as usize; qh += 1;
+                let d_cur = dist[cur];
+                let mut bits = adj[cur];
+                while bits != 0 {
+                    let nb = bits.trailing_zeros() as usize; bits &= bits - 1;
+                    if dist[nb] == 255 {
+                        dist[nb] = d_cur + 1;
+                        queue[qt] = nb as u8; qt += 1;
+                    }
+                }
+            }
+            let d_c = comp_diam[comp_id[src] as usize] as u64;
+            for v in (src + 1)..nc {
+                let d = dist[v];
+                if d == 255 { continue; }
+                // RCW per pair = floor(10^6 / (D_c + 1 − d(u,v)))
+                // denom ≥ 1 always since d ≤ D_c.
+                rcw_ppm += 1_000_000 / (d_c + 1 - d as u64);
+            }
+        }
+
+        // 7. Reverse Wiener: Λ = Σ_c [C(n_c,2) × D_c − W_c].
+        //    W_c ≤ C(n_c,2) × D_c always (d ≤ D_c for all pairs), so no underflow.
+        let mut rw = 0u64;
+        for c in 0..n_comp {
+            let n_c  = comp_size[c];              // nodes in component c
+            let d_c  = comp_diam[c] as u64;       // diameter of c
+            let w_c  = comp_wiener[c];            // Wiener index of c
+            let pairs = n_c * (n_c - 1) / 2;     // C(n_c, 2)
+            rw += pairs * d_c - w_c;
+        }
+
+        (rw, rcw_ppm, tw, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16183,6 +16355,19 @@ pub fn graph_topo_indices17() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) — neighbor-degree-sum pass then edge scan; no BFS needed.
 pub fn graph_topo_indices18() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices18_inner()
+}
+
+/// V3.30: `graph topo19` — Reverse Wiener Λ + Reciprocal Complementary Wiener RCW + Terminal Wiener TW.
+///
+///   Returns (rw, rcw_ppm, tw, edge_count, node_count).
+///   Λ(G)   = Σ_c [C(n_c,2) × D_c − W_c]                     (exact u64; Randić et al. 2000)
+///   RCW(G) × 10^6 = Σ_{u<v,conn} floor(10^6/(D_c+1−d(u,v))) (floor ppm; Vukičević 2010)
+///   TW(G)  = Σ_{u<v, both pendant} d(u,v)                    (exact u64; Gutman et al. 2004)
+/// Λ=0 iff all components have D=1 (complete blocks) or are singletons.
+/// TW=0 iff fewer than 2 pendant nodes (deg=1) in the entire graph.
+/// Algorithm: O(n(n+m)) — 2 BFS phases; component detection O(V+E).
+pub fn graph_topo_indices19() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices19_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
