@@ -13027,6 +13027,88 @@ impl GraphRuntime {
 
         (ir_ppm, rr_ppm, lz, edge_count, nc)
     }
+
+    // ── V3.28: Zagreb coindices M̄₁ + M̄₂ + forgotten coindex F̄ ─────────────
+    //
+    // Zagreb coindices sum over *non-edges* (pairs {u,v} with u≠v, uv∉E):
+    //   M̄₁(G) = Σ_{uv∉E} (d_u + d_v)   (Ashrafi, Došlić & Hamzeh 2010)
+    //   M̄₂(G) = Σ_{uv∉E} d_u · d_v     (Ashrafi, Došlić & Hamzeh 2010)
+    //   F̄(G)  = Σ_{uv∉E} (d_u² + d_v²) (forgotten coindex; De 2016)
+    //
+    // Closed-form identities (all derivable from global degree sums):
+    //   M̄₁ = 2m(n−1) − M₁      [M₁ = Σ_v d_v² = Σ_{uv∈E}(d_u+d_v)]
+    //   M̄₂ = 2m² − M₁/2 − M₂  [M₂ = Σ_{uv∈E} d_u·d_v; M₁ always even]
+    //   F̄  = (n−1)·M₁ − F      [F = Σ_v d_v³ (forgotten index)]
+    //
+    // Proof M₁ always even: M₁=Σ d_v² ≡ #{odd-degree vertices} (mod 2) = 0
+    // (handshaking lemma: # odd-degree vertices is always even).
+    //
+    // Algorithm: single O(V+E) degree scan — no BFS, no complement scan.
+    // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) ≈ 3KB total.
+    pub fn graph_topo_indices17_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array + accumulate M₁, M₂, F in a single scan.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        let mut m1 = 0u64; // Σ_v d²
+        let mut m2 = 0u64; // Σ_{uv∈E} d_u·d_v
+        let mut f  = 0u64; // Σ_v d³
+
+        for ci in 0..nc {
+            let d = deg[ci];
+            m1 += d * d;
+            f  += d * d * d;
+        }
+        for a in 0..nc {
+            let da = deg[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a { m2 += da * deg[b]; }
+            }
+        }
+
+        // 4. Apply closed-form identities.
+        let m  = edge_count as u64;
+        let n  = nc as u64;
+        // M̄₁ = 2m(n−1) − M₁  (n≥1 guaranteed by early return above; 2m(n-1)≥M₁ always)
+        let mbar1 = 2 * m * (n - 1) - m1;
+        // M̄₂ = 2m² − M₁/2 − M₂  (M₁ always even; cf. proof above)
+        let mbar2 = 2 * m * m - m1 / 2 - m2;
+        // F̄  = (n−1)·M₁ − F
+        let fbar  = (n - 1) * m1 - f;
+
+        (mbar1, mbar2, fbar, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -15969,6 +16051,19 @@ pub fn graph_topo_indices15() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) degree scan; no BFS needed.
 pub fn graph_topo_indices16() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices16_inner()
+}
+
+/// V3.28: `graph topo17` — Zagreb coindices M̄₁ + M̄₂ + forgotten coindex F̄.
+///
+///   Returns (mbar1, mbar2, fbar, edge_count, node_count).
+///   M̄₁(G) = Σ_{uv∉E} (d_u + d_v)   = 2m(n−1) − M₁  (Ashrafi, Došlić & Hamzeh 2010)
+///   M̄₂(G) = Σ_{uv∉E} d_u · d_v    = 2m² − M₁/2 − M₂ (Ashrafi, Došlić & Hamzeh 2010)
+///   F̄(G)  = Σ_{uv∉E} (d_u²+d_v²)  = (n−1)·M₁ − F    (forgotten coindex; De 2016)
+/// All three computed analytically from Zagreb indices — no complement scan.
+/// M̄₁=M̄₂=F̄=0 for complete graphs (no non-edges).
+/// Algorithm: O(V+E) degree scan; no BFS needed.
+pub fn graph_topo_indices17() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices17_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

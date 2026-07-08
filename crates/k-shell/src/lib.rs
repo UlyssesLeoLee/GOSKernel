@@ -10036,6 +10036,82 @@ pub fn dispatch_graph_topo_indices16(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.28: `graph topo17` — Zagreb coindices M̄₁ + M̄₂ + forgotten coindex F̄.
+///   M̄₁(G) = Σ_{uv∉E} (d_u+d_v)   = 2m(n−1) − M₁  (Ashrafi, Došlić & Hamzeh 2010)
+///   M̄₂(G) = Σ_{uv∉E} d_u·d_v     = 2m² − M₁/2 − M₂ (Ashrafi, Došlić & Hamzeh 2010)
+///   F̄(G)  = Σ_{uv∉E} (d_u²+d_v²) = (n−1)·M₁ − F   (forgotten coindex; De 2016)
+/// All three are zero for complete graphs (no non-edges exist).
+pub fn dispatch_graph_topo_indices17(sink: &ConsoleSink) {
+    let (mbar1, mbar2, fbar, edge_count, node_count) =
+        gos_runtime::graph_topo_indices17();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo17 (M\u{0305}\u{2081} + M\u{0305}\u{2082} + F\u{0305} Zagreb coindices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        let complete = mbar1 == 0 && edge_count > 0;
+
+        // M̄₁: first Zagreb coindex (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  1st zagreb coindex  M\u{0305}\u{2081} =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, mbar1 as usize);
+        set_color(sink, 8, 0);
+        if complete {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E}(d+d)]  (=0: complete graph)");
+        } else {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E}(d_u+d_v)]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // M̄₂: second Zagreb coindex (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  2nd zagreb coindex  M\u{0305}\u{2082} =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, mbar2 as usize);
+        set_color(sink, 8, 0);
+        if complete {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E} d_u\u{00b7}d_v]  (=0: complete graph)");
+        } else {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E} d_u\u{00b7}d_v]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // F̄: forgotten coindex (exact)
+        set_color(sink, 8, 0);
+        print_str(sink, "  forgotten coindex    F\u{0305}  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, fbar as usize);
+        set_color(sink, 8, 0);
+        if complete {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E}(d\u{00b2}+d\u{00b2})]  (=0: complete graph)");
+        } else {
+            print_str(sink, "  [\u{03a3}_{uv\u{2209}E}(d_u\u{00b2}+d_v\u{00b2})]  (exact)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Ashrafi, Do\u{0161}li\u{0107} & Hamzeh 2010  De 2016");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
