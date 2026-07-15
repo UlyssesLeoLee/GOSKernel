@@ -10340,6 +10340,79 @@ pub fn dispatch_graph_topo_indices20(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.32: `graph topo21` — ABC₄ + Neighborhood Harmonic NH + Neighborhood Sombor NSO.
+/// Three 4th-generation S-variant topological indices using S(v)=Σ_{w∈N(v)} d(w).
+pub fn dispatch_graph_topo_indices21(sink: &ConsoleSink) {
+    let (abc4, nh, nso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices21();
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo21 (ABC\u{2084} + NH + NSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // ABC₄
+        set_color(sink, 8, 0);
+        print_str(sink, "  4th ABC index   ABC\u{2084} =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, abc4);
+        set_color(sink, 8, 0);
+        if abc4 == 0 && edge_count > 0 {
+            print_str(sink, "   [\u{03a3} \u{221a}((S_u+S_v\u{22122})/(S_u\u{00b7}S_v))]  (=0: S_u+S_v=2 for all edges)");
+        } else {
+            print_str(sink, "   [\u{03a3} \u{221a}((S_u+S_v\u{22122})/(S_u\u{00b7}S_v))]  (ppm)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NH (Neighborhood Harmonic)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighbor harm    NH =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, nh);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 2/(S_u+S_v)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NSO (Neighborhood Sombor)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighbor sombor  NSO =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, nso);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} \u{221a}(S_u\u{00b2}+S_v\u{00b2})]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Ghorbani & Hosseinzadeh 2010  (NH/NSO: S-variant family)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

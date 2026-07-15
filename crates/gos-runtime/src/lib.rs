@@ -13493,6 +13493,109 @@ impl GraphRuntime {
 
         (so_star_ppm, rso_ppm, rso_red_ppm, edge_count, nc)
     }
+
+    /// V3.32 — ABC₄ + Neighborhood Harmonic NH + Neighborhood Sombor NSO
+    ///
+    /// All three use S(v) = Σ_{w∈N(v)} d(w) (neighbor degree sum), computed in
+    /// one O(V+E) degree scan — no BFS needed.
+    ///
+    /// abc4_ppm  = ABC₄(G) × 10^6 = Σ_{uv∈E} √((S_u+S_v−2)/(S_u·S_v)) × 10^6
+    /// nh_ppm    = NH(G)  × 10^6 = Σ_{uv∈E} 2/(S_u+S_v)              × 10^6
+    /// nso_ppm   = NSO(G) × 10^6 = Σ_{uv∈E} √(S_u²+S_v²)             × 10^6
+    ///
+    /// Formulas (no float, no_std safe):
+    ///   ABC₄ per edge: isqrt64((S_u+S_v−2)×10^12/(S_u×S_v)); 0 if S_u+S_v=2
+    ///   NH   per edge: 2_000_000 / (S_u+S_v)  (integer floor)
+    ///   NSO  per edge: isqrt128((S_u²+S_v²) as u128 × 10^12) cast to u64
+    pub fn graph_topo_indices21_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Integer sqrt helpers (Newton-Raphson, no float, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop { let y = (x + n / x) / 2; if y >= x { return x; } x = y; }
+        }
+        fn isqrt128(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop { let y = (x + n / x) / 2; if y >= x { return x; } x = y; }
+        }
+
+        // 4. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 5. Neighbor degree sum S(v) = Σ_{w∈N(v)} d(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 6. Edge scan (a < b): accumulate ABC₄, NH, NSO.
+        //    ABC₄: isqrt64((S_u+S_v−2)×10^12/(S_u×S_v))  [0 when S_u+S_v=2]
+        //    NH:   2_000_000 / (S_u+S_v)                   [floor integer]
+        //    NSO:  isqrt128((S_u²+S_v²)×10^12) as u64      [u128 to avoid overflow for large S]
+        let mut abc4_ppm = 0u64;
+        let mut nh_ppm   = 0u64;
+        let mut nso_ppm  = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let ssum = sa + sb;
+                    // ABC₄
+                    if ssum > 2 {
+                        abc4_ppm += isqrt64((ssum - 2) * 1_000_000_000_000u64 / (sa * sb));
+                    }
+                    // NH (neighborhood harmonic)
+                    nh_ppm += 2_000_000u64 / ssum;
+                    // NSO (neighborhood Sombor) — use u128 to prevent s²×10^12 overflow
+                    let nso_n = ((sa * sa + sb * sb) as u128) * 1_000_000_000_000u128;
+                    nso_ppm += isqrt128(nso_n) as u64;
+                }
+            }
+        }
+
+        (abc4_ppm, nh_ppm, nso_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16486,6 +16589,20 @@ pub fn graph_topo_indices19() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) degree scan only — no BFS needed.
 pub fn graph_topo_indices20() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices20_inner()
+}
+
+/// V3.32: `graph topo21` — ABC₄ + Neighborhood Harmonic NH + Neighborhood Sombor NSO.
+///
+///   Returns (abc4_ppm, nh_ppm, nso_ppm, edge_count, node_count).
+///   All indices use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+///   ABC₄(G) × 10^6 = Σ_{uv∈E} √((S_u+S_v−2)/(S_u·S_v)) × 10^6   (floor ppm; Ghorbani & Hosseinzadeh 2010)
+///   NH(G)   × 10^6 = Σ_{uv∈E} 2/(S_u+S_v) × 10^6                  (floor ppm; S-analogue of Harmonic)
+///   NSO(G)  × 10^6 = Σ_{uv∈E} √(S_u²+S_v²) × 10^6                 (floor ppm; S-analogue of Sombor)
+/// ABC₄=0 when S_u+S_v=2 for all edges (only K₂: S=1).
+/// S-uniform invariant: K₃ and K_{1,4} share S=4 everywhere → identical per-edge values.
+/// Algorithm: O(V+E) S-scan — degree pass then edge pass; no BFS needed.
+pub fn graph_topo_indices21() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices21_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
