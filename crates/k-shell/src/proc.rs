@@ -1252,6 +1252,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices18(sink);
     } else if cmd == "graph topo19" || cmd == "gtopo19" || cmd == "reverse wiener" || cmd == "grw" || cmd == "reciprocal complementary wiener" || cmd == "grcw" || cmd == "terminal wiener" || cmd == "gtw" || cmd == "grwrcwtw" {
         super::dispatch_graph_topo_indices19(sink);
+    } else if cmd == "graph topo20" || cmd == "gtopo20" || cmd == "modified sombor" || cmd == "gsostar" || cmd == "reciprocal sombor" || cmd == "grso" || cmd == "reduced sombor" || cmd == "grsom" || cmd == "gsostarsombrsom" {
+        super::dispatch_graph_topo_indices20(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

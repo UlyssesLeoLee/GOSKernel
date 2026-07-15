@@ -10269,6 +10269,77 @@ pub fn dispatch_graph_topo_indices19(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices20(sink: &ConsoleSink) {
+    let (so_star, rso, rso_red, edge_count, node_count) =
+        gos_runtime::graph_topo_indices20();
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo20 (SO* + RSO + rSO Sombor variants)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // Modified Sombor SO*
+        set_color(sink, 8, 0);
+        print_str(sink, "  modified sombor  SO* =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, so_star);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} d_u\u{00b7}d_v/\u{221a}(d_u\u{00b2}+d_v\u{00b2})]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Reciprocal Sombor RSO
+        set_color(sink, 8, 0);
+        print_str(sink, "  reciprocal somb  RSO =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_ppm3_u64(sink, rso);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/\u{221a}(d_u\u{00b2}+d_v\u{00b2})]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // Reduced Sombor rSO
+        set_color(sink, 8, 0);
+        print_str(sink, "  reduced sombor  rSO =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, rso_red);
+        set_color(sink, 8, 0);
+        if rso_red == 0 && edge_count > 0 {
+            print_str(sink, "   [\u{03a3} \u{221a}((d_u-1)\u{00b2}+(d_v-1)\u{00b2})]  (rSO=0: all pendant-pendant)");
+        } else {
+            print_str(sink, "   [\u{03a3} \u{221a}((d_u-1)\u{00b2}+(d_v-1)\u{00b2})]  (ppm)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Ghanbari & Rajabi-Parsa 2021  Gutman 2022  Doslic et al. 2022");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

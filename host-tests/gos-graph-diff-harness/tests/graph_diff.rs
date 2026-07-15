@@ -41,7 +41,6 @@ const GD_ID_C: NodeId = derive_node_id(GD_PLUGIN, GD_KEY_C);
 
 const VEC_A: VectorAddress = VectorAddress::new(0xD1, 1, 0, 0);
 const VEC_B: VectorAddress = VectorAddress::new(0xD1, 2, 0, 0);
-const VEC_C: VectorAddress = VectorAddress::new(0xD1, 3, 0, 0);
 
 const fn gd_spec(key: &'static str, node_id: NodeId) -> NodeSpec {
     NodeSpec {

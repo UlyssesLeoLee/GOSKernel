@@ -5,7 +5,16 @@
 
 **文档管理规范**：本次优化起，各阶段核心 Markdown 文档统一在标题下方附带文档管理票（文档编号 / 版本 / 状态 / 作成・审核・批准 / 变更履历），Excel 文档统一附带「文档管理」首页 sheet。硬化日志系列（06_运维维护/hardening/）作为历史记录，其内容不回溯改写事实，仅做归位与中文化；`doc/` 根目录保留的同名旧文件是硬化当时的原始存档，不做删除，仅供追溯对照。
 
-**本轮优化摘要（2026-07-03）**：
+**本轮优化摘要（2026-07-15）**：
+
+- 硬化日志系列自上一轮（2026-07-03，索引截至 V2.65）以来已持续推进至 **V3.30**（累计 65 篇新增硬化记录，涵盖 V2.66~V3.30），下表已补齐全部缺口索引条目
+- 发现 5 篇硬化日志（V3.16 / V3.17 / V3.20 / V3.21 / V3.23）此前只散落在 `doc/` 根目录且为英文，从未归位至 `06_运维维护/hardening/`——本轮已逐篇核对源码与测试数据后翻译为中文并归位，原根目录英文存档保留但补充跳转说明指向中文版
+- 发现 3 篇硬化日志（V3.04、V3.28、V3.29）虽已正确归位于 `06_运维维护/hardening/`，但内容仍为纯英文，与「硬化日志统一中文化」规范矛盾——本轮已就地中文化，不改动版本号/文件路径/函数名/测试名/测试计数
+- 扫描全部 126 篇硬化日志的 CJK 字符密度后，另发现 3 篇纯英文遗漏（V3.10、V3.11、V3.27），本轮一并中文化，共计翻译 11 篇
+- V2.66~V3.30 区间新增的核心内容是**拓扑指数命令族的大规模扩展**：从 `graph topo`（V3.12，SC/GA/AZI）到 `graph topo19`（V3.30，反向 Wiener/RCW/终端 Wiener），累计 19 组、60 余个分子图拓扑描述符（Zagreb 系、Randić 系、距离系 Wiener/Szeged/Harary、离心率系、传输量系、补图指数等），全部译名并纳入索引
+- 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
+
+**上一轮优化摘要（2026-07-03，存档）**：
 
 - 硬化日志系列存在中文化缺口：V2.43~V2.49、V2.51~V2.54 共 11 篇此前以英文写入 `06_运维维护/hardening/`，与文档管理规范「硬化日志统一中文化」矛盾。本轮已逐篇核对源码与测试数据后改写为纯中文版，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实
 - V2.50、V2.55~V2.65 共 12 篇已核对：V2.50 本轮撰写时即为纯中文，无需改动；V2.55~V2.65 共 11 篇为中英双语格式（中文段落在前、英文复述在后），中文内容完整可读，本轮判定满足「中文书写」要求，保留双语格式供代码/API 交叉核对，未做删改
@@ -16,7 +25,7 @@
 - 上一轮遗留的「V2.42 硬化日志格式统一」「doc/ 根目录旧文件跳转提示」两项待跟进事项已处理，见下文
 - 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
 
-**上一轮优化摘要（2026-07-02，存档）**：
+**再上一轮优化摘要（2026-07-02，存档）**：
 
 - 硬化日志系列存在大面积中文化缺口：V2.16~V2.18、V2.21~V2.33、V2.35~V2.41 共 23 篇此前以英文写入 `06_运维维护/hardening/`，与文档管理规范「硬化日志统一中文化」矛盾。本轮已逐篇核对源码与测试数据后中文化，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实
 - 发现 V2.15（`stat <vec>` 单节点详情命令）硬化日志此前只停留在 `doc/` 根目录（英文），从未归位至 `06_运维维护/hardening/`，本轮已补建中文版 [hardening/HARDENING_LOG_2026-07-01_V2.15.md](06_运维维护/hardening/HARDENING_LOG_2026-07-01_V2.15.md)
@@ -24,7 +33,7 @@
 - 下表补齐此前遗漏的 V2.15~V2.42 硬化日志索引条目（此前索引仅收录至 V2.19，且中间跳过 V2.15~V2.18）
 - 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
 
-**再上一轮优化摘要（2026-07-01，存档）**：
+**更早轮次优化摘要（2026-07-01，存档）**：
 
 - 修正 [implementation_plan_v0_1_zh.md](04_实施计划/implementation_plan_v0_1_zh.md)、[task_v0_1_zh.md](04_实施计划/task_v0_1_zh.md) 与 [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md) 之间关于 Phase A/B 完成状态的口径矛盾
 - [GITHUB_DESCRIPTION_020.md](00_项目管理/GITHUB_DESCRIPTION_020.md) 由英文全文改写为中文，并修正 `gos-loader` 定位与 crate 数量（25 → 39）
@@ -171,15 +180,84 @@
 | [hardening/HARDENING_LOG_2026-07-03_V2.63.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.63.md) | MD | V2.63 — graph transitivity 命令 + 原始三角形/三元组计数 + 10 测试 |
 | [hardening/HARDENING_LOG_2026-07-03_V2.64.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.64.md) | MD | V2.64 — graph kcore 命令 + Batagelj-Zaversnik k-核分解/退化度 + 10 测试 |
 | [hardening/HARDENING_LOG_2026-07-03_V2.65.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.65.md) | MD | V2.65 — graph assortativity 命令 + Newman(2002) 度同配系数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.66.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.66.md) | MD | V2.66 — graph reciprocity 命令 + 有向图互惠性度量 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.67.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.67.md) | MD | V2.67 — graph modularity 命令 + Newman-Girvan 模块度 Q（LPA 分区）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.68.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.68.md) | MD | V2.68 — graph rich-club 系数命令 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.69.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.69.md) | MD | V2.69 — graph girth 命令 + 有向图最短环长度 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.70.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.70.md) | MD | V2.70 — graph Wiener 指数命令 + 节点对 BFS 距离和 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.71.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.71.md) | MD | V2.71 — graph harmonic 命令 + 调和中心性（倒数 BFS 距离和）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.72.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.72.md) | MD | V2.72 — graph peripheral 命令 + 离心率=直径的外围节点集 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.73.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.73.md) | MD | V2.73 — graph center 命令 + 离心率=半径的中心节点集 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.74.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.74.md) | MD | V2.74 — graph global efficiency 命令 + 全局效率 E(G) + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.75.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.75.md) | MD | V2.75 — graph avg clustering 命令 + 平均聚类系数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.76.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.76.md) | MD | V2.76 — graph local efficiency 命令 + 局部效率 E_loc + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.77.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.77.md) | MD | V2.77 — graph small-world 命令 + 小世界系数 σ + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.78.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.78.md) | MD | V2.78 — graph scale-free 命令 + 度异质性指数 κ=⟨k²⟩/⟨k⟩ + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.79.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.79.md) | MD | V2.79 — graph summary 命令 + 拓扑一站式报告（密度+CC+效率+σ+κ）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-03_V2.80.md](06_运维维护/hardening/HARDENING_LOG_2026-07-03_V2.80.md) | MD | V2.80 — power-law exponent MLE 命令 + 幂律指数极大似然估计 γ̂ + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.81.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.81.md) | MD | V2.81 — γ̂ 集成进 graph summary 面板 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.82.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.82.md) | MD | V2.82 — graph diameter 组合视图（中心+外围合并面板）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.83.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.83.md) | MD | V2.83 — graph metric snapshot 保存与比较命令 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.84.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.84.md) | MD | V2.84 — graph link prediction 命令 + CN/Jaccard/Adamic-Adar/RA 节点对链路预测 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.85.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.85.md) | MD | V2.85 — graph articulation 命令 + Tarjan 割点检测 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.86.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.86.md) | MD | V2.86 — graph bridges 命令 + Tarjan low-link 割边检测 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.87.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.87.md) | MD | V2.87 — Eulerian path/circuit 检测命令 + O(V+E) 度数+BFS 判定 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.88.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.88.md) | MD | V2.88 — DAG 最长路径（关键路径）命令 + Kahn BFS+DP + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-04_V2.89.md](06_运维维护/hardening/HARDENING_LOG_2026-07-04_V2.89.md) | MD | V2.89 — DAG 拓扑分层命令 + Kahn BFS+DP 并行执行层级 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.90.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.90.md) | MD | V2.90 — graph dominator tree 命令 + Cooper et al. 2001 迭代 RPO 支配树 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.91.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.91.md) | MD | V2.91 — feedback arc set 命令 + 迭代 DFS 三染色 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.92.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.92.md) | MD | V2.92 — maximum bipartite matching 命令 + Kuhn 迭代 DFS 匹配 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.93.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.93.md) | MD | V2.93 — 2-edge-connected components 命令 + Tarjan 桥检测 + BFS + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.94.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.94.md) | MD | V2.94 — k-truss 分解命令 + 边剥离算法（k-core 的边级精化）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.95.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.95.md) | MD | V2.95 — maximum clique 命令 + Bron-Kerbosch + Tomita 主元优化 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.96.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.96.md) | MD | V2.96 — maximum independent set 命令 + 补图上的 Bron-Kerbosch + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-05_V2.97.md](06_运维维护/hardening/HARDENING_LOG_2026-07-05_V2.97.md) | MD | V2.97 — minimum vertex cover 命令 + König 精确解（二部图）+ 2-近似（一般图）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V2.98.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V2.98.md) | MD | V2.98 — minimum dominating set 命令 + 贪心 ln(Δ)+1 近似 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V2.99.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V2.99.md) | MD | V2.99 — minimum path cover 命令 + König/Dilworth DAG 算法 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.00.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.00.md) | MD | V3.00 — minimum spanning arborescence 命令 + Chu-Liu/Edmonds 1967 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.01.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.01.md) | MD | V3.01 — feedback vertex set 命令 + 贪心 Kahn FVS + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.02.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.02.md) | MD | V3.02 — global min cut 命令 + Stoer-Wagner 1997 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.03.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.03.md) | MD | V3.03 — Hamiltonian path/circuit 命令 + 迭代回溯 DFS + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.04.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.04.md) | MD | V3.04 — chordal graph recognition 命令 + LexBFS PEO 验证 + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-06_V3.05.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.05.md) | MD | V3.05 — biconnected components 命令 + Tarjan 边栈 BCC + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.06.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.06.md) | MD | V3.06 — edge betweenness centrality 命令 + Brandes 边介数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.07.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.07.md) | MD | V3.07 — vertex connectivity 命令 + Even 1975 节点分裂最大流 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.08.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.08.md) | MD | V3.08 — edge coloring 命令 + 贪心 Vizing χ'(G) + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.09.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.09.md) | MD | V3.09 — graph spectral analysis 命令 + 谱半径 ρ(A) + 代数连通度 λ₂(L) + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.10.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.10.md) | MD | V3.10 — graph entropy 命令 + 度数分布香农熵 H(G) + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-06_V3.11.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.11.md) | MD | V3.11 — graph zagreb 命令 + Zagreb M1/M2 + Randić R + Albertson I + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-06_V3.12.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.12.md) | MD | V3.12 — graph topo 命令 + SC/GA/AZI 拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.13.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.13.md) | MD | V3.13 — graph topo2 命令 + H/ABC/F 拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.14.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.14.md) | MD | V3.14 — graph topo3 命令 + SDD/ISI/Nirmala 拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.15.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.15.md) | MD | V3.15 — graph topo4 命令 + Sombor/RM₂/Sigma 拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-06_V3.16.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.16.md) | MD | V3.16 — graph topo5 命令 + HM₁/HM₂/AG 拓扑指数 + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-06_V3.17.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.17.md) | MD | V3.17 — graph topo6 命令 + EM₁/ABS/RRR 拓扑指数 + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-06_V3.18.md](06_运维维护/hardening/HARDENING_LOG_2026-07-06_V3.18.md) | MD | V3.18 — graph topo7 命令 + Wiener/Harary/超-Wiener 基于距离拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-07_V3.19.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.19.md) | MD | V3.19 — graph topo8 命令 + ECI/直径/半径/平均离心率拓扑指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-07_V3.20.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.20.md) | MD | V3.20 — graph topo9 命令 + Schultz MTI/Gutman/连通离心指数 度数-距离混合指数 + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-07_V3.21.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.21.md) | MD | V3.21 — graph topo10 命令 + Szeged/修订 Szeged/Mostar 边划分距离指数 + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-07_V3.22.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.22.md) | MD | V3.22 — graph topo11 命令 + Balaban J/传输不规则度/顶点 PI 传输类指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-07_V3.23.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.23.md) | MD | V3.23 — graph topo12 命令 + Zagreb 离心率 M1\*/M2\*/M3\* + 10 测试（本轮从 doc 根目录中文化归位） |
+| [hardening/HARDENING_LOG_2026-07-07_V3.24.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.24.md) | MD | V3.24 — graph topo13 命令 + 传输 Zagreb TM1/TM2/GA_t 指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-08_V3.25.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.25.md) | MD | V3.25 — graph topo14 命令 + 总离心率/离心距离和/几何-算术离心率 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-08_V3.26.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.26.md) | MD | V3.26 — graph topo15 命令 + 跳跃 Zagreb LM1/LM2/LM3（二距离度数）指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-08_V3.27.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.27.md) | MD | V3.27 — graph topo16 命令 + 乘积连通性 R_{1/2}/倒数 Randić R_{-1}/兰州指数 Lz + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-08_V3.28.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.28.md) | MD | V3.28 — graph topo17 命令 + Zagreb 补图指数 M̄₁/M̄₂/F̄ + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-08_V3.29.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.29.md) | MD | V3.29 — graph topo18 命令 + 邻域 Zagreb NM₁/NM₂/GA₂ 指数 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-08_V3.30.md](06_运维维护/hardening/HARDENING_LOG_2026-07-08_V3.30.md) | MD | V3.30 — graph topo19 命令 + 反向 Wiener Λ/RCW/终端 Wiener TW 指数 + 10 测试 |
 
 ---
 
-*最终更新：2026-07-03 · GOS V2.65 · 累计 623 个 host tests · 图论分析命令族（PageRank/HITS/community/spanning/color/mst/shortest/flow/between/attractor）与图健康度指标族（density/clustering/transitivity/kcore/assortativity）全部完成并纳入中文文档*
+*最终更新：2026-07-15 · GOS V3.30 · 累计约 1273 个 host tests（详见各硬化日志逐篇累计计数）· 图论分析命令族自 V2.66 起持续扩展至拓扑指数第 19 组（graph topo1~topo19），涵盖 Zagreb 系、距离系（Wiener/Szeged/Harary）、离心率系、传输量系、补图指数等 60 余个分子图拓扑描述符，全部纳入中文文档索引*
 
 ## 待跟进事项
 
-- **[已处理]** V2.42 硬化日志正文格式与 V2.19 模板不一致——本轮 V2.43~V2.54 的重写已统一采用 V2.42 建立的模板（版本号/功能 → 变更摘要 → 算法 → 实现细节 → 测试用例 → 不变量确认）。
-- **[已处理]** `doc/` 根目录旧文件跳转提示——经核实，`doc/` 根目录下的同名旧文件（如 `HARDENING_LOG_2026-06-30.md` 等）是硬化当时的原始存档快照，与 `06_运维维护/` 下的归位版本内容不同（根目录版本更早、更简略），属于历史存档而非重复文件，故不添加跳转提示，避免误导为"过时需更新"；已在文档管理规范中明确此存档语义。
-- V2.55~V2.65 共 11 篇硬化日志采用中英双语格式（中文段落 + 英文复述），内容完整但非纯中文；下一轮可评估是否需要移除英文复述段落以完全统一格式，或维持现状以便与源码注释交叉核对。
-- [GOS测试报告书.xlsx](05_测试验证/GOS测试报告书.xlsx) 与 [GOS运维日志汇总.xlsx](06_运维维护/GOS运维日志汇总.xlsx) 的测试总数/硬化日志汇总表尚停留在早期版本（分别约 V2.14、8项测试概览），未反映 V2.15~V2.65 的增量（累计 623 host tests，65 次硬化）；建议下一轮更新两份 xlsx 的汇总表。
-- `implementation_plan_v0_1_zh.md` / `task_v0_1_zh.md` 的 Phase 划分基于 V0.1 早期规划，V2.43~V2.65 新增的图论分析、图健康度、属性存储三大命令族尚未在 Backlog 中登记为已完成任务；本轮已在正文补充图论套件完成状态引用，但 Backlog 条目本身未逐条勾选，建议下一轮核对补全。
+- **[已处理]** 5 篇滞留于 `doc/` 根目录的英文硬化日志（V3.16/V3.17/V3.20/V3.21/V3.23）——本轮已翻译归位至 `06_运维维护/hardening/`，根目录原文件补充跳转说明。
+- **[已处理]** hardening 目录内 6 篇纯英文硬化日志（V3.04、V3.10、V3.11、V3.27、V3.28、V3.29）——本轮已就地中文化。
+- **[已处理]** V2.42 硬化日志正文格式与 V2.19 模板不一致——V2.43~V2.54 的重写已统一采用 V2.42 建立的模板（版本号/功能 → 变更摘要 → 算法 → 实现细节 → 测试用例 → 不变量确认）。
+- **[已处理]** `doc/` 根目录旧文件跳转提示——经核实，`doc/` 根目录下的同名旧文件（如 `HARDENING_LOG_2026-06-30.md` 等）是硬化当时的原始存档快照，与 `06_运维维护/` 下的归位版本内容不同（根目录版本更早、更简略），属于历史存档而非重复文件，故不添加跳转提示，避免误导为"过时需更新"；已在文档管理规范中明确此存档语义。仅对本轮新归位的 5 篇例外补充了跳转说明（因这 5 篇此前从未归位，root 版本即为唯一版本）。
+- V2.55~V2.65 共 11 篇硬化日志采用中英双语格式（中文段落 + 英文复述），内容完整但非纯中文；可评估是否需要移除英文复述段落以完全统一格式，或维持现状以便与源码注释交叉核对（本轮未处理，维持现状）。
+- **[待处理，优先级高]** [GRAPH_CLI_COMMANDS_zh.md](03_详细设计/GRAPH_CLI_COMMANDS_zh.md) 与 [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md) 均未收录 V2.66~V3.30 新增的约 60 个命令（reciprocity/modularity/rich-club/girth/wiener/harmonic/peripheral/center/efficiency 系列，以及 V3.12~V3.30 的 19 组拓扑指数命令 `graph topo`~`graph topo19`）。这是当前文档体系中口径滞后最严重的部分，规模较大，建议下一轮专项处理：至少在 GRAPH_CLI_COMMANDS_zh.md 新增章节汇总 `graph topo1~19` 命令族及其别名索引，并在 GOS_ARCH_v2.md 概述段落更新版本号引用。
+- [GOS测试报告书.xlsx](05_测试验证/GOS测试报告书.xlsx) 与 [GOS运维日志汇总.xlsx](06_运维维护/GOS运维日志汇总.xlsx) 的测试总数/硬化日志汇总表仍停留在早期版本（分别约 V2.14、8项测试概览），未反映 V2.15~V3.30 的增量（累计约 1273 host tests，逾百次硬化）；建议下一轮更新两份 xlsx 的汇总表。
+- `implementation_plan_v0_1_zh.md` / `task_v0_1_zh.md` 的 Phase 划分基于 V0.1 早期规划，V2.66~V3.30 新增的拓扑指数命令族尚未在 Backlog 中登记为已完成任务；建议下一轮核对补全。
+- 本轮翻译的 11 篇硬化日志（5 篇归位 + 6 篇就地翻译）均为逐句人工核对翻译，未改动任何数值、公式、文件路径或测试计数；但受限于单轮篇幅，未对 V2.66~V3.30 剩余约 54 篇硬化日志逐篇重新核对格式模板一致性，仅确认其 CJK 密度达标（非纯英文）。

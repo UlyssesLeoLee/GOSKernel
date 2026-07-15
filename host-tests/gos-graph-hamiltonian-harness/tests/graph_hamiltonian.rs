@@ -41,20 +41,17 @@ const HM_KEY_A: &str = "hm.a";
 const HM_KEY_B: &str = "hm.b";
 const HM_KEY_C: &str = "hm.c";
 const HM_KEY_D: &str = "hm.d";
-const HM_KEY_E: &str = "hm.e";
 
 const HM_ID_A: NodeId = derive_node_id(HM_PLUGIN, HM_KEY_A);
 const HM_ID_B: NodeId = derive_node_id(HM_PLUGIN, HM_KEY_B);
 const HM_ID_C: NodeId = derive_node_id(HM_PLUGIN, HM_KEY_C);
 const HM_ID_D: NodeId = derive_node_id(HM_PLUGIN, HM_KEY_D);
-const HM_ID_E: NodeId = derive_node_id(HM_PLUGIN, HM_KEY_E);
 
 // L4=79 namespace for this harness.
 const HM_VEC_A: VectorAddress = VectorAddress::new(79, 1, 1, 0);
 const HM_VEC_B: VectorAddress = VectorAddress::new(79, 1, 2, 0);
 const HM_VEC_C: VectorAddress = VectorAddress::new(79, 1, 3, 0);
 const HM_VEC_D: VectorAddress = VectorAddress::new(79, 1, 4, 0);
-const HM_VEC_E: VectorAddress = VectorAddress::new(79, 2, 1, 0);
 
 const HM_MANIFEST: PluginManifest = PluginManifest {
     abi_version:  GOS_ABI_VERSION,

@@ -13387,6 +13387,112 @@ impl GraphRuntime {
 
         (rw, rcw_ppm, tw, edge_count, nc)
     }
+
+    // ── V3.31: Modified Sombor SO* + Reciprocal Sombor RSO + Reduced Sombor rSO ──
+    //
+    // Sombor-family variants (all O(V+E) degree-scan, no BFS):
+    //   SO*(G) × 10^6 = Σ_{uv∈E} d_u·d_v / √(d_u²+d_v²) × 10^6   (floor ppm; Ghanbari & Rajabi-Parsa 2021)
+    //   RSO(G) × 10^6 = Σ_{uv∈E} 10^6 / √(d_u²+d_v²)              (floor ppm; Gutman 2022)
+    //   rSO(G) × 10^6 = Σ_{uv∈E} √((d_u−1)²+(d_v−1)²) × 10^6     (floor ppm; Doslic et al. 2022)
+    //
+    // Overflow safety (all max-degree=127):
+    //   SO*: (d_a·d_b)²·10^12 ≤ (127²)²·10^12 = 260,144,641·10^12 < u128::MAX ✓
+    //   RSO: 10^12/(d_a²+d_b²) ≤ 10^12/2 = 500,000,000,000 < u64::MAX ✓
+    //   rSO: ((d_a-1)²+(d_b-1)²)·10^12 ≤ 2·126²·10^12 ≈ 3.2×10^16 < u64::MAX ✓
+    //
+    // Key invariants:
+    //   SO*(Δ-regular) = m·Δ/√2·10^6 per edge (≥ m·10^6 for Δ≥√2; AM-GM: d_a·d_b ≤ (d_a²+d_b²)/2)
+    //   RSO(Δ-regular) = m·10^6/(Δ√2) per edge (decreasing in Δ)
+    //   rSO=0 iff all edges are pendant-pendant (d_u=d_v=1); pendant-hub d_u=1,d_v=k: rSO contribution=(k-1)·10^6 (exact)
+    //   SO* per edge = RSO per edge × (d_u·d_v) (the RSO weight is 1, the SO* weight is d_u·d_v)
+    //
+    // Algorithm: O(V+E) — degree array from adj bitmasks; single undirected edge scan.
+    // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) ≈ 3KB total.
+    pub fn graph_topo_indices20_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Newton-Raphson integer sqrt helpers (no float, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+        fn isqrt128(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // 4. Degree array from adj bitmasks.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 5. Edge scan (a < b): accumulate SO*, RSO, rSO.
+        //    SO* formula:  isqrt128((d_a·d_b)²·10^12 / (d_a²+d_b²))  [identity: floor(A/√B)=floor(√(A²/B))]
+        //    RSO formula:  isqrt64(10^12 / (d_a²+d_b²))               [same identity, A=10^6]
+        //    rSO formula:  isqrt64(((d_a-1)²+(d_b-1)²)·10^12)         [floor(√C·10^6)=isqrt64(C·10^12)]
+        let mut so_star_ppm = 0u64;
+        let mut rso_ppm     = 0u64;
+        let mut rso_red_ppm = 0u64;
+        for a in 0..nc {
+            let da = deg[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let db       = deg[b];
+                    let sum_sq   = da * da + db * db;       // d_a² + d_b² ≥ 2
+                    let prod     = da * db;                  // d_a · d_b
+                    let so_num   = (prod as u128) * (prod as u128) * 1_000_000_000_000u128;
+                    so_star_ppm += isqrt128(so_num / (sum_sq as u128)) as u64;
+                    rso_ppm     += isqrt64(1_000_000_000_000u64 / sum_sq);
+                    let ra       = da - 1;  // ≥ 0; da ≥ 1 guaranteed (adj[a] ≠ 0)
+                    let rb       = db - 1;  // ≥ 0; db ≥ 1 guaranteed
+                    let red_sq   = ra * ra + rb * rb;
+                    rso_red_ppm += isqrt64(red_sq * 1_000_000_000_000u64);
+                }
+            }
+        }
+
+        (so_star_ppm, rso_ppm, rso_red_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16368,6 +16474,18 @@ pub fn graph_topo_indices18() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(n(n+m)) — 2 BFS phases; component detection O(V+E).
 pub fn graph_topo_indices19() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices19_inner()
+}
+
+/// V3.31: `graph topo20` — Sombor-family variants: SO* + RSO + rSO.
+///
+///   Returns (so_star_ppm, rso_ppm, rso_red_ppm, edge_count, node_count).
+///   SO*(G)  × 10^6 = Σ_{uv∈E} d_u·d_v/√(d_u²+d_v²) × 10^6   (floor ppm; Ghanbari & Rajabi-Parsa 2021)
+///   RSO(G)  × 10^6 = Σ_{uv∈E} 10^6/√(d_u²+d_v²)              (floor ppm; Gutman 2022)
+///   rSO(G)  × 10^6 = Σ_{uv∈E} √((d_u−1)²+(d_v−1)²)×10^6     (floor ppm; Doslic et al. 2022)
+/// rSO=0 iff all edges are pendant-pendant (d_u=d_v=1).
+/// Algorithm: O(V+E) degree scan only — no BFS needed.
+pub fn graph_topo_indices20() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices20_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

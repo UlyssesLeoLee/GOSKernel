@@ -61,7 +61,6 @@ const KC_KEY_C: &str = "kc.gamma";
 const KC_KEY_D: &str = "kc.delta";
 const KC_KEY_E: &str = "kc.epsilon";
 const KC_KEY_F: &str = "kc.zeta";
-const KC_KEY_G: &str = "kc.eta";
 
 const KC_ID_A: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_A);
 const KC_ID_B: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_B);
@@ -69,7 +68,6 @@ const KC_ID_C: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_C);
 const KC_ID_D: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_D);
 const KC_ID_E: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_E);
 const KC_ID_F: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_F);
-const KC_ID_G: NodeId = derive_node_id(KC_PLUGIN, KC_KEY_G);
 
 const KC_VEC_A: VectorAddress = VectorAddress::new(40, 1, 1, 0);
 const KC_VEC_B: VectorAddress = VectorAddress::new(40, 1, 2, 0);
@@ -77,7 +75,6 @@ const KC_VEC_C: VectorAddress = VectorAddress::new(40, 1, 3, 0);
 const KC_VEC_D: VectorAddress = VectorAddress::new(40, 1, 4, 0);
 const KC_VEC_E: VectorAddress = VectorAddress::new(40, 1, 5, 0);
 const KC_VEC_F: VectorAddress = VectorAddress::new(40, 1, 6, 0);
-const KC_VEC_G: VectorAddress = VectorAddress::new(40, 1, 7, 0);
 
 const KC_MANIFEST: PluginManifest = PluginManifest {
     abi_version:  GOS_ABI_VERSION,
