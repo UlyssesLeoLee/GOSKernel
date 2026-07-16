@@ -1276,6 +1276,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices30(sink);
     } else if cmd == "graph topo31" || cmd == "gtopo31" || cmd == "neighborhood sigma" || cmd == "gnsig" || cmd == "neighborhood quartic edge" || cmd == "gnhqs" || cmd == "neighborhood penta" || cmd == "gnps" || cmd == "gnsignhqsnps" {
         super::dispatch_graph_topo_indices31(sink);
+    } else if cmd == "graph topo32" || cmd == "gtopo32" || cmd == "neighborhood hextic" || cmd == "gnsh" || cmd == "neighborhood quintic edge" || cmd == "gnhps" || cmd == "neighborhood weighted sombor" || cmd == "gnwso" || cmd == "gnshnhpsnwso" {
+        super::dispatch_graph_topo_indices32(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

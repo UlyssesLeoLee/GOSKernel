@@ -14580,6 +14580,133 @@ impl GraphRuntime {
 
         (nsig, nhqs, nps, edge_count, nc)
     }
+
+    pub fn graph_topo_indices32_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NSH (S-Hextic vertex sum = Σ_v S(v)^6).
+        //
+        //    NSH(G) = Σ_v S(v)^6  (S-analogue of 6th-power vertex sum)
+        //
+        //    Extends the S-power-vertex series:
+        //      NM₁=Σ S² (topo18) → NF=Σ S³ (topo22) → NVQ=Σ S⁴ (topo30)
+        //      → NPS=Σ S⁵ (topo31) → NSH=Σ S⁶ (topo32)
+        //    NSH = n·S^6 for S-regular.
+        //
+        //    Overflow: S(v) ≤ 127² = 16129; S^6 ≤ 16129^6 ≈ 1.76×10^25 > u64::MAX.
+        //    Use u128 accumulator; clamp to u64::MAX for pathological inputs.
+        //    Test graphs (S ≤ 9): 4 × 9^6 = 2_125_764 — no overflow in practice.
+
+        let mut nsh_acc: u128 = 0;
+        for ci in 0..nc {
+            let s  = sv[ci] as u128;
+            let s2 = s * s;
+            let s3 = s2 * s;
+            nsh_acc = nsh_acc.saturating_add(s3 * s3);
+        }
+        let nsh = nsh_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NHPS (S-Quintic edge-sum) and NWSO (S-Weighted Sombor).
+        //
+        //    NHPS(G) = Σ_{uv∈E} (S_u+S_v)^5  (S-quintic edge-sum)
+        //    Extends the S-power-edge series:
+        //      NHM1=Σ(S+S)² (topo23) → NHCS=Σ(S+S)³ (topo30)
+        //      → NHQS=Σ(S+S)⁴ (topo31) → NHPS=Σ(S+S)⁵ (topo32)
+        //    NHPS = |E|·(2S)^5 = 32|E|S^5 for S-regular.
+        //    Overflow per edge: (2×16129)^5 = 32258^5 ≈ 3.49×10^22 > u64::MAX → u128 accumulator.
+        //    u128::MAX ≈ 3.4×10^38; sum ≤ 4064 × 3.49×10^22 ≈ 1.42×10^26 < u128::MAX ✓.
+        //
+        //    NWSO(G) × 10^6 = Σ_{uv∈E} S_u·S_v·√(S_u²+S_v²) × 10^6  (floor ppm)
+        //    S-Weighted Sombor: weight each Sombor edge term by S_u·S_v.
+        //    NSO = Σ√(S²+S²) (topo21); NWSO = Σ S_u·S_v·√(S_u²+S_v²) (topo32).
+        //    NWSO = |E|·S²·S√2·10^6 = |E|·S³√2·10^6 for S-regular.
+        //    Implementation: floor(√(S_u²·S_v²·(S_u²+S_v²)·10^12)) via isqrt128.
+        //    Overflow: S_u²·S_v²·(S_u²+S_v²) ≤ 16129^4·2·16129^2 = 2·16129^6 ≈ 3.52×10^25.
+        //    × 10^12 ≈ 3.52×10^37 < u128::MAX (3.4×10^38) ✓ per-edge.
+        //    Sum of ppm values: ≤ 4064 × (16129^3·√2·10^6) ≈ very large → use u128 accumulator.
+
+        // Integer square root u128 — bit-shift init, Babylonian, no float, no_std safe.
+        fn isqrt128_t32(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        let mut nhps_acc:  u128 = 0;
+        let mut nwso_acc:  u128 = 0;
+        for a in 0..nc {
+            let sa  = sv[a] as u128;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb = sv[b] as u128;
+                    // NHPS: (S_a + S_b)^5 accumulated in u128
+                    let ss  = sa + sb;
+                    let ss2 = ss * ss;
+                    let ss4 = ss2 * ss2;
+                    nhps_acc = nhps_acc.saturating_add(ss4 * ss);
+                    // NWSO ppm: floor(√(S_a²·S_b²·(S_a²+S_b²)·10^12)) via isqrt128
+                    let sa2 = sa * sa;
+                    let sb2 = sb * sb;
+                    let inner = sa2.saturating_mul(sb2).saturating_mul(sa2.saturating_add(sb2));
+                    let inner_scaled = inner.saturating_mul(1_000_000_000_000u128);
+                    nwso_acc = nwso_acc.saturating_add(isqrt128_t32(inner_scaled));
+                }
+            }
+        }
+        let nhps     = nhps_acc.min(u64::MAX as u128) as u64;
+        let nwso_ppm = nwso_acc.min(u64::MAX as u128) as u64;
+
+        (nsh, nhps, nwso_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -17657,6 +17784,21 @@ pub fn graph_topo_indices30() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
 pub fn graph_topo_indices31() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices31_inner()
+}
+
+/// V3.43: `graph topo32` — NSH + NHPS + NWSO (S-variant power-series and weighted Sombor).
+///
+///   Returns (nsh, nhps, nwso_ppm, edge_count, node_count).
+///   All indices use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+///   NSH(G)  = Σ_v S(v)^6                            (u128→u64; S-hextic vertex sum; extends NPS Σ S⁵)
+///   NHPS(G) = Σ_{uv∈E} (S_u+S_v)^5                 (u128→u64; S-quintic edge-sum; extends NHQS Σ(S+S)⁴)
+///   NWSO(G) × 10^6 = Σ_{uv∈E} S_u·S_v·√(S_u²+S_v²)·10^6 (floor ppm; S-Weighted Sombor)
+/// NSH = n·S^6 for S-regular; NHPS = |E|·(2S)^5 = 32|E|S^5 for S-regular.
+/// NWSO = |E|·S³·√2·10^6 for S-regular (= S²·NSO_per_edge).
+/// NSO(topo21) = Σ√(S²+S²); NWSO adds S_u·S_v weight: = Σ S_u·S_v·√(S_u²+S_v²).
+/// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
+pub fn graph_topo_indices32() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices32_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

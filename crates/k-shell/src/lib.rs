@@ -11149,6 +11149,72 @@ pub fn dispatch_graph_topo_indices31(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices32(sink: &ConsoleSink) {
+    let (nsh, nhps, nwso_ppm, edge_count, node_count) =
+        gos_runtime::graph_topo_indices32();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo32 (NSH + NHPS + NWSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NSH (S-Hextic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-hextic-vertex   NSH  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nsh as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2076}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHPS (S-Quintic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-quintic-edge    NHPS =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhps as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2075}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NWSO (S-Weighted Sombor)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-weighted-sombor NWSO =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        let nwso_whole = nwso_ppm / 1_000_000;
+        let nwso_frac  = ((nwso_ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, nwso_whole as usize);
+        print_str(sink, ".");
+        if nwso_frac < 10       { print_str(sink, "00"); }
+        else if nwso_frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, nwso_frac);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} S_u\u{00b7}S_v\u{00b7}\u{221a}(S_u\u{00b2}+S_v\u{00b2})]  (ppm)");
+        if nwso_ppm == (edge_count as u64) * 1_414_213 || nwso_ppm == (edge_count as u64) * 1_414_214 {
+            // approximate S=1 uniform check — skip annotation; let value speak for itself
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NSH extends NPS to 6th power; NHPS extends NHQS to 5th power; NWSO=S\u{00b2}\u{00b7}NSO per edge)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
