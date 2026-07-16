@@ -15056,6 +15056,121 @@ impl GraphRuntime {
 
         (nnc, nhoc, nhso, edge_count, nc)
     }
+
+    pub fn graph_topo_indices36_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NDC (S-Decic vertex sum = Σ_v S(v)^10).
+        //
+        //    NDC(G) = Σ_v S(v)^10  (exact u128→u64; S-decic vertex sum)
+        //
+        //    Extends the S-power-vertex series:
+        //      NM₁=Σ S² (topo18) → NF=Σ S³ (topo22) → NVQ=Σ S⁴ (topo30)
+        //      → NPS=Σ S⁵ (topo31) → NSH=Σ S⁶ (topo32) → NSHP=Σ S⁷ (topo33)
+        //      → NOC=Σ S⁸ (topo34) → NNC=Σ S⁹ (topo35) → NDC=Σ S¹⁰ (topo36)
+        //    NDC = n·S^10 for S-regular.
+        //    Overflow: S(v) ≤ 16129; S^10 ≤ 16129^10 ≈ 2.6×10^41 > u128::MAX.
+        //    Use saturating u128 accumulator; clamp to u64::MAX.
+
+        let mut ndc_acc: u128 = 0;
+        for ci in 0..nc {
+            let s   = sv[ci] as u128;
+            let s2  = s * s;
+            let s4  = s2 * s2;
+            let s8  = s4.saturating_mul(s4);
+            let s10 = s8.saturating_mul(s2);
+            ndc_acc = ndc_acc.saturating_add(s10);
+        }
+        let ndc = ndc_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NHNC (S-Nonic edge-sum) and NOSO (S-Octic Sombor).
+        //
+        //    NHNC(G) = Σ_{uv∈E} (S_u+S_v)^9  (exact u128→u64; S-nonic/ninth edge-sum)
+        //    Extends the S-power-edge series:
+        //      NHM1=Σ(S+S)² (topo23) → NHCS=Σ(S+S)³ (topo30) → NHQS=Σ(S+S)⁴ (topo31)
+        //      → NHPS=Σ(S+S)⁵ (topo32) → NHSE=Σ(S+S)⁶ (topo33) → NHHS=Σ(S+S)⁷ (topo34)
+        //      → NHOC=Σ(S+S)⁸ (topo35) → NHNC=Σ(S+S)⁹ (topo36)
+        //    NHNC = |E|·(2S)^9 = 512|E|S^9 for S-regular.
+        //    Overflow per edge: (2×16129)^9 ≈ 3.5×10^40 > u128::MAX → saturating.
+        //
+        //    NOSO(G) = Σ_{uv∈E} (S_u²+S_v²)^4  (exact u128→u64; S-Octic Sombor)
+        //    S-variant generalised Sombor SO^α with α=8: SO^α=(S²+S²)^{α/2}.
+        //    NSO(topo21)=α=1, NCSO(topo33)=α=3, NFSO(topo34)=α=4,
+        //    NHSO(topo35)=α=6, NOSO(topo36)=Σ(S²+S²)^4 (α=8) — exact, no isqrt.
+        //    NOSO = |E|·(2S²)^4 = 16|E|S^8 for S-regular.
+        //    Overflow per edge: (2×16129²)^4 ≈ 7.3×10^34 < u128::MAX. Sum ≤ 128 terms → safe.
+
+        let mut nhnc_acc: u128 = 0;
+        let mut noso_acc: u128 = 0;
+        for a in 0..nc {
+            let sa  = sv[a] as u128;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b] as u128;
+                    // NHNC: (S_a + S_b)^9 = ((S_a+S_b)^8) × (S_a+S_b)
+                    let ss   = sa + sb;
+                    let ss2  = ss * ss;
+                    let ss4  = ss2 * ss2;
+                    let ss8  = ss4.saturating_mul(ss4);
+                    let ss9  = ss8.saturating_mul(ss);
+                    nhnc_acc = nhnc_acc.saturating_add(ss9);
+                    // NOSO: (S_a² + S_b²)^4 = ((S_a²+S_b²)^2)^2
+                    let s2s  = sa * sa + sb * sb;
+                    let s2s2 = s2s * s2s;
+                    let s2s4 = s2s2.saturating_mul(s2s2);
+                    noso_acc = noso_acc.saturating_add(s2s4);
+                }
+            }
+        }
+        let nhnc = nhnc_acc.min(u64::MAX as u128) as u64;
+        let noso = noso_acc.min(u64::MAX as u128) as u64;
+
+        (ndc, nhnc, noso, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -18181,6 +18296,10 @@ pub fn graph_topo_indices34() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices35() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices35_inner()
+}
+
+pub fn graph_topo_indices36() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices36_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
