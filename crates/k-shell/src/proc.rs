@@ -1268,6 +1268,10 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices26(sink);
     } else if cmd == "graph topo27" || cmd == "gtopo27" || cmd == "neighborhood reciprocal randic" || cmd == "gnrr" || cmd == "neighborhood modified sombor" || cmd == "gnsos" || cmd == "neighborhood reduced sombor" || cmd == "gnrso2" || cmd == "gnrrnsosnrso" {
         super::dispatch_graph_topo_indices27(sink);
+    } else if cmd == "graph topo28" || cmd == "gtopo28" || cmd == "neighborhood nirmala" || cmd == "gnni" || cmd == "neighborhood modified nirmala" || cmd == "gnnmi" || cmd == "gnsm1" || cmd == "gnnigsm1" || cmd == "gnninnminsm1" {
+        super::dispatch_graph_topo_indices28(sink);
+    } else if cmd == "graph topo29" || cmd == "gtopo29" || cmd == "neighborhood zero randic" || cmd == "gnz0" || cmd == "neighborhood em2" || cmd == "gnem2" || cmd == "neighborhood sqrt vertex" || cmd == "gnse" || cmd == "gnz0nem2nse" {
+        super::dispatch_graph_topo_indices29(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

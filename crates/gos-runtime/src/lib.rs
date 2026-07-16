@@ -14261,6 +14261,110 @@ impl GraphRuntime {
 
         (nni_ppm, nnmi_ppm, nsm1, edge_count, nc)
     }
+
+    pub fn graph_topo_indices29_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. isqrt64 helper (Newton-Raphson, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // 6. Node scan: NZ₀ (inverse sqrt vertex sum) and NSe (sqrt vertex sum).
+        //
+        //    NZ₀_ppm = Σ_{v: S(v)>0} isqrt64(10^12 / S(v))  (floor ppm; S-zero-order Randić)
+        //    NSe_ppm = Σ_v             isqrt64(S(v) × 10^12) (floor ppm; S-sqrt vertex sum)
+        //
+        //    Overflow: 10^12/S(v) ≤ 10^12 < u64::MAX ✓
+        //              S(v)×10^12 ≤ 16129×10^12 = 1.61×10^16 < u64::MAX ✓
+        //    Node-sum ≤ 127 × 10^6 ≈ 1.27×10^8 << u64::MAX ✓
+
+        let mut nz0_ppm = 0u64;
+        let mut nse_ppm = 0u64;
+        for ci in 0..nc {
+            let s = sv[ci];
+            if s > 0 {
+                nz0_ppm += isqrt64(1_000_000_000_000u64 / s);
+            }
+            nse_ppm += isqrt64(s * 1_000_000_000_000u64);
+        }
+
+        // 7. Edge scan (a < b): accumulate NEM₂.
+        //
+        //    NEM₂ = Σ_{uv∈E} S_u · S_v · (S_u+S_v−2)  (exact u64; S-Reformulated 2nd Zagreb)
+        //
+        //    EM₂(G) = Σ_{uv∈E} d_u·d_v·(d_u+d_v-2)  [Miličević et al. 2004]
+        //    NEM₂=0 iff all edges have S_u+S_v=2 (both S=1; only K₂-type pairs).
+        //    NEM₂ = |E|·S²·(2S-2) for S-regular; = 0 for K₂ (ssum=2, factor=0).
+        //
+        //    Overflow: max per-edge = 16129×16129×32256 ≈ 8.39×10^12 < u64::MAX ✓
+        //              sum ≤ 8128 × 8.39×10^12 ≈ 6.82×10^16 < u64::MAX ✓
+
+        let mut nem2 = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let ssum = sa + sb;
+                    nem2 += sa * sb * ssum.saturating_sub(2);
+                }
+            }
+        }
+
+        (nz0_ppm, nem2, nse_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -17316,6 +17420,10 @@ pub fn graph_topo_indices27() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices28() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices28_inner()
+}
+
+pub fn graph_topo_indices29() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices29_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
