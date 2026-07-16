@@ -13759,6 +13759,93 @@ impl GraphRuntime {
 
         (nhm1, nsdd_ppm, nm3, edge_count, nc)
     }
+
+    pub fn graph_topo_indices24_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Edge scan (a < b): accumulate NISI, NAZI, NEM1.
+        //    NISI_ppm = Σ_{uv∈E} floor(S_u·S_v·10^6/(S_u+S_v))     (floor ppm; S-analogue of ISI)
+        //    NAZI_milli = Σ_{uv∈E} floor((S_u·S_v)^3·10^3/(S_u+S_v-2)^3)  (floor milli; S-analogue of AZI;
+        //                 skip edges with S_u+S_v=2, i.e. K₂-type pendant pairs)
+        //    NEM1     = Σ_{uv∈E} (S_u+S_v-2)^2                      (exact u64; S-analogue of EM₁)
+        //
+        //  Overflow safety:
+        //    NISI:  S_u·S_v·10^6 ≤ 16129²×10^6 ≈ 2.6×10^17 < u64::MAX ✓
+        //    NAZI:  (S_u·S_v)^3 ≤ (16129²)^3 ≈ 1.76×10^25 → needs u128 intermediate;
+        //           after /q^3: per-edge result ≤ ~5.24×10^14 × 1000 ≈ 5.24×10^14, fits u64 ✓
+        //    NEM1:  (ssum-2)^2 ≤ 32256^2 ≈ 10^9 per edge; ×8065 edges ≈ 8×10^12 < u64::MAX ✓
+        let mut nisi_ppm  = 0u64;
+        let mut nazi_milli = 0u64;
+        let mut nem1       = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let ssum = sa + sb;
+                    let sp   = sa * sb;
+                    // NISI = floor(S_u·S_v·10^6/(S_u+S_v))
+                    nisi_ppm += sp * 1_000_000u64 / ssum;
+                    // NAZI = floor((S_u·S_v)^3·10^3/(S_u+S_v-2)^3); skip when q=0 (S_u=S_v=1)
+                    if ssum > 2 {
+                        let q = ssum - 2;
+                        let sp3 = (sp as u128) * (sp as u128) * (sp as u128);
+                        let q3  = (q  as u128) * (q  as u128) * (q  as u128);
+                        nazi_milli += (sp3 * 1000 / q3) as u64;
+                    }
+                    // NEM1 = (S_u+S_v-2)^2
+                    let q64 = if ssum >= 2 { ssum - 2 } else { 0 };
+                    nem1 += q64 * q64;
+                }
+            }
+        }
+
+        (nisi_ppm, nazi_milli, nem1, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16794,6 +16881,10 @@ pub fn graph_topo_indices22() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then edge scan; no BFS needed.
 pub fn graph_topo_indices23() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices23_inner()
+}
+
+pub fn graph_topo_indices24() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices24_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

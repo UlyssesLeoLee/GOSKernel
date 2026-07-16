@@ -10553,6 +10553,88 @@ pub fn dispatch_graph_topo_indices23(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.35: `graph topo24` — NISI + NAZI + NEM1 (S-variant ISI, AZI, EM₁).
+pub fn dispatch_graph_topo_indices24(sink: &ConsoleSink) {
+    let (nisi_ppm, nazi_milli, nem1, edge_count, node_count) =
+        gos_runtime::graph_topo_indices24();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo24 (NISI + NAZI + NEM1 S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NISI (Neighborhood Inverse Sum Indegree)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-inv-sum-indeg   NISI =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        let nisi_whole = nisi_ppm / 1_000_000;
+        let nisi_frac  = ((nisi_ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, nisi_whole as usize);
+        print_str(sink, ".");
+        if nisi_frac < 10       { print_str(sink, "00"); }
+        else if nisi_frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, nisi_frac);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} S_u\u{00b7}S_v/(S_u+S_v)]  (ppm)");
+        if edge_count > 0 {
+            let s_half_ppm = nisi_ppm / edge_count as u64;
+            let _ = s_half_ppm; // annotation omitted for variable-S case
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NAZI (Neighborhood Augmented Zagreb Index)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-augmented-azi   NAZI =  ");
+        set_color(sink, 10, 0); // bright-green
+        let nazi_whole = nazi_milli / 1_000;
+        let nazi_frac  = (nazi_milli % 1_000) as usize;
+        print_num_inline(sink, nazi_whole as usize);
+        print_str(sink, ".");
+        if nazi_frac < 10       { print_str(sink, "00"); }
+        else if nazi_frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, nazi_frac);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S_u\u{00b7}S_v/(S_u+S_v-2))\u{00b3}]  (milli)");
+        if edge_count > 0 && nazi_milli == 0 {
+            set_color(sink, 11, 0);
+            print_str(sink, "  NAZI=0: all pendant-pair (S=1)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NEM1 (Neighborhood Reformulated First Zagreb)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-reform-zagreb   NEM1 =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nem1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S_u+S_v-2)\u{00b2}]  (exact)");
+        if edge_count > 0 && nem1 == 0 {
+            set_color(sink, 11, 0);
+            print_str(sink, "  NEM1=0: all S\u{2081}\u{208a}S\u{2082}=2");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Sedlar et al. 2011  Furtula et al. 2010  Milicevic et al. 2004  (S-variant family)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
