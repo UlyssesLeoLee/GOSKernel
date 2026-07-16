@@ -14166,6 +14166,101 @@ impl GraphRuntime {
 
         (nrr_ppm, nsos_ppm, nrso_ppm, edge_count, nc)
     }
+
+    pub fn graph_topo_indices28_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Edge scan (a < b): accumulate NNI, NNMI, NSM1.
+        //
+        //    NNI_ppm  = Σ_{uv∈E} isqrt64((S_u+S_v)×10^12)              (floor ppm; S-Nirmala)
+        //    NNMI_ppm = Σ_{uv∈E} (S_u+S_v)×isqrt64((S_u+S_v)×10^12)   (floor ppm; S-Modified Nirmala)
+        //    NSM1     = Σ_{uv∈E} (S_u+S_v)                              (exact u64; S-edge M₁)
+        //
+        //  NNMI identity: floor((S+S)^{3/2}×10^6) = (S_u+S_v)×floor(√(S_u+S_v)×10^6)
+        //  because (S_u+S_v) is integer ⟹ it factors out of the floor.
+        //
+        //  Overflow:
+        //    ssum×10^12: max ssum=32258; 32258×10^12=3.23×10^16 < u64::MAX ✓
+        //    NNMI acc:   per edge ≤32258×179_606_381≈5.79×10^12; sum≤8128×5.79×10^12≈4.71×10^16 < u64::MAX ✓
+        //    NSM1:       sum ≤ 8128×32258 ≈ 2.62×10^8 << u64::MAX ✓
+
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        let mut nni_ppm  = 0u64;
+        let mut nnmi_ppm = 0u64;
+        let mut nsm1     = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb  = sv[b];
+                    let ssum = sa + sb;
+                    // NNI per edge = floor(√(S_u+S_v) × 10^6) = isqrt64(ssum × 10^12)
+                    let nni_e = isqrt64(ssum * 1_000_000_000_000u64);
+                    nni_ppm  += nni_e;
+                    // NNMI per edge = floor((S_u+S_v)^{3/2} × 10^6) = ssum × nni_e
+                    nnmi_ppm += ssum * nni_e;
+                    // NSM1 = exact sum of (S_u+S_v) over all edges
+                    nsm1 += ssum;
+                }
+            }
+        }
+
+        (nni_ppm, nnmi_ppm, nsm1, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -17217,6 +17312,10 @@ pub fn graph_topo_indices26() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices27() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices27_inner()
+}
+
+pub fn graph_topo_indices28() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices28_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
