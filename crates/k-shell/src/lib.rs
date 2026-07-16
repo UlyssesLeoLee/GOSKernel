@@ -10480,6 +10480,79 @@ pub fn dispatch_graph_topo_indices22(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+/// V3.34: `graph topo23` — NHM1 + NSDD + NM3 (S-variant HM₁, SDD, M₃).
+pub fn dispatch_graph_topo_indices23(sink: &ConsoleSink) {
+    let (nhm1, nsdd_ppm, nm3, edge_count, node_count) =
+        gos_runtime::graph_topo_indices23();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo23 (NHM1 + NSDD + NM3 S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NHM1 (Neighborhood Hyper-Zagreb M₁)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-hyper zagreb M\u{2081}  NHM1 =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nhm1 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S_u+S_v)\u{00b2}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NSDD (Neighborhood Symmetric Division Deg)
+        let two_edge_ppm = 2u64 * edge_count as u64 * 1_000_000u64;
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-sym-div-deg    NSDD =  ");
+        set_color(sink, 10, 0); // bright-green
+        let nsdd_whole = nsdd_ppm / 1_000_000;
+        let nsdd_frac  = ((nsdd_ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, nsdd_whole as usize);
+        print_str(sink, ".");
+        if nsdd_frac < 10       { print_str(sink, "00"); }
+        else if nsdd_frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, nsdd_frac);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S\u{00b2}_u+S\u{00b2}_v)/(S_u\u{00b7}S_v)]  (ppm)");
+        if edge_count > 0 && nsdd_ppm == two_edge_ppm {
+            set_color(sink, 11, 0);
+            print_str(sink, "  \u{2261}2|E| (S-regular)");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NM3 (Neighborhood M₃ irregularity)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-irregularity   NM3  =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nm3 as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} |S_u\u{2212}S_v|]  (exact)");
+        if edge_count > 0 && nm3 == 0 {
+            set_color(sink, 11, 0);
+            print_str(sink, "  NM3=0: S-regular");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Shirdel et al. 2013  Vasilyev 2014  (S-variant family)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

@@ -13678,6 +13678,87 @@ impl GraphRuntime {
 
         (nr_ppm, nf, nsc_ppm, edge_count, nc)
     }
+
+    pub fn graph_topo_indices23_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Edge scan (a < b): accumulate NHM1, NSDD, NM3.
+        //    NHM1 = Σ_{uv∈E} (S_u+S_v)²              (exact u64; S-analogue of HM₁)
+        //    NSDD = Σ_{uv∈E} (S_u²+S_v²)/(S_u·S_v)  (floor ppm; S-analogue of SDD; ≥2|E|×10^6)
+        //    NM3  = Σ_{uv∈E} |S_u−S_v|               (exact u64; S-analogue of M₃ irregularity; =0 iff S-regular)
+        //
+        //  Overflow safety:
+        //    NHM1: (ssum)² ≤ 32258² ≈ 1.04×10^9 per edge; 512 edges × 10^9 < u64::MAX ✓
+        //    NSDD: (sa²+sb²)×10^6 ≤ 5.2×10^14 per edge; sum over 512 edges < u64::MAX ✓
+        //    NM3:  |sa−sb| ≤ 16129 per edge; 512×16129 < u64::MAX ✓
+        let mut nhm1     = 0u64;
+        let mut nsdd_ppm = 0u64;
+        let mut nm3      = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let ssum = sa + sb;
+                    let sp   = sa * sb;
+                    // NHM1 = (S_u+S_v)²
+                    nhm1 += ssum * ssum;
+                    // NSDD = floor((S_u²+S_v²)×10^6 / (S_u·S_v)); sp=0 only if sa or sb=0 (isolated nodes have no edges)
+                    if sp > 0 {
+                        nsdd_ppm += (sa * sa + sb * sb) * 1_000_000u64 / sp;
+                    }
+                    // NM3 = |S_u−S_v|
+                    nm3 += if sa >= sb { sa - sb } else { sb - sa };
+                }
+            }
+        }
+
+        (nhm1, nsdd_ppm, nm3, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16699,6 +16780,20 @@ pub fn graph_topo_indices21() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then node+edge pass; no BFS needed.
 pub fn graph_topo_indices22() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices22_inner()
+}
+
+/// V3.34: `graph topo23` — NHM1 + NSDD + NM3 (Neighborhood S-variant HM₁, SDD, M₃).
+///
+///   Returns (nhm1, nsdd_ppm, nm3, edge_count, node_count).
+///   All indices use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+///   NHM1(G) = Σ_{uv∈E} (S_u+S_v)²               (exact u64; S-analogue of HM₁, Shirdel et al. 2013)
+///   NSDD(G) × 10^6 = Σ_{uv∈E} (S_u²+S_v²)/(S_u·S_v) × 10^6 (floor ppm; S-analogue of SDD; ≥2|E|×10^6)
+///   NM3(G)  = Σ_{uv∈E} |S_u−S_v|                (exact u64; S-analogue of M₃ irregularity; =0 iff S-regular)
+/// NSDD invariant: NSDD=2|E|×10^6 iff S-regular (AM-GM: (S²_u+S²_v)/(S_u·S_v)≥2; equality when S_u=S_v).
+/// NM3 invariant: NM3=0 iff S-regular (all S values equal).
+/// Algorithm: O(V+E) S-scan — degree pass then S-pass then edge scan; no BFS needed.
+pub fn graph_topo_indices23() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices23_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
