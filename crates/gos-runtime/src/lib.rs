@@ -14067,6 +14067,105 @@ impl GraphRuntime {
 
         (npc_ppm, nrm2, nrso_ppm, edge_count, nc)
     }
+
+    pub fn graph_topo_indices27_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Edge scan (a < b): accumulate NRR, NSO*, NrSO.
+        //
+        //    NRR_ppm  = Σ_{uv∈E} floor(10^6/(S_u·S_v))                         (S-analogue of R_{-1})
+        //    NSOs_ppm = Σ_{uv∈E} isqrt128(S_u²·S_v²·10^12/(S_u²+S_v²))        (S-analogue of SO*)
+        //    NrSO_ppm = Σ_{uv∈E} isqrt128(((S_u-1)²+(S_v-1)²)·10^12) as u64   (S-analogue of rSO)
+        //
+        //  Overflow:
+        //    NRR:  sp≥1; floor(10^6/sp)≤10^6; total≤512×10^6 < u64::MAX ✓
+        //    NSOs: S²≤16129²≈2.6×10^8; S²·S²·10^12≤~6.8×10^28 < u128::MAX ✓
+        //          result per edge ≤ 16129²/√2·10^6 ≈ 1.8×10^14; total < u64::MAX ✓
+        //    NrSO: (S-1)²≤16128²≈2.6×10^8; sum×10^12≤5.2×10^20 > u64::MAX → u128 needed;
+        //          result per edge ≤ √(5.2×10^20) ≈ 7.2×10^10; total < u64::MAX ✓
+
+        fn isqrt128(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        let mut nrr_ppm  = 0u64;
+        let mut nsos_ppm = 0u64;
+        let mut nrso_ppm = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb = sv[b];
+                    // NRR = floor(10^6/(S_u·S_v))
+                    let sp = sa * sb;
+                    if sp > 0 { nrr_ppm += 1_000_000u64 / sp; }
+                    // NSO* = isqrt128(S_u²·S_v²·10^12/(S_u²+S_v²))
+                    let ss2 = sa * sa + sb * sb;
+                    if ss2 > 0 {
+                        let sp2 = (sa as u128) * (sa as u128) * (sb as u128) * (sb as u128);
+                        nsos_ppm += isqrt128(sp2 * 1_000_000_000_000u128 / (ss2 as u128)) as u64;
+                    }
+                    // NrSO = isqrt128(((S_u-1)²+(S_v-1)²)·10^12)
+                    let pa = sa.saturating_sub(1) as u128;
+                    let pb = sb.saturating_sub(1) as u128;
+                    nrso_ppm += isqrt128((pa * pa + pb * pb) * 1_000_000_000_000u128) as u64;
+                }
+            }
+        }
+
+        (nrr_ppm, nsos_ppm, nrso_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -17114,6 +17213,10 @@ pub fn graph_topo_indices25() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices26() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices26_inner()
+}
+
+pub fn graph_topo_indices27() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices27_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
