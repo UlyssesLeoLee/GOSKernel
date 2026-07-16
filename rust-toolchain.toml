@@ -1,6 +1,11 @@
 # GOS Kernel — Toolchain Pin
 # Required: nightly for abi_x86_interrupt, build-std
+# Pinned to a dated build (not floating "nightly") — a later nightly changed
+# core::iter::Step's required trait methods (forward_overflowing /
+# backward_overflowing), which the pinned x86_64 crate v0.14.13 doesn't
+# implement (E0046). Bump this date only after confirming `cargo check -p
+# gos-kernel` still passes under the new nightly.
 [toolchain]
-channel  = "nightly"
+channel  = "nightly-2026-04-02"
 components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy"]
 targets  = []

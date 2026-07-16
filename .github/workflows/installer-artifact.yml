@@ -17,7 +17,8 @@ jobs:
       - name: Install Nightly Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          # Pinned dated nightly — see rust-toolchain.toml for why.
+          toolchain: nightly-2026-04-02
           components: rust-src, llvm-tools-preview
 
       - name: Install cargo-bootimage
