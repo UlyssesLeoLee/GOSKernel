@@ -11506,6 +11506,63 @@ pub fn dispatch_graph_topo_indices37(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices38(sink: &ConsoleSink) {
+    let (ndoc, nhuc, ndso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices38();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo38 (NDoC + NHUC + NDSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NDoC (S-Dodecic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dodecic-vertex  NDoC =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, ndoc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{00b9}\u{00b2}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHUC (S-Undecic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-undecic-edge    NHUC =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhuc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{00b9}\u{00b9}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NDSO (S-Duodecic Sombor)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-duodecic-sombor NDSO =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, ndso as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2076}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NDoC extends NUC to 12th power; NHUC extends NHDC to 11th; NDSO=SO\u{00b9}\u{00b2} applied to S)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
