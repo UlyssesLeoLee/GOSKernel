@@ -14479,6 +14479,107 @@ impl GraphRuntime {
 
         (nvq, nrgs_ppm, nhcs, edge_count, nc)
     }
+
+    pub fn graph_topo_indices31_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NPS (S-Penta vertex sum = Σ_v S(v)^5).
+        //
+        //    NPS(G) = Σ_v S(v)^5  (exact for test graphs; S-analogue of 5th-power vertex sum)
+        //
+        //    Extension of NM₁=Σ S² (topo18), NF=Σ S³ (topo22), NVQ=Σ S⁴ (topo30) to 5th power.
+        //    NPS = n·S^5 for S-regular.
+        //
+        //    Overflow: S(v) ≤ 127² = 16129; S^5 ≤ 16129^5 ≈ 1.09×10^21 > u64::MAX.
+        //    Use u128 accumulator; clamp to u64::MAX for pathological inputs.
+        //    Test graphs (S ≤ 9): 4 × 9^5 = 236_196 — no overflow in practice.
+
+        let mut nps_acc: u128 = 0;
+        for ci in 0..nc {
+            let s  = sv[ci] as u128;
+            let s2 = s * s;
+            nps_acc = nps_acc.saturating_add(s2 * s2 * s);
+        }
+        let nps = nps_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NSig (S-Sigma) and NHQS (S-Quartic edge-sum).
+        //
+        //    NSig(G) = Σ_{uv∈E} (S_u−S_v)²  (exact u64; S-variant of Sigma irregularity index)
+        //    S-analogue of σ(G) = Σ_{uv∈E} (d_u−d_v)² (Gutman et al.).
+        //    NSig = 0 iff S-regular (all S values equal across edge endpoints).
+        //    Overflow: (S_u−S_v)² ≤ 16129² ≈ 2.60×10^8; sum ≤ 4064 × 2.60×10^8 ≈ 1.06×10^12 < u64::MAX ✓
+        //
+        //    NHQS(G) = Σ_{uv∈E} (S_u+S_v)^4  (S-quartic edge-sum; extends NHM1=Σ(S+S)², NHCS=Σ(S+S)³)
+        //    S-analogue of 4th-power edge-sum. NHQS = |E|·(2S)^4 = 16|E|S^4 for S-regular.
+        //    K₃ and K_{1,4}: both S-uniform S=4 → same per-edge NHQS (8^4=4096); totals differ by |E|.
+        //    Overflow per edge: (2×16129)^4 = 32258^4 ≈ 1.08×10^18 < u64::MAX ✓
+        //    Sum: 4064 × 1.08×10^18 ≈ 4.4×10^21 > u64::MAX — use u128 accumulator.
+
+        let mut nsig:     u64  = 0;
+        let mut nhqs_acc: u128 = 0;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb = sv[b];
+                    // NSig: (S_a - S_b)^2 (u64 safe per overflow analysis above)
+                    let diff = if sa >= sb { sa - sb } else { sb - sa };
+                    nsig += diff * diff;
+                    // NHQS: (S_a + S_b)^4 accumulated in u128
+                    let ss = (sa + sb) as u128;
+                    let ss2 = ss * ss;
+                    nhqs_acc = nhqs_acc.saturating_add(ss2 * ss2);
+                }
+            }
+        }
+        let nhqs = nhqs_acc.min(u64::MAX as u128) as u64;
+
+        (nsig, nhqs, nps, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -17542,6 +17643,20 @@ pub fn graph_topo_indices29() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices30() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices30_inner()
+}
+
+/// V3.42: `graph topo31` — NSig + NHQS + NPS (S-variant irregularity and power-sum family).
+///
+///   Returns (nsig, nhqs, nps, edge_count, node_count).
+///   All indices use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+///   NSig(G) = Σ_{uv∈E} (S_u−S_v)²                (exact u64; S-Sigma irregularity; =0 iff S-regular)
+///   NHQS(G) = Σ_{uv∈E} (S_u+S_v)^4               (u128→u64; S-quartic edge-sum; extends NHCS Σ(S+S)³)
+///   NPS(G)  = Σ_v S(v)^5                          (u128→u64; S-penta vertex sum; extends NVQ Σ S⁴)
+/// NSig=0 iff S-regular (all neighbor-degree sums equal across each edge).
+/// NHQS = n·(2S)^4 = 16n·S^4 for S-regular; NPS = n·S^5 for S-regular.
+/// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
+pub fn graph_topo_indices31() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices31_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
