@@ -11021,6 +11021,73 @@ pub fn dispatch_graph_topo_indices29(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices30(sink: &ConsoleSink) {
+    let (nvq, nrgs_ppm, nhcs, edge_count, node_count) =
+        gos_runtime::graph_topo_indices30();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo30 (NVQ + NRGS + NHCS S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NVQ (S-Quartic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-quartic-vertex  NVQ  =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nvq as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2074}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NRGS (S-Generalized Randić 3/2)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-randic-3/2      NRGS =  ");
+        set_color(sink, 10, 0); // bright-green
+        let nrgs_whole = nrgs_ppm / 1_000_000;
+        let nrgs_frac  = ((nrgs_ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, nrgs_whole as usize);
+        print_str(sink, ".");
+        if nrgs_frac < 10       { print_str(sink, "00"); }
+        else if nrgs_frac < 100 { print_str(sink, "0"); }
+        print_num_inline(sink, nrgs_frac);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S_u\u{00b7}S_v)^{3/2}]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHCS (S-Cubic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-cubic-edge-sum  NHCS =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nhcs as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} (S_u+S_v)\u{00b3}]  (exact)");
+        if edge_count > 0 && nhcs == 0 {
+            set_color(sink, 13, 0);
+            print_str(sink, "  NHCS=0: no edges");
+        }
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NVQ extends NM\u{2081}/NF to 4th power; NRGS=\u{03c7}_{3/2} S-variant; NHCS extends NHM\u{2081} to 3rd power)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.
