@@ -1,152 +1,152 @@
-# Hardening Log V2.84 — Graph Link Prediction (CN / Jaccard / Adamic-Adar / Resource Allocation)
+# 硬化日志 V2.84 — 图链接预测（CN / Jaccard / Adamic-Adar / 资源分配）
 
-**Date:** 2026-07-04  
-**Branch:** feat/vk-auto-live-surface  
-**Commit:** f7f9fc7  
-**Host-test total:** 813 (803 prior + 10 new)
+**日期：** 2026-07-04
+**分支：** feat/vk-auto-live-surface
+**提交：** f7f9fc7
+**宿主测试总计：** 813（此前 803，+10）
 
 ---
 
-## Feature: `graph predict <u> <v>` / `gpredict <u> <v>`
+## 功能：`graph predict <u> <v>` / `gpredict <u> <v>`
 
-### Motivation
+### 动机
 
-Production graph analysis platforms (NetworkX, igraph, Neo4j GDS) provide **link prediction**
-metrics that quantify how likely a missing edge between two nodes is to form, based on the
-shared structure of their neighbourhoods. GOSKernel already had rich topology analytics
-(centrality, efficiency, community detection) but lacked any mechanism to reason about
-*potential* future connections in the kernel dependency graph.
+生产级图分析平台（NetworkX、igraph、Neo4j GDS）都提供**链接预测**指标，
+用于基于两个节点邻域的共享结构，量化二者之间缺失边形成的可能性。
+GOSKernel 此前已具备丰富的拓扑分析能力（中心性、效率、社区检测），
+但缺乏任何机制来推理内核依赖图中*潜在*的未来连接。
 
-V2.84 adds four classical link-prediction scores from the Liben-Nowell & Kleinberg (2003)
-and Adamic & Adar (2003) literature:
+V2.84 新增了源自 Liben-Nowell & Kleinberg（2003）以及 Adamic & Adar（2003）
+文献的四个经典链接预测分数：
 
-| Metric | Formula | Interpretation |
+| 指标 | 公式 | 含义 |
 |---|---|---|
-| Common Neighbors (CN) | \|N(u) ∩ N(v)\| | count of shared neighbours |
-| Jaccard Coefficient | CN / \|N(u) ∪ N(v)\| | normalised overlap |
-| Adamic-Adar (AA) | Σ_{w∈CN} 1/ln(deg(w)) | inverse-log-degree weighted |
-| Resource Allocation (RA) | Σ_{w∈CN} 1/deg(w) | capacity-weighted |
+| 共同邻居数（CN） | \|N(u) ∩ N(v)\| | 共享邻居的数量 |
+| Jaccard 系数 | CN / \|N(u) ∪ N(v)\| | 归一化重叠度 |
+| Adamic-Adar（AA） | Σ_{w∈CN} 1/ln(deg(w)) | 按对数度数倒数加权 |
+| 资源分配（RA） | Σ_{w∈CN} 1/deg(w) | 按容量加权 |
 
-All scores are higher → stronger prediction that a missing edge u→v will form.
+所有分数都是数值越高 → 预测缺失边 u→v 会形成的可能性越强。
 
-OS analogy: LLDP / CDP neighbour-table prediction — which kernel subsystems are structurally
-primed to form a new dependency edge?
+操作系统类比：LLDP / CDP 邻居表预测——哪些内核子系统在结构上已经
+准备好形成新的依赖边？
 
 ---
 
-## Implementation
+## 实现
 
 ### crates/gos-runtime/src/lib.rs
 
-**New method** on `GraphRuntime` (inside `impl GraphRuntime`):
+**新增方法**（位于 `GraphRuntime` 内，即 `impl GraphRuntime` 中）：
 ```rust
 pub fn graph_link_predict_inner(
     &self,
     u: VectorAddress,
     v: VectorAddress,
 ) -> (usize, u32, u32, u32, usize)
-// returns (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count)
+// 返回 (cn, jaccard_ppm, aa_ppm, ra_ppm, node_count)
 ```
 
-**Algorithm:**
-1. Resolve u and v to node slots; return all-zeros if either is unknown or u == v.
-2. Scan all edges once (O(E)) to build two 128-bit neighbour bitvectors (`[u64; 2]`)
-   and accumulate per-slot total undirected degree (`deg[slot]`).
-3. Clear u and v from each other's bitvectors (mutual exclusion).
-4. Intersection bit-count → CN; union bit-count → |N(u) ∪ N(v)| for Jaccard.
-5. Bit-scan the intersection word-by-word for AA and RA accumulation:
-   - AA: uses embedded LN_TABLE[k] (same table as V2.77/V2.80); term = 1e12/LN_TABLE[deg] (ppm).
-   - RA: term = 1_000_000 / deg(w).
-6. Saturate accumulators to u32::MAX to prevent wrapping.
+**算法：**
+1. 将 u 与 v 解析为节点槽位；若任一未知或 u == v，则返回全零。
+2. 一次扫描所有边（O(E)）以构建两个 128 位邻居位向量（`[u64; 2]`），
+   并累积每个槽位的总无向度（`deg[slot]`）。
+3. 从各自的位向量中清除 u 和 v（互斥处理）。
+4. 交集位计数 → CN；并集位计数 → |N(u) ∪ N(v)|，用于 Jaccard。
+5. 逐字扫描交集以累积 AA 与 RA：
+   - AA：使用内嵌的 LN_TABLE[k]（与 V2.77/V2.80 使用的是同一张表）；
+     项 = 1e12/LN_TABLE[deg]（单位 ppm）。
+   - RA：项 = 1_000_000 / deg(w)。
+6. 累加器饱和至 u32::MAX，防止溢出回绕。
 
-**New public function:**
+**新增公开函数：**
 ```rust
 pub fn graph_link_predict(u: VectorAddress, v: VectorAddress) -> (usize, u32, u32, u32, usize)
 ```
 
-**Key invariants:**
-- Neighbourhood is undirected: edge u→w or w→u both contribute w to N(u).
-- u and v mutually excluded: `nbr_u[v_slot / 64] &= !(1 << (v_slot % 64))` etc.
-- Degenerate guard: `if u_slot == v_slot { return (0,0,0,0,node_count); }`
-- AA skips deg ≤ 1 via `if ln_d > 0` (LN_TABLE[0]=LN_TABLE[1]=0).
-- RA skips deg = 0 via `if d > 0` (isolated self-loop nodes).
-- Self-loops counted once in degree: `if fs == ts { deg[fs] += 1 }`.
-- Complexity: O(V + E) per call (one edge scan + one bit scan).
+**关键不变量：**
+- 邻域视为无向：边 u→w 或 w→u 都会让 w 计入 N(u)。
+- u 与 v 相互排斥：`nbr_u[v_slot / 64] &= !(1 << (v_slot % 64))` 等。
+- 退化保护：`if u_slot == v_slot { return (0,0,0,0,node_count); }`
+- AA 通过 `if ln_d > 0` 跳过 deg ≤ 1 的情形（LN_TABLE[0]=LN_TABLE[1]=0）。
+- RA 通过 `if d > 0` 跳过 deg = 0 的情形（孤立自环节点）。
+- 自环在度数中只计一次：`if fs == ts { deg[fs] += 1 }`。
+- 复杂度：每次调用 O(V + E)（一次边扫描 + 一次位扫描）。
 
 ### crates/k-shell/src/lib.rs
 
-**New function** `dispatch_graph_predict(sink, u, v)`:
-- Header: `graph predict u → v`
-- Table with 4 metric rows: common neighbors (raw count), jaccard, adamic-adar, resource allocation.
-- Each metric has a colour coding: grey=0, yellow=weak, green=strong.
-- Footer: `N node(s)  prediction: likely / weak / none`.
-- 6-decimal ppm display via inline `print_predict_ppm` helper.
+**新增函数** `dispatch_graph_predict(sink, u, v)`：
+- 标题：`graph predict u → v`
+- 包含 4 个指标行的表格：共同邻居数（原始计数）、jaccard、adamic-adar、资源分配。
+- 每个指标都有颜色编码：灰色=0，黄色=弱，绿色=强。
+- 脚注：`N node(s)  prediction: likely / weak / none`（N 个节点，预测：可能/较弱/无）。
+- 通过内联的 `print_predict_ppm` 辅助函数以 6 位小数显示 ppm 值。
 
 ### crates/k-shell/src/proc.rs
 
-**New routing** (placed after `graph compare` / `gcompare` dispatch):
+**新增路由**（放置在 `graph compare` / `gcompare` 分发之后）：
 ```
 graph predict <u> <v>   →  dispatch_graph_predict(u, v)
-gpredict <u> <v>        →  alias
-link predict <u> <v>    →  alias
-predict <u> <v>         →  alias
+gpredict <u> <v>        →  别名
+link predict <u> <v>    →  别名
+predict <u> <v>         →  别名
 ```
 
-**Help text** added alongside `graph snapshot` / `graph compare` entries.
+在 `graph snapshot` / `graph compare` 条目旁新增了**帮助文本**。
 
 ---
 
-## Test Harness: `host-tests/gos-graph-link-predict-harness`
+## 测试装置：`host-tests/gos-graph-link-predict-harness`
 
-**VectorAddress L4=60** identifies this harness namespace.
+**VectorAddress L4=60** 标识本装置的命名空间。
 
-| Test | Graph | Prediction | Expected |
+| 测试 | 图 | 预测 | 期望结果 |
 |---|---|---|---|
-| 1 | empty | any pair | CN=0, all zeros, nc=0 |
-| 2 | single node A | (A, B) | CN=0, nc=1 |
-| 3 | A, B (no edges) | (A, B) | CN=0, all zeros |
-| 4 | A→B | (A, B) | CN=0 (exclusion removes B from N(A)) |
-| 5 | A→B→C | (A, C) | CN=1, J=1M, AA≈1.443M, RA=500K |
-| 6 | any graph | (A, A) degenerate | all zeros |
-| 7 | star A→{B,C,D} | (B, C) | CN=1, J=1M, AA≈910K, RA=333K |
-| 8 | diamond A→{B,C}→D | (A, D) | CN=2, J=1M, AA≈2.885M, RA=1M |
-| 9 | {A→B} ∥ {C→D} | (A, D) | CN=0, all zeros |
-| 10 | A→B | (A, unknown) | CN=0, nc=2 |
+| 1 | 空图 | 任意节点对 | CN=0，全零，nc=0 |
+| 2 | 单节点 A | (A, B) | CN=0，nc=1 |
+| 3 | A、B（无边） | (A, B) | CN=0，全零 |
+| 4 | A→B | (A, B) | CN=0（互斥处理移除了 N(A) 中的 B） |
+| 5 | A→B→C | (A, C) | CN=1，J=1M，AA≈1.443M，RA=500K |
+| 6 | 任意图 | (A, A) 退化情形 | 全零 |
+| 7 | 星形 A→{B,C,D} | (B, C) | CN=1，J=1M，AA≈910K，RA=333K |
+| 8 | 菱形 A→{B,C}→D | (A, D) | CN=2，J=1M，AA≈2.885M，RA=1M |
+| 9 | {A→B} ∥ {C→D} | (A, D) | CN=0，全零 |
+| 10 | A→B | (A, unknown) | CN=0，nc=2 |
 
-**Result:** 10/10 pass.
+**结果：** 10/10 通过。
 
 ---
 
-## Metric Value Derivation
+## 指标数值推导
 
-For test 5 (path A→B→C, predict A,C): `deg(B)=2`:
-- AA = 1_000_000_000_000 / LN_TABLE[2] = 1e12 / 693_147 = 1_442_695 (≈ 1/ln(2) × 10^6)
+对于测试 5（路径 A→B→C，预测 A、C）：`deg(B)=2`：
+- AA = 1_000_000_000_000 / LN_TABLE[2] = 1e12 / 693_147 = 1_442_695（≈ 1/ln(2) × 10^6）
 - RA = 1_000_000 / 2 = 500_000
 
-For test 7 (star, predict leaf-pair B,C): `deg(A)=3`:
-- AA = 1e12 / LN_TABLE[3] = 1e12 / 1_098_612 ≈ 910_239 (≈ 1/ln(3) × 10^6)
-- RA = 1_000_000 / 3 = 333_333 (integer division)
+对于测试 7（星形，预测叶子对 B、C）：`deg(A)=3`：
+- AA = 1e12 / LN_TABLE[3] = 1e12 / 1_098_612 ≈ 910_239（≈ 1/ln(3) × 10^6）
+- RA = 1_000_000 / 3 = 333_333（整数除法）
 
-For test 8 (diamond, predict A,D): `deg(B)=deg(C)=2`:
+对于测试 8（菱形，预测 A、D）：`deg(B)=deg(C)=2`：
 - AA = 2 × 1_442_695 = 2_885_390
 - RA = 2 × 500_000 = 1_000_000
 
 ---
 
-## VectorAddress L4 Namespace Update
+## VectorAddress L4 命名空间更新
 
-| L4 | Harness |
+| L4 | 装置 |
 |---|---|
 | 59 | gos-graph-snapshot-harness (V2.83) |
 | **60** | **gos-graph-link-predict-harness (V2.84)** |
 
 ---
 
-## Literature Reference
+## 文献参考
 
-- D. Liben-Nowell & J. Kleinberg, "The Link-Prediction Problem for Social Networks," CIKM 2003.
-- L. Adamic & E. Adar, "Friends and Neighbors on the Web," Social Networks 25(3), 2003.
-- T. Zhou, L. Lü & Y.-C. Zhang, "Predicting Missing Links via Local Information," EPJB 71, 2009.
+- D. Liben-Nowell & J. Kleinberg，《社交网络中的链接预测问题》，CIKM 2003。
+- L. Adamic & E. Adar，《Web 上的朋友与邻居》，Social Networks 25(3)，2003。
+- T. Zhou, L. Lü & Y.-C. Zhang，《基于局部信息预测缺失链接》，EPJB 71，2009。
 
-Adamic-Adar is the standard benchmark metric; Resource Allocation (Zhou 2009) often outperforms
-it on sparse graphs. Both are included for completeness.
+Adamic-Adar 是标准基准指标；资源分配（Zhou 2009）在稀疏图上往往表现更优。
+两者均予以纳入以求完整性。

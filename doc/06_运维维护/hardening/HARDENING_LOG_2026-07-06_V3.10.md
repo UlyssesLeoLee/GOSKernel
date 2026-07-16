@@ -1,86 +1,86 @@
-# Hardening Log V3.10 — Graph Entropy H(G)
+# 硬化日志 V3.10 — 图熵 H(G)
 
-**Date**: 2026-07-06  
-**Branch**: feat/vk-auto-live-surface  
-**Previous baseline**: V3.09 (graph spectral analysis ρ(A)+λ₂(L), 1063 host tests)  
-**New total**: 1073 host tests (+10)
+**日期**：2026-07-06
+**分支**：feat/vk-auto-live-surface
+**上一基线**：V3.09（图谱分析 ρ(A)+λ₂(L)，1063 个宿主测试）
+**新总计**：1073 个宿主测试（+10）
 
 ---
 
-## Algorithm: Shannon Entropy of the Degree Distribution
+## 算法：度数分布的香农熵
 
-**Graph entropy** measures the *structural diversity* of a graph by applying Shannon's information-theoretic framework to its degree sequence. The degree distribution is treated as a probability distribution p(d) = (# nodes with degree d) / n, and the entropy
+**图熵**通过将香农信息论框架应用于图的度数序列，衡量图的*结构多样性*。度数分布被视为一个概率分布 p(d) = （度数为 d 的节点数）/ n，其熵
 
 > H(G) = −Σ_d p(d) ln p(d)
 
-quantifies how spread-out that distribution is. H = 0 for a perfectly regular graph (all nodes share the same degree); H = ln(n) when every node has a distinct degree (maximum heterogeneity). The **normalised entropy** H' = H/ln(n) ∈ [0, 1] provides a scale-independent diversity index.
+量化了该分布的离散程度。对完全正则图（所有节点度数相同）H = 0；当每个节点度数各不相同时（最大异质性）H = ln(n)。**归一化熵** H' = H/ln(n) ∈ [0, 1] 提供了一个与规模无关的多样性指标。
 
-### Theoretical Background
+### 理论背景
 
-**Shannon entropy** (Shannon 1948) is the foundational measure of information content in a probability distribution. Applied to graphs, the degree distribution p(k) is the natural discrete distribution to quantify, since degree captures each node's local connectivity role. Key properties:
+**香农熵**（Shannon 1948）是量化概率分布信息含量的基础度量。应用于图时，度数分布 p(k) 是最自然的量化对象，因为度数刻画了每个节点的局部连通角色。关键性质：
 
-- **Regular graphs** (k-regular: every node has the same degree): H = 0. One degree class → p(d) = 1 → −1·ln(1) = 0.
-- **Uniform degree distribution** (unlikely in real graphs): H = ln(n_classes).
-- **Star K_{1,k}**: two degree classes (one hub at degree k, k leaves at degree 1) → moderate entropy.
-- **Paths P_n**: end nodes at degree 1, interior nodes at degree 2 → H = −(2/n)ln(2/n) − ((n-2)/n)ln((n-2)/n) → converges to ln(2) as n → ∞.
-- **Complete graph K_n**: all degree n−1 → H = 0.
+- **正则图**（k-正则：所有节点度数相同）：H = 0。只有一个度数类别 → p(d) = 1 → −1·ln(1) = 0。
+- **均匀度数分布**（真实图中不常见）：H = ln(n_classes)。
+- **星图 K_{1,k}**：两个度数类别（一个度数为 k 的中心，k 个度数为 1 的叶子）→ 中等熵值。
+- **路径 P_n**：端节点度数为 1，内部节点度数为 2 → H = −(2/n)ln(2/n) − ((n-2)/n)ln((n-2)/n) → 当 n → ∞ 时收敛于 ln(2)。
+- **完全图 K_n**：所有节点度数均为 n−1 → H = 0。
 
-**Normalised entropy** H' = H / ln(n) is also called **normalised graph entropy** (Dehmer & Mowshowitz 2011). It measures structural regularity on a [0,1] scale independent of graph size.
+**归一化熵** H' = H / ln(n) 又称**归一化图熵**（Dehmer & Mowshowitz 2011）。它在与图规模无关的 [0,1] 尺度上衡量结构规则性。
 
-**Relationship to other metrics**:
-- **Power-law exponent γ̂** (V2.80): quantifies the tail of the degree distribution; entropy quantifies its overall spread.
-- **Degree assortativity** (V2.65): measures degree-degree correlations; entropy measures degree diversity.
-- **Spectral radius ρ(A)** (V3.09): bounded by √(2mH') where m = edges; high-entropy graphs tend toward larger spectral radii.
+**与其他指标的关系**：
+- **幂律指数 γ̂**（V2.80）：量化度数分布的尾部；熵则量化其整体离散程度。
+- **度同配性**（V2.65）：衡量度数之间的相关性；熵衡量度数的多样性。
+- **谱半径 ρ(A)**（V3.09）：受 √(2mH') 约束，其中 m 为边数；高熵图往往具有更大的谱半径。
 
 ---
 
-## Implementation
+## 实现
 
-### Key Formula
+### 关键公式
 
 ```
 H(G) = −Σ_{d: count[d]>0} (count[d]/n) · ln(count[d]/n)
       = (1/n) · Σ_{d: count[d]>0} count[d] · (ln(n) − ln(count[d]))
 ```
 
-In integer arithmetic using the LN_TABLE (ln(k) × 10^6 tabulated for k = 0..128):
+使用整数运算，借助 LN_TABLE（对 k = 0..128 制表的 ln(k) × 10⁶）：
 
 ```
 entropy_scaled = Σ_{d: count[d]>0} count[d] · (LN_TABLE[n] − LN_TABLE[count[d]])
-entropy_ppm    = entropy_scaled / n   ≈ H × 10^6   (floor division, ≤1 ppm error)
+entropy_ppm    = entropy_scaled / n   ≈ H × 10^6   (向下取整，误差 ≤1 ppm)
 normalized_ppm = entropy_ppm × 10^6 / LN_TABLE[n]   (H' × 10^6)
 ```
 
-This is **exact integer arithmetic** — no floating-point, no_std safe. The LN_TABLE has been in the codebase since V2.77 (small-world coefficient). The formula reuses the same `Σ count·ln(count)` accumulation pattern established for entropy computations.
+这是**精确整数运算**——无浮点数，no_std 安全。LN_TABLE 自 V2.77（小世界系数）起已存在于代码库中。该公式复用了为熵计算建立的相同 `Σ count·ln(count)` 累加模式。
 
-### Overflow Analysis
+### 溢出分析
 
-- `count[d]` ≤ n ≤ 128, so `LN_TABLE[count[d]]` is always in bounds.
-- `entropy_scaled` ≤ n × LN_TABLE[n] ≤ 128 × 4,852,030 = 620,659,840 < 2^30. Fits u64.
-- `entropy_ppm` = entropy_scaled / n ≤ LN_TABLE[128] = 4,852,030 < 2^23. Fits u32.
-- `entropy_ppm × 1_000_000` ≤ 4,852,030,000,000 < 2^43. Intermediate u64; result ≤ 1,000,000 fits u32.
+- `count[d]` ≤ n ≤ 128，因此 `LN_TABLE[count[d]]` 始终在表范围内。
+- `entropy_scaled` ≤ n × LN_TABLE[n] ≤ 128 × 4,852,030 = 620,659,840 < 2^30。u64 范围内。
+- `entropy_ppm` = entropy_scaled / n ≤ LN_TABLE[128] = 4,852,030 < 2^23。u32 范围内。
+- `entropy_ppm × 1_000_000` ≤ 4,852,030,000,000 < 2^43。中间结果为 u64；最终结果 ≤ 1,000,000，u32 范围内。
 
-### Public API
+### 公开 API
 
 ```rust
 pub fn graph_entropy() -> (u32, u32, usize)
 ```
 
-Returns `(entropy_ppm, normalized_ppm, node_count)`:
-- `entropy_ppm` = H × 10^6 (Shannon entropy in nats, scaled to ppm)
-- `normalized_ppm` = H/ln(n) × 10^6 ∈ [0, 1,000,000]
-- `node_count` = number of alive nodes in the runtime
+返回 `(entropy_ppm, normalized_ppm, node_count)`：
+- `entropy_ppm` = H × 10⁶（香农熵，单位 nat，按 ppm 缩放）
+- `normalized_ppm` = H/ln(n) × 10⁶ ∈ [0, 1,000,000]
+- `node_count` = 运行时中存活节点数
 
-### Shell Commands
+### Shell 命令
 
-| Command | Description |
+| 命令 | 说明 |
 |---------|-------------|
-| `graph entropy` | Full entropy panel |
-| `gentropy` | Short alias |
-| `degree entropy` | Descriptive alias |
-| `graph deg entropy` | Explicit alias |
+| `graph entropy` | 完整熵值面板 |
+| `gentropy` | 简称别名 |
+| `degree entropy` | 描述性别名 |
+| `graph deg entropy` | 显式别名 |
 
-### Display Output
+### 显示输出
 
 ```
  graph entropy  (H = −Σ p(d) ln p(d)  degree distribution)
@@ -94,45 +94,45 @@ Returns `(entropy_ppm, normalized_ppm, node_count)`:
 
 ---
 
-## Test Cases (10)
+## 测试用例（10 项）
 
-### Analytical Derivation
+### 解析推导
 
-All values are computed with exact integer arithmetic using LN_TABLE values. No floating-point tolerance needed — all `assert_eq!` with exact values.
+所有数值均使用 LN_TABLE 数值以精确整数运算计算得出。无需浮点容差——全部使用精确数值的 `assert_eq!`。
 
-| # | Graph | Degrees | entropy_ppm | normalized_ppm | nc |
+| # | 图 | 度数 | entropy_ppm | normalized_ppm | 节点数 |
 |---|-------|---------|-------------|----------------|----|
-| 1 | Empty | — | 0 | 0 | 0 |
-| 2 | Single node | {0} | 0 | 0 | 1 |
-| 3 | Edge A-B | {1,1} | 0 | 0 | 2 |
-| 4 | Path P₃ | {1,2,1} | **636,514** | **579,380** | 3 |
-| 5 | Triangle K₃ | {2,2,2} | 0 | 0 | 3 |
-| 6 | Star K_{1,4} | {4,1,1,1,1} | **500,401** | **310,916** | 5 |
-| 7 | Path P₄ | {1,2,2,1} | **693,147** | **500,000** | 4 |
-| 8 | Complete K₄ | {3,3,3,3} | 0 | 0 | 4 |
-| 9 | Two isolated | {0,0} | 0 | 0 | 2 |
+| 1 | 空图 | — | 0 | 0 | 0 |
+| 2 | 单节点 | {0} | 0 | 0 | 1 |
+| 3 | 单边 A-B | {1,1} | 0 | 0 | 2 |
+| 4 | 路径 P₃ | {1,2,1} | **636,514** | **579,380** | 3 |
+| 5 | 三角形 K₃ | {2,2,2} | 0 | 0 | 3 |
+| 6 | 星图 K_{1,4} | {4,1,1,1,1} | **500,401** | **310,916** | 5 |
+| 7 | 路径 P₄ | {1,2,2,1} | **693,147** | **500,000** | 4 |
+| 8 | 完全图 K₄ | {3,3,3,3} | 0 | 0 | 4 |
+| 9 | 两个孤立节点 | {0,0} | 0 | 0 | 2 |
 | 10 | K_{2,3} | {3,3,2,2,2} | **673,011** | **418,165** | 5 |
 
-### Notable Exact Relationships
+### 值得注意的精确关系
 
-**Test 7 (P₄)** is the cleanest cross-check:
-- P₄ has two equal-size degree groups: {1,1} and {2,2} (n=4, each group has 2/4 = 1/2 of nodes)
-- H = ln(2) ≈ 0.693147 (maximum entropy for 2-class distribution with equal proportions)
-- entropy_ppm = 693,147 exactly (this is LN_TABLE[2] × 1 = ln(2) × 10^6)
-- normalized_ppm = 693,147 × 10^6 / LN_TABLE[4] = 693,147 × 10^6 / (2 × 693,147) = 500,000 (exact)
-- H' = 1/2 exactly, since ln(4) = 2 ln(2)
+**测试 7（P₄）** 是最干净的交叉核对：
+- P₄ 有两个规模相等的度数组：{1,1} 和 {2,2}（n=4，每组占 2/4 = 1/2 的节点）
+- H = ln(2) ≈ 0.693147（两类等比例分布的最大熵）
+- entropy_ppm = 693,147（精确值，即 LN_TABLE[2] × 1 = ln(2) × 10⁶）
+- normalized_ppm = 693,147 × 10⁶ / LN_TABLE[4] = 693,147 × 10⁶ / (2 × 693,147) = 500,000（精确）
+- H' 精确等于 1/2，因为 ln(4) = 2 ln(2)
 
-**Test 6 (Star K_{1,4})**:
+**测试 6（星图 K_{1,4}）**：
 ```
 entropy_scaled = 4 × (LN_TABLE[5] − LN_TABLE[4]) + 1 × (LN_TABLE[5] − LN_TABLE[1])
               = 4 × (1,609,437 − 1,386,294) + 1 × (1,609,437 − 0)
               = 4 × 223,143 + 1,609,437
               = 892,572 + 1,609,437 = 2,502,009
-entropy_ppm   = 2,502,009 / 5 = 500,401  (rem=4)
+entropy_ppm   = 2,502,009 / 5 = 500,401  (余数=4)
 normalized_ppm = 500,401 × 10^6 / 1,609,437 = 310,916
 ```
 
-**Test 10 (K_{2,3})**:
+**测试 10（K_{2,3}）**：
 ```
 entropy_scaled = 3 × (LN_TABLE[5] − LN_TABLE[3]) + 2 × (LN_TABLE[5] − LN_TABLE[2])
               = 3 × (1,609,437 − 1,098,612) + 2 × (1,609,437 − 693,147)
@@ -144,53 +144,57 @@ normalized_ppm = 673,011 × 10^6 / 1,609,437 = 418,165
 
 ---
 
-## OS Analogy
+## 操作系统类比
 
-In an operating system dependency graph where nodes are kernel subsystems/services and edges are IPC dependencies:
+在一个节点为内核子系统/服务、边为 IPC 依赖关系的操作系统依赖图中：
 
-**Entropy as a structural diversity index:**
+**熵作为结构多样性指标：**
 
-- **H = 0** (regular graph): every subsystem has identical connectivity. Examples: ring topology, complete mesh. Predictable, uniform IPC scheduling — all modules have the same number of dependency links.
+- **H = 0**（正则图）：每个子系统的连通度完全相同。例如：环形拓扑、完全网格。可预测、均匀的 IPC 调度——所有模块拥有相同数量的依赖链路。
 
-- **Low H** (e.g., H' < 0.3): near-homogeneous — most subsystems have similar degree. Structured, well-layered topology. Easy to schedule and audit.
+- **低 H**（例如 H' < 0.3）：近似同质——大多数子系统度数相近。结构化、层次分明的拓扑，易于调度和审计。
 
-- **Moderate H** (e.g., H' ≈ 0.5): mixture of roles — some hubs, some leaves. Common in real kernels: a few critical subsystems (scheduler, memory manager) have many dependencies; most modules are more peripheral.
+- **中等 H**（例如 H' ≈ 0.5）：角色混合——部分是枢纽，部分是叶子。在真实内核中很常见：少数关键子系统（调度器、内存管理器）拥有大量依赖，大多数模块则更为边缘。
 
-- **High H** (H' → 1): maximally heterogeneous — all subsystems have different numbers of dependency links. Organic/evolutionary topology, harder to formally verify.
+- **高 H**（H' → 1）：最大异质性——所有子系统的依赖链路数量各不相同。这是有机/演化式拓扑，更难以形式化验证。
 
-**Entropy-driven operations:**
+**熵驱动的操作：**
 
 ```bash
-# Analogue: diversity of kernel module connectivity
-graph entropy      # Measure structural diversity H(G)
-graph summary      # Full topology panel (includes density, CC, efficiency)
-graph power law    # γ̂: tail exponent (how extreme are the hubs?)
-graph kcore        # k-core: who are the most densely connected subsystems?
+# 类比：内核模块连通性的多样性
+graph entropy      # 测量结构多样性 H(G)
+graph summary      # 完整拓扑面板（包含密度、连通分量、效率等）
+graph power law    # γ̂：尾部指数（枢纽有多极端？）
+graph kcore        # k-核：谁是连接最密集的子系统？
 ```
 
-**Epoch monitoring**: graph entropy does NOT bump the epoch (pure read-only metric). It can be polled rapidly to detect topology changes (e.g., after module hot-loading or dependency injection).
+**Epoch 监控**：graph entropy **不会**推进 epoch（纯只读指标）。可以高频轮询以检测拓扑变化（例如模块热加载或依赖注入之后）。
 
 ---
 
-## VectorAddress Namespace Update
+## VectorAddress 命名空间更新
 
 ```
 L4=86: graph-entropy (gos-graph-entropy-harness)
 ```
 
-Full updated L4 namespace:
+完整更新后的 L4 命名空间：
 ```
 82=graph-ebc, 83=graph-vconn, 84=graph-ecolor, 85=graph-spectral, 86=graph-entropy
 ```
 
 ---
 
-## Literature
+## 参考文献
 
-| Reference | Contribution |
+| 参考文献 | 贡献 |
 |-----------|-------------|
-| Shannon 1948 | Foundational entropy: H = −Σ p log p |
-| Trucco 1956 | First application of entropy to graph theory |
-| Dehmer & Mowshowitz 2011 | Comprehensive survey of graph entropy measures |
-| Clauset, Newman & Shalizi 2009 | MLE for power-law (V2.80, complements this) |
-| Newman 2002 | Degree assortativity (V2.65, complements this) |
+| Shannon 1948 | 熵的奠基性工作：H = −Σ p log p |
+| Trucco 1956 | 首次将熵应用于图论 |
+| Dehmer & Mowshowitz 2011 | 图熵度量的综合性综述 |
+| Clauset, Newman & Shalizi 2009 | 幂律的最大似然估计（V2.80，与本篇互补） |
+| Newman 2002 | 度同配性（V2.65，与本篇互补） |
+
+---
+
+*本文件于 2026-07-15 按文档管理规范就地中文化，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实。*

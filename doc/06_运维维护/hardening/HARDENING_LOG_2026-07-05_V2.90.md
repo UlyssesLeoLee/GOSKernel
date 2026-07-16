@@ -1,86 +1,84 @@
-# Hardening Log V2.90 -- Graph Dominator Tree (Cooper et al. 2001)
+# 硬化日志 V2.90 —— 图支配树（Cooper et al. 2001）
 
-**Date:** 2026-07-05
-**Branch:** feat/vk-auto-live-surface
-**Host-test total:** 873 (863 prior + 10 new)
-
----
-
-## Feature: `graph domtree <start>` / `gdomtree <start>` / `dominator <start>` / `gdom <start>`
-
-### Motivation
-
-V2.88–V2.89 added DAG-specific structural analysis (critical path, topological layers).
-V2.90 adds **dominator tree** analysis, which works on **general directed graphs**
-(including cyclic graphs) and answers a deeper structural question:
-
-> **"Which node is the mandatory predecessor — with no alternative route — for every other
-> node reachable from a given entry?"**
-
-The dominator tree is a foundational data structure in compiler theory and program analysis:
-
-| Question | OS / compiler analogy |
-|---|---|
-| Which node dominates N? | Which kernel subsystem must be running before this component can start, with no bypass path? |
-| What is the immediate dominator? | Which single ancestor is the closest mandatory gateway? |
-| Is A the sole entry path to B? | Can the network partition between A and B be exploited (A dominates B)? |
-
-Dominator trees appear in:
-- **Compiler CFG analysis** (SSA construction, loop detection, code motion)
-- **Security analysis** (control-flow integrity, post-dominator for backward slices)
-- **System boot analysis** (which subsystem is the mandatory prerequisite for each service)
-- **Network reliability** (which node's failure guarantees unreachability of downstream nodes)
-
-Compared with related algorithms already in the runtime:
-| Algorithm | What it finds |
-|---|---|
-| `graph_articulation` (V2.85) | Nodes whose removal increases connected-component count (undirected) |
-| `graph_bridges` (V2.86) | Edges whose removal increases connected-component count |
-| `graph_domtree` (V2.90) | For each node, the closest mandatory ancestor from a designated entry (directed) |
+**日期：** 2026-07-05
+**分支：** feat/vk-auto-live-surface
+**宿主测试总计：** 873（此前 863，+10 新增）
 
 ---
 
-## Algorithm: Cooper–Harvey–Kennedy 2001 Simple Iterative Dominator
+## 功能：`graph domtree <start>` / `gdomtree <start>` / `dominator <start>` / `gdom <start>`
 
-Reference: *"A Simple, Fast Dominance Algorithm"*, Cooper, Harvey & Kennedy, 2001.
+### 动机
 
-### Why this algorithm
+V2.88–V2.89 增加了针对 DAG 的结构分析（关键路径、拓扑分层）。
+V2.90 增加了**支配树（dominator tree）**分析，它适用于**一般有向图**
+（包括含环图），回答一个更深层的结构性问题：
 
-The classic Lengauer–Tarjan algorithm (1979) is O(V·α(V)) but requires complex data structures
-(semi-dominator computation, link-cut trees for path compression) that are hard to implement
-in `no_std` without dynamic allocation.
+> **"对于从给定入口可达的每个节点，哪个节点是其必经的前驱——不存在替代路径？"**
 
-Cooper et al. 2001 uses the same RPO-based iteration but with a simple array-backed
-lattice join. It is O(V² · E) worst-case but converges in 1–2 passes on DAGs and
-typical control-flow graphs — well within bounds for MAX_NODES=128.
+支配树是编译器理论和程序分析中的基础数据结构：
 
-### Step 1 — Iterative DFS → RPO Order
+| 问题 | 操作系统 / 编译器类比 |
+|---|---|
+| 哪个节点支配 N？ | 该组件启动前，哪个内核子系统必须已在运行，且没有绕行路径？ |
+| 最近支配节点是谁？ | 哪个最近的祖先是唯一的必经关卡？ |
+| A 是否是通往 B 的唯一入口路径？ | A 与 B 之间的网络分区是否可被利用（A 支配 B）？ |
 
-From `start`, run an iterative DFS using an explicit stack (no recursion, `no_std` safe).
-Track post-order as nodes finish. Reverse post-order (RPO) is the traversal order for
-the iterative algorithm.
+支配树出现在以下场景：
+- **编译器 CFG 分析**（SSA 构造、循环检测、代码移动）
+- **安全分析**（控制流完整性、用于后向切片的后支配树）
+- **系统启动分析**（每个服务的必要前置子系统是谁）
+- **网络可靠性**（哪个节点故障会必然导致下游节点不可达）
 
-Key: `rpo_num[slot]` stores each node's RPO position (0 = start, which dominates all).
-Unreachable nodes retain `rpo_num[slot] = UNDEF`.
+与运行时中已有的相关算法对比：
+| 算法 | 发现的内容 |
+|---|---|
+| `graph_articulation`（V2.85） | 移除后会增加连通分量数的节点（无向图） |
+| `graph_bridges`（V2.86） | 移除后会增加连通分量数的边 |
+| `graph_domtree`（V2.90） | 对每个节点，找到从指定入口出发的最近必经祖先（有向图） |
 
-### Step 2 — Initialize idom
+---
+
+## 算法：Cooper–Harvey–Kennedy 2001 简单迭代支配算法
+
+参考文献：*"A Simple, Fast Dominance Algorithm"*，Cooper, Harvey & Kennedy，2001。
+
+### 为什么选用这个算法
+
+经典的 Lengauer–Tarjan 算法（1979）复杂度为 O(V·α(V))，但需要复杂的数据结构
+（半支配节点计算、用于路径压缩的 link-cut 树），在不使用动态分配的 `no_std`
+环境中难以实现。
+
+Cooper 等人 2001 年的方法使用同样基于 RPO 的迭代，但采用简单的数组实现的
+格（lattice）汇合操作。最坏情况复杂度为 O(V² · E)，但在 DAG 和典型控制流图上
+通常 1–2 轮即可收敛——在 MAX_NODES=128 的规模下完全在预算范围内。
+
+### 第一步 —— 迭代 DFS → RPO 顺序
+
+从 `start` 出发，使用显式栈运行迭代 DFS（无递归，`no_std` 安全）。
+在节点结束访问时记录后序。逆后序（RPO）就是该迭代算法所使用的遍历顺序。
+
+关键点：`rpo_num[slot]` 存储每个节点的 RPO 位置（0 = start，它支配所有节点）。
+不可达节点保持 `rpo_num[slot] = UNDEF`。
+
+### 第二步 —— 初始化 idom
 
 ```
-idom[start_slot] = start_slot  // start dominates itself (lattice top)
-idom[all others] = UNDEF        // unknown
+idom[start_slot] = start_slot  // start 支配自身（格的顶点）
+idom[all others] = UNDEF        // 未知
 ```
 
-### Step 3 — Iterative Convergence
+### 第三步 —— 迭代收敛
 
-Process all reachable nodes in RPO order (skip start at position 0).
-For each node `b`, compute:
+按 RPO 顺序处理所有可达节点（跳过位置 0 的 start）。
+对每个节点 `b`，计算：
 
 ```
 new_idom = intersect over all predecessors p of b where idom[p] != UNDEF
 ```
 
-The `intersect(a, c)` function finds the LCA of `a` and `c` in the current partial
-dominator tree by walking both up (toward `start`, decreasing RPO number) until they meet:
+`intersect(a, c)` 函数通过在当前部分支配树中同时向上（朝 `start` 方向，
+RPO 编号递减）遍历 `a` 和 `c`，直到二者相遇，从而求得二者的最近公共祖先（LCA）：
 
 ```
 while a != c:
@@ -89,22 +87,22 @@ while a != c:
 return a  // == c
 ```
 
-This terminates because RPO numbers strictly decrease as we climb toward `start` (rpo=0).
+由于向 `start`（rpo=0）攀升时 RPO 编号严格递减，此过程必然终止。
 
-Repeat until no `idom[b]` changes.
+重复直到没有任何 `idom[b]` 再发生变化。
 
-For a DAG: converges in exactly one pass.
-For graphs with back edges: typically 2–3 passes.
+对于 DAG：恰好一轮即收敛。
+对于含回边的图：通常需要 2–3 轮。
 
-### Self-loops
+### 自环
 
-Self-loop edges (`from == to`) are skipped in the predecessor scan (`if p == b { continue }`).
-A self-loop does not add a new dominator path.
+自环边（`from == to`）在前驱扫描中被跳过（`if p == b { continue }`）。
+自环不会带来新的支配路径。
 
-### Unreachable nodes
+### 不可达节点
 
-Nodes not visited by DFS from `start` never appear in `rpo_slots`, so they are never
-processed and their `idom` stays `UNDEF`. They are excluded from output.
+未被从 `start` 出发的 DFS 访问到的节点，永远不会出现在 `rpo_slots` 中，
+因此永远不会被处理，其 `idom` 保持 `UNDEF`。它们会被排除在输出之外。
 
 ---
 
@@ -116,69 +114,69 @@ pub fn graph_domtree<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], usize, usize)
 ```
 
-Returns `(vecs, idoms, node_count, reachable_count)`:
-- `vecs[0..reachable_count]`  — reachable nodes in RPO order
-- `idoms[0..reachable_count]` — immediate dominator vector for each node
-- For `start`: `idoms[i] == vecs[i]` (start dominates itself)
-- `node_count`      — total live nodes in the graph
-- `reachable_count` — nodes reachable from `start` (including start)
+返回 `(vecs, idoms, node_count, reachable_count)`：
+- `vecs[0..reachable_count]`  —— 按 RPO 顺序排列的可达节点
+- `idoms[0..reachable_count]` —— 每个节点对应的最近支配节点向量
+- 对于 `start`：`idoms[i] == vecs[i]`（start 支配自身）
+- `node_count`      —— 图中存活节点总数
+- `reachable_count` —— 从 `start` 可达的节点数（包含 start 本身）
 
 ---
 
-## Key Invariants
+## 关键不变量
 
-| Invariant | Notes |
+| 不变量 | 说明 |
 |---|---|
-| `idom[start] == start` | Start is the root; it dominates itself |
-| `idom[b]` has strictly lower RPO than `b` | Guarantees the LCA walk terminates |
-| Unreachable nodes excluded from output | `rpo_num[s] == UNDEF` for unreachable slots |
-| Self-loops skipped in predecessor scan | Self-loop does not add a dominator path |
-| Diamond `A→{B,C}→D`: `idom[D] == A` | LCA of B and C in the dominator tree is A |
-| Back edges handled by iterative convergence | Not just for DAGs — general directed graphs |
-| Guard `guard < MAX_NODES * 2` in LCA walk | Prevents pathological loops (defensive) |
+| `idom[start] == start` | start 是根节点，支配自身 |
+| `idom[b]` 的 RPO 严格小于 `b` | 保证 LCA 遍历必然终止 |
+| 不可达节点被排除在输出之外 | 对不可达槽位有 `rpo_num[s] == UNDEF` |
+| 前驱扫描中跳过自环 | 自环不会增加支配路径 |
+| 菱形结构 `A→{B,C}→D`：`idom[D] == A` | 支配树中 B 和 C 的 LCA 是 A |
+| 迭代收敛可处理回边 | 不仅限于 DAG——适用于一般有向图 |
+| LCA 遍历中的守卫 `guard < MAX_NODES * 2` | 防止病态循环（防御性设计） |
 
 ---
 
-## Shell Commands
+## Shell 命令
 
 ```
-graph domtree <v>   dominator tree from entry node <v>
-gdomtree <v>        alias
-dominator <v>       alias
-gdom <v>            alias
+graph domtree <v>   从入口节点 <v> 出发的支配树
+gdomtree <v>        别名
+dominator <v>       别名
+gdom <v>            别名
 ```
 
-Display: table of `node` | `immediate dominator`; root node shown in yellow with `← root` marker.
+显示：`节点` | `最近支配节点` 的表格；根节点以黄色显示，并带 `← root` 标记。
 
 ---
 
-## Test Harness: `gos-graph-domtree-harness` (L4=66)
+## 测试套件：`gos-graph-domtree-harness`（L4=66）
 
-10 tests covering:
-1. Empty graph → 0 reachable
-2. Single node, start=self → idom = self
-3. Start absent from graph → 0 reachable
-4. Single edge A→B → idom[B]=A
-5. Linear chain A→B→C → idom[B]=A, idom[C]=B
-6. Diamond A→{B,C}→D → idom[D]=A (LCA of B and C)
-7. Unreachable node excluded from output
-8. Back edge cycle A→B→C→B → idom[B]=A, idom[C]=B
-9. Isolated start — only itself reachable
-10. Merge-then-extend A→{B,C}→D→E → idom[D]=A, idom[E]=D
+10 项测试覆盖：
+1. 空图 → 0 个可达节点
+2. 单节点，start=自身 → idom = 自身
+3. start 不在图中 → 0 个可达节点
+4. 单条边 A→B → idom[B]=A
+5. 线性链 A→B→C → idom[B]=A, idom[C]=B
+6. 菱形 A→{B,C}→D → idom[D]=A（B 和 C 的 LCA）
+7. 不可达节点被排除在输出之外
+8. 回边环 A→B→C→B → idom[B]=A, idom[C]=B
+9. 孤立 start —— 只有自身可达
+10. 汇合后延伸 A→{B,C}→D→E → idom[D]=A, idom[E]=D
 
-All 10 pass, zero warnings.
-
----
-
-## VectorAddress Namespace
-
-L4=66 reserved for `gos-graph-domtree-harness`.
+10 项全部通过，零警告。
 
 ---
 
-## Literature
+## VectorAddress 命名空间
 
-- Cooper, Harvey & Kennedy 2001 — *"A Simple, Fast Dominance Algorithm"*
-- Lengauer & Tarjan 1979 — original O(V·α(V)) algorithm (not used here; too complex for no_std)
-- Aho, Lam, Sethi & Ullman 2006 — *Compilers: Principles, Techniques, and Tools* §9.6
-- Cytron et al. 1991 — SSA construction uses dominator trees as the foundation
+L4=66 保留给 `gos-graph-domtree-harness`。
+
+---
+
+## 参考文献
+
+- Cooper, Harvey & Kennedy 2001 —— *"A Simple, Fast Dominance Algorithm"*
+- Lengauer & Tarjan 1979 —— 原始的 O(V·α(V)) 算法（此处未采用；对 no_std 而言过于复杂）
+- Aho, Lam, Sethi & Ullman 2006 —— *Compilers: Principles, Techniques, and Tools* §9.6
+- Cytron et al. 1991 —— SSA 构造以支配树为基础

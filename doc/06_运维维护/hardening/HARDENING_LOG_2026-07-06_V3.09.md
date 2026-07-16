@@ -1,45 +1,45 @@
-# Hardening Log V3.09 — Graph Spectral Analysis ρ(A) + λ₂(L)
+# 硬化日志 V3.09 — 图谱分析 ρ(A) + λ₂(L)
 
-**Date**: 2026-07-06  
-**Branch**: feat/vk-auto-live-surface  
-**Previous baseline**: V3.08 (edge coloring χ'(G), 1053 host tests)  
-**New total**: 1063 host tests (+10)
-
----
-
-## Algorithm: Graph Spectral Analysis
-
-**Graph spectral analysis** studies the eigenvalues of matrices associated with a graph — the adjacency matrix A and the Laplacian L = D − A — to extract structural properties. This hardening adds two fundamental spectral invariants:
-
-1. **Spectral radius ρ(A)** — the largest eigenvalue of the adjacency matrix
-2. **Algebraic connectivity λ₂(L)** — the Fiedler value, the second-smallest Laplacian eigenvalue
-
-### Theoretical Background
-
-**Spectral radius ρ(A)** (Perron-Frobenius, 1907–1912):
-- For a connected undirected graph, ρ(A) = max |λᵢ| over all eigenvalues λᵢ of A
-- For d-regular graphs: ρ = d
-- For complete graph K_n: ρ = n − 1  
-- For star K_{1,k}: ρ = √k
-- **Epidemic threshold**: disease spreads on a network iff βρ(A) > δ (infection rate × ρ > recovery rate). Above threshold (SIS model), epidemics persist; below, they die out.
-
-**Algebraic connectivity λ₂(L)** (Fiedler 1973):
-- λ₂(L) = 0 iff the graph is disconnected (by Kirchhoff's matrix-tree theorem)
-- Larger λ₂ ↔ harder to disconnect ↔ faster consensus / diffusion
-- **Cheeger inequality**: h(G) ≥ λ₂/2, where h(G) is the edge conductance (isoperimetric number)
-- **Expander graphs**: high λ₂ relative to λ₁ characterises efficient communication topologies
+**日期**：2026-07-06  
+**分支**：feat/vk-auto-live-surface  
+**先前基线**：V3.08（边染色 χ'(G)，1053 个宿主测试）  
+**新总计**：1063 个宿主测试（+10）
 
 ---
 
-## Implementation
+## 算法：图谱分析
 
-### Phase 1 — ρ(A) via A² Power Iteration
+**图谱分析**研究与图关联的矩阵——邻接矩阵 A 与拉普拉斯矩阵 L = D − A——的特征值，以提取结构性质。本次硬化新增两个基本的谱不变量：
 
-**Key challenge**: A has eigenvalues ±ρ for many common graphs (paths P_n, even cycles, bipartite graphs). Simple A-iteration oscillates between the +ρ and −ρ eigenvectors without converging.
+1. **谱半径 ρ(A)** —— 邻接矩阵的最大特征值
+2. **代数连通度 λ₂(L)** —— Fiedler 值，拉普拉斯矩阵第二小的特征值
 
-**Solution**: Iterate A² instead. Since A is real symmetric, A² is PSD with eigenvalues λᵢ² ≥ 0. No sign oscillation occurs. The Rayleigh quotient R(x, A²x) → ρ(A²) = ρ(A)².
+### 理论背景
 
-**No f32::sqrt in no_std**: Recovering ρ(A) = √ρ(A²) requires sqrt. Instead, use integer Newton-Raphson (`isqrt64`) on the ppm-scaled value:
+**谱半径 ρ(A)**（Perron-Frobenius，1907–1912）：
+- 对于连通无向图，ρ(A) = A 的所有特征值 λᵢ 中 |λᵢ| 的最大值
+- 对于 d-正则图：ρ = d
+- 对于完全图 K_n：ρ = n − 1  
+- 对于星形 K_{1,k}：ρ = √k
+- **传染阈值**：疾病在网络上传播当且仅当 βρ(A) > δ（感染率 × ρ > 恢复率）。在 SIS 模型中，超过阈值时疫情持续存在；低于阈值时疫情自行消亡。
+
+**代数连通度 λ₂(L)**（Fiedler 1973）：
+- λ₂(L) = 0 当且仅当图不连通（由 Kirchhoff 矩阵-树定理）
+- λ₂ 越大 ↔ 越难以断连 ↔ 共识/扩散越快
+- **Cheeger 不等式**：h(G) ≥ λ₂/2，其中 h(G) 是边导度（等周数）
+- **扩张图（expander graphs）**：相对 λ₁ 而言较高的 λ₂ 刻画了高效的通信拓扑
+
+---
+
+## 实现
+
+### 阶段 1 —— 通过 A² 幂迭代计算 ρ(A)
+
+**关键挑战**：对于许多常见图（路径 P_n、偶数环、二部图），A 的特征值中存在 ±ρ 成对出现的情况。直接对 A 做简单迭代会在 +ρ 和 −ρ 对应的特征向量之间振荡，无法收敛。
+
+**解决方案**：改为迭代 A²。由于 A 是实对称矩阵，A² 是半正定的，特征值 λᵢ² ≥ 0，不会发生符号振荡。Rayleigh 商 R(x, A²x) → ρ(A²) = ρ(A)²。
+
+**no_std 环境下没有 f32::sqrt**：要从 ρ(A) = √ρ(A²) 恢复 ρ(A) 需要开平方。为此改用对 ppm 缩放值进行整数牛顿-拉夫逊迭代（`isqrt64`）：
 
 ```rust
 fn isqrt64(n: u64) -> u64 {
@@ -53,128 +53,128 @@ fn isqrt64(n: u64) -> u64 {
 // rho_ppm  = isqrt64(rho_sq_u × 1_000_000) = floor(ρ(A) × 1e6)
 ```
 
-Error bound: ≤1 ppm from integer floor; well within 5000 ppm tolerance.
+误差界：整数向下取整误差 ≤1 ppm；远小于 5000 ppm 的容差。
 
-### Phase 2 — λₙ(L) via Laplacian Iteration
+### 阶段 2 —— 通过拉普拉斯迭代计算 λₙ(L)
 
-Iterates L·x with mean-centering to deflate the zero eigenspace (all-ones direction). Rayleigh quotient converges to λₙ(L) = max Laplacian eigenvalue.
+对 L·x 做迭代，并通过均值中心化来消除零特征子空间（全 1 方向）。Rayleigh 商收敛于 λₙ(L)（最大拉普拉斯特征值）。
 
-### Phase 3 — λ₂(L) via Shifted Deflation
+### 阶段 3 —— 通过位移消去法计算 λ₂(L)
 
-Sets B = μI − L with μ = λₙ + 1. B's eigenvalues are μ−λᵢ, all positive. The largest B-eigenvalue (= μ, from the zero Laplacian mode) is deflated by mean-centering. Power iteration on the deflated B converges to the second-largest B-eigenvalue = μ − λ₂. Thus λ₂ = μ − (converged Rayleigh quotient).
+设 B = μI − L，其中 μ = λₙ + 1。B 的特征值为 μ−λᵢ，全部为正。B 的最大特征值（=μ，来自零拉普拉斯模式）通过均值中心化被消去。对消去后的 B 做幂迭代，收敛于 B 的第二大特征值 = μ − λ₂。因此 λ₂ = μ − (收敛后的 Rayleigh 商)。
 
-Guard: for nc ≤ 1, λ₂ is undefined; return (rho_ppm, 0, nc) early.
+保护逻辑：当 nc ≤ 1 时，λ₂ 无定义；提前返回 (rho_ppm, 0, nc)。
 
-### Iteration Counts
+### 迭代次数
 
-- Phase 1 (A²): 60 steps
-- Phase 2 (λₙ): 60 steps  
-- Phase 3 (λ₂): 80 steps
+- 阶段 1（A²）：60 步
+- 阶段 2（λₙ）：60 步  
+- 阶段 3（λ₂）：80 步
 
-### Stack Usage
+### 栈占用
 
-Additional over previous (~128 bytes):
-- `w1 [f32; MAX_NODES]` = 512 B (Phase 1 intermediate)
-- `w2 [f32; MAX_NODES]` = 512 B (Phase 1 A² product)
-- All other arrays reuse existing slots
+相比之前额外增加约 128 字节：
+- `w1 [f32; MAX_NODES]` = 512 B（阶段 1 中间变量）
+- `w2 [f32; MAX_NODES]` = 512 B（阶段 1 的 A² 乘积）
+- 其余数组复用既有槽位
 
 ---
 
-## Runtime API
+## 运行时 API
 
 ```rust
 pub fn graph_spectral() -> (u32, u32, usize)
 ```
 
-Returns `(rho_ppm, lambda2_ppm, node_count)`:
-- `rho_ppm` — ρ(A) × 1_000_000 as u32 (spectral radius of adjacency matrix)
-- `lambda2_ppm` — λ₂(L) × 1_000_000 as u32 (Fiedler value; 0 if disconnected or nc≤1)
-- `node_count` — number of active compact-indexed nodes
+返回 `(rho_ppm, lambda2_ppm, node_count)`：
+- `rho_ppm` —— ρ(A) × 1_000_000，u32（邻接矩阵谱半径）
+- `lambda2_ppm` —— λ₂(L) × 1_000_000，u32（Fiedler 值；不连通或 nc≤1 时为 0）
+- `node_count` —— 活跃紧凑索引节点数
 
 ---
 
-## K-Shell Commands
+## K-Shell 命令
 
 ```
-graph spectral   — display ρ(A) spectral radius + λ₂(L) algebraic connectivity
-gspectral        — alias
-spectral radius  — alias
-spectral         — alias
-gspectrum        — alias
-graph spectrum   — alias
+graph spectral   — 显示 ρ(A) 谱半径 + λ₂(L) 代数连通度
+gspectral        — 别名
+spectral radius  — 别名
+spectral         — 别名
+gspectrum        — 别名
+graph spectrum   — 别名
 ```
 
-**Display**: bright-blue header; yellow values; epidemic threshold annotation on ρ; Cheeger bound (h≥λ₂/2) annotation on λ₂; green "connected" / red "disconnected" indicator; footer: `N node(s)  power iteration (60 steps)  Fiedler 1973`
+**显示效果：** 亮蓝色标题；黄色数值；ρ 旁附传染阈值注解；λ₂ 旁附 Cheeger 界（h≥λ₂/2）注解；绿色"已连通" / 红色"未连通"指示；页脚：`N node(s)  power iteration (60 steps)  Fiedler 1973`
 
 ---
 
-## VectorAddress Namespace
+## VectorAddress 命名空间
 
-**L4=85** for `gos-graph-spectral-harness`
+`gos-graph-spectral-harness` 对应 **L4=85**
 
 ---
 
-## Test Harness: gos-graph-spectral-harness (10 tests)
+## 测试装置：gos-graph-spectral-harness（10 个测试）
 
-| Test | Graph | ρ(A) | λ₂(L) |
+| 测试 | 图 | ρ(A) | λ₂(L) |
 |------|-------|------|--------|
-| 1 | Empty (0 nodes) | 0 | 0 |
-| 2 | Single node | 0 | 0 (nc≤1 guard) |
-| 3 | Single edge K₂ | 1.000 | 2.000 |
-| 4 | Path P₃ (A-B-C) | √2 ≈ 1.414 | 1.000 |
-| 5 | Triangle K₃ | 2.000 | 3.000 |
-| 6 | Complete K₄ | 3.000 | 4.000 |
-| 7 | Star K_{1,4} | 2.000 | 1.000 |
-| 8 | 2 isolated nodes | 0.000 | 0 (disconnected) |
-| 9 | K₂ + isolated node | 1.000 | 0 (disconnected) |
-| 10 | Cycle C₄ | 2.000 | 2.000 |
+| 1 | 空图（0 节点） | 0 | 0 |
+| 2 | 单节点 | 0 | 0（nc≤1 保护逻辑） |
+| 3 | 单边 K₂ | 1.000 | 2.000 |
+| 4 | 路径 P₃（A-B-C） | √2 ≈ 1.414 | 1.000 |
+| 5 | 三角形 K₃ | 2.000 | 3.000 |
+| 6 | 完全图 K₄ | 3.000 | 4.000 |
+| 7 | 星形 K_{1,4} | 2.000 | 1.000 |
+| 8 | 2 个孤立节点 | 0.000 | 0（不连通） |
+| 9 | K₂ + 孤立节点 | 1.000 | 0（不连通） |
+| 10 | 环 C₄ | 2.000 | 2.000 |
 
-All 10 pass with TOLERANCE = 5_000 ppm (±0.5%).
+全部 10 个测试通过，容差 TOLERANCE = 5_000 ppm（±0.5%）。
 
-**Notable eigenvalue corrections during development**:
-- P₃ Laplacian spectrum is {0, 1, 3} → λ₂=1 (NOT 2-√2 as initially estimated). The {0, 2-√2, 2+√2} values belong to a different graph.
-
----
-
-## Engineering Challenges Resolved
-
-1. **A-iteration oscillation** (P₃, K_{1,4}): Single A-iteration cycles between ±λ eigenvectors without converging. Fix: iterate A² — eigenvalues are all λᵢ² ≥ 0, oscillation impossible.
-
-2. **No f32::sqrt in no_std**: Standard `sqrt` is a `std` method. Fix: integer Newton-Raphson `isqrt64` on the u64 ppm-squared value gives ≤1 ppm error.
-
-3. **nc=1 degenerate case**: Single-node graph has 1D Laplacian with eigenvalue 0 only; λ₂ is undefined. Fix: early return with lambda2_ppm=0 before Phase 3 setup.
-
-4. **Mutex poisoning cascade**: A test panic while holding `TEST_LOCK` poisons the mutex, causing all subsequent tests to fail. Fix: `lock().unwrap_or_else(|e| e.into_inner())` to recover from poisoning.
+**开发过程中修正的特征值**：
+- P₃ 的拉普拉斯谱为 {0, 1, 3} → λ₂=1（**不是**最初估计的 2-√2）。{0, 2-√2, 2+√2} 是属于另一个图的值。
 
 ---
 
-## OS Analogy
+## 工程难题及其解决
 
-The spectral radius ρ(A) and algebraic connectivity λ₂(L) describe **information propagation** and **fault tolerance** in the OS inter-process communication graph:
+1. **A-迭代振荡**（P₃、K_{1,4}）：对 A 做单次迭代会在 ±λ 对应特征向量间循环，无法收敛。解决方案：改为迭代 A²——所有特征值 λᵢ² ≥ 0，不可能发生振荡。
 
-- **ρ(A) ↔ broadcast amplification**: The epidemic threshold 1/ρ is the critical message fanout below which broadcast storms self-terminate. Kernel message routing should target ρ < 1/β where β is the per-hop duplication rate.
-- **λ₂(L) ↔ partition resistance**: Low λ₂ means the process graph has a bottleneck — one IPC channel failure can isolate a subsystem. High λ₂ means the graph is well-connected (expander property). Production deployments target λ₂ > 0.5 for 3-fault tolerance.
-- **Cheeger h ≥ λ₂/2**: The minimum edge cut (as a fraction of volume) is lower-bounded by the Fiedler value. A kernel scheduler can use λ₂ to determine whether load-balancing across subsystems is safe.
+2. **no_std 中没有 f32::sqrt**：标准 `sqrt` 是 `std` 方法。解决方案：对 u64 的 ppm 平方值进行整数牛顿-拉夫逊迭代 `isqrt64`，误差 ≤1 ppm。
 
-This mirrors Linux's use of NUMA topology analysis for task placement and macOS's Grand Central Dispatch queue graph connectivity checks.
+3. **nc=1 的退化情形**：单节点图的拉普拉斯矩阵是一维的，只有特征值 0；λ₂ 无定义。解决方案：在阶段 3 建立之前提前返回，lambda2_ppm=0。
+
+4. **互斥锁中毒级联**：某个测试在持有 `TEST_LOCK` 时发生 panic，会使该互斥锁中毒，导致后续所有测试失败。解决方案：使用 `lock().unwrap_or_else(|e| e.into_inner())` 从中毒状态中恢复。
 
 ---
 
-## Relation to Existing Algorithms
+## 操作系统类比
 
-| Algorithm | Version | Relation |
+谱半径 ρ(A) 与代数连通度 λ₂(L) 描述了操作系统进程间通信图中的**信息传播**与**容错能力**：
+
+- **ρ(A) ↔ 广播放大系数**：传染阈值 1/ρ 是广播风暴自行终止所需的临界消息扇出值。内核消息路由应将 ρ 控制在 1/β 以下，其中 β 是每跳复制率。
+- **λ₂(L) ↔ 抗分割能力**：λ₂ 低意味着进程图存在瓶颈——一次 IPC 通道故障就可能孤立某个子系统。λ₂ 高意味着图连接良好（扩张图性质）。生产部署通常以 λ₂ > 0.5 作为 3-容错的目标。
+- **Cheeger h ≥ λ₂/2**：最小边割（占总容量的比例）的下界由 Fiedler 值给出。内核调度器可以利用 λ₂ 判断跨子系统负载均衡是否安全。
+
+这类似于 Linux 利用 NUMA 拓扑分析进行任务放置，以及 macOS Grand Central Dispatch 对队列图连通性的检查。
+
+---
+
+## 与既有算法的关系
+
+| 算法 | 版本 | 关系 |
 |-----------|---------|---------|
-| PageRank | V2.xx | PageRank principal eigenvector; ρ(A) is the corresponding eigenvalue |
-| Vertex connectivity κ(G) | V3.07 | both measure robustness; κ≥λ₂/Δ (Fiedler bound) |
-| Community detection (LPA) | V3.xx | communities correspond to near-zero λ₂ cuts |
-| Edge betweenness | V3.06 | high-betweenness edges are typically low-λ₂ bridges |
+| PageRank | V2.xx | PageRank 是主特征向量；ρ(A) 是对应的特征值 |
+| 顶点连通度 κ(G) | V3.07 | 二者都衡量健壮性；κ≥λ₂/Δ（Fiedler 界） |
+| 社区发现（LPA） | V3.xx | 社区对应于接近零的 λ₂ 割 |
+| 边介数 | V3.06 | 高介数的边通常是低 λ₂ 的桥 |
 
 ---
 
-## Literature
+## 参考文献
 
-- Fiedler, M. (1973). "Algebraic connectivity of graphs." *Czechoslovak Mathematical Journal* 23(98): 298–305. (Algebraic connectivity λ₂.)
-- Perron, O. (1907). "Zur Theorie der Matrizen." *Math. Ann.* 64: 248–263. (Dominant eigenvalue theory.)
-- Frobenius, G. (1912). "Über Matrizen aus nicht negativen Elementen." *Sitzungsber. Kgl. Preuss. Akad. Wiss.* (Perron-Frobenius theorem.)
-- Wang, Y. et al. (2003). "Epidemic spreading in real networks: An eigenvalue viewpoint." *SRDS 2003*. (ρ(A) and epidemic threshold.)
-- Cheeger, J. (1970). "A lower bound for the smallest eigenvalue of the Laplacian." *Problems in Analysis*. Princeton UP. (Cheeger inequality.)
+- Fiedler, M. (1973). "Algebraic connectivity of graphs." *Czechoslovak Mathematical Journal* 23(98): 298–305.（代数连通度 λ₂。）
+- Perron, O. (1907). "Zur Theorie der Matrizen." *Math. Ann.* 64: 248–263.（主特征值理论。）
+- Frobenius, G. (1912). "Über Matrizen aus nicht negativen Elementen." *Sitzungsber. Kgl. Preuss. Akad. Wiss.*（Perron-Frobenius 定理。）
+- Wang, Y. et al. (2003). "Epidemic spreading in real networks: An eigenvalue viewpoint." *SRDS 2003*.（ρ(A) 与传染阈值。）
+- Cheeger, J. (1970). "A lower bound for the smallest eigenvalue of the Laplacian." *Problems in Analysis*. Princeton UP.（Cheeger 不等式。）

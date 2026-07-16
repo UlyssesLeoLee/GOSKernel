@@ -1,76 +1,76 @@
-# Hardening Log — V3.27 (2026-07-08)
+# 硬化日志 — V3.27（2026-07-08）
 
-## Summary
-Implemented three generalized Randić-family + Lanzhou degree-based topological indices as the next scheduled hardening increment. Added 10 host tests (all green). Total host-test count: **1243**.
+## 摘要
+作为下一个定期硬化增量，实现了三个广义 Randić 家族 + 兰州（Lanzhou）基于度数的拓扑指数。新增 10 项宿主测试（全部通过）。宿主测试总计：**1243**。
 
-## Indices Added
+## 新增指数
 
-### R_{1/2} — Product Connectivity (Bollobás & Erdős 1998)
-- `ir_ppm = R_{1/2}(G) × 10^6 = Σ_{uv∈E} √(d_u·d_v) × 10^6` (floor ppm via isqrt64)
-- Generalizes Randić index (α=−½) to α=+½; measures geometric-mean degree product across edges
-- Regular Δ-graph: IR = m·Δ (exact; ppm = m·Δ·10^6)
-- Non-pendant star K_{1,k}: IR = k·√k·10^6 (ppm)
-- Complement to classic Randić R: R×IR ≥ m² (Cauchy-Schwarz)
+### R_{1/2} — 乘积连通性指数（Bollobás & Erdős 1998）
+- `ir_ppm = R_{1/2}(G) × 10^6 = Σ_{uv∈E} √(d_u·d_v) × 10^6`（经 isqrt64 下取整的 ppm）
+- 将 Randić 指数（α=−½）推广至 α=+½；衡量各边度数几何平均乘积
+- 正则 Δ-图：IR = m·Δ（精确；ppm = m·Δ·10^6）
+- 非悬挂星图 K_{1,k}：IR = k·√k·10^6（ppm）
+- 与经典 Randić R 的互补关系：R×IR ≥ m²（柯西-施瓦茨不等式）
 
-### R_{-1} — Reciprocal Randić (Bollobás & Erdős 1998)
-- `rr_ppm = R_{-1}(G) × 10^6 = Σ_{uv∈E} ⌊10^6/(d_u·d_v)⌋` (floor ppm; pure integer, no sqrt)
-- Generalizes Randić index (α=−½) to α=−1; penalizes high-degree edge products
-- Regular Δ-graph: RR = m/Δ² (ppm = floor(m·10^6/Δ²))
-- Star K_{1,k}: RR = k·10^6/(1·k) = k·10^6/k = 10^6 (exact, independent of k)
+### R_{-1} — 倒数 Randić 指数（Bollobás & Erdős 1998）
+- `rr_ppm = R_{-1}(G) × 10^6 = Σ_{uv∈E} ⌊10^6/(d_u·d_v)⌋`（下取整 ppm；纯整数运算，无需开方）
+- 将 Randić 指数（α=−½）推广至 α=−1；对高度数边乘积施加惩罚
+- 正则 Δ-图：RR = m/Δ²（ppm = floor(m·10^6/Δ²)）
+- 星图 K_{1,k}：RR = k·10^6/(1·k) = k·10^6/k = 10^6（精确值，与 k 无关）
 
-### Lz — Lanzhou Index (Xia et al. 2019)
-- `lz = Lz(G) = Σ_v d_v²·(n−1−d_v)` (exact u64; no sqrt, no BFS)
-- Algebraic identity: Lz = (n−1)·M₁(G) − F(G) (First Zagreb × (n-1) minus Forgotten index)
-- Lz = 0 for any complete graph K_n (n−1−d_v = 0 for all v)
-- Measures degree-weighted "room to grow" — amplifies high-degree nodes with many absent edges
-- OS analogy: kernel modules with high IPC degree but many unused connection slots (fragmented hub topology)
+### Lz — 兰州指数（Xia et al. 2019）
+- `lz = Lz(G) = Σ_v d_v²·(n−1−d_v)`（精确 u64；无需开方，无需 BFS）
+- 代数恒等式：Lz = (n−1)·M₁(G) − F(G)（第一 Zagreb 指数 ×(n-1) 减去遗忘指数）
+- 对任意完全图 K_n，Lz = 0（对所有 v，n−1−d_v = 0）
+- 衡量度数加权的"增长空间"——放大那些拥有大量缺失边的高度数节点
+- 操作系统类比：具有高 IPC 度数但存在大量未使用连接槽位的内核模块（碎片化的枢纽拓扑）
 
-## Reference Values
+## 参考数值
 
-| Graph        | IR_ppm     | RR_ppm  | lz | edges | nodes |
+| 图        | IR_ppm     | RR_ppm  | lz | 边数 | 节点数 |
 |--------------|------------|---------|-----|-------|-------|
-| Empty        | 0          | 0       | 0   | 0     | 0     |
-| 1 node       | 0          | 0       | 0   | 0     | 1     |
-| Edge A-B     | 1_000_000  | 1_000_000 | 0  | 1    | 2     |
-| Path P₃      | 2_828_426  | 1_000_000 | 2  | 2    | 3     |
-| Triangle K₃  | 6_000_000  | 750_000 | 0   | 3     | 3     |
-| Star K_{1,4} | 8_000_000  | 1_000_000 | 12 | 4    | 5     |
-| Path P₄      | 4_828_426  | 1_250_000 | 12 | 3    | 4     |
-| Complete K₄  | 18_000_000 | 666_666 | 0   | 6     | 4     |
-| Two isolated | 0          | 0       | 0   | 0     | 2     |
+| 空图        | 0          | 0       | 0   | 0     | 0     |
+| 1 个节点       | 0          | 0       | 0   | 0     | 1     |
+| 单边 A-B     | 1_000_000  | 1_000_000 | 0  | 1    | 2     |
+| 路径 P₃      | 2_828_426  | 1_000_000 | 2  | 2    | 3     |
+| 三角形 K₃  | 6_000_000  | 750_000 | 0   | 3     | 3     |
+| 星图 K_{1,4} | 8_000_000  | 1_000_000 | 12 | 4    | 5     |
+| 路径 P₄      | 4_828_426  | 1_250_000 | 12 | 3    | 4     |
+| 完全图 K₄  | 18_000_000 | 666_666 | 0   | 6     | 4     |
+| 两个孤立节点 | 0          | 0       | 0   | 0     | 2     |
 | K_{2,3}      | 14_696_934 | 999_996 | 42  | 6     | 5     |
 
-## Key Derivations
+## 关键推导
 
-- **P₃ IR**: isqrt64(1×2×10^12) = isqrt64(2×10^12) = 1_414_213; ×2 = 2_828_426
-- **K₃ RR**: 3 × floor(10^6/4) = 3 × 250_000 = 750_000
-- **K₄ RR**: 6 × floor(10^6/9) = 6 × 111_111 = 666_666 (10^6/9 = 111_111.1...; floor = 111_111)
-- **K_{2,3} IR**: isqrt64(6×10^12) = 2_449_489; ×6 = 14_696_934 (√6 = 2.44948974…)
-- **K_{2,3} RR**: 6 × floor(10^6/6) = 6 × 166_666 = 999_996
-- **K_{2,3} Lz**: (5−1)×M₁ − F = 4×30 − 78 = 120 − 78 = 42; M₁=2×9+3×4=30, F=2×27+3×8=78
+- **P₃ 的 IR**：isqrt64(1×2×10^12) = isqrt64(2×10^12) = 1_414_213；×2 = 2_828_426
+- **K₃ 的 RR**：3 × floor(10^6/4) = 3 × 250_000 = 750_000
+- **K₄ 的 RR**：6 × floor(10^6/9) = 6 × 111_111 = 666_666（10^6/9 = 111_111.1...；下取整 = 111_111）
+- **K_{2,3} 的 IR**：isqrt64(6×10^12) = 2_449_489；×6 = 14_696_934（√6 = 2.44948974…）
+- **K_{2,3} 的 RR**：6 × floor(10^6/6) = 6 × 166_666 = 999_996
+- **K_{2,3} 的 Lz**：(5−1)×M₁ − F = 4×30 − 78 = 120 − 78 = 42；M₁=2×9+3×4=30，F=2×27+3×8=78
 
-## Algorithm
+## 算法
 
-- Phase 1: Compact node index (O(V))
-- Phase 2: Undirected adjacency bitmask construction + edge dedup (O(E))
-- Phase 3: Degree array from adj.count_ones() (O(V))
-- Phase 4: Node scan for Lz: Σ_v d²·(n−1−d) (O(V))
-- Phase 5: Edge scan for IR and RR (O(E)):
-  - IR per edge: isqrt64(da·db·10^12)
-  - RR per edge: floor(10^6/(da·db))
-  - Overflow guard: da·db ≤ 127² = 16_129; 16_129×10^12 < u64::MAX ✓
-- Total: O(V+E) — fastest category (no BFS needed)
+- 第一阶段：紧凑节点索引（O(V)）
+- 第二阶段：构建无向邻接位掩码 + 边去重（O(E)）
+- 第三阶段：由 adj.count_ones() 得出度数数组（O(V)）
+- 第四阶段：对 Lz 的节点扫描：Σ_v d²·(n−1−d)（O(V)）
+- 第五阶段：对 IR 与 RR 的边扫描（O(E)）：
+  - 每条边 IR：isqrt64(da·db·10^12)
+  - 每条边 RR：floor(10^6/(da·db))
+  - 溢出防护：da·db ≤ 127² = 16_129；16_129×10^12 < u64::MAX ✓
+- 总复杂度：O(V+E) —— 最快的一类（无需 BFS）
 
-## Stack Usage
-- adj[128] (u128 = 2KB) + deg[128] (u64 = 1KB) ≈ 3KB total
+## 栈空间占用
+- adj[128]（u128 = 2KB）+ deg[128]（u64 = 1KB）≈ 共 3KB
 
-## Files Modified
-- `crates/gos-runtime/src/lib.rs`: added `graph_topo_indices16_inner` + `graph_topo_indices16` pub fn
-- `crates/k-shell/src/lib.rs`: added `dispatch_graph_topo_indices16`
-- `crates/k-shell/src/proc.rs`: routing entry for "graph topo16" / "gtopo16" / "product connectivity" / "gpc" / "reciprocal randic" / "grr" / "lanzhou index" / "glz" / "gpcrrlz"
-- `host-tests/gos-graph-topo16-harness/`: new harness (10 tests, VectorAddress L4=103)
+## 变更文件
+- `crates/gos-runtime/src/lib.rs`：新增 `graph_topo_indices16_inner` + 公开函数 `graph_topo_indices16`
+- `crates/k-shell/src/lib.rs`：新增 `dispatch_graph_topo_indices16`
+- `crates/k-shell/src/proc.rs`：新增 "graph topo16" / "gtopo16" / "product connectivity" / "gpc" / "reciprocal randic" / "grr" / "lanzhou index" / "glz" / "gpcrrlz" 的路由条目
+- `host-tests/gos-graph-topo16-harness/`：新建 harness（10 项测试，VectorAddress L4=103）
 
-## Shell Commands
+## Shell 命令
 ```
 graph topo16   gtopo16
 product connectivity   gpc
@@ -79,11 +79,15 @@ lanzhou index          glz
 gpcrrlz
 ```
 
-## OS Analogy
-- **IR (R_{1/2})**: cross-channel geometric-mean coupling intensity — high-degree pairs amplified; >m for hub-spoke topologies
-- **RR (R_{-1})**: inverse degree-product per link — high means uniform low-degree mesh; suppressed by hubs
-- **Lz**: per-module "unused slot pressure" — modules with many current connections but even more absent ones dominate; zero for complete meshes
+## 操作系统类比
+- **IR（R_{1/2}）**：跨通道几何平均耦合强度——高度数节点对被放大；对枢纽-辐射型拓扑其值 >m
+- **RR（R_{-1}）**：每条链路的倒数度数乘积——数值高意味着均匀的低度数网格；枢纽节点会抑制该值
+- **Lz**：每模块"未用槽位压力"——当前连接多但缺失连接更多的模块占主导；对完全网格为零
 
-## Literature
+## 参考文献
 - Bollobás, B. & Erdős, P. (1998). "Graphs of extremal weights." Ars Combinatoria, 50, 225-233.
 - Xia, Z., Chen, T., Wei, W. (2019). "The Lanzhou Index." MATCH Commun. Math. Comput. Chem., 82, 675-686.
+
+---
+
+*本文件于 2026-07-15 按文档管理规范就地中文化，仅译语言，不改动版本号 / 文件路径 / 函数名 / 测试名 / 测试计数等既成事实。*

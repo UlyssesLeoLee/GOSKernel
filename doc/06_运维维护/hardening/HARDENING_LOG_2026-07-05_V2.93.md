@@ -1,63 +1,62 @@
-# Hardening Log V2.93 -- 2-Edge-Connected Components (2ECC)
+# 硬化日志 V2.93 —— 2-边连通分量（2ECC）
 
-**Date:** 2026-07-05
-**Branch:** feat/vk-auto-live-surface
-**Host-test total:** 903 (893 prior + 10 new)
-
----
-
-## Feature: `graph 2ecc` / `g2ecc` / `2ecc` / `edge connected components`
-
-### Motivation
-
-V2.85 added articulation points (nodes whose removal disconnects the graph) and V2.86 added
-bridges (edges whose removal disconnects the graph). V2.93 completes this connectivity
-decomposition trilogy by partitioning the graph into **2-edge-connected components (2ECCs)**:
-maximal subgraphs where no single edge failure can partition the group.
-
-> **"Which clusters of kernel subsystems are internally fault-tolerant against any single
-> IPC link failure?"**
-
-| Question | OS analogy |
-|---|---|
-| Which subsystem groups survive any single link cut? | Bonded NIC pairs, RAID-1 storage paths |
-| Which nodes are only reachable via a critical single link? | Single-point-of-failure IPC channels |
-| How many independent fault-tolerance zones exist? | VLAN segment count, `ip link` bond groups |
-| Which edges are the weakest points in the communication fabric? | Bridges = `graph bridges` output |
-
-2ECCs complement the prior connectivity work:
-
-| Version | What it identifies |
-|---|---|
-| V2.85 — graph articulation | Cut *vertices* — remove one node to disconnect |
-| V2.86 — graph bridges | Cut *edges* — remove one edge to disconnect |
-| V2.93 — graph 2ecc | *Components* grouped by 2-edge-connectivity |
+**日期：** 2026-07-05
+**分支：** feat/vk-auto-live-surface
+**宿主测试总计：** 903（此前 893，+10 新增）
 
 ---
 
-### Algorithm: Two-Phase O(V+E)
+## 功能：`graph 2ecc` / `g2ecc` / `2ecc` / `edge connected components`
 
-**Phase 1 — Tarjan bridge-finding (identical to V2.86):**
-- Iterative DFS on the undirected projection of the graph
-- Maintains `disc[]` (discovery time), `low[]` (lowest reachable disc), and `par_ei[]` (parent edge index)
-- Bridge condition: `low[child] > disc[parent]` (strictly greater, not ≥)
-- Marks `is_bridge[ei] = true` for each bridge edge index
+### 动机
 
-**Phase 2 — BFS on non-bridge undirected edges:**
-- For each unvisited node, BFS across non-bridge undirected edges
-- Each BFS flood-fill discovers one 2ECC and assigns a 0-indexed component ID
-- Isolated nodes (no edges) each form their own singleton 2ECC
+V2.85 增加了关节点（移除后会使图断开的节点），V2.86 增加了桥
+（移除后会使图断开的边）。V2.93 通过将图划分为**2-边连通分量（2ECC）**，
+完成了这一连通性分解三部曲：这些是极大子图，其中任何单条边的失效都
+无法使该子图分裂。
 
-**Key invariant for connected graphs:**
+> **"哪些内核子系统集群在任何单条 IPC 链路失效的情况下仍能保持内部容错？"**
+
+| 问题 | 操作系统类比 |
+|---|---|
+| 哪些子系统组能在任意单条链路被切断后仍存活？ | 绑定网卡对、RAID-1 存储路径 |
+| 哪些节点仅能通过一条关键的单一链路到达？ | 单点故障的 IPC 通道 |
+| 存在多少个独立的容错区域？ | VLAN 网段数量、`ip link` 绑定组 |
+| 通信结构中哪些边是最薄弱的环节？ | 桥 = `graph bridges` 的输出 |
+
+2ECC 是对之前连通性工作的补充：
+
+| 版本 | 识别内容 |
+|---|---|
+| V2.85 —— graph articulation | 割*点*——移除单个节点即可使图断开 |
+| V2.86 —— graph bridges | 割*边*——移除单条边即可使图断开 |
+| V2.93 —— graph 2ecc | 按 2-边连通性分组的*分量* |
+
+---
+
+### 算法：两阶段 O(V+E)
+
+**阶段 1 —— Tarjan 找桥算法（与 V2.86 相同）：**
+- 在图的无向投影上进行迭代 DFS
+- 维护 `disc[]`（发现时间）、`low[]`（可达的最小发现时间）和 `par_ei[]`（父边索引）
+- 桥的判定条件：`low[child] > disc[parent]`（严格大于，非 ≥）
+- 为每条桥边索引标记 `is_bridge[ei] = true`
+
+**阶段 2 —— 在非桥无向边上进行 BFS：**
+- 对每个未访问节点，沿非桥无向边进行 BFS
+- 每次 BFS 泛洪填充发现一个 2ECC，并分配一个从 0 开始的分量 ID
+- 孤立节点（无边）各自构成一个单节点 2ECC
+
+**连通图的关键不变量：**
 ```
 comp_count = bridge_count + 1
 ```
-Verified in test 10 (path of 4 nodes: 3 bridges → 4 components).
+在测试 10 中验证（4 节点路径：3 条桥 → 4 个分量）。
 
-**Output contract:**
-- Every node belongs to exactly one 2ECC (unlike articulation points which can be in multiple BCCs)
-- Nodes sorted ascending by `(comp_id, VectorAddress.as_u64())` for deterministic output
-- `comp_ids[i]` is a `u8` (0–254); capped at 254 for graphs with > 254 components
+**输出约定：**
+- 每个节点恰好属于一个 2ECC（不同于可能属于多个双连通分量的关节点）
+- 节点按 `(comp_id, VectorAddress.as_u64())` 升序排序，保证输出确定性
+- `comp_ids[i]` 为 `u8` 类型（0–254）；对于超过 254 个分量的图，上限为 254
 
 ---
 
@@ -68,20 +67,20 @@ pub fn graph_2ecc<N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize)
 // (vecs, comp_ids, node_count, comp_count)
 ```
 
-- `vecs[0..node_count]` — live nodes sorted by (comp_id, VectorAddress)
-- `comp_ids[0..node_count]` — 0-indexed 2ECC for each corresponding node
-- `node_count` — total live nodes
-- `comp_count` — number of distinct 2-edge-connected components
+- `vecs[0..node_count]` —— 按 (comp_id, VectorAddress) 排序的存活节点
+- `comp_ids[0..node_count]` —— 每个对应节点从 0 开始的 2ECC 编号
+- `node_count` —— 存活节点总数
+- `comp_count` —— 2-边连通分量的数量
 
-**Shell commands:**
-- `graph 2ecc` — primary
-- `g2ecc` / `2ecc` / `edge connected components` — aliases
+**Shell 命令：**
+- `graph 2ecc` —— 主命令
+- `g2ecc` / `2ecc` / `edge connected components` —— 别名
 
-**VectorAddress L4=69** for `gos-graph-2ecc-harness`.
+**VectorAddress L4=69** 用于 `gos-graph-2ecc-harness`。
 
 ---
 
-### Display Format
+### 显示格式
 
 ```
  graph 2-edge-connected components
@@ -94,64 +93,64 @@ pub fn graph_2ecc<N: usize>() -> ([VectorAddress; N], [u8; N], usize, usize)
  2 components across 5 nodes
 ```
 
-Nodes are grouped and indented under their component header.
+节点按分量分组，并在分量标题下缩进显示。
 
 ---
 
-### Test Suite: gos-graph-2ecc-harness (10 tests)
+### 测试套件：gos-graph-2ecc-harness（10 项测试）
 
-| # | Scenario | Expected comp_count |
+| # | 场景 | 预期 comp_count |
 |---|---|---|
-| 1 | Empty graph | 0 |
-| 2 | Single isolated node | 1 (singleton 2ECC) |
-| 3 | Single directed edge A→B | 2 (bridge → {A}, {B}) |
-| 4 | Triangle / directed 3-cycle | 1 (no bridges) |
-| 5 | Path of 4 nodes A→B→C→D | 4 (every edge is a bridge) |
-| 6 | Two triangles joined by one bridge | 2 |
-| 7 | Two triangles sharing one edge | 1 (shared edge not a bridge) |
-| 8 | Star (1 center + 4 leaves) | 5 (all spokes are bridges) |
-| 9 | Two disconnected triangles | 2 |
-| 10 | Cross-check: `comp_count == bridge_count + 1` for path | verified |
+| 1 | 空图 | 0 |
+| 2 | 单个孤立节点 | 1（单节点 2ECC） |
+| 3 | 单条有向边 A→B | 2（桥 → {A}, {B}） |
+| 4 | 三角形 / 有向三元环 | 1（无桥） |
+| 5 | 4 节点路径 A→B→C→D | 4（每条边都是桥） |
+| 6 | 由一座桥连接的两个三角形 | 2 |
+| 7 | 共享一条边的两个三角形 | 1（共享边不是桥） |
+| 8 | 星形（1 中心 + 4 叶子） | 5（所有辐条边都是桥） |
+| 9 | 两个不连通的三角形 | 2 |
+| 10 | 交叉验证：路径图中 `comp_count == bridge_count + 1` | 已验证 |
 
 ---
 
-### Implementation Details
+### 实现细节
 
-**Self-loops ignored:** Self-loops can never be bridges (they don't connect two distinct
-nodes) and are explicitly skipped in both phases (`nbr_slot == cur_slot` guard).
+**忽略自环：** 自环永远不可能是桥（它们不连接两个不同的节点），
+在两个阶段中都被显式跳过（`nbr_slot == cur_slot` 守卫）。
 
-**Parent edge tracked by index not slot:** The `par_ei[cur_slot] == ei` guard in Phase 1
-skips the exact tree-edge we arrived on, not just edges to the parent node. This correctly
-handles anti-parallel edges (A→B and B→A both present): only the DFS-tree edge is skipped,
-the reverse parallel edge correctly updates `low[]`.
+**父边按索引而非槽位追踪：** 阶段 1 中的 `par_ei[cur_slot] == ei` 守卫
+跳过的是我们到达时所用的那条确切树边，而不仅仅是通向父节点的边。这能
+正确处理反向平行边的情况（同时存在 A→B 和 B→A）：只有 DFS 树边被跳过，
+反向的平行边会正确更新 `low[]`。
 
-**Phase 2 uses `is_bridge[]` array (512 bools):** Allocated on the stack, indexed by
-edge slot. Zero-cost compared to re-running bridge detection: no additional RUNTIME lock
-needed since both phases run within the same `RUNTIME.lock()` hold.
+**阶段 2 使用 `is_bridge[]` 数组（512 个布尔值）：** 分配在栈上，
+按边槽位索引。相比重新运行一次桥检测，此方式零成本：由于两个阶段都在
+同一次 `RUNTIME.lock()` 持有期间运行，无需额外的 RUNTIME 锁。
 
 ---
 
-### Literature & Theory
+### 参考文献与理论
 
-| Reference | Contribution |
+| 参考文献 | 贡献 |
 |---|---|
-| Tarjan 1972 | DFS disc/low-link bridge detection |
-| Whitney 1932 | k-edge-connectivity definition |
-| Even & Tarjan 1975 | Edge-connectivity and max-flow relationship |
-| Nagamochi & Ibaraki 1992 | Linear-time minimum cut |
-| König's theorem | Bridges are minimum edge cuts of size 1 |
+| Tarjan 1972 | DFS disc/low-link 找桥算法 |
+| Whitney 1932 | k-边连通性的定义 |
+| Even & Tarjan 1975 | 边连通性与最大流的关系 |
+| Nagamochi & Ibaraki 1992 | 线性时间最小割算法 |
+| König 定理 | 桥是大小为 1 的最小边割 |
 
-**Relationship to vertex connectivity:**
-- If the graph has any bridge → edge connectivity λ(G) = 1
-- If every node is in a singleton 2ECC → λ(G) = 1 (all edges are bridges)
-- If comp_count = 1 → no bridge exists → λ(G) ≥ 2
+**与顶点连通性的关系：**
+- 若图中存在任何桥 → 边连通度 λ(G) = 1
+- 若每个节点各自构成单节点 2ECC → λ(G) = 1（所有边都是桥）
+- 若 comp_count = 1 → 不存在桥 → λ(G) ≥ 2
 
 ---
 
-### Invariants Added
+### 新增不变量
 
-- `graph_2ecc`: every node belongs to exactly one 2ECC (unlike BCC where articulation points span multiple blocks)
-- `graph_2ecc` + `graph_bridges`: for connected graphs, `comp_count = bridge_count + 1`
-- Self-loops are ignored in both bridge-finding and component BFS
-- Output sorted ascending by `(comp_id, vecs.as_u64())` for determinism
-- `comp_ids` are 0-indexed starting from 0 (assigned in BFS-seed order)
+- `graph_2ecc`：每个节点恰好属于一个 2ECC（不同于关节点可能横跨多个块的 BCC）
+- `graph_2ecc` + `graph_bridges`：对连通图而言，`comp_count = bridge_count + 1`
+- 自环在找桥和分量 BFS 中均被忽略
+- 输出按 `(comp_id, vecs.as_u64())` 升序排序以保证确定性
+- `comp_ids` 从 0 开始编号（按 BFS 起始顺序分配）

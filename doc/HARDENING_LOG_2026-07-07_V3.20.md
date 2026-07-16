@@ -1,3 +1,5 @@
+> **[归位说明 / 2026-07-15]** 本文件为原始英文存档，未做删改。经审校已归位并中文化至 [doc/06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.20.md](06_运维维护/hardening/HARDENING_LOG_2026-07-07_V3.20.md)，请以该中文版为准。
+
 # Hardening Log — V3.20
 **Date:** 2026-07-07  
 **Branch:** feat/vk-auto-live-surface  

@@ -1,178 +1,179 @@
-# Hardening Log V2.87 — Eulerian Path/Circuit Detection
+# 硬化日志 V2.87 — 欧拉路径/回路检测
 
-**Date:** 2026-07-04  
-**Branch:** feat/vk-auto-live-surface  
-**Commit:** c001568  
-**Host-test total:** 843 (833 prior + 10 new)
-
----
-
-## Feature: `graph eulerian` / `geulerian` / `eulerian` / `euler`
-
-### Motivation
-
-V2.85 and V2.86 added **structural fault-tolerance** primitives (cut vertices, cut edges).
-V2.87 adds a complementary **traversal completeness** primitive: **Eulerian path/circuit
-detection** — answering whether the directed kernel graph admits a walk that visits every
-edge exactly once.
-
-This is a classic result from graph theory (Euler 1736, the Königsberg bridge problem) with
-direct OS relevance:
-
-| Question | OS analogy |
-|---|---|
-| Eulerian circuit exists? | Can a maintenance daemon visit every IPC channel exactly once and return to base? |
-| Eulerian path exists? | Can a single-pass audit traverse every dependency edge without retracing? |
-| Neither? | The graph has isolated subsystem clusters or degree imbalance — routing is incomplete. |
-
-In production graph platforms (NetworkX, igraph), Eulerian detection is a core primitive used
-in circuit design, DNA assembly, and network audit scheduling.
+**日期：** 2026-07-04
+**分支：** feat/vk-auto-live-surface
+**提交：** c001568
+**宿主测试总计：** 843（此前 833，+10）
 
 ---
 
-## Algorithm: Degree Balance + Weak Connectivity (O(V+E))
+## 功能：`graph eulerian` / `geulerian` / `eulerian` / `euler`
 
-Eulerian detection for directed graphs reduces to two O(V+E) checks:
+### 动机
 
-### Step 1 — Degree Census
+V2.85 与 V2.86 新增了**结构容错性**原语（割点、割边）。V2.87 新增了一个
+互补的**遍历完备性**原语：**欧拉路径/回路检测**——回答有向内核图
+是否存在一条能恰好遍历每条边一次的路径。
 
-For each live node, compute `out_degree` and `in_degree` by scanning the edge table once.
-Isolated nodes (out+in = 0) are excluded from all further checks.
+这是图论中的一个经典结果（欧拉，1736 年，哥尼斯堡七桥问题），
+与操作系统直接相关：
 
-### Step 2 — Degree Balance Classification
-
-| Condition | Classification |
+| 问题 | 操作系统类比 |
 |---|---|
-| All active nodes: `out == in` | Potential circuit |
-| Exactly one node: `out - in = +1` (start), exactly one: `in - out = +1` (end), rest balanced | Potential path |
-| Any node: `|out - in| ≥ 2`, or > 1 start/end candidate | Neither |
+| 是否存在欧拉回路？ | 维护守护进程能否恰好访问每条 IPC 通道一次并返回起点？ |
+| 是否存在欧拉路径？ | 一次单遍审计能否遍历每条依赖边而不重复经过？ |
+| 两者都不存在？ | 该图存在孤立的子系统集群或度数不平衡——路由是不完整的。 |
 
-### Step 3 — Weak Connectivity Check
+在生产级图平台（NetworkX、igraph）中，欧拉检测是电路设计、DNA 组装、
+网络审计调度中使用的核心原语。
 
-Undirected BFS from the first active node, treating every directed edge as undirected.
-All active nodes must be reachable. If any active node is not reached, the result is
-"neither" regardless of degree conditions.
+---
 
-**Key insight:** for directed graphs, the conditions are:
+## 算法：度数平衡 + 弱连通性（O(V+E)）
+
+有向图的欧拉检测可归约为两个 O(V+E) 检查：
+
+### 第一步 —— 度数统计
+
+对每个存活节点，通过一次扫描边表来计算 `out_degree` 与 `in_degree`。
+孤立节点（out+in = 0）被排除在后续所有检查之外。
+
+### 第二步 —— 度数平衡分类
+
+| 条件 | 分类 |
+|---|---|
+| 所有活跃节点：`out == in` | 潜在回路 |
+| 恰好一个节点：`out - in = +1`（起点），恰好一个：`in - out = +1`（终点），其余平衡 | 潜在路径 |
+| 任意节点：`|out - in| ≥ 2`，或存在超过 1 个起点/终点候选 | 两者皆非 |
+
+### 第三步 —— 弱连通性检查
+
+从第一个活跃节点开始进行无向 BFS，将每条有向边都当作无向边处理。
+所有活跃节点都必须可达。如果任何活跃节点未被到达，则不论度数条件
+如何，结果都是"两者皆非"。
+
+**关键洞察：** 对于有向图，条件为：
 
 ```
-Eulerian circuit: ∀v: in_degree(v) == out_degree(v)  AND  weakly connected
-Eulerian path:    ∃! s: out(s)−in(s)=1, ∃! t: in(t)−out(t)=1, ∀v≠s,t: balanced  AND  weakly connected
+欧拉回路：∀v: in_degree(v) == out_degree(v)  且  弱连通
+欧拉路径：∃! s: out(s)−in(s)=1，∃! t: in(t)−out(t)=1，∀v≠s,t: 平衡  且  弱连通
 ```
 
-**Vacuous case:** If no edges exist, the empty walk trivially satisfies the circuit condition
-(`has_circuit = true`, `has_path = false`). This applies to empty graphs and graphs with only
-isolated nodes.
+**平凡情形：** 若不存在任何边，空路径平凡地满足回路条件
+（`has_circuit = true`，`has_path = false`）。这适用于空图以及仅含孤立节点的图。
 
-**Complexity:** O(V + E) — one edge scan for degrees + one undirected BFS.  
-**Memory:** all arrays are stack-allocated; no heap, no_std safe.
+**复杂度：** O(V + E) —— 一次度数扫描边 + 一次无向 BFS。
+**内存：** 所有数组均为栈上分配；无堆分配，no_std 安全。
 
 ---
 
-## Return Value
+## 返回值
 
 ```rust
 pub fn graph_eulerian() -> (bool, bool, VectorAddress, VectorAddress, usize)
 //                          has_circuit  has_path  start_vec  end_vec  node_count
 ```
 
-| Field | Meaning |
+| 字段 | 含义 |
 |---|---|
-| `has_circuit` | Eulerian circuit exists (closed walk over all edges) |
-| `has_path` | Eulerian path exists (open walk); mutually exclusive with `has_circuit` |
-| `start_vec` | Path start vertex vector; `VectorAddress::new(0,0,0,0)` if circuit or neither |
-| `end_vec` | Path end vertex vector; `VectorAddress::new(0,0,0,0)` if circuit or neither |
-| `node_count` | Total live nodes in the graph |
+| `has_circuit` | 是否存在欧拉回路（遍历所有边的闭合路径） |
+| `has_path` | 是否存在欧拉路径（开放路径）；与 `has_circuit` 互斥 |
+| `start_vec` | 路径起点顶点向量；若为回路或两者皆非，则为 `VectorAddress::new(0,0,0,0)` |
+| `end_vec` | 路径终点顶点向量；若为回路或两者皆非，则为 `VectorAddress::new(0,0,0,0)` |
+| `node_count` | 图中存活节点总数 |
 
 ---
 
-## Implementation
+## 实现
 
 ### crates/gos-runtime/src/lib.rs
 
-**New method** on `GraphRuntime` (inside `impl GraphRuntime`):
+**新增方法**（位于 `GraphRuntime` 内，即 `impl GraphRuntime` 中）：
 ```rust
 pub fn graph_eulerian_inner(&self)
     -> (bool, bool, VectorAddress, VectorAddress, usize)
 ```
 
-**New public function:**
+**新增公开函数：**
 ```rust
-/// V2.87: Eulerian path/circuit detection for the live kernel graph.
+/// V2.87：对实时内核图进行欧拉路径/回路检测。
 pub fn graph_eulerian() -> (bool, bool, VectorAddress, VectorAddress, usize) {
     RUNTIME.lock().graph_eulerian_inner()
 }
 ```
 
-**Internal arrays (all stack-allocated):**
+**内部数组（均为栈上分配）：**
 
-| Array | Type | Purpose |
+| 数组 | 类型 | 用途 |
 |---|---|---|
-| `node_slots[MAX_NODES]` | `[usize; 128]` | Live node slot indices |
-| `out_deg[MAX_NODES]` | `[u16; 128]` | Out-degree per slot |
-| `in_deg[MAX_NODES]` | `[u16; 128]` | In-degree per slot |
-| `active_slots[MAX_NODES]` | `[usize; 128]` | Non-isolated node slots |
-| `visited[MAX_NODES]` | `[bool; 128]` | BFS visited flags |
-| `bfs_queue[MAX_NODES]` | `[usize; 128]` | BFS queue (array-based) |
+| `node_slots[MAX_NODES]` | `[usize; 128]` | 存活节点的槽位索引 |
+| `out_deg[MAX_NODES]` | `[u16; 128]` | 每个槽位的出度 |
+| `in_deg[MAX_NODES]` | `[u16; 128]` | 每个槽位的入度 |
+| `active_slots[MAX_NODES]` | `[usize; 128]` | 非孤立节点的槽位 |
+| `visited[MAX_NODES]` | `[bool; 128]` | BFS 访问标记 |
+| `bfs_queue[MAX_NODES]` | `[usize; 128]` | BFS 队列（基于数组实现） |
 
-**Key invariants:**
-- `active_count == 0` → vacuous circuit (early return before BFS).
-- Degree diff uses `i32` arithmetic; `match diff` dispatches 0 / 1 / -1 / other cleanly.
-- BFS uses undirected projection: both `from_node == cur_id` and `to_node == cur_id` edges followed.
-- Self-loop guard: `nbr_slot == cur_slot` skipped in BFS.
-- `circuit_degree_ok` and `path_degree_ok` are mutually exclusive: if `imbalanced == 0` then circuit; if `imbalanced == 2` with valid start/end then path.
+**关键不变量：**
+- `active_count == 0` → 平凡回路情形（在 BFS 之前提前返回）。
+- 度数差值使用 `i32` 运算；`match diff` 清晰地分派 0 / 1 / -1 / 其他情形。
+- BFS 使用无向投影：同时跟随 `from_node == cur_id` 和 `to_node == cur_id` 的边。
+- 自环保护：BFS 中跳过 `nbr_slot == cur_slot`。
+- `circuit_degree_ok` 与 `path_degree_ok` 互斥：若 `imbalanced == 0` 则为回路；
+  若 `imbalanced == 2` 且起点/终点有效则为路径。
 
 ### crates/k-shell/src/lib.rs
 
-**New function** `dispatch_graph_eulerian(sink: &ConsoleSink)`:
-- Header: ` graph eulerian` (cyan)
-- If `node_count == 0`: prints `(no nodes registered)`.
-- If `has_circuit`: prints green ✓ `Eulerian circuit exists` + note that any node is start/end.
-- If `has_path`: prints yellow ✓ `Eulerian path exists (not a circuit)` + `start <vec>  end <vec>`.
-- Otherwise: prints red ✗ `no Eulerian path or circuit` + diagnostic note.
-- Footer: `nodes: N`
+**新增函数** `dispatch_graph_eulerian(sink: &ConsoleSink)`：
+- 标题：` graph eulerian`（青色）
+- 若 `node_count == 0`：打印 `(no nodes registered)`（未注册任何节点）。
+- 若 `has_circuit`：以绿色打印 ✓ `Eulerian circuit exists`（存在欧拉回路）+ 说明
+  任意节点均可作为起点/终点。
+- 若 `has_path`：以黄色打印 ✓ `Eulerian path exists (not a circuit)`（存在欧拉路径，
+  非回路）+ `start <vec>  end <vec>`。
+- 否则：以红色打印 ✗ `no Eulerian path or circuit`（不存在欧拉路径或回路）+ 诊断说明。
+- 脚注：`nodes: N`（节点数：N）
 
-**Unicode used:**
-- `\u{2713}` (✓) — success checkmark
-- `\u{2717}` (✗) — failure crossmark
-- `\u{2500}` (─) — horizontal rule
+**使用的 Unicode 字符：**
+- `\u{2713}`（✓）—— 成功勾号
+- `\u{2717}`（✗）—— 失败叉号
+- `\u{2500}`（─）—— 水平分隔线
 
 ### crates/k-shell/src/proc.rs
 
-**New routing** (inserted after `graph bridges` / `gcute` dispatch):
+**新增路由**（插入在 `graph bridges` / `gcute` 分发之后）：
 ```
 graph eulerian  →  dispatch_graph_eulerian
-geulerian       →  alias
-eulerian        →  alias
-euler           →  alias
+geulerian       →  别名
+eulerian        →  别名
+euler           →  别名
 ```
 
 ---
 
-## Test Harness: `host-tests/gos-graph-eulerian-harness`
+## 测试装置：`host-tests/gos-graph-eulerian-harness`
 
-**VectorAddress L4=63** identifies this harness namespace.
+**VectorAddress L4=63** 标识本装置的命名空间。
 
-| Test | Graph topology | Expected |
+| 测试 | 图拓扑 | 期望结果 |
 |---|---|---|
-| 1 | Empty graph | has_circuit=true (vacuous), has_path=false |
-| 2 | Single isolated node A (no edges) | has_circuit=true (vacuous), has_path=false |
-| 3 | Triangle A→B→C→A | has_circuit=true (all balanced) |
-| 4 | Single edge A→B | has_path=true, start=A, end=B |
-| 5 | Path A→B→C | has_path=true, start=A, end=C |
-| 6 | Anti-parallel A→B + B→A | has_circuit=true (both in=out=1) |
-| 7 | Two disconnected edges A→B, C→D | neither (not weakly connected) |
-| 8 | Square A→B→C→D→A | has_circuit=true (all balanced) |
-| 9 | Lollipop: triangle A→B→C→A + tail C→D | has_path=true, start=C, end=D |
-| 10 | Hub→A, Hub→B, C→Hub (two start/two end candidates) | neither (two start candidates) |
+| 1 | 空图 | has_circuit=true（平凡情形），has_path=false |
+| 2 | 单个孤立节点 A（无边） | has_circuit=true（平凡情形），has_path=false |
+| 3 | 三角形 A→B→C→A | has_circuit=true（全部平衡） |
+| 4 | 单边 A→B | has_path=true, start=A, end=B |
+| 5 | 路径 A→B→C | has_path=true, start=A, end=C |
+| 6 | 反向平行 A→B + B→A | has_circuit=true（两者 in=out=1） |
+| 7 | 两条互不相连的边 A→B, C→D | 两者皆非（非弱连通） |
+| 8 | 方形 A→B→C→D→A | has_circuit=true（全部平衡） |
+| 9 | 棒棒糖形：三角形 A→B→C→A + 尾部 C→D | has_path=true, start=C, end=D |
+| 10 | Hub→A, Hub→B, C→Hub（两个起点候选/两个终点候选） | 两者皆非（存在两个起点候选） |
 
-**Result:** 10/10 pass.
+**结果：** 10/10 通过。
 
 ---
 
-## VectorAddress L4 Namespace Update
+## VectorAddress L4 命名空间更新
 
-| L4 | Harness |
+| L4 | 装置 |
 |---|---|
 | 61 | gos-graph-articulation-harness (V2.85) |
 | 62 | gos-graph-bridges-harness (V2.86) |
@@ -180,39 +181,38 @@ euler           →  alias
 
 ---
 
-## Key Graph Theory Facts
+## 关键图论事实
 
-**Euler's theorem (1736):** An undirected connected graph has an Eulerian circuit if and only
-if every vertex has even degree. This is the oldest result in graph theory — the resolution of
-the Königsberg bridge problem.
+**欧拉定理（1736 年）：** 一个无向连通图存在欧拉回路，当且仅当每个顶点的度
+均为偶数。这是图论中最古老的结果——哥尼斯堡七桥问题的解答。
 
-**Directed Eulerian conditions (Hierholzer 1873):**
-- **Circuit:** strongly connected (equivalently, weakly connected + all nodes balanced) AND
-  ∀v: `in_degree(v) == out_degree(v)`.
-- **Path:** weakly connected AND exactly one vertex with `out − in = 1` (source), exactly one
-  with `in − out = 1` (sink), all others balanced.
+**有向图欧拉条件（Hierholzer，1873 年）：**
+- **回路：** 强连通（等价于弱连通 + 所有节点平衡）且
+  ∀v: `in_degree(v) == out_degree(v)`。
+- **路径：** 弱连通且恰好一个顶点满足 `out − in = 1`（源点），恰好一个满足
+  `in − out = 1`（汇点），其余全部平衡。
 
-**Relationship to other V2.x metrics:**
+**与其他 V2.x 指标的关系：**
 
-| Metric | Relationship |
+| 指标 | 关系 |
 |---|---|
-| Bridges (V2.86) | A graph with any bridge cannot have an Eulerian circuit (removing a bridge disconnects) |
-| Transitivity / clustering (V2.63/V2.75) | High clustering ≠ Eulerian; degree balance is the key |
-| SCC (V2.34) | Eulerian circuit ↔ weakly connected + balanced; SCC-count > 1 blocks circuit but not always path |
-| Degree centrality (V2.38) | Eulerian ↔ ∀v: `in_deg(v) == out_deg(v)` — pure degree condition |
-| Girth (V2.69) | A DAG (girth=∞) can have Eulerian paths but never Eulerian circuits |
+| 桥（V2.86） | 存在任意桥的图不可能存在欧拉回路（移除桥会使图断开） |
+| 传递性 / 聚类系数（V2.63/V2.75） | 高聚类系数 ≠ 欧拉图；度数平衡才是关键 |
+| SCC（V2.34） | 欧拉回路 ↔ 弱连通 + 平衡；SCC 数 > 1 会阻止回路但不总是阻止路径 |
+| 度中心性（V2.38） | 欧拉性 ↔ ∀v: `in_deg(v) == out_deg(v)` —— 纯粹的度数条件 |
+| 围长（V2.69） | DAG（围长=∞）可以存在欧拉路径但永远不会存在欧拉回路 |
 
-**Vacuous Eulerian:** The empty graph (no edges) trivially satisfies the circuit condition
-because the universal quantifier `∀v: in == out` holds vacuously over zero active nodes.
-This is standard in graph theory and matches NetworkX behaviour (`nx.is_eulerian(empty) → True`).
+**平凡欧拉情形：** 空图（无边）平凡地满足回路条件，因为全称量词
+`∀v: in == out` 在零个活跃节点上是空真的（vacuously true）。这在图论中
+是标准约定，与 NetworkX 的行为一致（`nx.is_eulerian(empty) → True`）。
 
 ---
 
-## Literature Reference
+## 文献参考
 
-- L. Euler, "Solutio problematis ad geometriam situs pertinentis," Commentarii Academiae
-  Scientiarum Imperialis Petropolitanae 8, 1736. The Königsberg bridge problem — first proof
-  that an Eulerian circuit requires all even degrees.
-- C. Hierholzer & C. Wiener, "Über die Möglichkeit, einen Linienzug ohne Wiederholung und
-  ohne Unterbrechung zu umfahren," Mathematische Annalen 6, 1873. Proves the directed
-  Eulerian conditions and provides a constructive O(E) circuit-finding algorithm.
+- L. Euler，《与位置几何相关问题的解法》，Commentarii Academiae
+  Scientiarum Imperialis Petropolitanae 8，1736。哥尼斯堡七桥问题——
+  首次证明欧拉回路需要所有顶点度数均为偶数。
+- C. Hierholzer & C. Wiener，《论如何不重复、不间断地遍历一条闭合折线》，
+  Mathematische Annalen 6，1873。证明了有向图的欧拉条件，并给出了
+  一种构造性的 O(E) 回路查找算法。

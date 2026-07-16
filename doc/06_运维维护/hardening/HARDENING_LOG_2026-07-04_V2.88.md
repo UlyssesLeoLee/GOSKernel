@@ -1,73 +1,73 @@
-# Hardening Log V2.88 — DAG Longest Path / Critical Path Analysis
+# 硬化日志 V2.88 — DAG 最长路径 / 关键路径分析
 
-**Date:** 2026-07-04  
-**Branch:** feat/vk-auto-live-surface  
-**Host-test total:** 853 (843 prior + 10 new)
+**日期：** 2026-07-04
+**分支：** feat/vk-auto-live-surface
+**宿主测试总计：** 853（此前 843，+10）
 
 ---
 
-## Feature: `graph dag longest` / `gdaglongest` / `critical path` / `graph critical` / `gcritical`
+## 功能：`graph dag longest` / `gdaglongest` / `critical path` / `graph critical` / `gcritical`
 
-### Motivation
+### 动机
 
-V2.85–V2.87 added structural analysis primitives (articulation points, bridges, Eulerian circuits).
-V2.88 adds a **scheduling and planning** primitive: **DAG longest path / critical path analysis**
-— answering the minimum serial depth any parallel schedule must traverse in a dependency graph.
+V2.85–V2.87 新增了结构分析原语（关节点、桥、欧拉回路）。V2.88 新增了一个
+**调度与规划**原语：**DAG 最长路径 / 关键路径分析**——回答任何并行调度
+在依赖图中必须遍历的最小串行深度是多少。
 
-This is the fundamental question behind parallel build systems (`make -j`), boot sequencers
-(`systemd-analyze critical-chain`), and PERT/CPM project scheduling:
+这是并行构建系统（`make -j`）、启动排序器（`systemd-analyze critical-chain`）
+以及 PERT/CPM 项目调度背后的基本问题：
 
-| Question | OS analogy |
+| 问题 | 操作系统类比 |
 |---|---|
-| What is the critical path length? | `systemd-analyze critical-chain`: minimum wall-clock depth for parallel boot |
-| Is the graph a DAG? | Is the dependency graph free of circular dependencies (like `cargo`'s deadlock check)? |
-| Where does the critical path start/end? | Which leaf service and which root service define the unavoidable depth? |
+| 关键路径长度是多少？ | `systemd-analyze critical-chain`：并行启动的最小挂钟时间深度 |
+| 该图是否为 DAG？ | 依赖图是否不含循环依赖（类似 `cargo` 的死锁检查）？ |
+| 关键路径从哪里开始/结束？ | 哪个叶子服务和哪个根服务界定了这一不可避免的深度？ |
 
-In production graph platforms (NetworkX, igraph), DAG longest path is a core planning primitive
-used in task scheduling, compilation ordering, and dataflow analysis.
-
----
-
-## Algorithm: Kahn's BFS Topological Sort + Distance DP (O(V+E))
-
-The critical path algorithm combines **DAG detection** and **longest path DP** in a single pass:
-
-### Step 1 — In-Degree Census
-
-Scan the edge table once to compute `in_deg[v]` for every live node.
-
-**Self-loop handling:** Self-loops (`from == to`) are included in the in-degree count.
-This prevents Kahn's BFS from ever draining a self-loop node — it stays stuck at
-`in_deg ≥ 1`, is never emitted, and causes `processed < node_count → is_dag = false`.
-This is correct: a self-loop IS a directed cycle of length 1.
-
-### Step 2 — Kahn's BFS with Distance DP
-
-Seed the BFS queue with all `in_deg == 0` nodes (initial sources, `dist = 0`).
-
-For each emitted node `u`:
-- For each edge `u → v` (skipping self-loops in relaxation):
-  - `dist[v] = max(dist[v], dist[u] + 1)`  — DP relaxation
-  - `pred[v] = u` if `dist[u] + 1 > dist[v]` — predecessor tracking
-  - Decrement `in_deg[v]`; if `in_deg[v] == 0`, enqueue `v`
-
-### Step 3 — DAG Check
-
-If `processed_count < node_count`, at least one node could not be drained — a cycle exists.
-Return `(0, false, zero, zero, node_count)`.
-
-### Step 4 — Critical Path Extraction
-
-Find the node `end_slot` with the maximum `dist` value (tie-break: smallest slot index
-for determinism). Trace back through `pred[]` until `pred[cur] ≥ MAX_NODES` to find
-`start_slot` (the source of the critical path).
-
-**Vacuous case:** If `max_dist == 0` (no edges, or all isolated nodes), return
-`(0, true, zero, zero, node_count)` — the graph is a trivial DAG with no path.
+在生产级图平台（NetworkX、igraph）中，DAG 最长路径是任务调度、
+编译排序和数据流分析中使用的核心规划原语。
 
 ---
 
-## Return Signature
+## 算法：Kahn BFS 拓扑排序 + 距离动态规划（O(V+E)）
+
+关键路径算法在一次遍历中结合了 **DAG 检测**与**最长路径动态规划**：
+
+### 第一步 —— 入度统计
+
+一次扫描边表，为每个存活节点计算 `in_deg[v]`。
+
+**自环处理：** 自环（`from == to`）被计入入度统计。这可以防止 Kahn BFS
+将自环节点耗尽——它会一直卡在 `in_deg ≥ 1`，永远不会被输出，
+从而导致 `processed < node_count → is_dag = false`。这是正确的：
+自环本身就是一个长度为 1 的有向环。
+
+### 第二步 —— 带距离动态规划的 Kahn BFS
+
+用所有 `in_deg == 0` 的节点（初始源点，`dist = 0`）作为 BFS 队列的种子。
+
+对每个被输出的节点 `u`：
+- 对每条边 `u → v`（松弛时跳过自环）：
+  - `dist[v] = max(dist[v], dist[u] + 1)` —— 动态规划松弛
+  - 若 `dist[u] + 1 > dist[v]` 则 `pred[v] = u` —— 前驱节点跟踪
+  - 将 `in_deg[v]` 减一；若 `in_deg[v] == 0`，则将 `v` 入队
+
+### 第三步 —— DAG 检查
+
+若 `processed_count < node_count`，说明至少有一个节点未能被耗尽——
+存在环。返回 `(0, false, zero, zero, node_count)`。
+
+### 第四步 —— 关键路径提取
+
+找到 `dist` 值最大的节点 `end_slot`（同分时以槽位索引最小者作为
+决胜规则，以保证确定性）。沿 `pred[]` 回溯，直到
+`pred[cur] ≥ MAX_NODES`，从而找到 `start_slot`（关键路径的源点）。
+
+**平凡情形：** 若 `max_dist == 0`（无边，或全部为孤立节点），
+返回 `(0, true, zero, zero, node_count)` —— 该图是一个没有路径的平凡 DAG。
+
+---
+
+## 返回值签名
 
 ```rust
 pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize)
@@ -75,17 +75,17 @@ pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize)
 //                        path_hops is_dag  start_vec    end_vec      node_count
 ```
 
-| Field | Type | Meaning |
+| 字段 | 类型 | 含义 |
 |---|---|---|
-| `path_hops` | `u32` | Hop count of longest directed path; 0 if no edges or graph has cycle |
-| `is_dag` | `bool` | True iff no directed cycles (self-loops included) |
-| `start_vec` | `VectorAddress` | Source of the critical path; zero if no path |
-| `end_vec` | `VectorAddress` | Sink of the critical path; zero if no path |
-| `node_count` | `usize` | Total live nodes |
+| `path_hops` | `u32` | 最长有向路径的跳数；若无边或图存在环则为 0 |
+| `is_dag` | `bool` | 若不存在有向环（含自环）则为 true |
+| `start_vec` | `VectorAddress` | 关键路径的源点；若无路径则为零值 |
+| `end_vec` | `VectorAddress` | 关键路径的终点；若无路径则为零值 |
+| `node_count` | `usize` | 存活节点总数 |
 
 ---
 
-## Shell Display
+## Shell 显示效果
 
 ```
  graph dag longest
@@ -96,72 +96,75 @@ pub fn graph_dag_longest() -> (u32, bool, VectorAddress, VectorAddress, usize)
  ───────────────────────────────────────────────────────────
   is_dag: yes   nodes: 4
 ```
+（意为：DAG，关键路径 3 跳；起点/终点；任何并行调度必须遍历的最小串行深度；is_dag: 是，节点数: 4）
 
-For a cyclic graph:
+对于存在环的图：
 ```
   ✗ graph has directed cycles (not a DAG)
   critical path is undefined for cyclic graphs
   use `graph cycles` or `graph scc` to inspect cycles
 ```
+（意为：图含有向环（不是 DAG）；对含环图关键路径未定义；请使用 `graph cycles` 或 `graph scc` 检查环）
 
-For an empty/isolated graph:
+对于空图/孤立节点图：
 ```
   — no directed edges (trivial DAG)
   all nodes are isolated; critical path length = 0
 ```
+（意为：无有向边（平凡 DAG）；所有节点均为孤立节点；关键路径长度 = 0）
 
 ---
 
-## Test Coverage (gos-graph-dag-longest-harness, L4=64)
+## 测试覆盖（gos-graph-dag-longest-harness，L4=64）
 
-| # | Scenario | Expected |
+| # | 场景 | 期望结果 |
 |---|---|---|
-| 1 | Empty graph | is_dag=true, path_hops=0, nc=0 |
-| 2 | Single isolated node (no edges) | is_dag=true, path_hops=0, nc=1 |
-| 3 | Single self-loop A→A | is_dag=false, path_hops=0 |
-| 4 | Linear chain A→B→C→D | is_dag=true, path_hops=3, start=A, end=D |
-| 5 | Diamond A→B, A→C, B→D, C→D | is_dag=true, path_hops=2, start=A, end=D |
-| 6 | Two independent chains (A→B) and (C→D→E) | is_dag=true, path_hops=2, end=E |
-| 7 | Directed 3-cycle A→B→C→A | is_dag=false, path_hops=0 |
-| 8 | DAG with shortcut A→B→C + A→C | is_dag=true, path_hops=2, start=A, end=C |
-| 9 | Star fan-out A→{B,C,D,E} | is_dag=true, path_hops=1, start=A |
-| 10 | Chain of 5 hops A→B→C→D→E→F | is_dag=true, path_hops=5, start=A, end=F |
+| 1 | 空图 | is_dag=true, path_hops=0, nc=0 |
+| 2 | 单个孤立节点（无边） | is_dag=true, path_hops=0, nc=1 |
+| 3 | 单个自环 A→A | is_dag=false, path_hops=0 |
+| 4 | 线性链 A→B→C→D | is_dag=true, path_hops=3, start=A, end=D |
+| 5 | 菱形 A→B, A→C, B→D, C→D | is_dag=true, path_hops=2, start=A, end=D |
+| 6 | 两条独立链 (A→B) 和 (C→D→E) | is_dag=true, path_hops=2, end=E |
+| 7 | 有向 3 环 A→B→C→A | is_dag=false, path_hops=0 |
+| 8 | 带捷径的 DAG A→B→C + A→C | is_dag=true, path_hops=2, start=A, end=C |
+| 9 | 星形扇出 A→{B,C,D,E} | is_dag=true, path_hops=1, start=A |
+| 10 | 5 跳链 A→B→C→D→E→F | is_dag=true, path_hops=5, start=A, end=F |
 
-All 10 tests pass.
-
----
-
-## Key Invariants
-
-- Self-loops included in in-degree computation → correctly detected as cycles (is_dag=false)
-- Self-loops skipped in BFS relaxation step (no infinite distance updates)
-- `pred[v] ≥ MAX_NODES` sentinel means "v has no predecessor" (is a source node)
-- Tie-breaking for max-dist: smallest slot index → deterministic end_vec selection
-- Vacuous DAG (no edges): path_hops=0, is_dag=true, start/end=zero
-- Cyclic graph: path_hops=0, is_dag=false, start/end=zero
+全部 10 个测试通过。
 
 ---
 
-## VectorAddress L4 Namespace
+## 关键不变量
 
-- **L4=64**: `gos-graph-dag-longest-harness`
-
----
-
-## Literature
-
-- Kahn, A. B. (1962). "Topological sorting of large networks." *CACM* 5(11):558–562.
-- CPM / Critical Path Method: Kelley & Walker (1959), DuPont Engineering.
-- `systemd-analyze critical-chain` — Linux parallel boot critical path inspector.
+- 自环被计入入度计算 → 正确检测为环（is_dag=false）
+- 自环在 BFS 松弛步骤中被跳过（不会产生虚假的距离更新）
+- `pred[v] ≥ MAX_NODES` 哨兵值表示"v 无前驱"（是一个源节点）
+- 最大距离决胜规则：槽位索引最小者 → 确定性的 end_vec 选择
+- 平凡 DAG（无边）：path_hops=0，is_dag=true，start/end=零值
+- 有环图：path_hops=0，is_dag=false，start/end=零值
 
 ---
 
-## OS Analogy Mapping
+## VectorAddress L4 命名空间
 
-| Graph property | OS equivalent |
+- **L4=64**：`gos-graph-dag-longest-harness`
+
+---
+
+## 文献
+
+- Kahn, A. B. (1962)。《大型网络的拓扑排序》。*CACM* 5(11):558–562。
+- CPM / 关键路径法：Kelley & Walker (1959)，杜邦工程公司。
+- `systemd-analyze critical-chain` —— Linux 并行启动关键路径检查工具。
+
+---
+
+## 操作系统类比映射
+
+| 图属性 | 操作系统对应物 |
 |---|---|
-| `is_dag=true` | Dependency graph is acyclic (like `cargo check`, `tsort`) |
-| `is_dag=false` | Circular dependency detected (like `cargo` "cycle detected" error) |
-| `path_hops` | Minimum parallel boot depth (`systemd-analyze critical-chain` length) |
-| `start_vec` | Root boot service (kernel driver / hwclock) |
-| `end_vec` | Terminal service (login manager / display server) |
+| `is_dag=true` | 依赖图无环（类似 `cargo check`、`tsort`） |
+| `is_dag=false` | 检测到循环依赖（类似 `cargo` 的"检测到循环"错误） |
+| `path_hops` | 最小并行启动深度（`systemd-analyze critical-chain` 长度） |
+| `start_vec` | 根启动服务（内核驱动 / hwclock） |
+| `end_vec` | 终端服务（登录管理器 / 显示服务器） |

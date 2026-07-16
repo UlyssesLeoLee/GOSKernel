@@ -1,55 +1,55 @@
-# GOSKernel Hardening Log — V3.24
-**Date:** 2026-07-07  
-**Branch:** feat/vk-auto-live-surface  
-**Host-test suite total:** 1213 tests (all green)
+# GOSKernel 硬化日志 — V3.24
+**日期:** 2026-07-07
+**分支:** feat/vk-auto-live-surface
+**宿主测试套件总计:** 1213 个测试（全部通过）
 
 ---
 
-## Summary
+## 摘要
 
-V3.24 introduces **Transmission Zagreb indices** — three metrics derived from vertex transmissions T(v) (the BFS distance sum from each node to all reachable nodes). These extend the transmission-based index family established in V3.22 (Balaban J, TI, PI_v), adding squared-transmission and product-transmission variants. The new Geometric-Arithmetic transmission index GA_t uses an `isqrt128` Newton-Raphson implementation to handle large u128 intermediate products that overflow u64.
+V3.24 引入了**传输 Zagreb 指数（Transmission Zagreb indices）** —— 三个由顶点传输量 T(v)（每个节点到所有可达节点的 BFS 距离和）推导而来的指标。它们扩展了 V3.22 建立的基于传输量的指数家族（Balaban J、TI、PI_v），新增了平方传输量和乘积传输量变体。新的几何-算术传输指数 GA_t 使用 `isqrt128` 牛顿-拉夫逊实现，以处理会导致 u64 溢出的大型 u128 中间乘积。
 
 ---
 
-## New Feature: `graph topo13` — TM₁ + TM₂ + GA_t Transmission Zagreb Indices
+## 新功能: `graph topo13` — TM₁ + TM₂ + GA_t 传输 Zagreb 指数
 
 ### API
 
 ```rust
 pub fn graph_topo_indices13() -> (u64, u64, u64, usize, usize)
-// Returns: (tm1, tm2, ga_t_ppm, edge_count, node_count)
+// 返回: (tm1, tm2, ga_t_ppm, edge_count, node_count)
 ```
 
-### Indices
+### 指数
 
-| Symbol | Formula | Type | Literature |
+| 符号 | 公式 | 类型 | 文献 |
 |--------|---------|------|-----------|
-| TM₁ | Σ_v T_v² | exact u64 | Xing & Gutman 2012 |
-| TM₂ | Σ_{uv∈E} T_u·T_v | exact u64 | Xing & Gutman 2012 |
-| GA_t | Σ_{uv∈E} 2√(T_u·T_v)/(T_u+T_v) | floor ppm (×10⁶) | Alizadeh et al. 2013 |
+| TM₁ | Σ_v T_v² | 精确 u64 | Xing & Gutman 2012 |
+| TM₂ | Σ_{uv∈E} T_u·T_v | 精确 u64 | Xing & Gutman 2012 |
+| GA_t | Σ_{uv∈E} 2√(T_u·T_v)/(T_u+T_v) | 向下取整 ppm (×10⁶) | Alizadeh et al. 2013 |
 
-Where **T_v = Σ_{w reachable, w≠v} d(v,w)** is the vertex transmission within the connected component of v.
+其中 **T_v = Σ_{w reachable, w≠v} d(v,w)** 是 v 所在连通分量内的顶点传输量。
 
-### Key Invariants
+### 关键不变量
 
-- `GA_t = |E| × 10⁶` iff the graph is **transmission-regular** (all T_v equal)
-  - Examples: K_n (all T=n-1), K₃ (all T=2), K₄ (all T=3), even cycles
-- `GA_t < |E| × 10⁶` for non-transmission-regular graphs (e.g., K_{2,3}, stars, paths)
-- Isolated nodes: T_v=0, contribute 0 to TM₁; no edge contribution to TM₂ or GA_t
+- 当图为**传输正则图**（所有 T_v 相等）时，`GA_t = |E| × 10⁶`
+  - 例如：K_n（全部 T=n-1）、K₃（全部 T=2）、K₄（全部 T=3）、偶数环
+- 对于非传输正则图（例如 K_{2,3}、星图、路径），`GA_t < |E| × 10⁶`
+- 孤立节点：T_v=0，对 TM₁ 贡献为 0；对 TM₂ 或 GA_t 无边贡献
 
-### Algorithm
+### 算法
 
-1. **BFS O(n·(n+m))**: compute T_v for all nodes
-2. **O(n) node scan**: TM₁ = Σ T_v²
-3. **O(m) undirected edge scan (a < b)**:
+1. **BFS O(n·(n+m))**：为所有节点计算 T_v
+2. **O(n) 节点扫描**：TM₁ = Σ T_v²
+3. **O(m) 无向边扫描（a < b）**：
    - TM₂ += T_a × T_b
-   - GA_t: `isqrt128(4·T_a·T_b·10¹²) / (T_a + T_b)` (u128 arithmetic)
+   - GA_t: `isqrt128(4·T_a·T_b·10¹²) / (T_a + T_b)`（u128 运算）
 
-### isqrt128 Implementation
+### isqrt128 实现
 
-GA_t per edge = `floor(2√(T_u·T_v) / (T_u+T_v) × 10⁶) = isqrt128(4·T_u·T_v·10¹²) / (T_u+T_v)`
+每条边的 GA_t = `floor(2√(T_u·T_v) / (T_u+T_v) × 10⁶) = isqrt128(4·T_u·T_v·10¹²) / (T_u+T_v)`
 
-Since max T_v ≈ 8128 for MAX_NODES=128 nodes, `4·T_u·T_v·10¹² ≤ 2.64×10²⁰` which overflows u64 (max 1.84×10¹⁹). A u128 Newton-Raphson isqrt is required:
+由于 MAX_NODES=128 节点时最大 T_v ≈ 8128，`4·T_u·T_v·10¹² ≤ 2.64×10²⁰` 会导致 u64 溢出（最大值 1.84×10¹⁹）。因此需要 u128 版本的牛顿-拉夫逊 isqrt：
 
 ```rust
 fn isqrt128(n: u128) -> u128 {
@@ -64,42 +64,42 @@ fn isqrt128(n: u128) -> u128 {
 }
 ```
 
-No float, no_std-safe, converges in O(log log n) Newton-Raphson steps.
+无浮点运算，no_std 安全，以 O(log log n) 步牛顿-拉夫逊迭代收敛。
 
-### Stack Usage
+### 栈内存占用
 
-- `adj[128]` (u128 × 128 = 2KB)
-- `trans[128]` (u64 × 128 = 1KB)
+- `adj[128]`（u128 × 128 = 2KB）
+- `trans[128]`（u64 × 128 = 1KB）
 - `dist[128]` + `queue[128]` = 256B
-- **Total: ~3.5KB**
+- **总计：约 3.5KB**
 
-### Cross-Check Table
+### 交叉验证表
 
-| Graph | TM₁ | TM₂ | GA_t | edges | nodes |
+| 图 | TM₁ | TM₂ | GA_t | 边数 | 节点数 |
 |-------|-----|-----|------|-------|-------|
-| Empty | 0 | 0 | 0 | 0 | 0 |
-| 1 node | 0 | 0 | 0 | 0 | 1 |
-| Edge A-B | 2 | 1 | 1_000_000 | 1 | 2 |
-| Path P₃ | 22 | 12 | 1_959_590 | 2 | 3 |
-| Triangle K₃ | 12 | 12 | 3_000_000 | 3 | 3 |
-| Star K_{1,4} | 212 | 112 | 3_848_364 | 4 | 5 |
-| Path P₄ | 104 | 64 | 2_959_590 | 3 | 4 |
-| Complete K₄ | 36 | 54 | 6_000_000 | 6 | 4 |
-| Two isolated | 0 | 0 | 0 | 0 | 2 |
+| 空图 | 0 | 0 | 0 | 0 | 0 |
+| 单节点 | 0 | 0 | 0 | 0 | 1 |
+| 边 A-B | 2 | 1 | 1_000_000 | 1 | 2 |
+| 路径 P₃ | 22 | 12 | 1_959_590 | 2 | 3 |
+| 三角形 K₃ | 12 | 12 | 3_000_000 | 3 | 3 |
+| 星图 K_{1,4} | 212 | 112 | 3_848_364 | 4 | 5 |
+| 路径 P₄ | 104 | 64 | 2_959_590 | 3 | 4 |
+| 完全图 K₄ | 36 | 54 | 6_000_000 | 6 | 4 |
+| 两个孤立点 | 0 | 0 | 0 | 0 | 2 |
 | K_{2,3} | 158 | 180 | 5_975_154 | 6 | 5 |
 
-### Derivation Samples
+### 推导示例
 
-**K₃**: T_A=T_B=T_C=2. TM₁=3×4=12. TM₂=3×4=12.
-GA_t: isqrt128(4×2×2×10¹²)/4 = 4_000_000/4 = 1_000_000 per edge → 3_000_000 (trans-regular ✓)
+**K₃**：T_A=T_B=T_C=2。TM₁=3×4=12。TM₂=3×4=12。
+GA_t：每条边 isqrt128(4×2×2×10¹²)/4 = 4_000_000/4 = 1_000_000 → 3_000_000（传输正则 ✓）
 
-**K_{2,3}**: T_left=5, T_right=6.
-GA_t: isqrt128(4×5×6×10¹²)/11 = isqrt128(120×10¹²)/11 = 10_954_451/11 = 995_859 per edge → 5_975_154
+**K_{2,3}**：T_左侧=5, T_右侧=6。
+GA_t：isqrt128(4×5×6×10¹²)/11 = isqrt128(120×10¹²)/11 = 10_954_451/11 = 995_859（每条边） → 5_975_154
 
-**P₄**: T_A=T_D=6, T_B=T_C=4.
-Edge {B,C}: isqrt128(4×4×4×10¹²)/8 = 8_000_000/8 = 1_000_000 (exact, same transmissions).
+**P₄**：T_A=T_D=6, T_B=T_C=4。
+边 {B,C}：isqrt128(4×4×4×10¹²)/8 = 8_000_000/8 = 1_000_000（精确，传输量相同）。
 
-### Shell Aliases
+### Shell 别名
 
 ```
 graph topo13 | gtopo13 | transmission zagreb | gtm1tm2
@@ -109,23 +109,23 @@ geometric arithmetic transmission | ggat | gtm1tm2gat
 
 ---
 
-## OS Analogy
+## OS 类比
 
-| Index | OS Interpretation |
+| 指数 | OS 层面的解读 |
 |-------|------------------|
-| TM₁ | Squared routing-load pressure — amplifies nodes with high distance-weighted reach (hub amplifier) |
-| TM₂ | Edge co-load product — measures channel-pair load; high TM₂ = heavily loaded endpoint pairs |
-| GA_t | Geometric-arithmetic channel load balance — equals \|E\|×10⁶ for balanced routing; < \|E\|×10⁶ for hub-spoke asymmetry |
+| TM₁ | 平方路由负载压力 —— 放大那些距离加权可达范围较大的节点（枢纽放大器） |
+| TM₂ | 边共同负载乘积 —— 衡量通道对的负载；TM₂ 越高表示端点对负载越重 |
+| GA_t | 几何-算术通道负载均衡度 —— 均衡路由下等于 \|E\|×10⁶；枢纽-辐条式不对称时小于 \|E\|×10⁶ |
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
-|------|--------|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_topo_indices13_inner()` + `graph_topo_indices13()` with isqrt128 |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_topo_indices13()` with ppm display |
-| `crates/k-shell/src/proc.rs` | Added routing for "graph topo13" / "gtopo13" / aliases |
-| `host-tests/gos-graph-topo13-harness/` | New 10-test harness (VectorAddress L4=100) |
+| 文件 | 变更 |
+|------|------|
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices13_inner()` + `graph_topo_indices13()`（含 isqrt128） |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices13()`（含 ppm 显示） |
+| `crates/k-shell/src/proc.rs` | 新增 "graph topo13" / "gtopo13" / 别名的路由 |
+| `host-tests/gos-graph-topo13-harness/` | 新增 10 项测试套件（VectorAddress L4=100） |
 
-**Commit:** `feat(v3.24): Transmission Zagreb TM1 + TM2 + GA_t transmission-based indices + gos-graph-topo13-harness (10 tests)`
+**提交（Commit）：** `feat(v3.24): Transmission Zagreb TM1 + TM2 + GA_t transmission-based indices + gos-graph-topo13-harness (10 tests)`

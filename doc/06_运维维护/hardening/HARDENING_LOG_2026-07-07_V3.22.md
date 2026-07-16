@@ -1,99 +1,99 @@
-# GOSKernel Hardening Log — V3.22
-**Date:** 2026-07-07  
-**Branch:** feat/vk-auto-live-surface  
-**Host-test suite total:** 1193 tests (all green)
+# GOSKernel 硬化日志 — V3.22
+**日期:** 2026-07-07
+**分支:** feat/vk-auto-live-surface
+**宿主测试套件总计:** 1193 个测试（全部通过）
 
 ---
 
-## Summary
+## 摘要
 
-V3.22 introduces **transmission-based topological indices** — a set of three metrics derived from vertex transmittances T(v) (the row-sum of the distance matrix within each connected component). These complement V3.21's edge-partition Szeged/Mostar indices and V3.18's pairwise Wiener/Harary indices, completing a family of distance-based structural descriptors. All three indices are computed in a single O(n·(n+m)) BFS pass.
+V3.22 引入了**基于传输量（transmission）的拓扑指数** —— 一组三个指标，均由顶点传输量 T(v)（每个连通分量内距离矩阵的行和）推导而来。它们与 V3.21 的边划分 Szeged/Mostar 指数以及 V3.18 的点对 Wiener/Harary 指数相互补充，完善了一个基于距离的结构描述符家族。全部三个指数都在一次 O(n·(n+m)) 的 BFS 遍历中计算完成。
 
 ---
 
-## New Feature: `graph topo11` — Balaban J + Transmission Irregularity TI + Vertex PI
+## 新功能: `graph topo11` — Balaban J + 传输不规则度 TI + 顶点 PI
 
 ### API
 
 ```rust
 pub fn graph_topo_indices11() -> (u64, u64, u64, usize, usize)
-// Returns: (j_ppm, ti, piv, edge_count, node_count)
+// 返回: (j_ppm, ti, piv, edge_count, node_count)
 ```
 
-### Indices
+### 指数
 
-| Symbol | Formula | Type | Literature |
+| 符号 | 公式 | 类型 | 文献 |
 |--------|---------|------|-----------|
-| J | (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v) | floor ppm (×10⁶) | Balaban 1982 |
-| TI | Σ_{uv∈E} \|T_u − T_v\| | exact u64 | Abdo & Dimitrov 2014 |
-| PI_v | Σ_{uv∈E} (T_u + T_v) | exact u64 | Khalifeh et al. 2008 |
+| J | (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v) | 向下取整 ppm (×10⁶) | Balaban 1982 |
+| TI | Σ_{uv∈E} \|T_u − T_v\| | 精确 u64 | Abdo & Dimitrov 2014 |
+| PI_v | Σ_{uv∈E} (T_u + T_v) | 精确 u64 | Khalifeh et al. 2008 |
 
-**T_v (vertex transmittance):** Σ_{w reachable, w≠v} d(v,w) — BFS distance sum within connected component.  
-**μ:** max(1, m−n+2) — cyclomatic-number proxy; = 1 for trees; ≥ 2 for unicyclic and denser graphs.  
-**Disconnected graphs:** T_v counts only within-component distances (inter-component d = ∞ is excluded from BFS).
+**T_v（顶点传输量）：** Σ_{w reachable, w≠v} d(v,w) —— 连通分量内的 BFS 距离和。
+**μ：** max(1, m−n+2) —— 环数（cyclomatic number）代理值；树的 μ = 1；单圈图及更密集图的 μ ≥ 2。
+**非连通图：** T_v 仅统计分量内的距离（分量间的距离 d = ∞ 被排除在 BFS 之外）。
 
-### Algorithm
+### 算法
 
-1. Compact node index from node slots.
-2. Build undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-3. Build undirected edge list (canonical a < b).
-4. BFS from each vertex src; accumulate T[src] = Σ_{v≠src, d finite} d(src,v).
-5. For each edge {a,b}:
-   - J contribution: `isqrt64(10^12 / (T_a × T_b))` — uses identity `floor(A/√B) = floor(√(A²/B))`
-   - TI contribution: `|T_a − T_b|`
-   - PI_v contribution: `T_a + T_b`
-6. J_ppm = j_raw × m / μ.
+1. 从节点槽位构建紧凑节点索引。
+2. 构建无向邻接位掩码（有向→无向去重，排除自环）。
+3. 构建无向边列表（规范化 a < b）。
+4. 从每个顶点 src 做 BFS；累加 T[src] = Σ_{v≠src, d 有限} d(src,v)。
+5. 对每条边 {a,b}：
+   - J 的贡献：`isqrt64(10^12 / (T_a × T_b))` —— 利用恒等式 `floor(A/√B) = floor(√(A²/B))`
+   - TI 的贡献：`|T_a − T_b|`
+   - PI_v 的贡献：`T_a + T_b`
+6. J_ppm = j_raw × m / μ。
 
-Stack allocation: `adj[128](u128)` + `trans[128](u64)` + `dist/queue[128](u8)` + edge lists ≈ 4 KB total.  
-`isqrt64` uses pure integer Newton-Raphson (no-std safe, no f32/f64).
+栈上分配：`adj[128](u128)` + `trans[128](u64)` + `dist/queue[128](u8)` + 边列表，总计约 4 KB。
+`isqrt64` 使用纯整数牛顿-拉夫逊迭代法（no-std 安全，不涉及 f32/f64）。
 
-### Key Invariants
+### 关键不变量
 
 ```
-K_n (complete, n≥2): T_v = n-1 ∀v; TI = 0 (vertex-transitive)
+K_n（完全图，n≥2）: T_v = n-1 对所有 v 成立; TI = 0（顶点传递性）
                      μ = n(n-1)/2 - n + 2 = (n-1)(n-2)/2 + 1
-Trees:               μ = 1; J_ppm = m × Σ_e isqrt64(10^12/(T_a·T_b))
-Transmission-regular: TI = 0 iff all T_v equal (sufficient but not necessary for vertex-transitive)
-PI_v = Σ_v deg(v)·T_v  (equivalent degree-weighted-transmission formula)
-Disconnected (no edges): J = TI = PI_v = 0
+树:                  μ = 1; J_ppm = m × Σ_e isqrt64(10^12/(T_a·T_b))
+传输正则图:          TI = 0 当且仅当所有 T_v 相等（是顶点传递性的充分而非必要条件）
+PI_v = Σ_v deg(v)·T_v （等价的度加权传输量公式）
+非连通图（无边）:    J = TI = PI_v = 0
 ```
 
-### Cross-Check Table (analytical)
+### 交叉验证表（解析计算）
 
-| Graph      | J_ppm     | TI | PI_v | edges | nodes |
+| 图      | J_ppm     | TI | PI_v | 边数 | 节点数 |
 |------------|-----------|-----|------|-------|-------|
-| Empty      | 0         | 0   | 0    | 0     | 0     |
-| 1 node     | 0         | 0   | 0    | 0     | 1     |
-| Edge A-B   | 1_000_000 | 0   | 2    | 1     | 2     |
-| Path P₃    | 1_632_992 | 2   | 10   | 2     | 3     |
-| Triangle K₃| 2_250_000 | 0   | 12   | 3     | 3     |
-| Star K_{1,4}| 3_023_712| 12  | 44   | 4     | 5     |
-| Path P₄    | 1_974_744 | 4   | 28   | 3     | 4     |
-| Complete K₄| 2_999_997 | 0   | 36   | 6     | 4     |
-| 2 isolated | 0         | 0   | 0    | 0     | 2     |
+| 空图      | 0         | 0   | 0    | 0     | 0     |
+| 单节点     | 0         | 0   | 0    | 0     | 1     |
+| 边 A-B   | 1_000_000 | 0   | 2    | 1     | 2     |
+| 路径 P₃    | 1_632_992 | 2   | 10   | 2     | 3     |
+| 三角形 K₃| 2_250_000 | 0   | 12   | 3     | 3     |
+| 星图 K_{1,4}| 3_023_712| 12  | 44   | 4     | 5     |
+| 路径 P₄    | 1_974_744 | 4   | 28   | 3     | 4     |
+| 完全图 K₄| 2_999_997 | 0   | 36   | 6     | 4     |
+| 2 个孤立点 | 0         | 0   | 0    | 0     | 2     |
 | K_{2,3}    | 2_190_888 | 6   | 66   | 6     | 5     |
 
-**Key derivations:**
+**关键推导：**
 
-- **Edge A-B:** T_A=T_B=1; μ=1. j_raw=isqrt64(10^12)=1_000_000; J_ppm=1_000_000 (exact J=1). TI=0. PI_v=2.
-- **K₃:** T_u=2 ∀u; μ=2. j_raw=3×500_000=1_500_000; J_ppm=2_250_000 (exact J=9/4). TI=0. PI_v=12.
-- **K_{1,4}:** T(center)=4; T(leaf)=7; μ=1. j_raw=4×188_982=755_928; J_ppm=3_023_712 (exact≈3.0237). TI=4×3=12. PI_v=4×11=44.
-- **K₄:** T_u=3 ∀u; μ=4. j_raw=6×333_333=1_999_998; J_ppm=2_999_997 (exact J=3; floor error 3 ppm). TI=0. PI_v=36.
-- **K_{2,3}:** T(left)=5; T(right)=6; μ=3. j_raw=6×182_574=1_095_444; J_ppm=2_190_888. TI=6 (confirms non-transmission-regular). PI_v=66.
+- **边 A-B：** T_A=T_B=1；μ=1。j_raw=isqrt64(10^12)=1_000_000；J_ppm=1_000_000（精确 J=1）。TI=0。PI_v=2。
+- **K₃：** T_u=2 对所有 u 成立；μ=2。j_raw=3×500_000=1_500_000；J_ppm=2_250_000（精确 J=9/4）。TI=0。PI_v=12。
+- **K_{1,4}：** T(中心)=4；T(叶节点)=7；μ=1。j_raw=4×188_982=755_928；J_ppm=3_023_712（精确值≈3.0237）。TI=4×3=12。PI_v=4×11=44。
+- **K₄：** T_u=3 对所有 u 成立；μ=4。j_raw=6×333_333=1_999_998；J_ppm=2_999_997（精确 J=3；取整误差 3 ppm）。TI=0。PI_v=36。
+- **K_{2,3}：** T(左侧)=5；T(右侧)=6；μ=3。j_raw=6×182_574=1_095_444；J_ppm=2_190_888。TI=6（确认非传输正则）。PI_v=66。
 
-**isqrt64 precision constants:**
+**isqrt64 精度常数：**
 ```
-isqrt64(10^12/1)  = 1_000_000  (exact: 10^6)
-isqrt64(10^12/4)  =   500_000  (exact: 5×10^5)
-isqrt64(10^12/6)  =   408_248  (floor: √(10^12/6) = 408248.29…)
-isqrt64(10^12/9)  =   333_333  (floor: 10^6/3 = 333333.33…)
-isqrt64(10^12/16) =   250_000  (exact: 2.5×10^5)
-isqrt64(10^12/24) =   204_124  (floor: √(10^12/24) = 204124.14…)
-isqrt64(10^12/28) =   188_982  (floor: 10^6/√28 = 188982.23…)
-isqrt64(10^12/30) =   182_574  (floor: 10^6/√30 = 182574.18…)
+isqrt64(10^12/1)  = 1_000_000  (精确值: 10^6)
+isqrt64(10^12/4)  =   500_000  (精确值: 5×10^5)
+isqrt64(10^12/6)  =   408_248  (向下取整: √(10^12/6) = 408248.29…)
+isqrt64(10^12/9)  =   333_333  (向下取整: 10^6/3 = 333333.33…)
+isqrt64(10^12/16) =   250_000  (精确值: 2.5×10^5)
+isqrt64(10^12/24) =   204_124  (向下取整: √(10^12/24) = 204124.14…)
+isqrt64(10^12/28) =   188_982  (向下取整: 10^6/√28 = 188982.23…)
+isqrt64(10^12/30) =   182_574  (向下取整: 10^6/√30 = 182574.18…)
 ```
 
-### Shell Commands
+### Shell 命令
 
 ```
 graph topo11           gtopo11         balaban j         gbalaban
@@ -101,46 +101,46 @@ transmission irregularity              gti               vertex pi
 gpiv                   gjtipiv
 ```
 
-### OS Analogies
+### OS 类比
 
-- **J (Balaban connectivity):** Structural compactness score weighted by vertex centrality (transmittance). High J = more branched or tree-like topology with short-distance hubs. Low J = highly cyclic, uniform-load graph. In kernel dep-graphs: J measures how "hub-centric" the dependency structure is relative to its cycle density.
-- **TI (Transmission Irregularity):** Measures transmittance imbalance across edges. TI = 0 iff graph is transmission-regular (all vertices have equal sum of distances). TI > 0 indicates asymmetric routing load across IPC channels — edges bridge vertices with unequal "global load." Useful for detecting overloaded gateway subsystems.
-- **PI_v (Vertex PI):** Aggregate degree-weighted transmittance = Σ_v deg(v)·T(v). Captures total "routing pressure" weighted by both local connectivity and global reach. A subsystem that is highly connected AND far from others contributes disproportionately to PI_v — ideal candidate for load balancing or caching layers.
+- **J（Balaban 连通性）：** 按顶点中心性（传输量）加权的结构紧凑度评分。J 越高表示拓扑越呈分支/树状，具有短距离枢纽；J 越低表示图高度成环、负载分布均匀。在内核依赖图中：J 衡量依赖结构相对于其环密度的"枢纽中心化"程度。
+- **TI（传输不规则度）：** 衡量各边之间传输量的不平衡程度。TI = 0 当且仅当图是传输正则的（所有顶点的距离和相等）。TI > 0 表示 IPC 通道上存在不对称的路由负载 —— 边连接了"全局负载"不等的顶点。可用于检测过载的网关子系统。
+- **PI_v（顶点 PI）：** 聚合的度加权传输量 = Σ_v deg(v)·T(v)。同时捕捉局部连通性和全局可达性加权的总"路由压力"。既高度连通又远离其他节点的子系统会对 PI_v 产生不成比例的贡献 —— 是负载均衡或缓存层的理想候选。
 
-### Display
+### 显示
 
-- Bright-yellow header: `graph topo11 (J + TI + PI_v transmission indices)`
-- J: bright-cyan (ppm decimal display)
-- TI: bright-green; annotates "(TI=0: transmission-regular)" when 0
-- PI_v: bright-magenta (exact)
-- Footer: `N node(s)  M edge(s)  Balaban 1982  Abdo & Dimitrov 2014  Khalifeh et al. 2008`
-
----
-
-## Test Harness: `gos-graph-topo11-harness`
-
-**Location:** `host-tests/gos-graph-topo11-harness/`  
-**VectorAddress L4:** 98  
-**Plugin ID:** `TOPIX_11`
-
-10 tests, all pass:
-
-1. Empty graph → (0, 0, 0, 0, 0)
-2. Single node → (0, 0, 0, 0, 1)
-3. Single edge A→B → (1_000_000, 0, 2, 1, 2)
-4. Path P₃ → (1_632_992, 2, 10, 2, 3)
-5. Triangle K₃ → (2_250_000, 0, 12, 3, 3)
-6. Star K_{1,4} → (3_023_712, 12, 44, 4, 5)
-7. Path P₄ → (1_974_744, 4, 28, 3, 4)
-8. Complete K₄ → (2_999_997, 0, 36, 6, 4)
-9. Two isolated nodes → (0, 0, 0, 0, 2)
-10. K_{2,3} bipartite cross-check → (2_190_888, 6, 66, 6, 5)
+- 亮黄色标题：`graph topo11 (J + TI + PI_v transmission indices)`
+- J：亮青色（ppm 小数显示）
+- TI：亮绿色；为 0 时标注 "(TI=0: transmission-regular)"
+- PI_v：亮品红色（精确值）
+- 页脚：`N node(s)  M edge(s)  Balaban 1982  Abdo & Dimitrov 2014  Khalifeh et al. 2008`
 
 ---
 
-## VectorAddress L4 Namespace (updated)
+## 测试套件: `gos-graph-topo11-harness`
 
-| L4 | Harness |
+**位置：** `host-tests/gos-graph-topo11-harness/`
+**VectorAddress L4：** 98
+**插件 ID：** `TOPIX_11`
+
+10 个测试，全部通过：
+
+1. 空图 → (0, 0, 0, 0, 0)
+2. 单节点 → (0, 0, 0, 0, 1)
+3. 单边 A→B → (1_000_000, 0, 2, 1, 2)
+4. 路径 P₃ → (1_632_992, 2, 10, 2, 3)
+5. 三角形 K₃ → (2_250_000, 0, 12, 3, 3)
+6. 星图 K_{1,4} → (3_023_712, 12, 44, 4, 5)
+7. 路径 P₄ → (1_974_744, 4, 28, 3, 4)
+8. 完全图 K₄ → (2_999_997, 0, 36, 6, 4)
+9. 两个孤立节点 → (0, 0, 0, 0, 2)
+10. K_{2,3} 二部图交叉验证 → (2_190_888, 6, 66, 6, 5)
+
+---
+
+## VectorAddress L4 命名空间（更新）
+
+| L4 | 测试套件 |
 |----|---------|
 | 88 | graph-topo (SC/GA/AZI) |
 | 89 | graph-topo2 (H/ABC/F) |
@@ -156,23 +156,23 @@ gpiv                   gjtipiv
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
-|------|--------|
-| `crates/gos-runtime/src/lib.rs` | +`graph_topo_indices11_inner()` + `graph_topo_indices11()` export |
+| 文件 | 变更 |
+|------|------|
+| `crates/gos-runtime/src/lib.rs` | +`graph_topo_indices11_inner()` + `graph_topo_indices11()` 导出 |
 | `crates/k-shell/src/lib.rs` | +`dispatch_graph_topo_indices11()` |
-| `crates/k-shell/src/proc.rs` | +shell routing for topo11 (9 aliases) |
-| `host-tests/gos-graph-topo11-harness/` | new harness (4 files: Cargo.toml, .cargo/config.toml, tests/graph_topo11.rs) |
+| `crates/k-shell/src/proc.rs` | +topo11 的 shell 路由（9 个别名） |
+| `host-tests/gos-graph-topo11-harness/` | 新增测试套件（4 个文件：Cargo.toml, .cargo/config.toml, tests/graph_topo11.rs） |
 
 ---
 
-## Metrics
+## 指标
 
-- **New functions:** 2 (inner + public export)
-- **New shell aliases:** 9
-- **New tests:** 10
-- **Cumulative host tests:** 1193
-- **Algorithmic category:** Transmission-based distance (BFS all-pairs, O(n·(n+m)))
-- **Return type:** 5-tuple `(u64, u64, u64, usize, usize)` — matches topo7/topo9/topo10 pattern
-- **Integer arithmetic:** isqrt64 (pure Newton-Raphson, no-std) for J; exact integers for TI and PI_v
+- **新增函数：** 2（内部实现 + 公共导出）
+- **新增 shell 别名：** 9
+- **新增测试：** 10
+- **累计宿主测试数：** 1193
+- **算法类别：** 基于传输量的距离指数（全点对 BFS，O(n·(n+m))）
+- **返回类型：** 5 元组 `(u64, u64, u64, usize, usize)` —— 与 topo7/topo9/topo10 模式一致
+- **整数运算：** J 使用 isqrt64（纯牛顿-拉夫逊迭代，no-std）；TI 和 PI_v 为精确整数

@@ -1,54 +1,51 @@
-# Hardening Log V2.92 -- Maximum Bipartite Matching (Kuhn's Algorithm)
+# 硬化日志 V2.92 —— 最大二分图匹配（Kuhn 算法）
 
-**Date:** 2026-07-05
-**Branch:** feat/vk-auto-live-surface
-**Host-test total:** 893 (883 prior + 10 new)
-
----
-
-## Feature: `graph bipartite match` / `gbimatch` / `bipartite match`
-
-### Motivation
-
-V2.37 added `graph_bipartite` — the membership check (is this graph bipartite? which
-set does each node belong to?). V2.92 extends this to the matching problem:
-
-> **"Given a bipartite graph, what is the maximum set of disjoint A–B pairings?"**
-
-A **maximum bipartite matching** answers optimal assignment problems that arise
-throughout OS scheduling and resource allocation:
-
-| Question | OS analogy |
-|---|---|
-| Which tasks can bind to which CPUs? | `taskset` / `numactl --cpunodebind` affinity graph |
-| How many tasks can run concurrently without sharing a CPU? | Maximum independent scheduling slots |
-| Can every service be assigned a unique network interface? | NIC↔service exclusive binding |
-| Which IRQ handlers can be pinned to distinct CPU cores? | `/proc/irq/N/smp_affinity` assignment |
-
-Compared with related algorithms already in the runtime:
-
-| Algorithm | What it finds |
-|---|---|
-| `graph_bipartite` (V2.37) | Is the graph bipartite? Which side is each node on? |
-| `graph_community` (V2.44) | Label propagation community assignment (non-bipartite) |
-| `graph_spanning` (V2.52) | Spanning subgraph (all nodes, subset of edges) |
-| `graph_bipartite_match` (V2.92) | **Maximum matching: largest set of disjoint A↔B pairs** |
-
-The matching count also gives an upper bound for König's theorem:
-in a bipartite graph, maximum matching = minimum vertex cover.
+**日期：** 2026-07-05
+**分支：** feat/vk-auto-live-surface
+**宿主测试总计：** 893（此前 883，+10 新增）
 
 ---
 
-## Algorithm: Kuhn's Augmenting-Path DFS
+## 功能：`graph bipartite match` / `gbimatch` / `bipartite match`
 
-### Why augmenting paths
+### 动机
 
-A matching M is maximum if and only if there is no **augmenting path** — a path
-starting and ending at free (unmatched) nodes that alternates between non-matching
-and matching edges. Flipping edges along an augmenting path increases |M| by 1.
+V2.37 增加了 `graph_bipartite`——二分性检测（该图是否是二分图？每个节点属于哪一侧？）。
+V2.92 将其扩展为匹配问题：
 
-Kuhn's algorithm (also known as the Hungarian DFS method) repeats this for each
-free side-A node:
+> **"给定一个二分图，A–B 之间不相交配对的最大集合是多少？"**
+
+**最大二分图匹配**解决了贯穿操作系统调度和资源分配的最优分配问题：
+
+| 问题 | 操作系统类比 |
+|---|---|
+| 哪些任务可以绑定到哪些 CPU？ | `taskset` / `numactl --cpunodebind` 亲和图 |
+| 有多少任务可以在不共享 CPU 的情况下并发运行？ | 最大独立调度槽位数 |
+| 是否每个服务都能分配到唯一的网络接口？ | 网卡↔服务的独占绑定 |
+| 哪些 IRQ 处理程序可以固定到不同的 CPU 核？ | `/proc/irq/N/smp_affinity` 分配 |
+
+与运行时中已有的相关算法对比：
+
+| 算法 | 发现的内容 |
+|---|---|
+| `graph_bipartite`（V2.37） | 该图是否为二分图？每个节点属于哪一侧？ |
+| `graph_community`（V2.44） | 标签传播社区划分（非二分） |
+| `graph_spanning`（V2.52） | 生成子图（所有节点，边的子集） |
+| `graph_bipartite_match`（V2.92） | **最大匹配：最大的不相交 A↔B 配对集合** |
+
+匹配数还给出了 König 定理的上界：在二分图中，最大匹配 = 最小顶点覆盖。
+
+---
+
+## 算法：Kuhn 增广路径 DFS
+
+### 为什么使用增广路径
+
+一个匹配 M 是最大匹配，当且仅当不存在**增广路径**——即一条起止均为
+自由（未匹配）节点、并在非匹配边和匹配边之间交替的路径。沿增广路径
+翻转边可使 |M| 增加 1。
+
+Kuhn 算法（又称匈牙利 DFS 方法）对每个自由的 A 侧节点重复以下过程：
 
 ```
 for each free A-node a:
@@ -56,48 +53,48 @@ for each free A-node a:
     if found: augment (flip all edges along path), match_count += 1
 ```
 
-Each DFS is O(E). With O(V) free A-nodes, total complexity is **O(V·E)**.
-For our capacity constraints (V ≤ 128, E ≤ 512), this is at most 65,536 operations —
-well within real-time budget.
+每次 DFS 复杂度为 O(E)。有 O(V) 个自由 A 节点，总复杂度为 **O(V·E)**。
+在我们的容量约束下（V ≤ 128，E ≤ 512），最多为 65,536 次操作——
+完全在实时预算范围内。
 
-### Iterative DFS with explicit path tracking
+### 带显式路径追踪的迭代 DFS
 
-Recursion is not safe in `no_std` kernel code. The DFS uses:
+在 `no_std` 内核代码中递归并不安全。DFS 使用以下结构：
 
 ```
-dfs_stk:  [(a_slot, ei); MAX_NODES]   — explicit DFS stack
-chosen_b: [b_slot; MAX_NODES]         — B-node chosen at each DFS level
-visited_b: [bool; MAX_NODES]          — B-nodes tried in this DFS (per free A-node)
+dfs_stk:  [(a_slot, ei); MAX_NODES]   —— 显式 DFS 栈
+chosen_b: [b_slot; MAX_NODES]         —— 每个 DFS 层级选中的 B 节点
+visited_b: [bool; MAX_NODES]          —— 本次 DFS（针对某个自由 A 节点）中尝试过的 B 节点
 ```
 
-**Stack advance (found matched B-node):**
-1. Mark b_slot visited; record `chosen_b[level] = b_slot`
-2. Save edge scan position `dfs_stk[level].1 = ei` (for backtrack resume)
-3. Push matched A-node `match_b[b_slot]` at level+1
+**栈前进（找到已匹配的 B 节点）：**
+1. 标记 b_slot 已访问；记录 `chosen_b[level] = b_slot`
+2. 保存边扫描位置 `dfs_stk[level].1 = ei`（用于回溯恢复）
+3. 在 level+1 处压入已匹配的 A 节点 `match_b[b_slot]`
 
-**Augmentation (found free B-node):**
-1. Record `chosen_b[level] = free_b_slot`
-2. Walk from current level down to 0:
+**增广（找到自由的 B 节点）：**
+1. 记录 `chosen_b[level] = free_b_slot`
+2. 从当前 level 向下遍历至 0：
    - `match_a[a] = cur_b; match_b[cur_b] = a`
-   - Advance: `cur_b = chosen_b[level-1]`
-3. Increment match_count; break DFS
+   - 前进：`cur_b = chosen_b[level-1]`
+3. match_count 加一；跳出 DFS
 
-**Backtrack (no viable path from this A-node):**
-- `st_top -= 1` (pop DFS frame)
-- Outer while loop re-reads saved `ei` from `dfs_stk[lvl].1`, continues scanning
+**回溯（该 A 节点无可行路径）：**
+- `st_top -= 1`（弹出 DFS 帧）
+- 外层 while 循环重新读取已保存的 `ei`（`dfs_stk[lvl].1`），继续扫描
 
-### Bipartition (step 1)
+### 二分划分（第一步）
 
-The bipartite 2-colouring uses the same BFS technique as `graph_bipartite` (V2.37):
-edges are treated as undirected; BFS assigns alternating colours 0 (side A) and 1 (side B).
-If any node has the same colour as its BFS parent, the graph is not bipartite and
-`match_count = 0, is_bipartite = false` is returned immediately.
+二分二着色使用与 `graph_bipartite`（V2.37）相同的 BFS 技术：
+将边视为无向边；BFS 交替分配颜色 0（A 侧）和 1（B 侧）。
+若任一节点与其 BFS 父节点颜色相同，则该图非二分图，
+立即返回 `match_count = 0, is_bipartite = false`。
 
-### visited_b semantics
+### visited_b 语义
 
-`visited_b` is reset for each new free A-node's DFS. Within a single DFS, each
-B-node is tried at most once — this prevents cycles in the alternating-path search
-and ensures the DFS terminates in O(E) steps.
+`visited_b` 在每个新的自由 A 节点开始 DFS 时被重置。在单次 DFS 中，
+每个 B 节点最多被尝试一次——这可防止交替路径搜索中出现环，
+并确保 DFS 在 O(E) 步内终止。
 
 ---
 
@@ -108,81 +105,81 @@ pub fn graph_bipartite_match<const N: usize>(
 ) -> ([VectorAddress; N], [VectorAddress; N], usize, bool, usize)
 ```
 
-Returns `(left_vecs, right_vecs, match_count, is_bipartite, node_count)`:
-- `left_vecs[0..match_count]`  — matched side-A (color 0) nodes
-- `right_vecs[0..match_count]` — matched side-B (color 1) nodes; `left_vecs[i]` matches `right_vecs[i]`
-- `match_count`                — maximum matching size; 0 if not bipartite
-- `is_bipartite`               — false if an odd-length cycle was detected
-- `node_count`                 — total live nodes
+返回 `(left_vecs, right_vecs, match_count, is_bipartite, node_count)`：
+- `left_vecs[0..match_count]`  —— 已匹配的 A 侧（颜色 0）节点
+- `right_vecs[0..match_count]` —— 已匹配的 B 侧（颜色 1）节点；`left_vecs[i]` 与 `right_vecs[i]` 匹配
+- `match_count`                —— 最大匹配规模；若非二分图则为 0
+- `is_bipartite`               —— 若检测到奇数长度环则为 false
+- `node_count`                 —— 存活节点总数
 
-Output sorted by node_slot order (ascending VectorAddress.as_u64() within side A).
-N should be `MAX_NODES` (128) for full coverage.
+输出按节点槽位顺序排序（A 侧内按 VectorAddress.as_u64() 升序）。
+N 应取 `MAX_NODES`（128）以实现完整覆盖。
 
 ---
 
-## Key Invariants
+## 关键不变量
 
-| Invariant | Notes |
+| 不变量 | 说明 |
 |---|---|
-| `is_bipartite` consistent with `graph_bipartite` | Both use same BFS 2-colouring; test 10 cross-checks |
-| `match_count ≤ min(\|A\|, \|B\|)` | Matching is a set of disjoint pairs |
-| Left nodes in output pairwise distinct | Each A-node appears at most once |
-| Right nodes in output pairwise distinct | Each B-node appears at most once |
-| `match_count = 0` when `!is_bipartite` | Not bipartite → skip matching entirely |
-| Self-loops have no effect | BFS coloring skips self-loops (would assign same colour) |
-| Augmenting path correctness | `chosen_b[k]` records B chosen at level k; augmentation walks 0..lvl |
-| Backtrack resume | `dfs_stk[lvl].1` saves `ei` so scan continues after child backtracks |
+| `is_bipartite` 与 `graph_bipartite` 保持一致 | 二者使用相同的 BFS 二着色；测试 10 交叉验证 |
+| `match_count ≤ min(\|A\|, \|B\|)` | 匹配是一组不相交的配对 |
+| 输出中左侧节点两两不同 | 每个 A 节点最多出现一次 |
+| 输出中右侧节点两两不同 | 每个 B 节点最多出现一次 |
+| `!is_bipartite` 时 `match_count = 0` | 非二分图 → 完全跳过匹配 |
+| 自环无影响 | BFS 着色跳过自环（否则会分配相同颜色） |
+| 增广路径正确性 | `chosen_b[k]` 记录第 k 层选中的 B；增广遍历 0..lvl |
+| 回溯恢复 | `dfs_stk[lvl].1` 保存 `ei`，使子节点回溯后能继续扫描 |
 
 ---
 
-## Shell Commands
+## Shell 命令
 
 ```
-graph bipartite match   maximum bipartite matching
-gbimatch                alias
-bipartite match         alias
+graph bipartite match   最大二分图匹配
+gbimatch                别名
+bipartite match         别名
 ```
 
-Display:
-- Header: `graph bipartite match`
-- If not bipartite: red "NOT bipartite (odd-length cycle detected)" + hint
-- If bipartite, no edges: green "bipartite graph with no edges (empty matching)"
-- Otherwise: table of `side A ↔ side B` pairs in bright yellow
-- Footer: matching size + node count
+显示：
+- 标题：`graph bipartite match`
+- 若非二分图：红色显示 "NOT bipartite (odd-length cycle detected)" 及提示
+- 若为二分图但无边：绿色显示 "bipartite graph with no edges (empty matching)"
+- 否则：以亮黄色显示 `A 侧 ↔ B 侧` 配对表格
+- 页脚：匹配规模 + 节点数
 
 ---
 
-## Test Harness: `gos-graph-bimatch-harness` (L4=68)
+## 测试套件：`gos-graph-bimatch-harness`（L4=68）
 
-10 tests covering:
+10 项测试覆盖：
 
-| # | Scenario | Expected |
+| # | 场景 | 预期结果 |
 |---|---|---|
-| 1 | Empty graph | match_count=0, is_bipartite=true |
-| 2 | Single isolated node | match_count=0, is_bipartite=true |
-| 3 | Triangle (odd cycle, not bipartite) | is_bipartite=false, match_count=0 |
-| 4 | Single A–B edge | match_count=1, pair (A0,B0) |
-| 5 | Path chain A0–B0–A1 | match_count=1 (B0 shared, can only match one) |
-| 6 | K_{2,2} complete bipartite | match_count=2 (perfect matching) |
-| 7 | K_{2,3}: 2 left, 3 right | match_count=2 (bounded by smaller side) |
-| 8 | Augmenting path swap needed | match_count=2 (requires DFS to push and augment) |
-| 9 | Two disconnected bipartite components | match_count=2 (1 per component) |
-| 10 | K_{3,3}: invariant cross-checks | match_count=3; is_bipartite consistent with graph_bipartite; all output pairs vertex-disjoint |
+| 1 | 空图 | match_count=0, is_bipartite=true |
+| 2 | 单个孤立节点 | match_count=0, is_bipartite=true |
+| 3 | 三角形（奇数环，非二分图） | is_bipartite=false, match_count=0 |
+| 4 | 单条 A–B 边 | match_count=1，配对 (A0,B0) |
+| 5 | 路径链 A0–B0–A1 | match_count=1（B0 被共享，只能匹配一个） |
+| 6 | K_{2,2} 完全二分图 | match_count=2（完美匹配） |
+| 7 | K_{2,3}：左 2 右 3 | match_count=2（受较小一侧约束） |
+| 8 | 需要增广路径交换 | match_count=2（需要 DFS 压栈并增广） |
+| 9 | 两个不连通的二分子图 | match_count=2（每个分量各 1 个） |
+| 10 | K_{3,3}：不变量交叉验证 | match_count=3；is_bipartite 与 graph_bipartite 一致；所有输出配对节点不相交 |
 
-All 10 pass, zero warnings.
-
----
-
-## VectorAddress Namespace
-
-L4=68 reserved for `gos-graph-bimatch-harness`.
+10 项全部通过，零警告。
 
 ---
 
-## Literature
+## VectorAddress 命名空间
 
-- Kuhn 1955 — *"The Hungarian method for the assignment problem"* (augmenting path foundation)
-- Hopcroft & Karp 1973 — O(E√V) improvement (Kuhn used here for simplicity at V≤128)
-- König 1931 — König's theorem: in bipartite graphs, max matching = min vertex cover
-- Hall 1935 — Hall's marriage theorem (matching existence condition)
-- Cormen, Leiserson, Rivest & Stein — *Introduction to Algorithms* §26.3 (bipartite matching via max flow)
+L4=68 保留给 `gos-graph-bimatch-harness`。
+
+---
+
+## 参考文献
+
+- Kuhn 1955 —— *"The Hungarian method for the assignment problem"*（增广路径思想的来源）
+- Hopcroft & Karp 1973 —— O(E√V) 改进算法（此处因 V≤128 规模较小而采用 Kuhn 算法以求简洁）
+- König 1931 —— König 定理：二分图中，最大匹配 = 最小顶点覆盖
+- Hall 1935 —— Hall 婚姻定理（匹配存在性条件）
+- Cormen, Leiserson, Rivest & Stein —— *Introduction to Algorithms* §26.3（基于最大流的二分图匹配）
