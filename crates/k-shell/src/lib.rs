@@ -10413,6 +10413,73 @@ pub fn dispatch_graph_topo_indices21(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices22(sink: &ConsoleSink) {
+    let (nr, nf, nsc, edge_count, node_count) =
+        gos_runtime::graph_topo_indices22();
+
+    fn print_ppm3_u64(sink: &ConsoleSink, ppm: u64) {
+        let whole = ppm / 1_000_000;
+        let frac  = ((ppm % 1_000_000) / 1_000) as usize;
+        print_num_inline(sink, whole as usize);
+        print_str(sink, ".");
+        if frac < 10        { print_str(sink, "00"); }
+        else if frac < 100  { print_str(sink, "0"); }
+        print_num_inline(sink, frac);
+    }
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo22 (NR + NF + NSC S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NR (Neighborhood Randić)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighbor randic   NR =  ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_ppm3_u64(sink, nr);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/\u{221a}(S_u\u{00b7}S_v)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NF (Neighborhood Forgotten)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighbor forgot   NF =  ");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nf as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{00b3}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NSC (Neighborhood Sum Connectivity)
+        set_color(sink, 8, 0);
+        print_str(sink, "  neighbor sumconn  NSC =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_ppm3_u64(sink, nsc);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3} 1/\u{221a}(S_u+S_v)]  (ppm)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  Randic 1975 Furtula & Gutman 2015 Zhou & Trinajstic 2009  (S-variant family)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 /// V2.28: `uname` — kernel version and capacity limits.
 /// Analogous to `uname -a` + `sysctl kern.*` on Linux/BSD.
 /// Shows GOS version, ABI, capacity limits, and queue/ring depths.

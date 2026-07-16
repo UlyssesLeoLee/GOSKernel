@@ -1256,6 +1256,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices20(sink);
     } else if cmd == "graph topo21" || cmd == "gtopo21" || cmd == "abc4 index" || cmd == "gabc4" || cmd == "neighborhood harmonic" || cmd == "gnh" || cmd == "neighborhood sombor" || cmd == "gnso" || cmd == "gabc4nhnso" {
         super::dispatch_graph_topo_indices21(sink);
+    } else if cmd == "graph topo22" || cmd == "gtopo22" || cmd == "neighborhood randic" || cmd == "gnr" || cmd == "neighborhood forgotten" || cmd == "gnf" || cmd == "neighborhood sumconn" || cmd == "gnsc" || cmd == "gnrnfnsc" {
+        super::dispatch_graph_topo_indices22(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

@@ -13596,6 +13596,88 @@ impl GraphRuntime {
 
         (abc4_ppm, nh_ppm, nso_ppm, edge_count, nc)
     }
+
+    pub fn graph_topo_indices22_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Integer sqrt helper (Newton-Raphson, no float, no_std safe).
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let bits = 64u32 - n.leading_zeros();
+            let mut x: u64 = 1u64 << ((bits + 1) / 2);
+            loop { let y = (x + n / x) / 2; if y >= x { return x; } x = y; }
+        }
+
+        // 4. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 5. Neighbor degree sum S(v) = Σ_{w∈N(v)} d(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 6. Neighborhood Forgotten NF = Σ_v S(v)³  (exact u64; node scan).
+        //    S(v) ≤ 127² = 16129; S³ ≤ 16129³ ≈ 4.2×10^12; 128×4.2×10^12 < u64::MAX.
+        let mut nf = 0u64;
+        for ci in 0..nc { nf += sv[ci] * sv[ci] * sv[ci]; }
+
+        // 7. Edge scan (a < b): accumulate NR and NSC.
+        //    NR  = Σ_{uv∈E} 1/√(S_u·S_v)·10^6  = Σ isqrt64(10^12/(S_u·S_v))
+        //    NSC = Σ_{uv∈E} 1/√(S_u+S_v)·10^6  = Σ isqrt64(10^12/(S_u+S_v))
+        //    Both have S_u,S_v ≥ 1 at edge endpoints (isolated nodes have no edges).
+        let mut nr_ppm  = 0u64;
+        let mut nsc_ppm = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let sp   = sa * sb;
+                    let ssum = sa + sb;
+                    nr_ppm  += isqrt64(1_000_000_000_000u64 / sp);
+                    nsc_ppm += isqrt64(1_000_000_000_000u64 / ssum);
+                }
+            }
+        }
+
+        (nr_ppm, nf, nsc_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16603,6 +16685,20 @@ pub fn graph_topo_indices20() -> (u64, u64, u64, usize, usize) {
 /// Algorithm: O(V+E) S-scan — degree pass then edge pass; no BFS needed.
 pub fn graph_topo_indices21() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices21_inner()
+}
+
+/// V3.33: `graph topo22` — NR + NF + NSC (Neighborhood Randić, Forgotten, Sum Connectivity).
+///
+///   Returns (nr_ppm, nf, nsc_ppm, edge_count, node_count).
+///   All indices use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+///   NR(G)  × 10^6 = Σ_{uv∈E} 1/√(S_u·S_v) × 10^6   (floor ppm; S-analogue of Randić R)
+///   NF(G)          = Σ_v S(v)³                        (exact u64; S-analogue of Forgotten F)
+///   NSC(G) × 10^6 = Σ_{uv∈E} 1/√(S_u+S_v) × 10^6   (floor ppm; S-analogue of Sum Connectivity SC)
+/// NR=NSC for S=2 uniform graphs (S_u×S_v=S_u+S_v=4 when S=2).
+/// For S-uniform graphs with S=c: NR=m×floor(10^6/c), NSC=m×isqrt64(10^12/(2c)).
+/// Algorithm: O(V+E) S-scan — degree pass then S-pass then node+edge pass; no BFS needed.
+pub fn graph_topo_indices22() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices22_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
