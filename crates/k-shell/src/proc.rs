@@ -1262,6 +1262,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices23(sink);
     } else if cmd == "graph topo24" || cmd == "gtopo24" || cmd == "neighborhood isi" || cmd == "gnisi" || cmd == "neighborhood azi" || cmd == "gnazi" || cmd == "neighborhood em1" || cmd == "gnem1" || cmd == "gnisinazinemm1" {
         super::dispatch_graph_topo_indices24(sink);
+    } else if cmd == "graph topo25" || cmd == "gtopo25" || cmd == "neighborhood hm2" || cmd == "gnhm2" || cmd == "neighborhood ag" || cmd == "gnag" || cmd == "neighborhood abs" || cmd == "gnabs" || cmd == "gnhm2nagnabs" {
+        super::dispatch_graph_topo_indices25(sink);
     } else if let Some(vec_str) = cmd
         .strip_prefix("graph arborescence ")
         .or_else(|| cmd.strip_prefix("garborescence "))

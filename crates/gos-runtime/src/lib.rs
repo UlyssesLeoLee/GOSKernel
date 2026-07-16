@@ -13846,6 +13846,119 @@ impl GraphRuntime {
 
         (nisi_ppm, nazi_milli, nem1, edge_count, nc)
     }
+
+    pub fn graph_topo_indices25_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Edge scan (a < b): accumulate NHM₂, NAG, NABS.
+        //
+        //    NHM₂     = Σ_{uv∈E} (S_u·S_v)²                          (exact; u128 acc → u64)
+        //    NAG_ppm  = Σ_{uv∈E} floor((S_u+S_v)·10^6 / (2√(S_u·S_v)))
+        //             = Σ_{uv∈E} floor(ssum·10^12 / (2·isqrt128(sp·10^12)))
+        //    NABS_ppm = Σ_{uv∈E} floor(√((S_u+S_v-2)/(S_u+S_v))·10^6)
+        //             = Σ_{uv∈E} isqrt64((ssum-2)·10^12 / ssum)
+        //
+        //  Overflow safety:
+        //    NHM₂:  sp = S_u·S_v ≤ 16129² = 260_144_641; sp² ≤ 6.77×10^16 < u64::MAX ✓
+        //           accumulator: u128 (sum could exceed u64 for dense large graphs)
+        //    NAG:   sp·10^12 ≤ 260_144_641·10^12 ≈ 2.6×10^20 → use u128 for isqrt128 ✓
+        //           ssum·10^12 ≤ 32258·10^12 ≈ 3.2×10^16 < u64::MAX ✓
+        //           result ≤ ssum·10^6/(2·1) = 16129·10^6 ≈ 1.6×10^13 < u64::MAX per edge ✓
+        //    NABS:  (ssum-2)·10^12/ssum ≤ 32256·10^12 ≈ 3.2×10^16 < u64::MAX ✓
+        //           result ≤ 10^6 per edge ✓
+
+        // Integer square root u128 — bit-shift init, Babylonian, no float, no_std safe.
+        fn isqrt128(n: u128) -> u128 {
+            if n == 0 { return 0; }
+            let bits = 128u32 - n.leading_zeros();
+            let mut x: u128 = 1u128 << ((bits + 1) / 2);
+            loop {
+                let y = (x + n / x) / 2;
+                if y >= x { return x; }
+                x = y;
+            }
+        }
+
+        // Integer square root u64 — Babylonian method, no float, no_std safe.
+        fn isqrt64(n: u64) -> u64 {
+            if n == 0 { return 0; }
+            let mut x = n;
+            let mut y = (x + 1) / 2;
+            while y < x { x = y; y = (x + n / x) / 2; }
+            x
+        }
+
+        let mut nhm2_acc: u128 = 0;
+        let mut nag_ppm       = 0u64;
+        let mut nabs_ppm      = 0u64;
+        for a in 0..nc {
+            let sa = sv[a];
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb   = sv[b];
+                    let ssum = sa + sb;
+                    let sp   = sa * sb;
+                    // NHM₂ = (S_u·S_v)²
+                    nhm2_acc += (sp as u128) * (sp as u128);
+                    // NAG = floor(ssum·10^6 / (2·√sp))
+                    let isqrt_sp = isqrt128((sp as u128) * 1_000_000_000_000u128);
+                    if isqrt_sp > 0 {
+                        nag_ppm += (ssum * 1_000_000_000_000u64) / (2 * isqrt_sp as u64);
+                    }
+                    // NABS = floor(√((ssum-2)/ssum)·10^6) = isqrt64((ssum-2)·10^12/ssum)
+                    if ssum >= 2 {
+                        nabs_ppm += isqrt64((ssum - 2) * 1_000_000_000_000u64 / ssum);
+                    }
+                }
+            }
+        }
+
+        (nhm2_acc as u64, nag_ppm, nabs_ppm, edge_count, nc)
+    }
 }
 
 // ── Vertex-connectivity helper: max vertex-disjoint paths via node-split flow ──
@@ -16885,6 +16998,10 @@ pub fn graph_topo_indices23() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices24() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices24_inner()
+}
+
+pub fn graph_topo_indices25() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices25_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
