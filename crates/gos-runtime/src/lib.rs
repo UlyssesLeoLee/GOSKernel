@@ -16704,6 +16704,131 @@ impl GraphRuntime {
         (ntrictc, nhtrictc, nrso, edge_count, nc)
     }
 
+    pub fn graph_topo_indices54_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NOCTATC (S-Octacosic vertex sum = Σ_v S(v)^28).
+        //
+        //    NOCTATC(G) = Σ_v S(v)^28  (exact u128→u64; S-Octacosic vertex sum)
+        //
+        //    Extends the S-power-vertex series:
+        //      NM₁=Σ S² (topo18) → ... → NHEPTATC=Σ S²⁷ (topo53) → NOCTATC=Σ S²⁸ (topo54)
+        //    NOCTATC = n·S^28 for S-regular.
+        //    Overflow: S^28 ≤ 16129^28 → saturating u128 accumulator, clamp to u64::MAX.
+        //    Implementation: s^28 = s^16 × s^8 × s^4.
+
+        let mut noctatc_acc: u128 = 0;
+        for ci in 0..nc {
+            let s   = sv[ci] as u128;
+            let s2  = s * s;
+            let s4  = s2 * s2;
+            let s8  = s4.saturating_mul(s4);
+            let s16 = s8.saturating_mul(s8);
+            let s28 = s16.saturating_mul(s8).saturating_mul(s4);
+            noctatc_acc = noctatc_acc.saturating_add(s28);
+        }
+        let noctatc = noctatc_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NHOCTATC (S-Heptacosic edge-sum) and NYSO (S-Tetratetracontyl Sombor).
+        //
+        //    NHOCTATC(G) = Σ_{uv∈E} (S_u+S_v)^27  (exact u128→u64; S-Heptacosic edge-sum)
+        //    Extends the S-power-edge series:
+        //      NHM1=Σ(S+S)² (topo23) → ... → NHHEPTATC=Σ(S+S)²⁶ (topo53)
+        //      → NHOCTATC=Σ(S+S)²⁷ (topo54)
+        //    NHOCTATC = |E|·(2S)^27 = 134217728|E|·S^27 for S-regular.
+        //    Overflow per edge: (2×16129)^27 → saturating u128 accumulator.
+        //    Implementation: ss^27 = ss^16 × ss^8 × ss^2 × ss.
+        //
+        //    NYSO(G) = Σ_{uv∈E} (S_u²+S_v²)^22  (exact u128→u64; S-Tetratetracontyl Sombor α=44)
+        //    S-variant generalised Sombor SO^α with α=44: exact integer (no isqrt).
+        //    NSO(α=1,topo21), NCSO(α=3,topo33), NFSO(α=4,topo34),
+        //    NHSO(α=6,topo35), NOSO(α=8,topo36), NTSO(α=10,topo37),
+        //    NDSO(α=12,topo38), NESO(α=14,topo39), NGSO(α=16,topo40),
+        //    NIOSO(α=18,topo41), NJSO(α=20,topo42), NKSO(α=22,topo43),
+        //    NLSO(α=24,topo44), NMSO(α=26,topo45), NNSO(α=28,topo46),
+        //    NPSO(α=30,topo47), NQSO(α=32,topo48), NRSO(α=34,topo49),
+        //    NSSO(α=36,topo50), NUSO(α=38,topo51), NVSO(α=40,topo52), NXSO(α=42,topo53),
+        //    NYSO(α=44,topo54).
+        //    NYSO = |E|·(2S²)^22 = 4194304|E|·S^44 for S-regular.
+        //    Overflow per edge: (2×16129²)^22 → saturating u128 accumulator.
+        //    Implementation: s2s^22 = s2s^16 × s2s^4 × s2s^2.
+
+        let mut nhoctatc_acc: u128 = 0;
+        let mut nyso_acc:     u128 = 0;
+        for a in 0..nc {
+            let sa  = sv[a] as u128;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb     = sv[b] as u128;
+                    // NHOCTATC: (S_a + S_b)^27 = ss^16 × ss^8 × ss^2 × ss
+                    let ss     = sa + sb;
+                    let ss2    = ss * ss;
+                    let ss4    = ss2 * ss2;
+                    let ss8    = ss4.saturating_mul(ss4);
+                    let ss16   = ss8.saturating_mul(ss8);
+                    let ss27   = ss16.saturating_mul(ss8).saturating_mul(ss2).saturating_mul(ss);
+                    nhoctatc_acc = nhoctatc_acc.saturating_add(ss27);
+                    // NYSO: (S_a² + S_b²)^22 = s2s^16 × s2s^4 × s2s^2
+                    let s2s    = sa * sa + sb * sb;
+                    let s2s2   = s2s * s2s;
+                    let s2s4   = s2s2.saturating_mul(s2s2);
+                    let s2s8   = s2s4.saturating_mul(s2s4);
+                    let s2s16  = s2s8.saturating_mul(s2s8);
+                    let s2s22  = s2s16.saturating_mul(s2s4).saturating_mul(s2s2);
+                    nyso_acc = nyso_acc.saturating_add(s2s22);
+                }
+            }
+        }
+        let nhoctatc = nhoctatc_acc.min(u64::MAX as u128) as u64;
+        let nyso     = nyso_acc.min(u64::MAX as u128) as u64;
+
+        (noctatc, nhoctatc, nyso, edge_count, nc)
+    }
+
     pub fn graph_topo_indices53_inner(&self) -> (u64, u64, u64, usize, usize) {
         // 1. Compact node index.
         let mut slot_to_ci = [usize::MAX; MAX_NODES];
@@ -20381,6 +20506,10 @@ pub fn graph_topo_indices48() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices49() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices49_inner()
+}
+
+pub fn graph_topo_indices54() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices54_inner()
 }
 
 pub fn graph_topo_indices53() -> (u64, u64, u64, usize, usize) {
