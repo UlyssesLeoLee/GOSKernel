@@ -1308,6 +1308,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices46(sink);
     } else if cmd == "graph topo47" || cmd == "gtopo47" || cmd == "neighborhood heneicosic" || cmd == "gnhentc" || cmd == "neighborhood eicosic edge" || cmd == "gnhhentc" || cmd == "neighborhood triacontyl sombor" || cmd == "gnpso" || cmd == "gnhentcnhhentcnpso" {
         super::dispatch_graph_topo_indices47(sink);
+    } else if cmd == "graph topo56" || cmd == "gtopo56" || cmd == "neighborhood triacontyl" || cmd == "gntriac" || cmd == "gntriactl" || cmd == "gntriactc" || cmd == "neighborhood nonacosic edge" || cmd == "gnhtriactc" || cmd == "neighborhood octatetracontyl sombor" || cmd == "gnaso" || cmd == "gntriactcnhtriactcnaso" {
+        super::dispatch_graph_topo_indices56(sink);
     } else if cmd == "graph topo55" || cmd == "gtopo55" || cmd == "neighborhood nonacosic" || cmd == "gnnon atc" || cmd == "gnnona tc" || cmd == "gnnonatc" || cmd == "neighborhood octacosic edge" || cmd == "gnhnonatc" || cmd == "neighborhood hexatetracontyl sombor" || cmd == "gnzso" || cmd == "gnnonatcnhnonatcnzso" {
         super::dispatch_graph_topo_indices55(sink);
     } else if cmd == "graph topo54" || cmd == "gtopo54" || cmd == "neighborhood octacosic" || cmd == "gnoctatc" || cmd == "neighborhood heptacosic edge" || cmd == "gnhoctatc" || cmd == "neighborhood tetratetracontyl sombor" || cmd == "gnyso" || cmd == "gnoctatcnhoctatcnyso" {
