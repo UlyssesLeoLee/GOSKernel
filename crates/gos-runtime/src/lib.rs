@@ -18783,6 +18783,124 @@ impl GraphRuntime {
         (nhenpentaactc, nhhenpentaactc, natso, edge_count, nc)
     }
 
+    pub fn graph_topo_indices78_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NDOPENTAACTC (S-Dopentacontic vertex sum = Σ_v S(v)^52).
+        //
+        //    NDOPENTAACTC(G) = Σ_v S(v)^52  (exact u128→u64; S-Dopentacontic vertex sum)
+        //
+        //    Extends: → NHENPENTAACTC=Σ S⁵¹ (topo77) → NDOPENTAACTC=Σ S⁵² (topo78)
+        //    NDOPENTAACTC = n·S^52 for S-regular.
+        //    Overflow: S^52 > u64::MAX for S≥2 → saturating u128 accumulator, clamp to u64::MAX.
+        //    Implementation: s^52 = s32 × s16 × s4  (52=32+16+4; 3 mults — efficient!).
+
+        let mut ndopentaactc_acc: u128 = 0;
+        for ci in 0..nc {
+            let s   = sv[ci] as u128;
+            let s2  = s * s;
+            let s4  = s2 * s2;
+            let s8  = s4.saturating_mul(s4);
+            let s16 = s8.saturating_mul(s8);
+            let s32 = s16.saturating_mul(s16);
+            let s52 = s32.saturating_mul(s16).saturating_mul(s4);
+            ndopentaactc_acc = ndopentaactc_acc.saturating_add(s52);
+        }
+        let ndopentaactc = ndopentaactc_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NHDOPENTAACTC (S-Henpentacontic edge-sum) and NAUSO (S-Variant Sombor α=92).
+        //
+        //    NHDOPENTAACTC(G) = Σ_{uv∈E} (S_u+S_v)^51  (exact u128→u64; S-Henpentacontic edge-sum)
+        //    Extends: → NHHENPENTAACTC=Σ(S+S)⁵⁰ (topo77) → NHDOPENTAACTC=Σ(S+S)⁵¹ (topo78)
+        //    NHDOPENTAACTC = |E|·(2S)^51 = 2251799813685248|E|·S^51 for S-regular.
+        //    Overflow per edge: (2×16129)^51 → saturating u128 accumulator.
+        //    Implementation: ss^51 = ss32 × ss16 × ss2 × ss  (51=32+16+2+1; 4 mults).
+        //
+        //    NAUSO(G) = Σ_{uv∈E} (S_u²+S_v²)^46  (exact u128→u64; S-Variant Sombor α=92)
+        //    S-variant generalised Sombor SO^α with α=92: exact integer (no isqrt).
+        //    NATSO(α=90,topo77) → NAUSO(α=92,topo78). (3rd-pass AU.)
+        //    NAUSO = |E|·(2S²)^46 = 70368744177664|E|·S^92 for S-regular.
+        //    Overflow per edge: (2×16129²)^46 → saturating u128 accumulator.
+        //    Implementation: s2s^46 = s2s32 × s2s8 × s2s4 × s2s2  (46=32+8+4+2; 4 mults).
+
+        let mut nhdopentaactc_acc: u128 = 0;
+        let mut nauso_acc:          u128 = 0;
+        for a in 0..nc {
+            let sa  = sv[a] as u128;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb     = sv[b] as u128;
+                    // NHDOPENTAACTC: (S_a + S_b)^51 = ss32 × ss16 × ss2 × ss  (51=32+16+2+1; 4 mults)
+                    let ss     = sa + sb;
+                    let ss2    = ss * ss;
+                    let ss4    = ss2 * ss2;
+                    let ss8    = ss4.saturating_mul(ss4);
+                    let ss16   = ss8.saturating_mul(ss8);
+                    let ss32   = ss16.saturating_mul(ss16);
+                    let ss51   = ss32.saturating_mul(ss16).saturating_mul(ss2).saturating_mul(ss);
+                    nhdopentaactc_acc = nhdopentaactc_acc.saturating_add(ss51);
+                    // NAUSO: (S_a² + S_b²)^46 = s2s32 × s2s8 × s2s4 × s2s2  (46=32+8+4+2; 4 mults)
+                    let s2s    = sa * sa + sb * sb;
+                    let s2s2   = s2s * s2s;
+                    let s2s4   = s2s2.saturating_mul(s2s2);
+                    let s2s8   = s2s4.saturating_mul(s2s4);
+                    let s2s16  = s2s8.saturating_mul(s2s8);
+                    let s2s32  = s2s16.saturating_mul(s2s16);
+                    let s2s46  = s2s32.saturating_mul(s2s8).saturating_mul(s2s4).saturating_mul(s2s2);
+                    nauso_acc = nauso_acc.saturating_add(s2s46);
+                }
+            }
+        }
+        let nhdopentaactc = nhdopentaactc_acc.min(u64::MAX as u128) as u64;
+        let nauso         = nauso_acc.min(u64::MAX as u128) as u64;
+
+        (ndopentaactc, nhdopentaactc, nauso, edge_count, nc)
+    }
+
     pub fn graph_topo_indices61_inner(&self) -> (u64, u64, u64, usize, usize) {
         // 1. Compact node index.
         let mut slot_to_ci = [usize::MAX; MAX_NODES];
@@ -23456,6 +23574,10 @@ pub fn graph_topo_indices51() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices50() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices50_inner()
+}
+
+pub fn graph_topo_indices78() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices78_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
