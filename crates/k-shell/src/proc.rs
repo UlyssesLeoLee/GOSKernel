@@ -1310,6 +1310,12 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices47(sink);
     } else if cmd == "graph topo65" || cmd == "gtopo65" || cmd == "neighborhood nonatriacontic" || cmd == "gnnnonatriactc" || cmd == "neighborhood octatriacontic edge" || cmd == "gnnhnonatriactc" || cmd == "neighborhood hexahexacontyl sombor" || cmd == "gnnahso" || cmd == "gnnnonatriactcnhnonatriactcnahso" {
         super::dispatch_graph_topo_indices65(sink);
+    } else if cmd == "graph topo66" || cmd == "gtopo66" || cmd == "neighborhood tetracontic" || cmd == "gntetraactc" || cmd == "neighborhood nonatriacontic edge" || cmd == "gnhtetraactc" || cmd == "neighborhood octahexacontyl sombor" || cmd == "gnnaiso" || cmd == "gntetraactcnhtetraactcnaiso" {
+        super::dispatch_graph_topo_indices66(sink);
+    } else if cmd == "graph topo67" || cmd == "gtopo67" || cmd == "neighborhood hentetracontic" || cmd == "gnhentetraactc" || cmd == "neighborhood tetracontic edge" || cmd == "gnhhentetraactc" || cmd == "neighborhood tetracontyl sombor" || cmd == "gnnajso" || cmd == "gnhentetraactcnhhentetraactcnajso" {
+        super::dispatch_graph_topo_indices67(sink);
+    } else if cmd == "graph topo68" || cmd == "gtopo68" || cmd == "neighborhood dotetracontic" || cmd == "gndotetraactc" || cmd == "neighborhood hentetracontic edge" || cmd == "gnhdotetraactc" || cmd == "neighborhood dotetracontyl sombor" || cmd == "gnnakso" || cmd == "gndotetraactcnhdotetraactcnakso" {
+        super::dispatch_graph_topo_indices68(sink);
     } else if cmd == "graph topo64" || cmd == "gtopo64" || cmd == "neighborhood octatriacontic" || cmd == "gnoctatriactc" || cmd == "neighborhood heptatriacontic edge" || cmd == "gnhoctatriactc" || cmd == "neighborhood tetrahexacontyl sombor" || cmd == "gnnagso" || cmd == "gnoctatriactcnhoctatriactcnagso" {
         super::dispatch_graph_topo_indices64(sink);
     } else if cmd == "graph topo63" || cmd == "gtopo63" || cmd == "neighborhood heptatriacontic" || cmd == "gnheptatriactc" || cmd == "neighborhood hexatriacontic edge" || cmd == "gnnhheptatriactc" || cmd == "neighborhood hexahexacontyl sombor" || cmd == "gnafso" || cmd == "gnheptatriactcnhheptatriactcnafso" {
