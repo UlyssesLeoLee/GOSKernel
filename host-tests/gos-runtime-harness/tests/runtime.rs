@@ -689,6 +689,53 @@ fn journal_round_trips_envelopes_through_blob() {
     }
 }
 
+// ADR-015 axis③: a record's per-envelope `version` field (the wire
+// CONTROL_PLANE_PROTOCOL_VERSION an emitter stamped it with) is gated on
+// deserialize, distinct from the journal container's own JOURNAL_VERSION
+// header check (already covered above). A future protocol-wire bump that
+// forgets to update an old reader should be rejected, not silently
+// misread.
+#[test]
+fn journal_rejects_envelope_with_stale_protocol_version() {
+    use gos_journal::{deserialize_envelope, replay, serialize_envelope, JournalError};
+    use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind};
+
+    let env = ControlPlaneEnvelope {
+        version: 1,
+        kind: ControlPlaneMessageKind::Metric,
+        subject: *b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0",
+        arg0: 7,
+        arg1: 0,
+    };
+    let mut record = [0u8; gos_journal::ENVELOPE_RECORD_BYTES];
+    serialize_envelope(&env, &mut record);
+
+    // Sanity: as-stamped, it decodes fine.
+    deserialize_envelope(&record).expect("current protocol version decodes");
+
+    // Tamper the per-record version field to a value no build understands.
+    record[..2].copy_from_slice(&99u16.to_le_bytes());
+    match deserialize_envelope(&record) {
+        Err(JournalError::UnsupportedProtocolVersion(99)) => {}
+        other => panic!(
+            "expected UnsupportedProtocolVersion(99), got {:?}",
+            other.map(|e| e.version)
+        ),
+    }
+
+    // Same rejection surfaces through `replay` over a full blob.
+    let mut ring: gos_journal::JournalRing<1> = gos_journal::JournalRing::new();
+    ring.append(&env).expect("append");
+    let mut blob = vec![0u8; gos_journal::HEADER_BYTES + gos_journal::ENVELOPE_RECORD_BYTES];
+    ring.flush_into(&mut blob).expect("flush");
+    blob[gos_journal::HEADER_BYTES..gos_journal::HEADER_BYTES + 2]
+        .copy_from_slice(&7u16.to_le_bytes());
+    match replay(&blob, |_| {}) {
+        Err(JournalError::UnsupportedProtocolVersion(7)) => {}
+        other => panic!("expected UnsupportedProtocolVersion(7), got {:?}", other),
+    }
+}
+
 // Phase D.4: gos-log routes a formatted log call to both installed
 // backends, respects min-level filtering, and truncates oversize
 // payloads with the `truncated` flag set on the structured record.

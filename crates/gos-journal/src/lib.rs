@@ -46,6 +46,11 @@ pub enum JournalError {
     TrailingBytes,
     /// Unknown ControlPlaneMessageKind value during deserialize.
     UnknownKind(u8),
+    /// A record's `version` field (the wire `CONTROL_PLANE_PROTOCOL_VERSION`
+    /// the envelope was stamped with at emit time, distinct from the journal
+    /// container's own `JOURNAL_VERSION`) doesn't match what this build of
+    /// gos-journal understands. See ADR-015 axis③.
+    UnsupportedProtocolVersion(u16),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +124,9 @@ pub fn deserialize_envelope(
     record: &[u8; ENVELOPE_RECORD_BYTES],
 ) -> Result<ControlPlaneEnvelope, JournalError> {
     let version = u16::from_le_bytes([record[0], record[1]]);
+    if version != gos_protocol::CONTROL_PLANE_PROTOCOL_VERSION {
+        return Err(JournalError::UnsupportedProtocolVersion(version));
+    }
     let kind = decode_kind(record[2])?;
     let mut subject = [0u8; 16];
     subject.copy_from_slice(&record[4..20]);
