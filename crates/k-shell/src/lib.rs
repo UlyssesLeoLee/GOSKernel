@@ -12361,6 +12361,63 @@ pub fn dispatch_graph_topo_indices68(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices69(sink: &ConsoleSink) {
+    let (ntritetraactc, nhtritetraactc, nalso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices69();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo69 (NTRITETRAACTC + NHTRITETRAACTC + NALSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NTRITETRAACTC (S-Tritetracontic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-tritetracontic-vtx   NTRITETRAACTC= ");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, ntritetraactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2074}\u{00b3}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHTRITETRAACTC (S-Dotetracontic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dotetracontic-edge   NHTRITETRAACTC=");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhtritetraactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2074}\u{00b2}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NALSO (S-Tritetracontyl Sombor, α=74)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-tritetracontyl-sb    NALSO       =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nalso as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{00b3}\u{2077}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NTRITETRAACTC extends NDOTETRAACTC to 43rd power; NHTRITETRAACTC extends NHDOTETRAACTC to 42nd; NALSO=SO\u{00b5}\u{2077}\u{2074} on S, 3rd-pass AL)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_topo_indices64(sink: &ConsoleSink) {
     let (noctatriactc, nhoctatriactc, nagso, edge_count, node_count) =
         gos_runtime::graph_topo_indices64();
