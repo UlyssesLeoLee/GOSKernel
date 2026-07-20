@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use core::sync::atomic::AtomicUsize;
 
 use gos_protocol::{
-    fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy,
+    abi_compatible, fixed_bytes_16, CapabilitySpec, CapabilityToken, ClaimId, ClaimPolicy,
     ControlPlaneMessageKind, DomainId, EndpointId, ExecutionLaneClass, GraphSnapshot,
     HeapQuota, ImportSpec, LeaseEpoch, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
     ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleLifecycle,
@@ -79,6 +79,7 @@ pub enum SupervisorError {
     ModuleRejected,
     DomainCreateFailed,
     DomainTeardownFailed,
+    AbiVersionMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1214,6 +1215,16 @@ impl Supervisor {
             return Err(SupervisorError::InvalidState);
         }
         if let ModuleSource::Descriptor(descriptor) = source {
+            // Mirrors gos_loader::validate_manifest's GOS_ABI_VERSION gate
+            // (ADR-015): the vtable a module's entry point receives
+            // (`ModuleAbiV1`/`MODULE_ABI_VERSION`) is a second, independent
+            // ABI axis from the plugin-manifest one and was never checked
+            // here — a module built against a future-major or newer-minor
+            // host would install and run with a vtable shape it doesn't
+            // understand instead of failing fast at validate time.
+            if !abi_compatible(descriptor.abi_version, MODULE_ABI_VERSION) {
+                return Err(SupervisorError::AbiVersionMismatch);
+            }
             let mut dep_idx = 0usize;
             while dep_idx < descriptor.dependencies.len() {
                 let dependency = descriptor.dependencies[dep_idx];
