@@ -11,13 +11,14 @@ use gos_protocol::{
     MODULE_ABI_VERSION,
 };
 use gos_supervisor::{
-    bootstrap, bring_up_module, charge_heap, claim_resource, clear_restart_history, current_instance,
-    dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
-    instance_domain_root, instance_is_degraded, instance_restart_generation, module_handle_for_id,
-    module_lifecycle, module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
-    release_claim, restart_module, schedule_instance, snapshot, spawn_instance,
-    template_for_module, ModuleStatusSummary, SupervisorError, MAX_CLAIMS, MAX_MODULES,
-    MAX_RESTARTS_BEFORE_DEGRADE,
+    bootstrap, bring_up_module, charge_gpu_bytes, charge_heap, claim_resource,
+    clear_restart_history, current_instance, dequeue_ready_instance, drain_revocation,
+    fault_module, heap_grant_summary, install_module, instance_domain_root, instance_is_degraded,
+    instance_resource_summaries, instance_restart_generation, module_handle_for_id,
+    module_lifecycle, module_status_summaries, process_restart_queue, queue_restart,
+    realize_boot_modules, release_claim, restart_module, schedule_instance, set_gpu_quota,
+    snapshot, spawn_instance, template_for_module, InstanceResourceSummary, ModuleStatusSummary,
+    SupervisorError, MAX_CLAIMS, MAX_INSTANCES, MAX_MODULES, MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -993,4 +994,49 @@ fn module_handle_for_id_resolves_installed_module_by_name() {
     restart_module(resolved).expect("restart via resolved handle");
     let after = module_lifecycle(provider).expect("lifecycle after restart");
     assert_eq!(after, ModuleLifecycle::Running, "RestartAlways module comes back up");
+}
+
+const ZERO_RESOURCE: InstanceResourceSummary = InstanceResourceSummary {
+    instance_id: NodeInstanceId::ZERO,
+    module: ModuleHandle::ZERO,
+    lifecycle: gos_protocol::NodeInstanceLifecycle::Stopped,
+    heap_pages_used: 0,
+    heap_pages_max: 0,
+    gpu_bytes_used: 0,
+    gpu_bytes_max: 0,
+};
+
+#[test]
+fn instance_resource_summaries_reports_heap_and_gpu_usage_against_quota() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+    let instance = current_instance(provider).expect("primary instance");
+
+    set_gpu_quota(instance, 4096).expect("set gpu quota");
+    charge_gpu_bytes(instance, 1024).expect("charge gpu");
+
+    let mut out = [ZERO_RESOURCE; MAX_INSTANCES];
+    let count = instance_resource_summaries(&mut out);
+    assert_eq!(count, 1, "exactly the one live instance is reported");
+    let summary = out[0];
+    assert_eq!(summary.instance_id, instance);
+    assert_eq!(summary.module, provider);
+    assert_eq!(summary.lifecycle, gos_protocol::NodeInstanceLifecycle::Ready);
+    // PROVIDER's heap quota is charged 2 pages by test_start (see
+    // CALLBACK_HEAP_BASE wiring above), so usage should already be
+    // non-zero by the time boot has realized this module.
+    assert_eq!(summary.heap_pages_used, 2);
+    assert!(summary.heap_pages_max >= summary.heap_pages_used);
+    assert_eq!(summary.gpu_bytes_used, 1024);
+    assert_eq!(summary.gpu_bytes_max, 4096);
+
+    // charge_heap further and confirm the summary tracks the new total.
+    charge_heap(instance, 1).expect("charge heap");
+    let mut out = [ZERO_RESOURCE; MAX_INSTANCES];
+    let count = instance_resource_summaries(&mut out);
+    assert_eq!(count, 1);
+    assert_eq!(out[0].heap_pages_used, 3);
 }

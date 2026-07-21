@@ -55,6 +55,7 @@ See:
 - [doc/03_详细设计/NETWORK_NODE_zh.md](./doc/03_详细设计/NETWORK_NODE_zh.md)
 - [doc/OPS_MODULE_HEALTH.md](./doc/OPS_MODULE_HEALTH.md)
 - [doc/OPS_SUPERVISOR_SNAPSHOT.md](./doc/OPS_SUPERVISOR_SNAPSHOT.md)
+- [doc/OPS_INSTANCE_RESOURCE_USAGE.md](./doc/OPS_INSTANCE_RESOURCE_USAGE.md)
 
 ## Developer Quick Start
 

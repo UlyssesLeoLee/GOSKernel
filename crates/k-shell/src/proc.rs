@@ -530,6 +530,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
         super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  resources / res  per-instance + total heap/gpu usage vs quota\n");
         super::print_str(sink, "  sup     supervisor internals (instances/resources/caps/lanes)\n");
         super::print_str(sink, "  restart <name>  manually restart one module by id\n");
         super::print_str(sink, "  nodes              list all live graph nodes (ps-style)\n");
@@ -1676,6 +1677,57 @@ fn dispatch_text_command(
                 super::set_color(sink, 12, 0);
                 super::print_str(sink, " supervisor not bootstrapped\n");
             }
+        }
+    } else if cmd == "resources" || cmd == "res" {
+        super::set_color(sink, 10, 0);
+        super::print_str(sink, " instance resources\n");
+        super::set_color(sink, 7, 0);
+        let mut summaries = [gos_supervisor::InstanceResourceSummary {
+            instance_id: gos_protocol::NodeInstanceId::ZERO,
+            module: gos_protocol::ModuleHandle::ZERO,
+            lifecycle: gos_protocol::NodeInstanceLifecycle::Stopped,
+            heap_pages_used: 0,
+            heap_pages_max: 0,
+            gpu_bytes_used: 0,
+            gpu_bytes_max: 0,
+        }; gos_supervisor::MAX_INSTANCES];
+        let count = gos_supervisor::instance_resource_summaries(&mut summaries);
+        if count == 0 {
+            super::print_str(sink, "  (no live instances)\n");
+        }
+        let mut total_heap_used: u64 = 0;
+        let mut total_heap_max: u64 = 0;
+        let mut total_gpu_used: u64 = 0;
+        let mut total_gpu_max: u64 = 0;
+        for summary in summaries.iter().take(count) {
+            super::print_str(sink, "  instance#");
+            super::print_num_inline(sink, summary.instance_id.0 as usize);
+            super::print_str(sink, "  state: ");
+            super::print_str(sink, super::instance_lifecycle_label(summary.lifecycle));
+            super::print_str(sink, "  heap: ");
+            super::print_num_inline(sink, summary.heap_pages_used as usize);
+            super::print_str(sink, "/");
+            super::print_num_inline(sink, summary.heap_pages_max as usize);
+            super::print_str(sink, " pages  gpu: ");
+            super::print_num_inline(sink, summary.gpu_bytes_used as usize);
+            super::print_str(sink, "/");
+            super::print_num_inline(sink, summary.gpu_bytes_max as usize);
+            super::print_str(sink, " bytes\n");
+            total_heap_used += summary.heap_pages_used as u64;
+            total_heap_max += summary.heap_pages_max as u64;
+            total_gpu_used += summary.gpu_bytes_used;
+            total_gpu_max += summary.gpu_bytes_max;
+        }
+        if count > 0 {
+            super::print_str(sink, "  total  heap: ");
+            super::print_num_inline(sink, total_heap_used as usize);
+            super::print_str(sink, "/");
+            super::print_num_inline(sink, total_heap_max as usize);
+            super::print_str(sink, " pages  gpu: ");
+            super::print_num_inline(sink, total_gpu_used as usize);
+            super::print_str(sink, "/");
+            super::print_num_inline(sink, total_gpu_max as usize);
+            super::print_str(sink, " bytes\n");
         }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
         let theme = super::selected_theme();

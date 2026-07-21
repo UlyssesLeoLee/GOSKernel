@@ -14195,6 +14195,18 @@ fn module_fault_policy_label(policy: gos_protocol::ModuleFaultPolicy) -> &'stati
     }
 }
 
+fn instance_lifecycle_label(state: gos_protocol::NodeInstanceLifecycle) -> &'static str {
+    match state {
+        gos_protocol::NodeInstanceLifecycle::Allocated => "allocated",
+        gos_protocol::NodeInstanceLifecycle::Ready => "ready",
+        gos_protocol::NodeInstanceLifecycle::Running => "running",
+        gos_protocol::NodeInstanceLifecycle::WaitingClaim => "waiting-claim",
+        gos_protocol::NodeInstanceLifecycle::Suspended => "suspended",
+        gos_protocol::NodeInstanceLifecycle::Stopped => "stopped",
+        gos_protocol::NodeInstanceLifecycle::Faulted => "faulted",
+    }
+}
+
 fn entry_policy_label(policy: gos_protocol::EntryPolicy) -> &'static str {
     match policy {
         gos_protocol::EntryPolicy::Manual => "manual",
