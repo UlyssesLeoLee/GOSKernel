@@ -530,6 +530,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  info    runtime snapshot\n");
         super::print_str(sink, "  graph   graph counters\n");
         super::print_str(sink, "  modules supervisor module health (lifecycle/fault/restarts)\n");
+        super::print_str(sink, "  restart <name>  manually restart one module by id\n");
         super::print_str(sink, "  nodes              list all live graph nodes (ps-style)\n");
         super::print_str(sink, "  nodes faulted      list only faulted nodes\n");
         super::print_str(sink, "  nodes summary      lifecycle distribution count\n");
@@ -819,6 +820,9 @@ fn dispatch_text_command(
                 super::print_str(sink, "  DEGRADED");
             }
             super::print_str(sink, "\n");
+        }
+        if count > 0 {
+            super::print_str(sink, "  restart <name>  manually restart a faulted/degraded module\n");
         }
     } else if cmd == "nodes" || cmd == "nodes all" {
         super::dispatch_nodes_list(sink, false);
@@ -1559,6 +1563,47 @@ fn dispatch_text_command(
                     Err(_) => {
                         super::set_color(sink, 12, 0);
                         super::print_str(sink, " clear failed (see `modules` for fault policy)\n");
+                    }
+                },
+                None => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " unknown module: ");
+                    super::print_str(sink, trimmed);
+                    super::print_str(sink, "  (see `modules` for installed names)\n");
+                }
+            }
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(name) = cmd.strip_prefix("restart ") {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " usage: restart <module-name>\n");
+        } else {
+            let mut upper = [0u8; 16];
+            let bytes = trimmed.as_bytes();
+            let len = bytes.len().min(16);
+            for i in 0..len {
+                upper[i] = bytes[i].to_ascii_uppercase();
+            }
+            let upper_str = core::str::from_utf8(&upper[..len]).unwrap_or("");
+            let module_id = gos_protocol::ModuleId::from_ascii(upper_str);
+            match gos_supervisor::module_handle_for_id(module_id) {
+                Some(handle) => match gos_supervisor::restart_module(handle) {
+                    Ok(()) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " restarting ");
+                        super::print_str(sink, trimmed);
+                        super::set_color(sink, 7, 0);
+                        if let Ok(state) = gos_supervisor::module_lifecycle(handle) {
+                            super::print_str(sink, "  state: ");
+                            super::print_str(sink, super::module_lifecycle_label(state));
+                        }
+                        super::print_str(sink, "\n");
+                    }
+                    Err(_) => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " restart failed (see `modules` for fault policy)\n");
                     }
                 },
                 None => {

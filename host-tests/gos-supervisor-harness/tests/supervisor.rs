@@ -13,8 +13,8 @@ use gos_protocol::{
 use gos_supervisor::{
     bootstrap, bring_up_module, charge_heap, claim_resource, clear_restart_history, current_instance,
     dequeue_ready_instance, drain_revocation, fault_module, heap_grant_summary, install_module,
-    instance_domain_root, instance_is_degraded, instance_restart_generation, module_lifecycle,
-    module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
+    instance_domain_root, instance_is_degraded, instance_restart_generation, module_handle_for_id,
+    module_lifecycle, module_status_summaries, process_restart_queue, queue_restart, realize_boot_modules,
     release_claim, restart_module, schedule_instance, snapshot, spawn_instance,
     template_for_module, ModuleStatusSummary, SupervisorError, MAX_CLAIMS, MAX_MODULES,
     MAX_RESTARTS_BEFORE_DEGRADE,
@@ -964,4 +964,33 @@ fn clear_restart_history_rejects_unknown_handle() {
         clear_restart_history(unknown),
         Err(SupervisorError::ModuleNotFound)
     );
+}
+
+#[test]
+fn module_handle_for_id_resolves_installed_module_by_name() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    // The shell `restart <name>` command only has the typed module name to
+    // go on; module_handle_for_id is the lookup that turns it into the
+    // ModuleHandle restart_module requires.
+    let resolved = module_handle_for_id(ModuleId::from_ascii("MOD.PROVIDER"))
+        .expect("installed module must resolve by id");
+    assert_eq!(resolved, provider);
+
+    assert!(
+        module_handle_for_id(ModuleId::from_ascii("NO.SUCH.MODULE")).is_none(),
+        "unknown module id must not resolve"
+    );
+
+    // Round-trip: resolve by name, then restart through the resolved
+    // handle exactly as the shell command does.
+    let before = module_lifecycle(provider).expect("lifecycle before restart");
+    assert_eq!(before, ModuleLifecycle::Running);
+    restart_module(resolved).expect("restart via resolved handle");
+    let after = module_lifecycle(provider).expect("lifecycle after restart");
+    assert_eq!(after, ModuleLifecycle::Running, "RestartAlways module comes back up");
 }
