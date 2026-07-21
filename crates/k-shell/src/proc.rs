@@ -1329,6 +1329,8 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices70(sink);
     } else if cmd == "graph topo71" || cmd == "gtopo71" || cmd == "neighborhood pentatetracontic" || cmd == "gnpentetraactc" || cmd == "neighborhood tetratetracontic edge" || cmd == "gnhpentetraactc" || cmd == "neighborhood pentatetracontyl sombor" || cmd == "gnnanso" || cmd == "gnpentetraactcnhpentetraactcnanso" {
         super::dispatch_graph_topo_indices71(sink);
+    } else if cmd == "graph topo84" || cmd == "gtopo84" || cmd == "neighborhood octopentacontic" || cmd == "gnoctopentaactc" || cmd == "neighborhood heptapentacontic edge" || cmd == "gnnhoctopentaactc" || cmd == "neighborhood tetrahectyl sombor" || cmd == "gnnbaso" || cmd == "gnoctopentaactcnhoctopentaactcnbaso" {
+        super::dispatch_graph_topo_indices84(sink);
     } else if cmd == "graph topo83" || cmd == "gtopo83" || cmd == "neighborhood heptapentacontic" || cmd == "gnheptpentaactc" || cmd == "neighborhood hexapentacontic edge" || cmd == "gnnhheptpentaactc" || cmd == "neighborhood dohectyl sombor" || cmd == "gnnazso" || cmd == "gnheptpentaactcnhheptpentaactcnazso" {
         super::dispatch_graph_topo_indices83(sink);
     } else if cmd == "graph topo82" || cmd == "gtopo82" || cmd == "neighborhood hexapentacontic" || cmd == "gnhexpentaactc" || cmd == "neighborhood pentapentacontic edge" || cmd == "gnnhhexpentaactc" || cmd == "neighborhood centyl sombor" || cmd == "gnnayso" || cmd == "gnhexpentaactcnhhexpentaactcnayso" {
