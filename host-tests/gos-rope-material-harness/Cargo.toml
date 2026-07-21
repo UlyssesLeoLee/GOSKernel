@@ -1,0 +1,10 @@
+[package]
+name = "gos-rope-material-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+k-rope = { path = "../../crates/k-rope" }
+gos-protocol = { path = "../../crates/gos-protocol" }

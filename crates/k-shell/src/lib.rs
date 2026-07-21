@@ -13502,6 +13502,63 @@ pub fn dispatch_graph_topo_indices91(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices92(sink: &ConsoleSink) {
+    let (nhexahexaactc, nhhexahexaactc, nbisos, edge_count, node_count) =
+        gos_runtime::graph_topo_indices92();
+
+    set_color(sink, 7, 0);
+    print_str(sink, " graph topo92 (NHEXAHEXAACTC + NHHEXAHEXAACTC + NBISOS S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NHEXAHEXAACTC (S-Hexahexacontic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-hexahexactic-vtx        NHEXAHEXAACTC=");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nhexahexaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2076}\u{2076}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHHEXAHEXAACTC (S-Hexahexacontic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-hexahexacontic-edge     NHHEXAHEXAACTC=");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhhexahexaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2076}\u{2075}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NBISOS (S-Variant Sombor, α=120)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dohectyl-sombor-bi       NBISOS      =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nbisos as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2076}\u{2070}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NHEXAHEXAACTC extends NHEXAPENTACTC to 66th power; 7th of hexacontic; NBISOS=SO\u{00b5}\u{00b9}\u{00b2}\u{2070} on S, 9th of NB series)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_topo_indices90(sink: &ConsoleSink) {
     let (nhexatetraactc, nhhexatetraactc, nbgso, edge_count, node_count) =
         gos_runtime::graph_topo_indices90();

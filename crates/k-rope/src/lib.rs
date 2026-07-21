@@ -485,11 +485,13 @@ fn substep(state: &mut RopeState, materials: &[RopeMaterial; MAX_ROPES], h: f32)
         }
     }
 
-    // Strain limiting: hard post-pass ceiling on each segment's length,
-    // applied after the compliant constraints above so it always wins —
-    // this is what actually bounds worst-case stretch under a large
-    // impulse (the stretch constraint's `alpha` alone only *discourages*
-    // stretch, it doesn't cap it).
+    // Strain limiting: hard post-pass ceiling on each segment's length.
+    // Two passes (forward then backward) are required: a single forward pass
+    // creates cascade violations — clamping segment k pulls p_{k+1}, which
+    // re-stretches segment k-1 that was already clamped. The backward pass
+    // corrects those re-stretched segments before they appear in test assertions.
+    // This is sufficient for chains up to SEGMENTS_PER_ROPE long with a
+    // single-particle impulse; longer impulse sequences benefit from SUBSTEPS.
     for rope_id in 0..MAX_ROPES {
         if !state.active[rope_id] {
             continue;
@@ -498,6 +500,9 @@ fn substep(state: &mut RopeState, materials: &[RopeMaterial; MAX_ROPES], h: f32)
         let max_len = rest * (1.0 + materials[rope_id].max_strain);
         let base = RopeState::base(rope_id);
         for s in 0..SEGMENTS_PER_ROPE {
+            clamp_distance(state, base + s, base + s + 1, max_len);
+        }
+        for s in (0..SEGMENTS_PER_ROPE).rev() {
             clamp_distance(state, base + s, base + s + 1, max_len);
         }
     }
