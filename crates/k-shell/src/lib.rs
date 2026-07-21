@@ -13103,6 +13103,63 @@ pub fn dispatch_graph_topo_indices82(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices83(sink: &ConsoleSink) {
+    let (nheptpentaactc, nhheptpentaactc, nazso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices83();
+
+    set_color(sink, 14, 0); // bright-yellow
+    print_str(sink, " graph topo83 (NHEPTPENTAACTC + NHHEPTPENTAACTC + NAZSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NHEPTPENTAACTC (S-Heptapentacontic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-heptapentacontic-vtx    NHEPTPENTAACTC =");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, nheptpentaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2075}\u{2077}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHHEPTPENTAACTC (S-Hexapentacontic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-hexapentacontic-edge   NHHEPTPENTAACTC=");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhheptpentaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2075}\u{2076}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NAZSO (S-Variant Sombor, α=102)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dohectyl-sombor         NAZSO          =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nazso as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2075}\u{00b9}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NHEPTPENTAACTC extends NHEXPENTAACTC to 57th power; NHHEPTPENTAACTC extends NHHEXPENTAACTC to 56th; NAZSO=SO\u{00b5}\u{00b9}\u{2070}\u{00b2} on S, 3rd-pass AZ)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_topo_indices76(sink: &ConsoleSink) {
     let (npentaactc, nhpentaactc, nasso, edge_count, node_count) =
         gos_runtime::graph_topo_indices76();
