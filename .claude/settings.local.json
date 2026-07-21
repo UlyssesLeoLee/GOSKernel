@@ -39,7 +39,19 @@
       "Bash(python3 probe.py)",
       "Bash(echo \"▶ booted PID=$!\")",
       "Bash(echo \"▶ booting PID=$!\")",
-      "Bash(python3)"
+      "Bash(python3)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"degree\" -KeepLogs)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"graph-topo13|graph-degree\" -KeepLogs 2>&1 | tail -50)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"graph-topo13|graph-degree\" -KeepLogs 2>&1 | Select-Object -Last 60)",
+      "PowerShell(grep topo)",
+      "PowerShell(head -10)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"topo13\")",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"graph\" -NoRetry 2>&1 | Select-Object -Last 40)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"hamiltonian|kcore|diff\" 2>&1 | Select-Object -Last 40)",
+      "PowerShell(cd E:\\\\GOSKernel; pwsh -NoProfile -File tools/run_host_tests_with_evidence.ps1 -Filter \"graph-hamiltonian|graph-kcore|graph-diff\" 2>&1 | Select-Object -Last 50)",
+      "PowerShell(cd E:\\\\GOSKernel\\\\host-tests\\\\gos-graph-hamiltonian-harness; cargo test --quiet 2>&1 | tee $env:TEMP\\\\test_output.log; echo \"\"; \"警告总数:\"; \\(Get-Content $env:TEMP\\\\test_output.log | Select-String \"warning:\"\\).Count)",
+      "Bash(xargs head -40)",
+      "Bash(cargo check *)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-# HARDENING LOG — V3.81 — 2026-07-20
+# GOSKernel 强化日志 — V3.81（2026-07-20）
 
 ## 概述 / Summary
 

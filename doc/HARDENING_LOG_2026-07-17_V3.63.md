@@ -1,5 +1,7 @@
 # GOS 强化日志 V3.63 — 2026-07-17
 
+> **归位说明（2026-07-19）**：本文件此前仅存在于 `doc/` 根目录，从未归位至 `06_运维维护/hardening/`。本轮已复制归档至 [06_运维维护/hardening/HARDENING_LOG_2026-07-17_V3.63.md](06_运维维护/hardening/HARDENING_LOG_2026-07-17_V3.63.md)（内容一致，原为纯中文，未做改写）。根目录本文件按文档管理规范保留，作为硬化当时的原始存档快照。
+
 ## 版本概要
 
 **V3.63** — NHEXATC + NHHEXATC + NVSO Neighborhood S-variant 拓扑指数

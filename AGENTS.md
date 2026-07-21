@@ -13,10 +13,10 @@ Two documents are the repo's non-negotiable constitution. Read them before
 touching boot sequencing, the plugin model, the runtime/supervisor, or graph
 mutation:
 
-- [`doc/RULE_GRAPH_PRIME.md`](doc/RULE_GRAPH_PRIME.md) — hard invariants:
+- [`doc/00_项目管理/RULE_GRAPH_PRIME.md`](doc/00_项目管理/RULE_GRAPH_PRIME.md) — hard invariants:
   bootstrap boundary, stable `NodeId`/`VectorAddress`/`EdgeId`, native-first
   plugins, graph-mediated cooperation, zero-new-legacy.
-- [`doc/GOS_GOVERNANCE_v0_2.md`](doc/GOS_GOVERNANCE_v0_2.md) — rationale,
+- [`doc/00_项目管理/GOS_GOVERNANCE_v0_2.md`](doc/00_项目管理/GOS_GOVERNANCE_v0_2.md) — rationale,
   current legacy allowlist (`k-pit`, `k-ps2`, `k-idt`, `k-pmm`, `k-vmm`,
   `k-heap` — do not extend it), and the merge checklist.
 
@@ -37,7 +37,7 @@ Constraints from those docs that are easy to violate by accident:
 
 > A separate, **not-yet-ratified** "edge algebra constitution" redesign
 > (sometimes referenced as `ADR-001`/`ADR-004`) may exist only as a proposal
-> in a sibling agent worktree (`doc/ADR-001-edge-algebra-constitution.md`,
+> in a sibling agent worktree (`doc/03_详细设计/ADR-001-edge-algebra-constitution.md`,
 > `plan/V2_DEVELOPMENT_PLAN.md`). If you see an `ADR-00x` citation, confirm
 > the doc actually exists and is ratified **on your branch** before relying
 > on it or repeating the citation — don't propagate references to docs you
@@ -65,10 +65,16 @@ Constraints from those docs that are easy to violate by accident:
   dependency. Follow this pattern for Phase I UI work rather than adding one.
 - `tools/*.py`, `tools/*.ps1` — build/launch helpers and empirical
   verification harnesses (see §4).
-- `doc/`, `plan/` — design docs, specs, phase roadmaps (mostly Chinese).
-  `RULE_GRAPH_PRIME.md` / `GOS_GOVERNANCE_v0_2.md` are the load-bearing
-  ones; treat everything else as design history, not current law, unless
-  cross-checked against code.
+- `doc/`, `plan/` — design docs, specs, phase roadmaps (mostly Chinese),
+  organized under `doc/00_项目管理` … `doc/06_运维维护` following a
+  Japanese-style SDLC document structure (project mgmt → requirements →
+  basic design → detailed design → implementation plan → test verification
+  → operations). `00_项目管理/RULE_GRAPH_PRIME.md` /
+  `00_项目管理/GOS_GOVERNANCE_v0_2.md` are the load-bearing ones; treat
+  everything else as design history, not current law, unless cross-checked
+  against code. Loose `.md` files directly under `doc/` (outside the
+  numbered folders) are archival stubs pointing at the canonical numbered
+  location — follow the link rather than reading the stub itself.
 
 ## 3. Build, run, check
 

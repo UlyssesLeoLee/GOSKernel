@@ -1,9 +1,9 @@
-# HARDENING_LOG_2026-07-20_V3.73
+# GOSKernel 强化日志 — V3.73
 
 **版本**: V3.73  
 **日期**: 2026-07-20  
 **分支**: feat/vk-auto-live-surface  
-**主题**: NHEXATRIACTC + NHHEXATRIACTC + NAESO Neighborhood S-variant topological indices + gos-graph-topo62-harness (10 tests)
+**主题**: NHEXATRIACTC + NHHEXATRIACTC + NAESO 邻域 S-变体拓扑指数 + gos-graph-topo62-harness（10 项测试）
 
 ---
 

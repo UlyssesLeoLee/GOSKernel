@@ -1,31 +1,31 @@
-# HARDENING LOG — V3.51 (2026-07-16)
+# GOSKernel 强化日志 V3.51 — 2026-07-16
 
-## Summary
+## 摘要
 
-Added three new S-variant Neighborhood topological indices — NQTC, NHTC, NGSO — plus the
-`gos-graph-topo40-harness` (10 tests). Host-test suite now totals **1483 tests**.
+新增三个 S-variant Neighborhood 拓扑指数 —— NQTC、NHTC、NGSO，以及
+`gos-graph-topo40-harness`（10 项测试）。宿主测试套件现总计 **1483 个测试**。
 
-## New indices: NQTC + NHTC + NGSO (S-variant family, topo40)
+## 新增指数：NQTC + NHTC + NGSO（S-variant 家族，topo40）
 
-### Mathematical definitions
+### 数学定义
 
-Let S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
+设 S(v) = Σ_{w∈N(v)} deg(w)（邻居度数和，"S-variant"）。
 
-| Index | Formula | Type | Series |
+| 指数 | 公式 | 类型 | 所属序列 |
 |-------|---------|------|--------|
-| NQTC | Σ_v S(v)^14 | S-Tetradecic vertex sum | extends NTC=Σ S¹³ (topo39) |
-| NHTC | Σ_{uv∈E} (S_u+S_v)^13 | S-Tridecic edge-sum | extends NHDOC=Σ(S+S)¹² (topo39) |
-| NGSO | Σ_{uv∈E} (S_u²+S_v²)^8 | S-Hexadecic Sombor α=16 | extends NESO=Σ(S²+S²)⁷ (topo39) |
+| NQTC | Σ_v S(v)^14 | S-十四次方顶点和 | 扩展 NTC=Σ S¹³（topo39） |
+| NHTC | Σ_{uv∈E} (S_u+S_v)^13 | S-十三次方边和 | 扩展 NHDOC=Σ(S+S)¹²（topo39） |
+| NGSO | Σ_{uv∈E} (S_u²+S_v²)^8 | S-十六次方 Sombor α=16 | 扩展 NESO=Σ(S²+S²)⁷（topo39） |
 
-### S-regular formulas
+### S-正则公式
 
-- NQTC = n·S^14                        (for S-regular)
-- NHTC = |E|·(2S)^13 = 8192|E|·S^13   (for S-regular)
-- NGSO = |E|·(2S²)^8 = 256|E|·S^16    (for S-regular)
+- NQTC = n·S^14                        （对 S-正则图）
+- NHTC = |E|·(2S)^13 = 8192|E|·S^13   （对 S-正则图）
+- NGSO = |E|·(2S²)^8 = 256|E|·S^16    （对 S-正则图）
 
-### Cross-check table
+### 交叉验证表
 
-| Graph | NQTC | NHTC | NGSO | edges | nodes |
+| 图 | NQTC | NHTC | NGSO | 边数 | 点数 |
 |-------|------|------|------|-------|-------|
 | K₂ | 2 | 8_192 | 256 | 1 | 2 |
 | P₃ | 49_152 | 134_217_728 | 33_554_432 | 2 | 3 |
@@ -35,25 +35,25 @@ Let S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum, "S-variant").
 | K₄ | 91_507_169_819_844 | 124_937_789_194_027_008 | 2_846_239_010_076_427_776 | 6 | 4 |
 | K_{2,3} | 391_820_820_480 | 641_959_232_274_432 | 4_333_224_817_852_416 | 6 | 5 |
 
-### Implementation notes
+### 实现要点
 
-- All three use u128 accumulators with saturating ops; NO isqrt anywhere (all exact integer)
-- NQTC: s^14 = s^8 × s^4 × s^2 (s8.saturating_mul(s4).saturating_mul(s2))
-- NHTC: ss^13 = ss^8 × ss^4 × ss (ss8.saturating_mul(ss4).saturating_mul(ss))
-- NGSO: s2s^8 = (s2s^4)^2 (s2s4.saturating_mul(s2s4))
-- NGSO is exact integer because (S_u²+S_v²)^8 has no fractional power
-- K₃ and K_{1,4} share S=4 → same per-edge NHTC and NGSO; NQTC differs by node count
-- VectorAddress L4=127 for gos-graph-topo40-harness; plugin TOPIX_40; executor t40.exec
+- 三者均使用带饱和运算的 u128 累加器；全程无需 isqrt（均为精确整数）
+- NQTC：s^14 = s^8 × s^4 × s^2（s8.saturating_mul(s4).saturating_mul(s2)）
+- NHTC：ss^13 = ss^8 × ss^4 × ss（ss8.saturating_mul(ss4).saturating_mul(ss)）
+- NGSO：s2s^8 = (s2s^4)^2（s2s4.saturating_mul(s2s4)）
+- NGSO 为精确整数，因为 (S_u²+S_v²)^8 不含分数次幂
+- K₃ 与 K_{1,4} 共享 S=4 → 每边 NHTC、NGSO 相同；NQTC 因节点数不同而不同
+- gos-graph-topo40-harness 的 VectorAddress L4=127；插件 TOPIX_40；执行器 t40.exec
 
-### Key values
+### 关键数值
 
-- K₂ (S=1): NQTC=2, NHTC=2^13=8_192, NGSO=2^8=256
-- P₃ (S=2): NQTC=3×2^14=49_152, NHTC=2×4^13=134_217_728, NGSO=2×8^8=33_554_432
-- K₃ (S=4): 4^14=268_435_456; 8^13=549_755_813_888; 32^8=1_099_511_627_776
-- K₄ (S=9): 9^14=22_876_792_454_961; 18^13=20_822_964_865_671_168; 162^8=474_373_168_346_071_296
-- K_{2,3} (S=6): 6^14=78_364_164_096; 12^13=106_993_205_379_072; 72^8=722_204_136_308_736
+- K₂（S=1）：NQTC=2，NHTC=2^13=8_192，NGSO=2^8=256
+- P₃（S=2）：NQTC=3×2^14=49_152，NHTC=2×4^13=134_217_728，NGSO=2×8^8=33_554_432
+- K₃（S=4）：4^14=268_435_456；8^13=549_755_813_888；32^8=1_099_511_627_776
+- K₄（S=9）：9^14=22_876_792_454_961；18^13=20_822_964_865_671_168；162^8=474_373_168_346_071_296
+- K_{2,3}（S=6）：6^14=78_364_164_096；12^13=106_993_205_379_072；72^8=722_204_136_308_736
 
-### Shell commands
+### Shell 命令
 
 ```
 graph topo40 | gtopo40
@@ -63,17 +63,17 @@ neighborhood hexadecic sombor | gngso
 gnqtcnhtcngso
 ```
 
-## Files changed
+## 变更文件
 
-| File | Change |
+| 文件 | 变更内容 |
 |------|--------|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_topo_indices40_inner()` method + `graph_topo_indices40()` public fn |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_topo_indices40()` |
-| `crates/k-shell/src/proc.rs` | Added topo40 routing branch |
-| `host-tests/gos-graph-topo40-harness/` | New harness (Cargo.toml, .cargo/config.toml, tests/graph_topo40.rs) |
-| `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-16_V3.51.md` | This file |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices40_inner()` 方法 + 公共函数 `graph_topo_indices40()` |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices40()` |
+| `crates/k-shell/src/proc.rs` | 新增 topo40 路由分支 |
+| `host-tests/gos-graph-topo40-harness/` | 新建 harness（Cargo.toml、.cargo/config.toml、tests/graph_topo40.rs） |
+| `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-16_V3.51.md` | 本篇日志 |
 
-## Test results
+## 测试结果
 
 ```
 running 10 tests
@@ -91,12 +91,12 @@ test test_10_k23_bipartite ... ok
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 ```
 
-## Cumulative state
+## 累计状态
 
-- **Version**: V3.51
-- **Branch**: feat/vk-auto-live-surface
-- **Host-test suite total**: 1483 tests (1473 through V3.50 + 10 new)
-- **VectorAddress L4 namespace**: 88=graph-topo through 127=graph-topo40
-- **S-variant power-vertex series**: NM₁(2)→NF(3)→NVQ(4)→NPS(5)→NSH(6)→NSHP(7)→NOC(8)→NNC(9)→NDC(10)→NUC(11)→NDoC(12)→NTC(13)→NQTC(14)
-- **S-variant power-edge series**: NHM1(2)→NHCS(3)→NHQS(4)→NHPS(5)→NHSE(6)→NHHS(7)→NHOC(8)→NHNC(9)→NHDC(10)→NHUC(11)→NHDOC(12)→NHTC(13)
-- **S-variant Sombor α-series**: NSO(1)→NCSO(3)→NFSO(4)→NHSO(6)→NOSO(8)→NTSO(10)→NDSO(12)→NESO(14)→NGSO(16)
+- **版本**：V3.51
+- **分支**：feat/vk-auto-live-surface
+- **宿主测试套件总计**：1483 个测试（截至 V3.50 的 1473 个 + 新增 10 个）
+- **VectorAddress L4 命名空间**：88=graph-topo 至 127=graph-topo40
+- **S-variant 幂次-顶点序列**：NM₁(2)→NF(3)→NVQ(4)→NPS(5)→NSH(6)→NSHP(7)→NOC(8)→NNC(9)→NDC(10)→NUC(11)→NDoC(12)→NTC(13)→NQTC(14)
+- **S-variant 幂次-边序列**：NHM1(2)→NHCS(3)→NHQS(4)→NHPS(5)→NHSE(6)→NHHS(7)→NHOC(8)→NHNC(9)→NHDC(10)→NHUC(11)→NHDOC(12)→NHTC(13)
+- **S-variant Sombor α-序列**：NSO(1)→NCSO(3)→NFSO(4)→NHSO(6)→NOSO(8)→NTSO(10)→NDSO(12)→NESO(14)→NGSO(16)

@@ -1,48 +1,48 @@
-# Hardening Log — V3.35 (2026-07-15)
+# GOSKernel 强化日志 V3.35 — 2026-07-15
 
-**Branch**: feat/vk-auto-live-surface  
-**Commit**: feat(v3.35): NISI + NAZI + NEM1 Neighborhood S-variant indices + gos-graph-topo24-harness (10 tests)
-
----
-
-## Summary
-
-Added three new Neighborhood S-variant topological indices continuing the S-family introduced in V3.29–V3.34.  
-This version adds S-analogues of the Inverse Sum Indegree (ISI), Augmented Zagreb Index (AZI), and Reformulated First Zagreb Index (EM₁).
+**分支**: feat/vk-auto-live-surface  
+**提交**: feat(v3.35): NISI + NAZI + NEM1 Neighborhood S-variant indices + gos-graph-topo24-harness (10 tests)
 
 ---
 
-## New Functionality
+## 摘要
+
+新增三个 Neighborhood S-variant 拓扑指数，延续 V3.29–V3.34 引入的 S 系列家族。
+本版本新增反和入度指数（ISI）、增广 Zagreb 指数（AZI）、重构第一 Zagreb 指数（EM₁）的 S-模拟量。
+
+---
+
+## 新增内容
 
 ### `gos_runtime::graph_topo_indices24() -> (nisi_ppm: u64, nazi_milli: u64, nem1: u64, edge_count: usize, node_count: usize)`
 
-**S(v) = Σ_{w∈N(v)} deg(w)** — neighbor-degree sum (same S as topo18/topo21–topo24 family)
+**S(v) = Σ_{w∈N(v)} deg(w)** — 邻居度数和（与 topo18/topo21–topo24 族相同的 S 定义）
 
-| Index | Formula | Scale | Reference |
-|-------|---------|-------|-----------|
-| NISI | Σ_{uv∈E} S_u·S_v/(S_u+S_v) | floor ppm | S-analogue of ISI (Sedlar et al. 2011) |
-| NAZI | Σ_{uv∈E} (S_u·S_v/(S_u+S_v−2))³ | floor milli | S-analogue of AZI (Furtula et al. 2010) |
-| NEM1 | Σ_{uv∈E} (S_u+S_v−2)² | exact u64 | S-analogue of EM₁ (Milićević et al. 2004) |
+| 指数 | 公式 | 精度 | 参考文献 |
+|------|------|------|-----------|
+| NISI | Σ_{uv∈E} S_u·S_v/(S_u+S_v) | 向下取整 ppm | ISI 的 S-模拟量（Sedlar et al. 2011） |
+| NAZI | Σ_{uv∈E} (S_u·S_v/(S_u+S_v−2))³ | 向下取整 milli | AZI 的 S-模拟量（Furtula et al. 2010） |
+| NEM1 | Σ_{uv∈E} (S_u+S_v−2)² | 精确 u64 | EM₁ 的 S-模拟量（Milićević et al. 2004） |
 
-**Key invariants:**
-- NISI = |E|×S/2×10⁶ for S-regular graphs (S-uniform)
-- NAZI = 0 when every edge has S_u+S_v=2 (only K₂ type: S=1 both endpoints)
-- NEM1 = 0 iff (S_u+S_v=2) for all edges
-- K₃ and K_{1,4} share same per-edge values (both S-uniform S=4, same ssum=8, sp=16, q=6)
-- K₄ (S=9) and K_{2,3} (S=6) give DIFFERENT values (unlike some prior S-family indices)
+**关键不变量：**
+- 对 S-正则图（S 均匀分布）：NISI = |E|×S/2×10⁶
+- 当每条边满足 S_u+S_v=2 时（仅 K₂ 型：两端点 S=1），NAZI = 0
+- 当且仅当所有边满足 S_u+S_v=2 时，NEM1 = 0
+- K₃ 与 K_{1,4} 每边取值相同（均为 S-均匀 S=4，ssum=8，sp=16，q=6）
+- K₄（S=9）与 K_{2,3}（S=6）取值不同（与此前部分 S 系列指数的表现不同）
 
-**Overflow safety:**
-- NISI: S_u·S_v·10⁶ ≤ 16129²×10⁶ ≈ 2.6×10¹⁷ < u64::MAX ✓
-- NAZI: (S_u·S_v)³ needs u128 intermediate; per-edge result after division ≤ ~5.24×10¹⁴ fits u64 ✓
-- NEM1: (ssum−2)² ≤ 32256² ≈ 10⁹ per edge × 8065 ≈ 8×10¹² < u64::MAX ✓
+**溢出安全性：**
+- NISI：S_u·S_v·10⁶ ≤ 16129²×10⁶ ≈ 2.6×10¹⁷ < u64::MAX ✓
+- NAZI：(S_u·S_v)³ 需要 u128 中间量；除法后每边结果 ≤ ~5.24×10¹⁴，可容纳于 u64 ✓
+- NEM1：(ssum−2)² ≤ 32256² ≈ 10⁹，每边 × 8065 ≈ 8×10¹² < u64::MAX ✓
 
-**Algorithm:** O(V+E) — adj+deg pass → S(v) pass → edge scan; no BFS needed
+**算法：** O(V+E) — 邻接+度数遍历 → S(v) 计算 → 边扫描；无需 BFS
 
-**Cross-check table:**
+**交叉验证表：**
 
-| Graph | NISI (ppm) | NAZI (milli) | NEM1 | edges | nodes |
+| 图 | NISI (ppm) | NAZI (milli) | NEM1 | 边数 | 点数 |
 |-------|-----------|-------------|------|-------|-------|
-| Empty | 0 | 0 | 0 | 0 | 0 |
+| 空图 | 0 | 0 | 0 | 0 | 0 |
 | K₂ | 500_000 | 0 | 0 | 1 | 2 |
 | P₃ | 2_000_000 | 16_000 | 8 | 2 | 3 |
 | K₃ | 6_000_000 | 56_886 | 108 | 3 | 3 |
@@ -51,34 +51,34 @@ This version adds S-analogues of the Inverse Sum Indegree (ISI), Augmented Zagre
 | K₄ | 27_000_000 | 778_476 | 1_536 | 6 | 4 |
 | K_{2,3} | 18_000_000 | 279_936 | 600 | 6 | 5 |
 
-**Shell commands:** `graph topo24` / `gtopo24` / `neighborhood isi` / `gnisi` / `neighborhood azi` / `gnazi` / `neighborhood em1` / `gnem1` / `gnisinazinemm1`
+**Shell 命令：** `graph topo24` / `gtopo24` / `neighborhood isi` / `gnisi` / `neighborhood azi` / `gnazi` / `neighborhood em1` / `gnem1` / `gnisinazinemm1`
 
-**VectorAddress L4=111** for gos-graph-topo24-harness
+**gos-graph-topo24-harness 的 VectorAddress L4=111**
 
-**OS analogy:**
-- NISI = S-harmonic coupling intensity per channel (S-uniform = |E|×S/2; balanced load)
-- NAZI = S-augmented bond pressure cubed (0 for pendant-pair leaf topology; high for dense hubs)
-- NEM1 = squared S-excess per channel (0 for K₂-type; measures S-surplus above threshold 2)
+**操作系统类比：**
+- NISI = 每通道的 S-谐波耦合强度（S-均匀时 = |E|×S/2；负载均衡）
+- NAZI = S-增广键压立方（悬挂对叶拓扑时为 0；密集枢纽时较高）
+- NEM1 = 每通道 S-盈余的平方（K₂ 型时为 0；衡量高于阈值 2 的 S-盈余量）
 
-**Display:** bright-yellow header; NISI bright-cyan (ppm); NAZI bright-green (milli + "NAZI=0: all pendant-pair" annotation); NEM1 bright-magenta (exact + "NEM1=0: all S₁+S₂=2" annotation)
+**显示：** 亮黄色标题；NISI 亮青色（ppm）；NAZI 亮绿色（milli + "NAZI=0: all pendant-pair" 注记）；NEM1 亮品红（精确值 + "NEM1=0: all S₁+S₂=2" 注记）
 
-**Footer:** "Sedlar et al. 2011  Furtula et al. 2010  Milicevic et al. 2004  (S-variant family)"
+**页脚：** "Sedlar et al. 2011  Furtula et al. 2010  Milicevic et al. 2004  (S-variant family)"
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
+| 文件 | 变更内容 |
 |------|--------|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_topo_indices24_inner()` + `graph_topo_indices24()` |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_topo_indices24()` |
-| `crates/k-shell/src/proc.rs` | Added routing for topo24 commands |
-| `host-tests/gos-graph-topo24-harness/` | New harness crate (10 tests, VectorAddress L4=111) |
-| `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-15_V3.35.md` | This log |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices24_inner()` + `graph_topo_indices24()` |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices24()` |
+| `crates/k-shell/src/proc.rs` | 新增 topo24 命令路由 |
+| `host-tests/gos-graph-topo24-harness/` | 新建 harness crate（10 个测试，VectorAddress L4=111） |
+| `doc/06_运维维护/hardening/HARDENING_LOG_2026-07-15_V3.35.md` | 本篇日志 |
 
 ---
 
-## Test Results
+## 测试结果
 
 ```
 running 10 tests
@@ -96,11 +96,11 @@ test test_10_k23_bipartite ... ok
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-**Host-test suite total: 1323 tests** (1313 through V3.34 + 10 new)
+**宿主测试套件总计：1323 个测试**（截至 V3.34 的 1313 个 + 新增 10 个）
 
 ---
 
-## VectorAddress L4 Namespace (updated)
+## VectorAddress L4 命名空间（更新后）
 
 88=graph-topo, 89=graph-topo2, 90=graph-topo3, 91=graph-topo4, 92=graph-topo5,  
 93=graph-topo6, 94=graph-topo7, 95=graph-topo8, 96=graph-topo9, 97=graph-topo10,  

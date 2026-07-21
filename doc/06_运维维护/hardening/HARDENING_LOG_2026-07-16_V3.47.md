@@ -1,38 +1,37 @@
-# HARDENING LOG — V3.47 — 2026-07-16
+# GOSKernel 强化日志 V3.47 — 2026-07-16
 
-## Summary
+## 摘要
 
-Added three new Neighborhood S-variant topological indices extending the S-power series to
-the 10th degree, completing topo36:
+新增三个 Neighborhood S-variant 拓扑指数，将 S-幂次序列扩展至第 10 次幂，完成 topo36：
 
-- **NDC(G)** = Σ_v S(v)^10 — S-Decic vertex sum (10th power)
-- **NHNC(G)** = Σ_{uv∈E} (S_u+S_v)^9 — S-Nonic edge-sum (9th power)
-- **NOSO(G)** = Σ_{uv∈E} (S_u²+S_v²)^4 — S-Octic Sombor (SO^α with α=8; exact integer)
+- **NDC(G)** = Σ_v S(v)^10 — S-十次方顶点和（10th power）
+- **NHNC(G)** = Σ_{uv∈E} (S_u+S_v)^9 — S-九次方边和（9th power）
+- **NOSO(G)** = Σ_{uv∈E} (S_u²+S_v²)^4 — S-八次方 Sombor（SO^α，α=8；精确整数）
 
-All three use S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum), the S-variant of degree.
+三者均使用 S(v) = Σ_{w∈N(v)} deg(w)（邻居度数和），即度数的 S-变体。
 
-## Changes
+## 变更内容
 
 ### crates/gos-runtime/src/lib.rs
 
-Added `graph_topo_indices36_inner()` (Runtime impl) and public `graph_topo_indices36()`:
+新增 `graph_topo_indices36_inner()`（Runtime 实现）与公共函数 `graph_topo_indices36()`：
 
 ```
 pub fn graph_topo_indices36() -> (u64, u64, u64, usize, usize)
-  Returns (ndc, nhnc, noso, edge_count, node_count)
+  返回 (ndc, nhnc, noso, edge_count, node_count)
 ```
 
-Algorithm: O(V+E) — degree pass → S(v) pass → vertex scan (NDC) + edge scan (NHNC, NOSO).
-All three use u128 accumulators with saturating_mul/add; no BFS; no isqrt.
+算法：O(V+E) — 度数遍历 → S(v) 计算 → 顶点扫描（NDC） + 边扫描（NHNC、NOSO）。
+三者均使用带 saturating_mul/add 的 u128 累加器；无需 BFS；无需 isqrt。
 
 ### crates/k-shell/src/lib.rs
 
-Added `dispatch_graph_topo_indices36()` — bright-yellow header, bright-cyan NDC,
-bright-green NHNC, bright-magenta NOSO.
+新增 `dispatch_graph_topo_indices36()` —— 亮黄色标题，NDC 亮青色，
+NHNC 亮绿色，NOSO 亮品红。
 
 ### crates/k-shell/src/proc.rs
 
-Added dispatch routing for:
+新增以下路由：
 - `"graph topo36"` / `"gtopo36"` / `"neighborhood decic"` / `"gndc"`
 - `"neighborhood nonic edge"` / `"gnhnc"`
 - `"neighborhood octic sombor"` / `"gnoso"`
@@ -40,40 +39,40 @@ Added dispatch routing for:
 
 ### host-tests/gos-graph-topo36-harness/
 
-New 10-test harness (VectorAddress L4=123, plugin TOPIX_36, executor t36.exec).
-All 10 tests pass.
+新建 10 项测试的 harness（VectorAddress L4=123，插件 TOPIX_36，执行器 t36.exec）。
+10 项测试全部通过。
 
-## Mathematical Definitions
+## 数学定义
 
-**NDC(G) = Σ_v S(v)^10** (S-Decic vertex sum)
+**NDC(G) = Σ_v S(v)^10**（S-十次方顶点和）
 
-Extends the S-power-vertex series:
+扩展 S-幂次-顶点序列：
 NM₁=Σ S² → NF=Σ S³ → NVQ=Σ S⁴ → NPS=Σ S⁵ → NSH=Σ S⁶ → NSHP=Σ S⁷
-→ NOC=Σ S⁸ → NNC=Σ S⁹ → **NDC=Σ S¹⁰** (topo36)
+→ NOC=Σ S⁸ → NNC=Σ S⁹ → **NDC=Σ S¹⁰**（topo36）
 
-- NDC = n·S^10 for S-regular
-- Overflow: S^10 ≤ 16129^10 ≈ 2.6×10^41 > u128::MAX → saturating arithmetic
+- 对 S-正则图：NDC = n·S^10
+- 溢出：S^10 ≤ 16129^10 ≈ 2.6×10^41 > u128::MAX → 使用饱和运算
 
-**NHNC(G) = Σ_{uv∈E} (S_u+S_v)^9** (S-Nonic edge-sum)
+**NHNC(G) = Σ_{uv∈E} (S_u+S_v)^9**（S-九次方边和）
 
-Extends the S-power-edge series:
+扩展 S-幂次-边序列：
 NHM₁=Σ(S+S)² → NHCS → NHQS → NHPS → NHSE → NHHS → NHOC=Σ(S+S)^8
-→ **NHNC=Σ(S+S)^9** (topo36)
+→ **NHNC=Σ(S+S)^9**（topo36）
 
-- NHNC = |E|·(2S)^9 = 512|E|·S^9 for S-regular
-- Overflow per edge: (2×16129)^9 ≈ 3.5×10^40 > u128::MAX → saturating
+- 对 S-正则图：NHNC = |E|·(2S)^9 = 512|E|·S^9
+- 每边溢出：(2×16129)^9 ≈ 3.5×10^40 > u128::MAX → 使用饱和运算
 
-**NOSO(G) = Σ_{uv∈E} (S_u²+S_v²)^4** (S-Octic Sombor, α=8)
+**NOSO(G) = Σ_{uv∈E} (S_u²+S_v²)^4**（S-八次方 Sombor，α=8）
 
-Generalised Sombor SO^α applied to S-values with α=8 (exact integer, no isqrt):
-NSO(α=1) → NCSO(α=3) → NFSO(α=4) → NHSO(α=6) → **NOSO(α=8)** (topo36)
+将广义 Sombor 指数 SO^α 应用于 S 值，α=8（精确整数，无需 isqrt）：
+NSO(α=1) → NCSO(α=3) → NFSO(α=4) → NHSO(α=6) → **NOSO(α=8)**（topo36）
 
-- NOSO = |E|·(2S²)^4 = 16|E|·S^8 for S-regular
-- Per-edge max: (2×16129²)^4 ≈ 7.3×10^34 < u128::MAX ✓
+- 对 S-正则图：NOSO = |E|·(2S²)^4 = 16|E|·S^8
+- 每边最大值：(2×16129²)^4 ≈ 7.3×10^34 < u128::MAX ✓
 
-## Cross-Check Table
+## 交叉验证表
 
-| Graph    | NDC             | NHNC               | NOSO          | edges | nodes |
+| 图    | NDC             | NHNC               | NOSO          | 边数 | 点数 |
 |----------|-----------------|--------------------|---------------|-------|-------|
 | K₂       | 2               | 512                | 16            | 1     | 2     |
 | P₃       | 3_072           | 524_288            | 8_192         | 2     | 3     |
@@ -83,7 +82,7 @@ NSO(α=1) → NCSO(α=3) → NFSO(α=4) → NHSO(α=6) → **NOSO(α=8)** (topo3
 | K₄       | 13_947_137_604  | 1_190_155_742_208  | 4_132_485_216 | 6     | 4     |
 | K_{2,3}  | 302_330_880     | 30_958_682_112     | 161_243_136   | 6     | 5     |
 
-## Test Results
+## 测试结果
 
 ```
 running 10 tests
@@ -101,10 +100,10 @@ test test_10_k23_bipartite ... ok
 test result: ok. 10 passed; 0 failed; 0 ignored
 ```
 
-## VectorAddress L4 Namespace (updated)
+## VectorAddress L4 命名空间（更新后）
 
-88=graph-topo through 122=graph-topo35, **123=graph-topo36**
+88=graph-topo 至 122=graph-topo35，**123=graph-topo36**
 
-## Host Test Suite Total
+## 宿主测试套件总计
 
-**1443 tests** (was 1433 through V3.46; +10 from gos-graph-topo36-harness)
+**1443 个测试**（截至 V3.46 为 1433；gos-graph-topo36-harness 新增 10 个）
