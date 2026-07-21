@@ -1,0 +1,408 @@
+// gos-graph-topo82-harness — V3.93 NHEXPENTAACTC + NHHEXPENTAACTC + NAYSO (S-variant family)
+//
+// Verifies `gos_runtime::graph_topo_indices82()`:
+//   Returns (nhexpentaactc, nhhexpentaactc, nayso, edge_count, node_count)
+//   - nhexpentaactc  = NHEXPENTAACTC(G)  = Σ_v S(v)^56                   (exact u64; S-Hexapentacontic vertex sum)
+//   - nhhexpentaactc = NHHEXPENTAACTC(G) = Σ_{uv∈E} (S_u+S_v)^55         (exact u64; S-Pentapentacontic edge-sum)
+//   - nayso          = NAYSO(G)          = Σ_{uv∈E} (S_u²+S_v²)^50       (exact u64; S-Variant Sombor, α=100)
+//   - edge_count     = undirected non-self-loop edges
+//   - node_count     = live node count
+//
+// where S(v) = Σ_{w∈N(v)} deg(w) is the neighbor-degree sum ("S-variant").
+//
+// DEFINITIONS:
+//   NHEXPENTAACTC(G) = Σ_v S(v)^56
+//     S-Hexapentacontic vertex sum; extends the S-power-vertex series:
+//       NM₁=Σ S² (topo18), ...,
+//       NPENTAPENTAACTC=Σ S⁵⁵ (topo81), NHEXPENTAACTC=Σ S⁵⁶ (topo82). Seventh of the pentacontic (50-59) series.
+//     NHEXPENTAACTC = n·S^56 for S-regular.
+//     Overflow: S^56 > u64::MAX for S≥2 → saturating u128 accumulator, clamp to u64::MAX.
+//     Implementation: s^56 = s32 × s16 × s8  (56=32+16+8; 3 mults — efficient!).
+//
+//   NHHEXPENTAACTC(G) = Σ_{uv∈E} (S_u+S_v)^55
+//     S-Pentapentacontic edge-sum; extends the S-power-edge series:
+//       NHM1=Σ(S+S)² (topo23), ..., NHPENTAPENTAACTC=Σ(S+S)⁵⁴ (topo81),
+//       NHHEXPENTAACTC=Σ(S+S)⁵⁵ (topo82).
+//     NHHEXPENTAACTC = |E|·(2S)^55 = 36028797018963968|E|·S^55 for S-regular.
+//     Overflow per edge: (2×16129)^55 → saturating u128 accumulator.
+//     Implementation: ss^55 = ss32 × ss16 × ss4 × ss2 × ss  (55=32+16+4+2+1; 5 mults).
+//
+//   NAYSO(G) = Σ_{uv∈E} (S_u²+S_v²)^50
+//     S-Variant Sombor: generalised Sombor SO^α with α=100 on S-variant.
+//     3rd-pass double-letter "AY" (after NAXSO α=98, topo81).
+//     NSO(topo21,α=1),..., NAASO(topo58,α=52),..., NAXSO(topo81,α=98), NAYSO(topo82,α=100).
+//     NAYSO = |E|·(2S²)^50 = 1125899906842624|E|·S^100 for S-regular.
+//     Overflow per edge: (2×16129²)^50 → saturating u128 accumulator.
+//     Implementation: s2s^50 = s2s32 × s2s16 × s2s2  (50=32+16+2; 3 mults).
+//
+// S VALUES PER GRAPH:
+//   K₂        : S(A)=S(B)=1
+//   P₃=A-B-C  : S(A)=S(B)=S(C)=2    → S-uniform S=2
+//   K₃        : S(each)=4            → S-uniform S=4
+//   K_{1,4}   : S(hub)=4, S(leaf)=4  → S-uniform S=4
+//   P₄=A-B-C-D: S(A)=S(D)=2, S(B)=S(C)=3 → mixed S
+//   K₄        : S(each)=9            → S-uniform S=9
+//   K_{2,3}   : S(all)=6             → S-uniform S=6
+//
+// ANALYTICAL CROSS-CHECK TABLE:
+//
+//  Graph     NHEXPENTAACTC(exact)             NHHEXPENTAACTC(exact)       NAYSO(exact)              edges  nodes
+//  Empty                       0                             0                      0                0      0
+//  1 node                      0                             0                      0                0      1
+//  K₂                          2            36_028_797_018_963_968    1_125_899_906_842_624              1      2
+//  P₃       216_172_782_113_783_808               u64::MAX(sat.)             u64::MAX(sat.)            2      3
+//  K₃              u64::MAX(sat.)                u64::MAX(sat.)             u64::MAX(sat.)            3      3
+//  K_{1,4}         u64::MAX(sat.)                u64::MAX(sat.)             u64::MAX(sat.)            4      5
+//  P₄              u64::MAX(sat.)                u64::MAX(sat.)             u64::MAX(sat.)            3      4
+//  K₄              u64::MAX(sat.)                u64::MAX(sat.)             u64::MAX(sat.)            6      4
+//  2 isolated                  0                             0                      0                0      2
+//  K_{2,3}         u64::MAX(sat.)                u64::MAX(sat.)             u64::MAX(sat.)            6      5
+//
+// DERIVATIONS:
+//
+//   K₂ (S=1 uniform, 1 edge, 2 nodes):
+//     NHEXPENTAACTC:  1^56 + 1^56 = 2. ✓
+//     NHHEXPENTAACTC: (1+1)^55 = 2^55 = 36_028_797_018_963_968. ✓
+//     NAYSO:          (1²+1²)^50 = 2^50 = 1_125_899_906_842_624. ✓
+//
+//   P₃ (S=2 uniform, 2 edges, 3 nodes):
+//     NHEXPENTAACTC:  3×2^56 = 3×72_057_594_037_927_936 = 216_172_782_113_783_808. ✓
+//     NHHEXPENTAACTC: 2×(2+2)^55 = 2×4^55 = 2×2^110 → SATURATES. ✓
+//     NAYSO:          2×(4+4)^50 = 2×8^50 = 2×2^150 → SATURATES. ✓
+//
+//   K₃ (S=4 uniform, 3 edges, 3 nodes):
+//     NHEXPENTAACTC:  3×4^56 = 3×2^112 → SATURATES. ✓
+//     NHHEXPENTAACTC: 3×8^55 → SATURATES. ✓
+//     NAYSO:          3×32^50 → SATURATES. ✓
+//
+//   K_{1,4} (S=4 uniform, 4 edges, 5 nodes):
+//     NHEXPENTAACTC:  5×4^56 → SATURATES. ✓
+//     NHHEXPENTAACTC: 4×8^55 → SATURATES. ✓
+//     NAYSO:          4×32^50 → SATURATES. ✓
+//
+//   P₄ (S(A)=2, S(B)=3, S(C)=3, S(D)=2; 3 edges, 4 nodes):
+//     NHEXPENTAACTC:  2×2^56 + 2×3^56.  3^41>u64::MAX → 3^56 >> u64::MAX → SATURATES. ✓
+//     NHHEXPENTAACTC: 5^55+6^55+5^55 → each term >> u64::MAX → SATURATES. ✓
+//     NAYSO:          13^50+18^50+13^50 → SATURATES. ✓
+//
+//   K₄ (S=9 uniform, 6 edges, 4 nodes):
+//     NHEXPENTAACTC:  4×9^56 → SATURATES. ✓
+//     NHHEXPENTAACTC: 6×18^55 → SATURATES. ✓
+//     NAYSO:          6×162^50 → SATURATES. ✓
+//
+//   K_{2,3} (S=6 uniform, 6 edges, 5 nodes):
+//     NHEXPENTAACTC:  5×6^56 → SATURATES. ✓
+//     NHHEXPENTAACTC: 6×12^55 → SATURATES. ✓
+//     NAYSO:          6×72^50 → SATURATES. ✓
+//
+// S-REGULAR FORMULA VERIFICATION:
+//   NHEXPENTAACTC  = n·S^56                                                                   for S-regular ✓
+//   NHHEXPENTAACTC = |E|·(2S)^55 = 36028797018963968|E|·S^55                                 for S-regular ✓
+//   NAYSO          = |E|·(2S²)^50 = 1125899906842624|E|·S^100                                for S-regular ✓
+//   Note: s^56 = s32×s16×s8 is efficient (56=32+16+8, three powers of 2, only 3 mults)
+//
+// Tests (10):
+//  1.  Empty graph                        → (0, 0, 0, 0, 0)
+//  2.  Single isolated node               → (0, 0, 0, 0, 1)
+//  3.  Single directed edge A→B (K₂)     → (2, 36_028_797_018_963_968, 1_125_899_906_842_624, 1, 2)
+//  4.  Path P₃ = A-B-C                   → (216_172_782_113_783_808, u64::MAX, u64::MAX, 2, 3)
+//  5.  Triangle K₃                       → (u64::MAX, u64::MAX, u64::MAX, 3, 3)
+//  6.  Star K_{1,4}                      → (u64::MAX, u64::MAX, u64::MAX, 4, 5)
+//  7.  Path P₄ = A-B-C-D                 → (u64::MAX, u64::MAX, u64::MAX, 3, 4)
+//  8.  Complete K₄                       → (u64::MAX, u64::MAX, u64::MAX, 6, 4)
+//  9.  Two isolated nodes                 → (0, 0, 0, 0, 2)
+// 10.  K_{2,3} bipartite cross-check     → (u64::MAX, u64::MAX, u64::MAX, 6, 5)
+
+use std::sync::Mutex;
+
+use gos_protocol::{
+    derive_edge_id, derive_node_id, EdgeSpec, EntryPolicy, ExecutorId,
+    GOS_ABI_VERSION, NodeId, NodeSpec, PluginId, PluginManifest,
+    RoutePolicy, RuntimeEdgeType, RuntimeNodeType, VectorAddress,
+};
+
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// ── Shared fixtures ───────────────────────────────────────────────────────────
+
+const T82_PLUGIN: PluginId   = PluginId::from_ascii("TOPIX_82");
+const T82_EXEC:   ExecutorId = ExecutorId::from_ascii("t82.exec");
+
+const T82_KEY_A: &str = "t82.alpha";
+const T82_KEY_B: &str = "t82.beta";
+const T82_KEY_C: &str = "t82.gamma";
+const T82_KEY_D: &str = "t82.delta";
+const T82_KEY_E: &str = "t82.epsilon";
+
+const T82_ID_A: NodeId = derive_node_id(T82_PLUGIN, T82_KEY_A);
+const T82_ID_B: NodeId = derive_node_id(T82_PLUGIN, T82_KEY_B);
+const T82_ID_C: NodeId = derive_node_id(T82_PLUGIN, T82_KEY_C);
+const T82_ID_D: NodeId = derive_node_id(T82_PLUGIN, T82_KEY_D);
+const T82_ID_E: NodeId = derive_node_id(T82_PLUGIN, T82_KEY_E);
+
+// L4=169 namespace for this harness.
+const T82_VEC_A: VectorAddress = VectorAddress::new(169, 1, 1, 0);
+const T82_VEC_B: VectorAddress = VectorAddress::new(169, 1, 2, 0);
+const T82_VEC_C: VectorAddress = VectorAddress::new(169, 1, 3, 0);
+const T82_VEC_D: VectorAddress = VectorAddress::new(169, 2, 1, 0);
+const T82_VEC_E: VectorAddress = VectorAddress::new(169, 2, 2, 0);
+
+const T82_MANIFEST: PluginManifest = PluginManifest {
+    abi_version:  GOS_ABI_VERSION,
+    plugin_id:    T82_PLUGIN,
+    name:         "kl-graph-topo82-harness",
+    version:      1,
+    depends_on:   &[],
+    permissions:  &[],
+    exports:      &[],
+    imports:      &[],
+    nodes:        &[],
+    edges:        &[],
+    signature:    None,
+    policy_hash:  [0u8; 16],
+};
+
+fn node_spec(key: &'static str, id: NodeId) -> NodeSpec {
+    NodeSpec {
+        node_id:           id,
+        local_node_key:    key,
+        node_type:         RuntimeNodeType::Service,
+        entry_policy:      EntryPolicy::Manual,
+        executor_id:       T82_EXEC,
+        state_schema_hash: 0,
+        permissions:       &[],
+        exports:           &[],
+        vector_ref:        None,
+    }
+}
+
+fn add_node(vec: VectorAddress, key: &'static str, id: NodeId) {
+    gos_runtime::register_node(T82_PLUGIN, vec, node_spec(key, id)).unwrap();
+}
+
+fn add_edge(from: NodeId, to: NodeId, key: &'static str) {
+    gos_runtime::register_edge(EdgeSpec {
+        edge_id:              derive_edge_id(from, to, key),
+        from_node:            from,
+        to_node:              to,
+        edge_type:            RuntimeEdgeType::Signal,
+        weight:               1.0,
+        acl_mask:             u64::MAX,
+        route_policy:         RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding:   None,
+        vector_ref:           None,
+    }).unwrap();
+}
+
+fn setup() -> std::sync::MutexGuard<'static, ()> {
+    let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    gos_runtime::reset();
+    gos_runtime::discover_plugin(T82_MANIFEST).unwrap();
+    g
+}
+
+// ── Test 1: Empty graph ───────────────────────────────────────────────────────
+#[test]
+fn test_01_empty() {
+    let _g = setup();
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,               0, "empty: node_count=0");
+    assert_eq!(ec,               0, "empty: edge_count=0");
+    assert_eq!(nhexpentaactc,    0, "empty: NHEXPENTAACTC=0");
+    assert_eq!(nhhexpentaactc,   0, "empty: NHHEXPENTAACTC=0");
+    assert_eq!(nayso,            0, "empty: NAYSO=0");
+}
+
+// ── Test 2: Single isolated node ─────────────────────────────────────────────
+// S(A)=0 → no edges → all indices 0.
+#[test]
+fn test_02_single_node() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,               1, "single: node_count=1");
+    assert_eq!(ec,               0, "single: edge_count=0");
+    assert_eq!(nhexpentaactc,    0, "single: NHEXPENTAACTC=0");
+    assert_eq!(nhhexpentaactc,   0, "single: NHHEXPENTAACTC=0");
+    assert_eq!(nayso,            0, "single: NAYSO=0");
+}
+
+// ── Test 3: Single directed edge A→B (K₂) ───────────────────────────────────
+// deg(A)=deg(B)=1.  S(A)=S(B)=1.  1 edge, 2 nodes.
+// NHEXPENTAACTC:  1^56+1^56 = 2.
+// NHHEXPENTAACTC: (1+1)^55 = 2^55 = 36_028_797_018_963_968.
+// NAYSO:          (1²+1²)^50 = 2^50 = 1_125_899_906_842_624.
+#[test]
+fn test_03_k2_edge() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,               2,                         "k2: node_count=2");
+    assert_eq!(ec,               1,                         "k2: edge_count=1");
+    assert_eq!(nhexpentaactc,    2,                         "k2: NHEXPENTAACTC=2 (1\u{2075}\u{2076}+1\u{2075}\u{2076}=2)");
+    assert_eq!(nhhexpentaactc,   36_028_797_018_963_968,    "k2: NHHEXPENTAACTC=36_028_797_018_963_968 (2\u{2075}\u{2075}=2^55)");
+    assert_eq!(nayso,            1_125_899_906_842_624,     "k2: NAYSO=1_125_899_906_842_624 (2\u{2075}\u{2070}=2^50)");
+}
+
+// ── Test 4: Path P₃ = A-B-C ─────────────────────────────────────────────────
+// deg: A=1,B=2,C=1.  S: S(A)=deg(B)=2, S(B)=deg(A)+deg(C)=2, S(C)=deg(B)=2.
+// S=2 uniform, 2 edges, 3 nodes.
+// NHEXPENTAACTC:  3×2^56 = 3×72_057_594_037_927_936 = 216_172_782_113_783_808.
+// NHHEXPENTAACTC: 2×(2+2)^55 = 2×4^55 = 2×2^110 → SATURATES.
+// NAYSO:          2×(4+4)^50 = 2×8^50 = 2×2^150 → SATURATES.
+#[test]
+fn test_04_path_p3() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+    add_edge(T82_ID_B, T82_ID_C, "t82.e.bc");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,               3,                         "p3: node_count=3");
+    assert_eq!(ec,               2,                         "p3: edge_count=2");
+    assert_eq!(nhexpentaactc,    216_172_782_113_783_808,   "p3: NHEXPENTAACTC=216_172_782_113_783_808 (3\u{00d7}2\u{2075}\u{2076})");
+    assert_eq!(nhhexpentaactc,   u64::MAX,                  "p3: NHHEXPENTAACTC=SAT (4\u{2075}\u{2075}>u64)");
+    assert_eq!(nayso,            u64::MAX,                  "p3: NAYSO=SAT (8\u{2075}\u{2070}>u64)");
+}
+
+// ── Test 5: Triangle K₃ ──────────────────────────────────────────────────────
+// deg=2 for all.  S(each)=4.  3 edges, 3 nodes. All saturate.
+#[test]
+fn test_05_triangle_k3() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+    add_edge(T82_ID_B, T82_ID_C, "t82.e.bc");
+    add_edge(T82_ID_C, T82_ID_A, "t82.e.ca");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,              3,        "k3: node_count=3");
+    assert_eq!(ec,              3,        "k3: edge_count=3");
+    assert_eq!(nhexpentaactc,   u64::MAX, "k3: NHEXPENTAACTC=SAT");
+    assert_eq!(nhhexpentaactc,  u64::MAX, "k3: NHHEXPENTAACTC=SAT");
+    assert_eq!(nayso,           u64::MAX, "k3: NAYSO=SAT");
+}
+
+// ── Test 6: Star K_{1,4} ─────────────────────────────────────────────────────
+// Hub has deg=4, leaves deg=1.  S(hub)=4×1=4, S(leaf)=deg(hub)=4.
+// S=4 uniform → all saturate.
+#[test]
+fn test_06_star_k14() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A); // hub
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_node(T82_VEC_D, T82_KEY_D, T82_ID_D);
+    add_node(T82_VEC_E, T82_KEY_E, T82_ID_E);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+    add_edge(T82_ID_A, T82_ID_C, "t82.e.ac");
+    add_edge(T82_ID_A, T82_ID_D, "t82.e.ad");
+    add_edge(T82_ID_A, T82_ID_E, "t82.e.ae");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,              5,        "k14: node_count=5");
+    assert_eq!(ec,              4,        "k14: edge_count=4");
+    assert_eq!(nhexpentaactc,   u64::MAX, "k14: NHEXPENTAACTC=SAT");
+    assert_eq!(nhhexpentaactc,  u64::MAX, "k14: NHHEXPENTAACTC=SAT");
+    assert_eq!(nayso,           u64::MAX, "k14: NAYSO=SAT");
+}
+
+// ── Test 7: Path P₄ = A-B-C-D ───────────────────────────────────────────────
+// deg: A=1,B=2,C=2,D=1.  S(A)=2,S(B)=1+2=3,S(C)=2+1=3,S(D)=2.
+// NHEXPENTAACTC:  2×2^56 + 2×3^56.  3^41>u64::MAX → SATURATES.
+// NHHEXPENTAACTC: 5^55+6^55+5^55 → SATURATES.
+// NAYSO:          13^50+18^50+13^50 → SATURATES.
+#[test]
+fn test_07_path_p4() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_node(T82_VEC_D, T82_KEY_D, T82_ID_D);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+    add_edge(T82_ID_B, T82_ID_C, "t82.e.bc");
+    add_edge(T82_ID_C, T82_ID_D, "t82.e.cd");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,              4,        "p4: node_count=4");
+    assert_eq!(ec,              3,        "p4: edge_count=3");
+    assert_eq!(nhexpentaactc,   u64::MAX, "p4: NHEXPENTAACTC=SAT");
+    assert_eq!(nhhexpentaactc,  u64::MAX, "p4: NHHEXPENTAACTC=SAT");
+    assert_eq!(nayso,           u64::MAX, "p4: NAYSO=SAT");
+}
+
+// ── Test 8: Complete K₄ ──────────────────────────────────────────────────────
+// deg=3 for all.  S(each)=3+3+3=9.  6 edges, 4 nodes. All saturate.
+#[test]
+fn test_08_complete_k4() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_node(T82_VEC_D, T82_KEY_D, T82_ID_D);
+    add_edge(T82_ID_A, T82_ID_B, "t82.e.ab");
+    add_edge(T82_ID_A, T82_ID_C, "t82.e.ac");
+    add_edge(T82_ID_A, T82_ID_D, "t82.e.ad");
+    add_edge(T82_ID_B, T82_ID_C, "t82.e.bc");
+    add_edge(T82_ID_B, T82_ID_D, "t82.e.bd");
+    add_edge(T82_ID_C, T82_ID_D, "t82.e.cd");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,              4,        "k4: node_count=4");
+    assert_eq!(ec,              6,        "k4: edge_count=6");
+    assert_eq!(nhexpentaactc,   u64::MAX, "k4: NHEXPENTAACTC=SAT");
+    assert_eq!(nhhexpentaactc,  u64::MAX, "k4: NHHEXPENTAACTC=SAT");
+    assert_eq!(nayso,           u64::MAX, "k4: NAYSO=SAT");
+}
+
+// ── Test 9: Two isolated nodes ────────────────────────────────────────────────
+// No edges → S=0 everywhere → all indices 0.
+#[test]
+fn test_09_two_isolated() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,               2, "isolated: node_count=2");
+    assert_eq!(ec,               0, "isolated: edge_count=0");
+    assert_eq!(nhexpentaactc,    0, "isolated: NHEXPENTAACTC=0");
+    assert_eq!(nhhexpentaactc,   0, "isolated: NHHEXPENTAACTC=0");
+    assert_eq!(nayso,            0, "isolated: NAYSO=0");
+}
+
+// ── Test 10: K_{2,3} bipartite ───────────────────────────────────────────────
+// Parts {A,B} (deg=3) and {C,D,E} (deg=2).
+// S(A)=S(B)=deg(C)+deg(D)+deg(E)=6; S(C)=S(D)=S(E)=deg(A)+deg(B)=6.
+// S=6 uniform. NHEXPENTAACTC=5×6^56 → SAT; all three saturate.
+#[test]
+fn test_10_k23_bipartite() {
+    let _g = setup();
+    add_node(T82_VEC_A, T82_KEY_A, T82_ID_A);
+    add_node(T82_VEC_B, T82_KEY_B, T82_ID_B);
+    add_node(T82_VEC_C, T82_KEY_C, T82_ID_C);
+    add_node(T82_VEC_D, T82_KEY_D, T82_ID_D);
+    add_node(T82_VEC_E, T82_KEY_E, T82_ID_E);
+    add_edge(T82_ID_A, T82_ID_C, "t82.e.ac");
+    add_edge(T82_ID_A, T82_ID_D, "t82.e.ad");
+    add_edge(T82_ID_A, T82_ID_E, "t82.e.ae");
+    add_edge(T82_ID_B, T82_ID_C, "t82.e.bc");
+    add_edge(T82_ID_B, T82_ID_D, "t82.e.bd");
+    add_edge(T82_ID_B, T82_ID_E, "t82.e.be");
+
+    let (nhexpentaactc, nhhexpentaactc, nayso, ec, nc) = gos_runtime::graph_topo_indices82();
+    assert_eq!(nc,              5,        "k23: node_count=5");
+    assert_eq!(ec,              6,        "k23: edge_count=6");
+    assert_eq!(nhexpentaactc,   u64::MAX, "k23: NHEXPENTAACTC=SAT (5\u{00d7}6\u{2075}\u{2076})");
+    assert_eq!(nhhexpentaactc,  u64::MAX, "k23: NHHEXPENTAACTC=SAT");
+    assert_eq!(nayso,           u64::MAX, "k23: NAYSO=SAT");
+}
