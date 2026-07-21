@@ -675,6 +675,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  watch              live proc table in VECTOR DECK panel (like watch -n1 proc)\n");
         super::print_str(sink, "  graph watch        alias for watch\n");
         super::print_str(sink, "  watch stop         exit watch mode\n");
+        super::print_str(sink, "  unfault <name>  clear a module's restart-loop counter\n");
         super::print_str(sink, "  show    overview, or toggle node/edge context\n");
         super::print_str(sink, "  back    return to the previous graph view\n");
         super::print_str(sink, "  node <vector>  select/show one node\n");
@@ -1521,6 +1522,52 @@ fn dispatch_text_command(
         } else {
             super::set_color(sink, 12, 0);
             super::print_str(sink, " graph topo <L4>: l4 must be a decimal number 0-255\n");
+            super::set_color(sink, 7, 0);
+        }
+    } else if let Some(name) = cmd.strip_prefix("unfault ") {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " usage: unfault <module-name>\n");
+        } else {
+            let mut upper = [0u8; 16];
+            let bytes = trimmed.as_bytes();
+            let len = bytes.len().min(16);
+            for i in 0..len {
+                upper[i] = bytes[i].to_ascii_uppercase();
+            }
+            let upper_str = core::str::from_utf8(&upper[..len]).unwrap_or("");
+            let module_id = gos_protocol::ModuleId::from_ascii(upper_str);
+            let mut summaries = [gos_supervisor::ModuleStatusSummary {
+                handle: gos_protocol::ModuleHandle::ZERO,
+                module_id: gos_protocol::ModuleId::ZERO,
+                state: gos_protocol::ModuleLifecycle::Stopped,
+                fault_policy: gos_protocol::ModuleFaultPolicy::Manual,
+                restart_generation: 0,
+                degraded: false,
+            }; gos_supervisor::MAX_MODULES];
+            let count = gos_supervisor::module_status_summaries(&mut summaries);
+            let found = summaries.iter().take(count).find(|s| s.module_id == module_id);
+            match found {
+                Some(summary) => match gos_supervisor::clear_restart_history(summary.handle) {
+                    Ok(()) => {
+                        super::set_color(sink, 10, 0);
+                        super::print_str(sink, " restart history cleared for ");
+                        super::print_str(sink, trimmed);
+                        super::print_str(sink, "\n");
+                    }
+                    Err(_) => {
+                        super::set_color(sink, 12, 0);
+                        super::print_str(sink, " clear failed (see `modules` for fault policy)\n");
+                    }
+                },
+                None => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " unknown module: ");
+                    super::print_str(sink, trimmed);
+                    super::print_str(sink, "  (see `modules` for installed names)\n");
+                }
+            }
             super::set_color(sink, 7, 0);
         }
     } else if cmd == "theme" || cmd == "themes" || cmd == "theme list" {
