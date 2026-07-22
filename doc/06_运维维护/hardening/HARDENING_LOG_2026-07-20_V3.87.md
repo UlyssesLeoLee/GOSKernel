@@ -1,94 +1,94 @@
-# HARDENING LOG — V3.87 (2026-07-20)
+# 强化日志 — V3.87（2026-07-20）
 
-## Summary
+## 摘要
 
-V3.87 adds **NPENTAACTC + NHPENTAACTC + NASSO** — three new Neighborhood
-S-variant topological indices — as `gos_runtime::graph_topo_indices76()`, opening
-the pentacontic (50–59) power series. Includes `gos-graph-topo76-harness` (10 new tests).
+V3.87 新增 **NPENTAACTC + NHPENTAACTC + NASSO** —— 三项新的 Neighborhood
+S-variant 拓扑指数，实现为 `gos_runtime::graph_topo_indices76()`，开启
+pentacontic（50–59）次幂系列。新增 `gos-graph-topo76-harness`（10 项新测试）。
 
-**Host-test suite total: 1843 tests** (10 added, all passing).
-
----
-
-## New Topological Indices (topo76)
-
-All three indices use `S(v) = Σ_{w∈N(v)} deg(w)` — the neighbor-degree sum —
-consistent with topo18/topo21–topo76 family.
-
-### NPENTAACTC — S-Pentacontic Vertex Sum
-
-```
-NPENTAACTC(G) = Σ_v S(v)^50    (u128→u64 saturating)
-```
-
-- Extends NNONATETRAACTC = ΣS⁴⁹ (topo75) to the 50th power
-- First index of the pentacontic (50–59) series
-- S-regular formula: `NPENTAACTC = n·S^50`
-- Implementation: `s^50 = s32 × s16 × s2` (50=32+16+2; 3 mults — efficient)
-
-### NHPENTAACTC — S-Nonapentacontic Edge Sum
-
-```
-NHPENTAACTC(G) = Σ_{uv∈E} (S_u + S_v)^49    (u128→u64 saturating)
-```
-
-- Extends NHNONATETRAACTC = Σ(S+S)⁴⁸ (topo75) to the 49th power
-- S-regular formula: `NHPENTAACTC = 562_949_953_421_312 · |E| · S^49`
-  (coefficient = 2^49)
-- Implementation: `ss^49 = ss32 × ss16 × ss` (49=32+16+1; 3 mults)
-
-### NASSO — S-Variant Sombor (α=88)
-
-```
-NASSO(G) = Σ_{uv∈E} (S_u² + S_v²)^44    (u128→u64 saturating)
-```
-
-- Generalised Sombor SO^α with α=88 on S-variant; 3rd-pass double-letter "AS"
-- Sequence: … → NARSO(α=86, topo75) → NASSO(α=88, topo76)
-- S-regular formula: `NASSO = 17_592_186_044_416 · |E| · S^88` (coefficient = 2^44)
-- Implementation: `s2s^44 = s2s32 × s2s8 × s2s4` (44=32+8+4; 3 mults — efficient!)
+**宿主测试套件总数：1843 项**（新增 10 项，全部通过）。
 
 ---
 
-## VectorAddress L4 Namespace
+## 新增拓扑指数（topo76）
 
-| L4 value | Harness |
+三项指数均使用 `S(v) = Σ_{w∈N(v)} deg(w)`（邻域度数和），
+与 topo18/topo21–topo76 系列保持一致。
+
+### NPENTAACTC —— S-第50次幂顶点和
+
+```
+NPENTAACTC(G) = Σ_v S(v)^50    (u128→u64 饱和)
+```
+
+- 将 NNONATETRAACTC = ΣS⁴⁹（topo75）延伸至第50次幂
+- pentacontic（50–59）系列首个指数
+- S-正则图公式：`NPENTAACTC = n·S^50`
+- 实现：`s^50 = s32 × s16 × s2`（50=32+16+2；3 次乘法 —— 效率高）
+
+### NHPENTAACTC —— S-第49次幂边和
+
+```
+NHPENTAACTC(G) = Σ_{uv∈E} (S_u + S_v)^49    (u128→u64 饱和)
+```
+
+- 将 NHNONATETRAACTC = Σ(S+S)⁴⁸（topo75）延伸至第49次幂
+- S-正则图公式：`NHPENTAACTC = 562_949_953_421_312 · |E| · S^49`
+  （系数 = 2^49）
+- 实现：`ss^49 = ss32 × ss16 × ss`（49=32+16+1；3 次乘法）
+
+### NASSO —— S-变体 Sombor 指数（α=88）
+
+```
+NASSO(G) = Σ_{uv∈E} (S_u² + S_v²)^44    (u128→u64 饱和)
+```
+
+- S-变体广义 Sombor 指数 SO^α，α=88；第3轮双字母 "AS"
+- 序列：… → NARSO(α=86, topo75) → NASSO(α=88, topo76)
+- S-正则图公式：`NASSO = 17_592_186_044_416 · |E| · S^88`（系数 = 2^44）
+- 实现：`s2s^44 = s2s32 × s2s8 × s2s4`（44=32+8+4；3 次乘法 —— 效率高！）
+
+---
+
+## VectorAddress L4 命名空间
+
+| L4 值 | Harness |
 |----------|---------|
-| 88–162   | graph-topo through graph-topo75 |
-| **163**  | **graph-topo76** (this version) |
+| 88–162   | graph-topo 至 graph-topo75 |
+| **163**  | **graph-topo76**（本版本） |
 
 ---
 
-## Key Values
+## 关键测试值
 
-| Graph    | NPENTAACTC            | NHPENTAACTC           | NASSO               | edges | nodes |
+| 图 | NPENTAACTC | NHPENTAACTC | NASSO | 边数 | 节点数 |
 |----------|-----------------------|-----------------------|---------------------|-------|-------|
-| Empty    | 0                     | 0                     | 0                   | 0     | 0     |
-| 1 node   | 0                     | 0                     | 0                   | 0     | 1     |
-| K₂       | 2                     | 562_949_953_421_312   | 17_592_186_044_416  | 1     | 2     |
-| P₃       | 3_377_699_720_527_872 | u64::MAX (sat.)       | u64::MAX (sat.)     | 2     | 3     |
-| K₃       | u64::MAX (sat.)       | u64::MAX (sat.)       | u64::MAX (sat.)     | 3     | 3     |
-| K_{1,4}  | u64::MAX (sat.)       | u64::MAX (sat.)       | u64::MAX (sat.)     | 4     | 5     |
-| P₄       | u64::MAX (sat.)       | u64::MAX (sat.)       | u64::MAX (sat.)     | 3     | 4     |
-| K₄       | u64::MAX (sat.)       | u64::MAX (sat.)       | u64::MAX (sat.)     | 6     | 4     |
-| K_{2,3}  | u64::MAX (sat.)       | u64::MAX (sat.)       | u64::MAX (sat.)     | 6     | 5     |
+| 空图 | 0 | 0 | 0 | 0 | 0 |
+| 单节点 | 0 | 0 | 0 | 0 | 1 |
+| K₂ | 2 | 562_949_953_421_312 | 17_592_186_044_416 | 1 | 2 |
+| P₃ | 3_377_699_720_527_872 | u64::MAX（饱和）| u64::MAX（饱和）| 2 | 3 |
+| K₃ | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 3 | 3 |
+| K_{1,4} | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 4 | 5 |
+| P₄ | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 3 | 4 |
+| K₄ | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 6 | 4 |
+| K_{2,3} | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 6 | 5 |
 
-**P₃ NPENTAACTC derivation:** 3 × 2^50 = 3 × 1_125_899_906_842_624 = 3_377_699_720_527_872 (fits u64 exactly).
+**P₃ 的 NPENTAACTC 推导**：3 × 2^50 = 3 × 1_125_899_906_842_624 = 3_377_699_720_527_872（精确容纳于 u64）。
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
+| 文件 | 变更 |
 |------|--------|
-| `crates/gos-runtime/src/lib.rs` | +`graph_topo_indices76_inner()`, +`graph_topo_indices76()` |
-| `crates/k-shell/src/lib.rs` | +`dispatch_graph_topo_indices76()` |
-| `crates/k-shell/src/proc.rs` | +k-shell dispatch entry for topo76 |
-| `host-tests/gos-graph-topo76-harness/` | New harness (10 tests, all pass) |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices76_inner()`、`graph_topo_indices76()` |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices76()` |
+| `crates/k-shell/src/proc.rs` | 新增 topo76 的 k-shell 调度条目 |
+| `host-tests/gos-graph-topo76-harness/` | 新建 harness（10 项测试，全部通过） |
 
 ---
 
-## k-shell Commands
+## k-shell 命令
 
 ```
 graph topo76           gtopo76
@@ -100,7 +100,7 @@ gnpentaactcnhpentaactcnasso
 
 ---
 
-## Test Results
+## 测试结果
 
 ```
 running 10 tests
@@ -118,4 +118,4 @@ test test_10_k23_bipartite ... ok
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured
 ```
 
-`cargo check --manifest-path crates/gos-runtime/Cargo.toml`: clean.
+`cargo check --manifest-path crates/gos-runtime/Cargo.toml`：构建通过，无警告。

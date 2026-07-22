@@ -1,61 +1,61 @@
-# GOS Hardening Log — V3.94
+# GOS 强化日志 — V3.94
 
-**Date**: 2026-07-20  
-**Branch**: feat/vk-auto-live-surface  
-**Commit**: feat(v3.94): NHEPTPENTAACTC + NHHEPTPENTAACTC + NAZSO Neighborhood S-variant indices + gos-graph-topo83-harness (10 tests)
+**日期**：2026-07-20
+**分支**：feat/vk-auto-live-surface
+**提交**：feat(v3.94): NHEPTPENTAACTC + NHHEPTPENTAACTC + NAZSO Neighborhood S-variant 指数 + gos-graph-topo83-harness（10 项测试）
 
-## Summary
+## 摘要
 
-Added three new Neighborhood S-variant topological indices (topo83) to the GOS graph-theory kernel, extending the pentacontic series and the S-variant Sombor family.
+为 GOS 图论内核新增三项 Neighborhood S-variant 拓扑指数（topo83），延伸 pentacontic 系列与 S-变体 Sombor 家族。
 
-## New Indices
+## 新增指数
 
-### NHEPTPENTAACTC — S-Heptapentacontic Vertex Sum
-- **Formula**: NHEPTPENTAACTC(G) = Σ_v S(v)^57
-- **Type**: S-power vertex sum; exact u128→u64 with saturation
-- **Series**: Eighth of the pentacontic (50-59) series
-- **Extends**: NHEXPENTAACTC = Σ S^56 (topo82) → NHEPTPENTAACTC = Σ S^57 (topo83)
-- **S-regular**: NHEPTPENTAACTC = n·S^57
-- **Implementation**: s^57 = s32 × s16 × s8 × s (57=32+16+8+1; 4 mults)
+### NHEPTPENTAACTC —— S-第57次幂顶点和
+- **公式**：NHEPTPENTAACTC(G) = Σ_v S(v)^57
+- **类型**：S-幂次顶点和；精确 u128→u64 饱和运算
+- **系列**：pentacontic（50-59）系列第8个
+- **延伸自**：NHEXPENTAACTC = Σ S^56（topo82）→ NHEPTPENTAACTC = Σ S^57（topo83）
+- **S-正则图公式**：NHEPTPENTAACTC = n·S^57
+- **实现**：s^57 = s32 × s16 × s8 × s（57=32+16+8+1；4 次乘法）
 
-### NHHEPTPENTAACTC — S-Hexapentacontic Edge Sum
-- **Formula**: NHHEPTPENTAACTC(G) = Σ_{uv∈E} (S_u+S_v)^56
-- **Type**: S-power edge sum; exact u128→u64 with saturation
-- **Extends**: NHHEXPENTAACTC = Σ(S+S)^55 (topo82) → NHHEPTPENTAACTC = Σ(S+S)^56 (topo83)
-- **S-regular**: NHHEPTPENTAACTC = 72057594037927936·|E|·S^56
-- **Implementation**: ss^56 = ss32 × ss16 × ss8 (56=32+16+8; 3 mults — efficient!)
+### NHHEPTPENTAACTC —— S-第56次幂边和
+- **公式**：NHHEPTPENTAACTC(G) = Σ_{uv∈E} (S_u+S_v)^56
+- **类型**：S-幂次边和；精确 u128→u64 饱和运算
+- **延伸自**：NHHEXPENTAACTC = Σ(S+S)^55（topo82）→ NHHEPTPENTAACTC = Σ(S+S)^56（topo83）
+- **S-正则图公式**：NHHEPTPENTAACTC = 72057594037927936·|E|·S^56
+- **实现**：ss^56 = ss32 × ss16 × ss8（56=32+16+8；3 次乘法 —— 效率高！）
 
-### NAZSO — S-Variant Sombor α=102
-- **Formula**: NAZSO(G) = Σ_{uv∈E} (S_u²+S_v²)^51
-- **Type**: S-variant generalised Sombor SO^α with α=102; exact (no isqrt)
-- **Series**: 3rd-pass "AZ" — last letter of the alphabet in the NA... series
-- **Extends**: NAYSO(α=100, topo82) → NAZSO(α=102, topo83)
-- **S-regular**: NAZSO = 2251799813685248·|E|·S^102
-- **Implementation**: s2s^51 = s2s32 × s2s16 × s2s2 × s2s (51=32+16+2+1; 4 mults)
+### NAZSO —— S-变体 Sombor 指数 α=102
+- **公式**：NAZSO(G) = Σ_{uv∈E} (S_u²+S_v²)^51
+- **类型**：S-变体广义 Sombor 指数 SO^α，α=102；精确（无需 isqrt）
+- **系列**：第3轮 "AZ" —— NA... 系列中字母表的最后一个字母
+- **延伸自**：NAYSO(α=100, topo82) → NAZSO(α=102, topo83)
+- **S-正则图公式**：NAZSO = 2251799813685248·|E|·S^102
+- **实现**：s2s^51 = s2s32 × s2s16 × s2s2 × s2s（51=32+16+2+1；4 次乘法）
 
-## Key Test Values (K₂, S=1 uniform)
+## 关键测试值（K₂，S=1 均匀）
 
-| Index          | K₂ value                  | Formula       |
+| 指数 | K₂ 值 | 公式 |
 |----------------|---------------------------|---------------|
-| NHEPTPENTAACTC | 2                         | 1^57+1^57     |
-| NHHEPTPENTAACTC| 72_057_594_037_927_936    | 2^56          |
-| NAZSO          | 2_251_799_813_685_248     | 2^51          |
+| NHEPTPENTAACTC | 2 | 1^57+1^57 |
+| NHHEPTPENTAACTC| 72_057_594_037_927_936 | 2^56 |
+| NAZSO | 2_251_799_813_685_248 | 2^51 |
 
-P₃ non-saturating: NHEPTPENTAACTC = 432_345_564_227_567_616 = 3×2^57
+P₃ 未饱和：NHEPTPENTAACTC = 432_345_564_227_567_616 = 3×2^57
 
-## Files Changed
+## 变更文件
 
-- `crates/gos-runtime/src/lib.rs` — `graph_topo_indices83_inner()` + `graph_topo_indices83()` public API
-- `crates/k-shell/src/lib.rs` — `dispatch_graph_topo_indices83()` display function
-- `crates/k-shell/src/proc.rs` — routing for `"graph topo83"`, `"gtopo83"`, and aliases
-- `host-tests/gos-graph-topo83-harness/` — new harness (10 tests, all green)
+- `crates/gos-runtime/src/lib.rs` —— `graph_topo_indices83_inner()` + 公开 API `graph_topo_indices83()`
+- `crates/k-shell/src/lib.rs` —— `dispatch_graph_topo_indices83()` 显示函数
+- `crates/k-shell/src/proc.rs` —— `"graph topo83"`、`"gtopo83"` 及别名路由
+- `host-tests/gos-graph-topo83-harness/` —— 新建 harness（10 项测试，全部通过）
 
-## VectorAddress Namespace
+## VectorAddress 命名空间
 
-- L4=170 for gos-graph-topo83-harness
-- Plugin: TOPIX_83; Executor: t83.exec
+- L4=170 分配给 gos-graph-topo83-harness
+- 插件：TOPIX_83；执行器：t83.exec
 
-## Shell Aliases
+## Shell 别名
 
 - `graph topo83` / `gtopo83`
 - `neighborhood heptapentacontic` / `gnheptpentaactc`
@@ -63,14 +63,14 @@ P₃ non-saturating: NHEPTPENTAACTC = 432_345_564_227_567_616 = 3×2^57
 - `neighborhood dohectyl sombor` / `gnnazso`
 - `gnheptpentaactcnhheptpentaactcnazso`
 
-## Test Results
+## 测试结果
 
-- **Host test suite**: 1913 tests total (1903 prior + 10 new)
-- **New harness**: gos-graph-topo83-harness — 10/10 passed
-- **Runtime check**: `cargo check -p gos-runtime` — clean
+- **宿主测试套件**：共 1913 项（此前 1903 项 + 本次新增 10 项）
+- **新增 harness**：gos-graph-topo83-harness —— 10/10 通过
+- **运行时检查**：`cargo check -p gos-runtime` —— 通过，无警告
 
-## Notes
+## 备注
 
-- NHHEPTPENTAACTC ss^56 is particularly efficient: 56=32+16+8 (three powers of 2, only 3 combination mults)
-- NAZSO marks the end of the 3rd-pass single-letter "NA..." Sombor series (A through Z complete)
-- Next: topo84 will begin NBASO series or extend pentacontic with NOCTPENTAACTC (Σ S^58)
+- NHHEPTPENTAACTC 的 ss^56 实现尤为高效：56=32+16+8（三个2的幂次，仅需3次组合乘法）
+- NAZSO 标志着第3轮单字母 "NA..." Sombor 系列的终结（A 至 Z 已全部用尽）
+- 下一步：topo84 将开启 NBASO 系列，或以 NOCTPENTAACTC（Σ S^58）延伸 pentacontic 系列

@@ -1,88 +1,88 @@
-# HARDENING LOG — V3.77 (2026-07-20)
+# 强化日志 — V3.77（2026-07-20）
 
-## Summary
+## 摘要
 
-Added NTETRAACTC + NHTETRAACTC + NAISO Neighborhood S-variant topological indices (topo66),
-and `gos-graph-topo66-harness` with 10 tests.
+新增 NTETRAACTC + NHTETRAACTC + NAISO 三项 Neighborhood S-variant 拓扑指数（topo66），
+以及配套的 `gos-graph-topo66-harness`（10 项测试）。
 
-**Host-test suite total: 1743 tests** (1733 through V3.76 + 10 new).
+**宿主测试套件总数：1743 项**（V3.76 累计 1733 项 + 本次新增 10 项）。
 
 ---
 
-## What Changed
+## 变更内容
 
-### New API: `gos_runtime::graph_topo_indices66()`
+### 新增 API：`gos_runtime::graph_topo_indices66()`
 
 ```rust
 pub fn graph_topo_indices66() -> (u64, u64, u64, usize, usize)
-// returns (ntetraactc, nhtetraactc, naiso, edge_count, node_count)
+// 返回 (ntetraactc, nhtetraactc, naiso, edge_count, node_count)
 ```
 
-All three indices are based on the S-variant neighbor-degree sum:
-`S(v) = Σ_{w∈N(v)} deg(w)`.
+三项指数均基于 S-变体邻域度和：
+`S(v) = Σ_{w∈N(v)} deg(w)`。
 
-#### NTETRAACTC — S-Tetracontic vertex sum (α=40)
+#### NTETRAACTC —— S-第40次幂顶点和（α=40）
 
 ```
 NTETRAACTC(G) = Σ_v S(v)^40
 ```
 
-- Extends the S-power-vertex series: `NNONATRIACTC=ΣS^39` (topo65) → `NTETRAACTC=ΣS^40` (topo66)
-- S-regular formula: `NTETRAACTC = n·S^40`
-- Implementation: `s^40 = s32 × s8` (40 = 32+8; highly efficient — only 1 extra multiply after s32)
+- 延伸 S-幂次顶点系列：`NNONATRIACTC=ΣS^39`（topo65）→ **`NTETRAACTC=ΣS^40`（topo66）**
+- S-正则图公式：`NTETRAACTC = n·S^40`
+- 实现：`s^40 = s32 × s8`（40 = 32+8；效率很高，s32 之后仅需 1 次额外乘法）
 
-#### NHTETRAACTC — S-Nonatriacontic edge-sum (power=39)
+#### NHTETRAACTC —— S-第39次幂边和（power=39）
 
 ```
 NHTETRAACTC(G) = Σ_{uv∈E} (S_u + S_v)^39
 ```
 
-- Extends: `NHNONATRIACTC=Σ(S+S)^38` (topo65) → `NHTETRAACTC=Σ(S+S)^39` (topo66)
-- S-regular formula: `NHTETRAACTC = |E|·(2S)^39 = 549_755_813_888·|E|·S^39`
-- Implementation: `ss^39 = ss32 × ss4 × ss2 × ss` (39 = 32+4+2+1)
+- 延伸：`NHNONATRIACTC=Σ(S+S)^38`（topo65）→ **`NHTETRAACTC=Σ(S+S)^39`（topo66）**
+- S-正则图公式：`NHTETRAACTC = |E|·(2S)^39 = 549_755_813_888·|E|·S^39`
+- 实现：`ss^39 = ss32 × ss4 × ss2 × ss`（39 = 32+4+2+1）
 
-#### NAISO — S-Octahexacontyl Sombor (α=68)
+#### NAISO —— S-第68次 Sombor 变体（α=68）
 
 ```
 NAISO(G) = Σ_{uv∈E} (S_u² + S_v²)^34
 ```
 
-- 3rd-pass double-letter series: NAASO(α=52)…NAHSO(α=66) → **NAISO(α=68)**
-- Exact integer computation (no isqrt needed): α=68 is even, j=34
-- S-regular formula: `NAISO = |E|·(2S²)^34 = 17_179_869_184·|E|·S^68`
-- Implementation: `s2s^34 = s2s32 × s2s2` (34 = 32+2; highly efficient)
+- 第3轮双字母序列延续：NAASO(α=52)…NAHSO(α=66) → **NAISO(α=68)**
+- 精确整数运算（无需 isqrt）：α=68 为偶数，j=34
+- S-正则图公式：`NAISO = |E|·(2S²)^34 = 17_179_869_184·|E|·S^68`
+- 实现：`s2s^34 = s2s32 × s2s2`（34 = 32+2；效率很高，仅需 1 次额外乘法）
 
 ---
 
-## Test Values
+## 测试数据
 
-| Graph      | NTETRAACTC           | NHTETRAACTC      | NAISO            | edges | nodes |
+| 图 | NTETRAACTC | NHTETRAACTC | NAISO | 边数 | 节点数 |
 |-----------|----------------------|------------------|------------------|-------|-------|
-| Empty      | 0                    | 0                | 0                | 0     | 0     |
-| 1 node     | 0                    | 0                | 0                | 0     | 1     |
-| K₂         | 2                    | 549_755_813_888  | 17_179_869_184   | 1     | 2     |
-| P₃         | 3_298_534_883_328    | u64::MAX         | u64::MAX         | 2     | 3     |
-| K₃         | u64::MAX             | u64::MAX         | u64::MAX         | 3     | 3     |
-| K_{1,4}    | u64::MAX             | u64::MAX         | u64::MAX         | 4     | 5     |
-| P₄         | u64::MAX             | u64::MAX         | u64::MAX         | 3     | 4     |
-| K₄         | u64::MAX             | u64::MAX         | u64::MAX         | 6     | 4     |
-| 2 isolated | 0                    | 0                | 0                | 0     | 2     |
-| K_{2,3}    | u64::MAX             | u64::MAX         | u64::MAX         | 6     | 5     |
+| 空图 | 0 | 0 | 0 | 0 | 0 |
+| 单节点 | 0 | 0 | 0 | 0 | 1 |
+| K₂ | 2 | 549_755_813_888 | 17_179_869_184 | 1 | 2 |
+| P₃ | 3_298_534_883_328 | u64::MAX | u64::MAX | 2 | 3 |
+| K₃ | u64::MAX | u64::MAX | u64::MAX | 3 | 3 |
+| K_{1,4} | u64::MAX | u64::MAX | u64::MAX | 4 | 5 |
+| P₄ | u64::MAX | u64::MAX | u64::MAX | 3 | 4 |
+| K₄ | u64::MAX | u64::MAX | u64::MAX | 6 | 4 |
+| 两孤立节点 | 0 | 0 | 0 | 0 | 2 |
+| K_{2,3} | u64::MAX | u64::MAX | u64::MAX | 6 | 5 |
 
-Note: P₄ saturation is new at topo66. At topo65, NNONATRIACTC for P₄ was
-`8_105_111_405_549_580_310` (fits in u64). At topo66, NTETRAACTC for P₄
-requires `2×3^40 = 24_315_330_918_113_857_602 > u64::MAX`, so all three
-indices saturate for P₄ onward.
+注：P₄ 在 topo66 出现新的饱和点。topo65 时，P₄ 的 NNONATRIACTC 为
+`8_105_111_405_549_580_310`（可容纳于 u64）。到 topo66，P₄ 的 NTETRAACTC
+需要 `2×3^40 = 24_315_330_918_113_857_602 > u64::MAX`，因此从 P₄ 起三项
+指数均发生饱和。
 
 ---
 
-## New Harness
+## 新增测试 harness
 
-**`host-tests/gos-graph-topo66-harness/`** (10 tests)
+**`host-tests/gos-graph-topo66-harness/`**（10 项测试）
 
-- Plugin: `TOPIX_66` / Executor: `t66.exec`
+- 插件：`TOPIX_66` / 执行器：`t66.exec`
 - VectorAddress L4=153
-- All 10 tests: PASS
+- 全部 10 项测试：通过
 
 ```
 test test_01_empty          ... ok
@@ -101,7 +101,7 @@ test result: ok. 10 passed; 0 failed
 
 ---
 
-## Shell Commands
+## Shell 命令
 
 ```
 graph topo66 / gtopo66 / gntetraactc / gnhtetraactc / gnnaiso
@@ -110,15 +110,15 @@ gntetraactcnhtetraactcnaiso
 
 ---
 
-## VectorAddress L4 Namespace Update
+## VectorAddress L4 命名空间更新
 
-88=graph-topo through 152=graph-topo65, **153=graph-topo66**
+88=graph-topo 至 152=graph-topo65，**153=graph-topo66**
 
 ---
 
-## Implementation Notes
+## 实现说明
 
-- `s^40 = s32 × s8`: highly efficient (40 = 32+8, only 2 squarings after s2)
-- `ss^39 = ss32 × ss4 × ss2 × ss`: same 4-term decomposition as topo65's `ss^38` but with one extra `×ss`
-- `s2s^34 = s2s32 × s2s2`: highly efficient (34 = 32+2, only 1 extra multiply)
-- All computations use u128 saturating arithmetic, clamped to u64::MAX at the end
+- `s^40 = s32 × s8`：效率很高（40 = 32+8，s2 之后仅需 2 次平方）
+- `ss^39 = ss32 × ss4 × ss2 × ss`：与 topo65 的 `ss^38` 相同的 4 项分解，多 1 次 `×ss`
+- `s2s^34 = s2s32 × s2s2`：效率很高（34 = 32+2，仅需 1 次额外乘法）
+- 全部运算使用 u128 饱和累加器，末尾截断至 u64::MAX

@@ -1,93 +1,93 @@
-# Hardening Log — V3.93 (2026-07-20)
+# 强化日志 — V3.93（2026-07-20）
 
-## Summary
+## 摘要
 
-Added three new Neighborhood S-variant topological indices for the GOS graph kernel:
+为 GOS 图内核新增三项 Neighborhood S-variant 拓扑指数：
 
-- **NHEXPENTAACTC** — S-Hexapentacontic vertex sum: `Σ_v S(v)^56`
-- **NHHEXPENTAACTC** — S-Pentapentacontic edge-sum: `Σ_{uv∈E} (S_u+S_v)^55`
-- **NAYSO** — S-Variant Sombor SO^α with α=100 (Centyl Sombor): `Σ_{uv∈E} (S_u²+S_v²)^50`
+- **NHEXPENTAACTC** —— S-第56次幂顶点和：`Σ_v S(v)^56`
+- **NHHEXPENTAACTC** —— S-第55次幂边和：`Σ_{uv∈E} (S_u+S_v)^55`
+- **NAYSO** —— S-变体 Sombor 指数 SO^α，α=100（Centyl Sombor）：`Σ_{uv∈E} (S_u²+S_v²)^50`
 
-New harness `gos-graph-topo82-harness` added with 10 tests (all green).
+新增 harness `gos-graph-topo82-harness`（10 项测试，全部通过）。
 
-Cumulative host-test count: **1903 tests**.
+累计宿主测试数：**1903 项**。
 
 ---
 
-## Mathematical Definitions
+## 数学定义
 
-Let `S(v) = Σ_{w∈N(v)} deg(w)` be the neighbor-degree sum of vertex `v`.
+设 `S(v) = Σ_{w∈N(v)} deg(w)` 为顶点 `v` 的邻域度数和。
 
-### NHEXPENTAACTC (S-Hexapentacontic vertex sum)
+### NHEXPENTAACTC（S-第56次幂顶点和）
 
 ```
 NHEXPENTAACTC(G) = Σ_v S(v)^56
 ```
 
-- **Series position**: Seventh index in the pentacontic (50–59 power) series
-- **Predecessor**: NPENTAPENTAACTC = Σ S^55 (V3.92, topo81)
-- **S-regular formula**: NHEXPENTAACTC = n · S^56
-- **Implementation**: s^56 = s32 × s16 × s8 (56 = 32+16+8; 3 multiplications — efficient!)
-- **Overflow handling**: Saturating u128 accumulator, clamped to u64::MAX
+- **系列定位**：pentacontic（50–59次幂）系列第7个指数
+- **前驱**：NPENTAPENTAACTC = Σ S^55（V3.92，topo81）
+- **S-正则图公式**：NHEXPENTAACTC = n · S^56
+- **实现**：s^56 = s32 × s16 × s8（56 = 32+16+8；3 次乘法 —— 效率高！）
+- **溢出处理**：饱和 u128 累加器，截断至 u64::MAX
 
-### NHHEXPENTAACTC (S-Pentapentacontic edge-sum)
+### NHHEXPENTAACTC（S-第55次幂边和）
 
 ```
 NHHEXPENTAACTC(G) = Σ_{uv∈E} (S_u + S_v)^55
 ```
 
-- **Series position**: Extends NHPENTAPENTAACTC = Σ(S+S)^54 (topo81) to 55th power
-- **S-regular formula**: NHHEXPENTAACTC = |E| · (2S)^55 = 36028797018963968 · |E| · S^55
-- **Implementation**: ss^55 = ss32 × ss16 × ss4 × ss2 × ss (55 = 32+16+4+2+1; 5 mults)
+- **系列定位**：将 NHPENTAPENTAACTC = Σ(S+S)^54（topo81）延伸至第55次幂
+- **S-正则图公式**：NHHEXPENTAACTC = |E| · (2S)^55 = 36028797018963968 · |E| · S^55
+- **实现**：ss^55 = ss32 × ss16 × ss4 × ss2 × ss（55 = 32+16+4+2+1；5 次乘法）
 
-### NAYSO (S-Centyl Sombor, α=100)
+### NAYSO（S-Centyl Sombor，α=100）
 
 ```
 NAYSO(G) = Σ_{uv∈E} (S_u² + S_v²)^50
 ```
 
-- **Series position**: 3rd-pass double-letter AY in the generalised Sombor SO^α family
-- **Predecessor**: NAXSO (α=98, topo81)
-- **S-regular formula**: NAYSO = |E| · (2S²)^50 = 1125899906842624 · |E| · S^100
-- **Implementation**: s2s^50 = s2s32 × s2s16 × s2s2 (50 = 32+16+2; 3 mults)
-- **Note**: s^56 = s32×s16×s8 is efficient (56 = 32+16+8, three powers of 2, only 3 final mults)
+- **系列定位**：广义 Sombor SO^α 家族中第3轮双字母 AY
+- **前驱**：NAXSO（α=98，topo81）
+- **S-正则图公式**：NAYSO = |E| · (2S²)^50 = 1125899906842624 · |E| · S^100
+- **实现**：s2s^50 = s2s32 × s2s16 × s2s2（50 = 32+16+2；3 次乘法）
+- **说明**：s^56 = s32×s16×s8 效率很高（56 = 32+16+8，三个2的幂次，仅需3次最终乘法）
 
 ---
 
-## Analytical Test Values
+## 解析测试值
 
-| Graph    | NHEXPENTAACTC         | NHHEXPENTAACTC              | NAYSO               | edges | nodes |
+| 图 | NHEXPENTAACTC | NHHEXPENTAACTC | NAYSO | 边数 | 节点数 |
 |----------|-----------------------|-----------------------------|---------------------|-------|-------|
-| Empty    | 0                     | 0                           | 0                   | 0     | 0     |
-| K₂       | 2                     | 36_028_797_018_963_968      | 1_125_899_906_842_624 | 1   | 2     |
-| P₃       | 216_172_782_113_783_808 | u64::MAX (sat.)           | u64::MAX (sat.)     | 2     | 3     |
-| K₃       | u64::MAX (sat.)       | u64::MAX (sat.)             | u64::MAX (sat.)     | 3     | 3     |
-| K₄       | u64::MAX (sat.)       | u64::MAX (sat.)             | u64::MAX (sat.)     | 6     | 4     |
+| 空图 | 0 | 0 | 0 | 0 | 0 |
+| K₂ | 2 | 36_028_797_018_963_968 | 1_125_899_906_842_624 | 1 | 2 |
+| P₃ | 216_172_782_113_783_808 | u64::MAX（饱和）| u64::MAX（饱和）| 2 | 3 |
+| K₃ | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 3 | 3 |
+| K₄ | u64::MAX（饱和）| u64::MAX（饱和）| u64::MAX（饱和）| 6 | 4 |
 
-**K₂ derivation** (S=1 uniform):
-- NHEXPENTAACTC: 1^56 + 1^56 = 2
-- NHHEXPENTAACTC: (1+1)^55 = 2^55 = 36_028_797_018_963_968
-- NAYSO: (1²+1²)^50 = 2^50 = 1_125_899_906_842_624
+**K₂ 推导**（S=1 均匀）：
+- NHEXPENTAACTC：1^56 + 1^56 = 2
+- NHHEXPENTAACTC：(1+1)^55 = 2^55 = 36_028_797_018_963_968
+- NAYSO：(1²+1²)^50 = 2^50 = 1_125_899_906_842_624
 
-**P₃ derivation** (S=2 uniform, 3 nodes × S^56):
-- NHEXPENTAACTC: 3 × 2^56 = 3 × 72_057_594_037_927_936 = 216_172_782_113_783_808 (fits in u64)
-- NHHEXPENTAACTC: 2 × 4^55 = 2 × 2^110 → saturates
-- NAYSO: 2 × 8^50 = 2 × 2^150 → saturates
+**P₃ 推导**（S=2 均匀，3节点 × S^56）：
+- NHEXPENTAACTC：3 × 2^56 = 3 × 72_057_594_037_927_936 = 216_172_782_113_783_808（可容纳于 u64）
+- NHHEXPENTAACTC：2 × 4^55 = 2 × 2^110 → 饱和
+- NAYSO：2 × 8^50 = 2 × 2^150 → 饱和
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
+| 文件 | 变更 |
 |------|--------|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_topo_indices82_inner()` + public `graph_topo_indices82()` |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_topo_indices82()` display function |
-| `crates/k-shell/src/proc.rs` | Added routing for `graph topo82`/`gtopo82`/`gnhexpentaactc`/`gnnhhexpentaactc`/`gnnayso` |
-| `host-tests/gos-graph-topo82-harness/` | New harness (10 tests, all green) |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices82_inner()` + 公开函数 `graph_topo_indices82()` |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices82()` 显示函数 |
+| `crates/k-shell/src/proc.rs` | 新增路由：`graph topo82`/`gtopo82`/`gnhexpentaactc`/`gnnhhexpentaactc`/`gnnayso` |
+| `host-tests/gos-graph-topo82-harness/` | 新建 harness（10 项测试，全部通过） |
 
 ---
 
-## Shell Commands
+## Shell 命令
 
 ```
 graph topo82
@@ -103,33 +103,33 @@ gnhexpentaactcnhhexpentaactcnayso
 
 ---
 
-## VectorAddress Namespace
+## VectorAddress 命名空间
 
-- L4=168: gos-graph-topo81-harness (V3.92)
-- **L4=169: gos-graph-topo82-harness (V3.93, this change)**
+- L4=168：gos-graph-topo81-harness（V3.92）
+- **L4=169：gos-graph-topo82-harness（V3.93，本次变更）**
 
 ---
 
-## Runtime API
+## 运行时 API
 
 ```rust
 gos_runtime::graph_topo_indices82() -> (nhexpentaactc: u64, nhhexpentaactc: u64, nayso: u64, edge_count: usize, node_count: usize)
 ```
 
-- Plugin: `TOPIX_82`
-- Executor: `t82.exec`
+- 插件：`TOPIX_82`
+- 执行器：`t82.exec`
 
 ---
 
-## Context
+## 背景说明
 
-Part of the ongoing automated hardening cycle. The S-variant pentacontic series (topo76–topo85) implements
-a systematic family of high-power vertex/edge topological indices on the neighbor-degree sum (S-variant).
+本次变更是持续自动化强化周期的一部分。S-变体 pentacontic 系列（topo76–topo85）实现了
+建立在邻域度数和（S-变体）之上的一系列高次幂顶点/边拓扑指数。
 
-Each firing adds three indices:
-1. A vertex sum S^n (incrementing by 1 per version)
-2. An edge sum (S_u+S_v)^(n-1) (one less power)  
-3. A generalised S-variant Sombor SO^α with α = 2×(n-6) (incrementing α by 2 per version)
+每次迭代新增三项指数：
+1. 顶点和 S^n（每版本递增 1 次幂）
+2. 边和 (S_u+S_v)^(n-1)（次幂少 1）
+3. 广义 S-变体 Sombor 指数 SO^α，α = 2×(n-6)（每版本 α 递增 2）
 
-The double-letter SO naming (NAASO, NABSO, ..., NAXSO, NAYSO) tracks the α/2 offset from
-the initial NSO (α=1, topo21) through the extended series.
+双字母 SO 命名（NAASO、NABSO、……、NAXSO、NAYSO）沿着扩展系列追踪相对于
+初始 NSO（α=1，topo21）的 α/2 偏移量。

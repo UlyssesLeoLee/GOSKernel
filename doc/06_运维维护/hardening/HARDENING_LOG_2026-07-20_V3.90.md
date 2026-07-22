@@ -1,81 +1,81 @@
-# HARDENING LOG — V3.90 (2026-07-20)
+# 强化日志 — V3.90（2026-07-20）
 
-## Summary
+## 摘要
 
-**Branch:** feat/vk-auto-live-surface  
-**Version:** V3.90  
-**Indices added:** NTRIPENTAACTC + NHTRIPENTAACTC + NAVSO  
-**Harness:** gos-graph-topo79-harness (10 tests)  
-**Total host tests:** 1873  
+**分支**：feat/vk-auto-live-surface
+**版本**：V3.90
+**新增指数**：NTRIPENTAACTC + NHTRIPENTAACTC + NAVSO
+**Harness**：gos-graph-topo79-harness（10 项测试）
+**宿主测试总数**：1873
 
 ---
 
-## New Topology Indices (topo79, L4=166)
+## 新增拓扑指数（topo79，L4=166）
 
-### NTRIPENTAACTC — S-Tripentacontic Vertex Sum
+### NTRIPENTAACTC —— S-第53次幂顶点和
 
 ```
 NTRIPENTAACTC(G) = Σ_v S(v)^53
 ```
 
-- **S-variant**: S(v) = Σ_{w∈N(v)} deg(w) (neighbor-degree sum)
-- **Series position**: Fourth of the pentacontic (50–59) series; follows NDOPENTAACTC=Σ S^52 (topo78)
-- **S-regular formula**: NTRIPENTAACTC = n·S^53
-- **Implementation**: s^53 = s32 × s16 × s4 × s (53=32+16+4+1; 4 mults)
-- **Overflow**: Saturating u128 accumulator, clamped to u64::MAX
+- **S-变体**：S(v) = Σ_{w∈N(v)} deg(w)（邻域度数和）
+- **系列定位**：pentacontic（50–59）系列第4个；延续 NDOPENTAACTC=Σ S^52（topo78）
+- **S-正则图公式**：NTRIPENTAACTC = n·S^53
+- **实现**：s^53 = s32 × s16 × s4 × s（53=32+16+4+1；4 次乘法）
+- **溢出处理**：饱和 u128 累加器，截断至 u64::MAX
 
-### NHTRIPENTAACTC — S-Dopentacontic Edge Sum
+### NHTRIPENTAACTC —— S-第52次幂边和
 
 ```
 NHTRIPENTAACTC(G) = Σ_{uv∈E} (S_u + S_v)^52
 ```
 
-- **Series position**: Follows NHDOPENTAACTC=Σ(S+S)^51 (topo78)
-- **S-regular formula**: NHTRIPENTAACTC = |E|·(2S)^52 = 4_503_599_627_370_496·|E|·S^52
-- **Implementation**: ss^52 = ss32 × ss16 × ss4 (52=32+16+4; 3 mults — efficient!)
+- **系列定位**：延续 NHDOPENTAACTC=Σ(S+S)^51（topo78）
+- **S-正则图公式**：NHTRIPENTAACTC = |E|·(2S)^52 = 4_503_599_627_370_496·|E|·S^52
+- **实现**：ss^52 = ss32 × ss16 × ss4（52=32+16+4；3 次乘法 —— 效率高！）
 
-### NAVSO — S-Variant Sombor α=94
+### NAVSO —— S-变体 Sombor 指数 α=94
 
 ```
 NAVSO(G) = Σ_{uv∈E} (S_u² + S_v²)^47
 ```
 
-- **Alpha**: α = 94 (3rd-pass "AV"; follows NAUSO α=92, topo78)
-- **S-regular formula**: NAVSO = |E|·(2S²)^47 = 140_737_488_355_328·|E|·S^94
-- **Implementation**: s2s^47 = s2s32 × s2s8 × s2s4 × s2s2 × s2s (47=32+8+4+2+1; 5 mults)
+- **Alpha**：α = 94（第3轮双字母 "AV"；延续 NAUSO α=92，topo78）
+- **S-正则图公式**：NAVSO = |E|·(2S²)^47 = 140_737_488_355_328·|E|·S^94
+- **实现**：s2s^47 = s2s32 × s2s8 × s2s4 × s2s2 × s2s（47=32+8+4+2+1；5 次乘法）
 
 ---
 
-## K₂ Reference Values
+## K₂ 参考值
 
-| Index | Value |
+| 指数 | 值 |
 |-------|-------|
-| NTRIPENTAACTC | 2 (= 1^53 + 1^53) |
-| NHTRIPENTAACTC | 4_503_599_627_370_496 (= 2^52) |
-| NAVSO | 140_737_488_355_328 (= 2^47) |
+| NTRIPENTAACTC | 2（= 1^53 + 1^53） |
+| NHTRIPENTAACTC | 4_503_599_627_370_496（= 2^52） |
+| NAVSO | 140_737_488_355_328（= 2^47） |
 
-## P₃ Reference Values
+## P₃ 参考值
 
-| Index | Value |
+| 指数 | 值 |
 |-------|-------|
-| NTRIPENTAACTC | 27_021_597_764_222_976 (= 3×2^53) |
-| NHTRIPENTAACTC | u64::MAX (saturated) |
-| NAVSO | u64::MAX (saturated) |
+| NTRIPENTAACTC | 27_021_597_764_222_976（= 3×2^53） |
+| NHTRIPENTAACTC | u64::MAX（饱和） |
+| NAVSO | u64::MAX（饱和） |
 
 ---
 
-## Files Changed
+## 变更文件
 
-| File | Change |
+| 文件 | 变更 |
 |------|--------|
-| `crates/gos-runtime/src/lib.rs` | Added `graph_topo_indices79_inner` + `graph_topo_indices79` |
-| `crates/k-shell/src/lib.rs` | Added `dispatch_graph_topo_indices79` |
-| `crates/k-shell/src/proc.rs` | Added routing for `graph topo79` / `gtopo79` / `gntripentaactc` / etc. |
-| `host-tests/gos-graph-topo79-harness/` | New 10-test harness (with `.cargo/config.toml` for host target) |
+| `crates/gos-runtime/src/lib.rs` | 新增 `graph_topo_indices79_inner` + `graph_topo_indices79` |
+| `crates/k-shell/src/lib.rs` | 新增 `dispatch_graph_topo_indices79` |
+| `crates/k-shell/src/proc.rs` | 新增路由：`graph topo79` / `gtopo79` / `gntripentaactc` 等 |
+| `host-tests/gos-graph-topo79-harness/` | 新建 10 项测试 harness（含用于宿主目标的 `.cargo/config.toml`） |
 
 ---
 
-## Test Results
+## 测试结果
 
 ```
 running 10 tests
@@ -83,14 +83,14 @@ running 10 tests
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-All 10 tests verified:
-1. Empty graph → (0, 0, 0, 0, 0)
-2. Single node → (0, 0, 0, 0, 1)
+全部 10 项测试验证如下：
+1. 空图 → (0, 0, 0, 0, 0)
+2. 单节点 → (0, 0, 0, 0, 1)
 3. K₂ → (2, 4_503_599_627_370_496, 140_737_488_355_328, 1, 2)
 4. P₃ → (27_021_597_764_222_976, u64::MAX, u64::MAX, 2, 3)
 5. K₃ → (u64::MAX, u64::MAX, u64::MAX, 3, 3)
 6. K_{1,4} → (u64::MAX, u64::MAX, u64::MAX, 4, 5)
 7. P₄ → (u64::MAX, u64::MAX, u64::MAX, 3, 4)
 8. K₄ → (u64::MAX, u64::MAX, u64::MAX, 6, 4)
-9. Two isolated → (0, 0, 0, 0, 2)
+9. 两孤立节点 → (0, 0, 0, 0, 2)
 10. K_{2,3} → (u64::MAX, u64::MAX, u64::MAX, 6, 5)
