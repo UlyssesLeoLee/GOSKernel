@@ -564,6 +564,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  nattr set / nattr get / nattr list / nattr list u8  aliases\n");
         super::print_str(sink, "  edges              list all live graph edges (ss-style)\n");
         super::print_str(sink, "  edges count        total edge count\n");
+        super::print_str(sink, "  edges summary      per-type edge count breakdown (like ss -s / netstat -s)\n");
         super::print_str(sink, "  edges <type>       filter by type: call spawn depend signal return mount sync stream use\n");
         super::print_str(sink, "  graph diff         show topology changes since pinned epoch (like git diff)\n");
         super::print_str(sink, "  graph diff <N>     show topology changes since epoch N (e.g. graph diff 42)\n");
@@ -991,6 +992,8 @@ fn dispatch_text_command(
         super::dispatch_edges_list(sink, None);
     } else if cmd == "edges count" || cmd == "edge count" {
         super::dispatch_edge_count(sink);
+    } else if cmd == "edges summary" || cmd == "edges stat" || cmd == "edge types" {
+        super::dispatch_edge_type_summary(sink);
     } else if let Some(type_str) = cmd.strip_prefix("edges ") {
         if let Some(et) = super::parse_edge_type_filter(type_str) {
             super::dispatch_edges_list(sink, Some(et));

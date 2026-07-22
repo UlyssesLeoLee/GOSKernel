@@ -1452,6 +1452,86 @@ pub fn dispatch_edge_count(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 }
 
+/// Edge type distribution summary — counts per type, colour-coded for quick
+/// triage. Analogous to `ss -s` / `netstat -s`: aggregated topology health
+/// at a glance without walking every edge by hand.
+pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
+    use gos_protocol::RuntimeEdgeType;
+    const PAGE: usize = 8;
+    let mut items = [GraphEdgeSummary::EMPTY; PAGE];
+    let mut offset = 0usize;
+
+    let mut n_call = 0usize;
+    let mut n_spawn = 0usize;
+    let mut n_depend = 0usize;
+    let mut n_signal = 0usize;
+    let mut n_return = 0usize;
+    let mut n_mount = 0usize;
+    let mut n_sync = 0usize;
+    let mut n_stream = 0usize;
+    let mut n_use = 0usize;
+
+    loop {
+        let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
+        for item in items.iter().take(returned) {
+            match item.edge_type {
+                RuntimeEdgeType::Call => n_call += 1,
+                RuntimeEdgeType::Spawn => n_spawn += 1,
+                RuntimeEdgeType::Depend => n_depend += 1,
+                RuntimeEdgeType::Signal => n_signal += 1,
+                RuntimeEdgeType::Return => n_return += 1,
+                RuntimeEdgeType::Mount => n_mount += 1,
+                RuntimeEdgeType::Sync => n_sync += 1,
+                RuntimeEdgeType::Stream => n_stream += 1,
+                RuntimeEdgeType::Use => n_use += 1,
+            }
+        }
+        offset += returned;
+        if returned == 0 || offset >= total {
+            break;
+        }
+    }
+
+    set_color(sink, 11, 0);
+    print_str(sink, " edge type summary\n");
+    set_color(sink, 7, 0);
+
+    let total_edges =
+        n_call + n_spawn + n_depend + n_signal + n_return + n_mount + n_sync + n_stream + n_use;
+    if total_edges == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (no edges)\n");
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    macro_rules! print_edge_count {
+        ($label:expr, $count:expr, $fg:expr) => {
+            if $count > 0 {
+                set_color(sink, $fg, 0);
+                print_str(sink, "  ");
+                print_str(sink, $label);
+                print_str(sink, ": ");
+                print_num_inline(sink, $count);
+                print_str(sink, "\n");
+            }
+        };
+    }
+    print_edge_count!("call", n_call, 14);
+    print_edge_count!("spawn", n_spawn, 7);
+    print_edge_count!("depend", n_depend, 10);
+    print_edge_count!("signal", n_signal, 11);
+    print_edge_count!("return", n_return, 7);
+    print_edge_count!("mount", n_mount, 13);
+    print_edge_count!("sync", n_sync, 7);
+    print_edge_count!("stream", n_stream, 7);
+    print_edge_count!("use", n_use, 13);
+    set_color(sink, 7, 0);
+    print_str(sink, "  total: ");
+    print_num_inline(sink, total_edges);
+    print_str(sink, "\n");
+}
+
 /// `graph diff` — structural topology changelog since pinned epoch.
 ///
 /// Like `git log` for the kernel graph: shows every node/edge add or remove
