@@ -5,7 +5,17 @@
 
 **文档管理规范**：本次优化起，各阶段核心 Markdown 文档统一在标题下方附带文档管理票（文档编号 / 版本 / 状态 / 作成・审核・批准 / 变更履历），Excel 文档统一附带「文档管理」首页 sheet。硬化日志系列（06_运维维护/hardening/）作为历史记录，其内容不回溯改写事实，仅做归位与中文化；`doc/` 根目录保留的同名旧文件是硬化当时的原始存档，不做删除，仅供追溯对照。
 
-**本轮优化摘要（2026-07-19）**：
+**本轮优化摘要（2026-07-21）**：
+
+- 硬化日志系列自上一轮（2026-07-19，索引截至 V3.65）以来已持续推进至 **V3.104**（V3.66~V3.104 共 39 次硬化迭代，其中 **V3.66、V3.102 两版本文件缺失**——在 `06_运维维护/hardening/` 与 `doc/` 根目录均未找到实体文件，仅能从相邻版本的交叉引用中还原其内容，本轮如实记录该缺口，不做内容臆造），下表已补齐全部可核实的索引条目
+- 扫描全部 37 篇实体新硬化日志的 CJK 字符密度，发现 **16 篇为纯英文**（V3.77/78/84/85/86/87/88/89/90/93/94/95/97/98/99/100），本轮已逐篇核对源码引用与测试数据后翻译为中文，不改动版本号/文件路径/函数名/测试名/测试计数
+- **处理上一轮标记的高优先级待跟进事项**：[GRAPH_CLI_COMMANDS_zh.md](03_详细设计/GRAPH_CLI_COMMANDS_zh.md)（v1.7 → v1.8）对照硬化日志补齐 V3.66~V3.104 新增的 Neighborhood S-variant 拓扑指数命令族 `graph topo55`~`graph topo93`（39 组、117 个指数），新增 §十五完整索引，原 §十五/§十六 顺延为 §十六/§十七
+- [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md)（v2.7 → v2.8）§5.1 补充上述命令族概述，指向 GRAPH_CLI_COMMANDS_zh.md §十五 作为权威口径；累计 host tests 由 1623 更新为约 2021
+- V3.66~V3.104 区间新增的核心内容是 Neighborhood S-variant 拓扑指数族由 30 次幂顶点/边幂次推进至 67 次幂（依次跨越 triacontic 尾段 → tetracontic 段 → pentacontic 段 → hexacontic 段前 8 个），Sombor 变体 α 由 46 推进至 122（命名法历经第2轮单字母复用、第3轮双字母 "AA"~"AZ"、第4轮双字母 "BA"~"BJ" 三次进位），全部译名并纳入索引
+- **新发现两处口径缺陷，本轮均如实标注、未擅自修正**：① V3.66（topo55）、V3.102（topo91）硬化日志文件缺失（详见上文）；② V3.100（topo89）硬化日志自述"宿主测试总数 1963（此前 1953）"，与 V3.99（topo88）自述的累计总数 1963 矛盾（两者不能同时成立，差 10 项，疑似记录笔误）——已在 V3.100 中文译文与 GRAPH_CLI_COMMANDS_zh.md §十五中加注说明
+- 标记本轮新发现的待跟进缺口：见文末「待跟进事项」
+
+**上一轮优化摘要（2026-07-19，存档）**：
 
 - 硬化日志系列自上一轮（2026-07-15，索引截至 V3.30）以来已持续推进至 **V3.65**（累计 35 篇新增硬化记录，涵盖 V3.31~V3.65），下表已补齐全部缺口索引条目
 - 扫描全部 35 篇新增硬化日志的 CJK 字符密度，发现 12 篇为纯英文（V3.35/36/38/39/40/41/42/47/48/49/50/51），本轮已逐篇核对源码与测试数据后翻译为中文，不改动版本号/文件路径/函数名/测试名/测试计数
@@ -290,18 +300,61 @@
 | [hardening/HARDENING_LOG_2026-07-17_V3.63.md](06_运维维护/hardening/HARDENING_LOG_2026-07-17_V3.63.md) | MD | V3.63 — graph topo52 命令 + NHEXATC/NHHEXATC/NVSO 邻域指数 + 10 测试（本轮从 doc 根目录归位） |
 | [hardening/HARDENING_LOG_2026-07-17_V3.64.md](06_运维维护/hardening/HARDENING_LOG_2026-07-17_V3.64.md) | MD | V3.64 — graph topo53 命令 + NHEPTATC/NHHEPTATC/NXSO 邻域指数 + 10 测试 |
 | [hardening/HARDENING_LOG_2026-07-17_V3.65.md](06_运维维护/hardening/HARDENING_LOG_2026-07-17_V3.65.md) | MD | V3.65 — graph topo54 命令 + NOCTATC/NHOCTATC/NYSO 邻域指数 + 10 测试（累计 1623 host tests） |
+| *（V3.66 缺失）* | — | topo55 — NNONATC/NHNONATC/NZSO（α=46）邻域指数，仅见于 V3.67 等后续引用，文件未在仓库中找到 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.67.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.67.md) | MD | V3.67 — graph topo56 命令 + NTRIACTC/NHTRIACTC/NASO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.68.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.68.md) | MD | V3.68 — graph topo57 命令 + NHENTRIACTC/NHHENTRIACTC/NBSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.69.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.69.md) | MD | V3.69 — graph topo58 命令 + NDOTRIACTC/NHDOTRIACTC/NAASO（双字母序列起点）邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.70.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.70.md) | MD | V3.70 — graph topo59 命令 + NTRITRIACTC/NHTRITRIACTC/NABSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.71.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.71.md) | MD | V3.71 — graph topo60 命令 + NTETRTRIACTC/NHTETRTRIACTC/NACSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-19_V3.72.md](06_运维维护/hardening/HARDENING_LOG_2026-07-19_V3.72.md) | MD | V3.72 — graph topo61 命令 + NPENTTRIACTC/NHPENTTRIACTC/NADSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.73.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.73.md) | MD | V3.73 — graph topo62 命令 + NHEXATRIACTC/NHHEXATRIACTC/NAESO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.74.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.74.md) | MD | V3.74 — graph topo63 命令 + NHEPTATRIACTC/NHHEPTATRIACTC/NAFSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.75.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.75.md) | MD | V3.75 — graph topo64 命令 + NOCTATRIACTC/NHOCTATRIACTC/NAGSO 邻域指数 + 10 测试（累计 1723 host tests） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.76.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.76.md) | MD | V3.76 — graph topo65 命令 + NNONATRIACTC/NHNONATRIACTC/NAHSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.77.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.77.md) | MD | V3.77 — graph topo66 命令 + NTETRAACTC/NHTETRAACTC/NAISO 邻域指数 + 10 测试（累计 1743 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.78.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.78.md) | MD | V3.78 — graph topo67 命令 + NHENTETRAACTC/NHHENTETRAACTC/NAJSO 邻域指数 + 10 测试（本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.79.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.79.md) | MD | V3.79 — graph topo68 命令 + NDOTETRAACTC/NHDOTETRAACTC/NAKSO 邻域指数（补齐 topo66/67 k-shell 派发函数）+ 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.80.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.80.md) | MD | V3.80 — graph topo69 命令 + NTRITETRAACTC/NHTRITETRAACTC/NALSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.81.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.81.md) | MD | V3.81 — graph topo70 命令 + NTETRATETRAACTC/NHTETRATETRAACTC/NAMSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.82.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.82.md) | MD | V3.82 — graph topo71 命令 + NPENTETRAACTC/NHPENTETRAACTC/NANSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.83.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.83.md) | MD | V3.83 — graph topo72 命令 + NHEXTETRAACTC/NHHEXTETRAACTC/NAOSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.84.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.84.md) | MD | V3.84 — graph topo73 命令 + NHEPTETRAACTC/NHHEPTETRAACTC/NAPSO 邻域指数 + 10 测试（累计 1813 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.85.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.85.md) | MD | V3.85 — graph topo74 命令 + NOCTOTETRAACTC/NHOCTOTETRAACTC/NAQSO 邻域指数 + 10 测试（累计 1823 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.86.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.86.md) | MD | V3.86 — graph topo75 命令 + NNONATETRAACTC/NHNONATETRAACTC/NARSO 邻域指数 + 10 测试（累计 1833 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.87.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.87.md) | MD | V3.87 — graph topo76 命令 + NPENTAACTC/NHPENTAACTC/NASSO 邻域指数（pentacontic 系列首个）+ 10 测试（累计 1843 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.88.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.88.md) | MD | V3.88 — graph topo77 命令 + NHENPENTAACTC/NHHENPENTAACTC/NATSO 邻域指数 + 10 测试（累计 1853 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.89.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.89.md) | MD | V3.89 — graph topo78 命令 + NDOPENTAACTC/NHDOPENTAACTC/NAUSO 邻域指数 + 10 测试（累计 1863 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.90.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.90.md) | MD | V3.90 — graph topo79 命令 + NTRIPENTAACTC/NHTRIPENTAACTC/NAVSO 邻域指数 + 10 测试（累计 1873 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.91.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.91.md) | MD | V3.91 — graph topo80 命令 + NTETRAPENTAACTC/NHTETRAPENTAACTC/NAWSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.92.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.92.md) | MD | V3.92 — graph topo81 命令 + NPENTAPENTAACTC/NHPENTAPENTAACTC/NAXSO 邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-20_V3.93.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.93.md) | MD | V3.93 — graph topo82 命令 + NHEXPENTAACTC/NHHEXPENTAACTC/NAYSO（Centyl Sombor）邻域指数 + 10 测试（累计 1903 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.94.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.94.md) | MD | V3.94 — graph topo83 命令 + NHEPTPENTAACTC/NHHEPTPENTAACTC/NAZSO（第3轮双字母收官）邻域指数 + 10 测试（累计 1913 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-20_V3.95.md](06_运维维护/hardening/HARDENING_LOG_2026-07-20_V3.95.md) | MD | V3.95 — graph topo84 命令 + NOCTOPENTAACTC/NHOCTOPENTAACTC/NBASO（第4轮双字母起点）邻域指数 + 10 测试（累计 1923 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.96.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.96.md) | MD | V3.96 — graph topo85 命令 + NNONAPENTAACTC/NHNONAPENTAACTC/NBBSO（pentacontic 系列收官）邻域指数 + 10 测试 |
+| [hardening/HARDENING_LOG_2026-07-21_V3.97.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.97.md) | MD | V3.97 — graph topo86 命令 + NHEXAACTC/NHHEXAACTC/NBCSO（hexacontic 系列首个）邻域指数 + 10 测试（累计 1943 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.98.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.98.md) | MD | V3.98 — graph topo87 命令 + NHEXAENACTC/NHHEXAENACTC/NBDSO 邻域指数 + 10 测试（累计 1953 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.99.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.99.md) | MD | V3.99 — graph topo88 命令 + NHEXADYACTC/NHHEXADYACTC/NBESO 邻域指数 + 10 测试（累计 1963 host tests，本轮中文化） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.100.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.100.md) | MD | V3.100 — graph topo89 命令 + NHEXATRIACTC/NHHEXATRIACTC/NBFSO 邻域指数（首个三位数版本号里程碑）+ 10 测试（本轮中文化；自述累计 host tests 与 V3.99 存在 10 项口径矛盾，已如实标注） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.101.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.101.md) | MD | V3.101 — graph topo90 命令 + NHEXATETRAACTC/NHHEXATETRAACTC/NBGSO 邻域指数 + 10 测试 |
+| *（V3.102 缺失）* | — | topo91 — NHEXAPENTAACTC/NHHEXAPENTAACTC/NBHSO（α=118）邻域指数，仅见于 V3.101/V3.103/V3.104 交叉引用，文件未在仓库中找到 |
+| [hardening/HARDENING_LOG_2026-07-21_V3.103.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.103.md) | MD | V3.103 — graph topo92 命令 + NHEXAHEXAACTC/NHHEXAHEXAACTC/NBISOS 邻域指数 + k-rope 应变限制双向扫描修复 + rope 物理测试套件首次入库（gos-rope-harness 12 测试 + gos-rope-material-harness 6 测试）+ 10 测试（累计约 2011 host tests） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.104.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.104.md) | MD | V3.104 — graph topo93 命令 + NHEXAHEPTACTC/NHHEXAHEPTACTC/NBJSO 邻域指数 + 10 测试（累计约 2021 host tests） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.105.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.105.md) | MD | V3.105 — graph topo94 命令 + NHEXAOCTACTC/NHHEXAOCTACTC/NBKSO（NB第11个，α=124）邻域指数 + 10 测试（累计约 2031 host tests） |
+| [hardening/HARDENING_LOG_2026-07-21_V3.106.md](06_运维维护/hardening/HARDENING_LOG_2026-07-21_V3.106.md) | MD | V3.106 — graph topo95 命令 + NHEXAENNACTC/NHHEXAENNACTC/NBLSO（NB第12个，α=126，hexacontic 系列收官）邻域指数 + 10 测试（累计约 2041 host tests） |
 
 ---
 
-*最终更新：2026-07-19 · GOS V3.65 · 累计 1623 个 host tests（详见各硬化日志逐篇累计计数）· 图论分析命令族自 V3.29 起以「邻域度和 S(v) 替代顶点度数 d(v)」的 Neighborhood S-variant 模式持续扩展，V3.31~V3.65 新增 graph topo20~topo54 共 35 组、105 个邻域 S-变体拓扑指数，加上 V3.12~V3.30 的 graph topo1~topo19（19 组、57 个指数），拓扑指数命令族累计 54 组、约 165 个分子图拓扑描述符，全部纳入中文文档索引*
+*最终更新：2026-07-21 · GOS V3.106 · 累计约 2041 个 host tests（详见各硬化日志逐篇累计计数；V3.99→V3.100 存在 10 项口径矛盾，尚未核实，见「待跟进事项」）· 图论分析命令族自 V3.29 起以「邻域度和 S(v) 替代顶点度数 d(v)」的 Neighborhood S-variant 模式持续扩展，V3.31~V3.104 新增 graph topo20~topo93 共 74 组、222 个邻域 S-变体拓扑指数，加上 V3.12~V3.30 的 graph topo1~topo19（19 组、57 个指数），拓扑指数命令族累计 93 组、约 279 个分子图拓扑描述符，全部纳入中文文档索引 · V3.103 起新增 k-rope 绳索物理子系统（XPBD 应变限制 + 材质属性测试，18 项测试），为拓扑指数系列之外的新分支，尚未纳入 GRAPH_CLI_COMMANDS_zh.md（该模块目前无 CLI 命令，属内部物理引擎，暂不需要）*
 
 ## 待跟进事项
 
-- **[已处理]** 2 篇滞留于 `doc/` 根目录的孤儿硬化日志（V3.60/V3.63）——本轮核实原文已为纯中文后，归档至 `06_运维维护/hardening/`，根目录原文件补充跳转说明。
-- **[已处理]** 06_运维维护/hardening 目录内 12 篇纯英文硬化日志（V3.35/36/38/39/40/41/42/47/48/49/50/51）——本轮已就地中文化，不改动版本号/文件路径/函数名/测试名/测试计数。
-- **[已处理，优先级高，历时 4 轮]** [GRAPH_CLI_COMMANDS_zh.md](03_详细设计/GRAPH_CLI_COMMANDS_zh.md)（v1.6→v1.7）与 [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md)（v2.5→v2.6）此前长期未收录 V3.31~V3.65 新增的 Neighborhood S-variant 拓扑指数命令族 `graph topo20`~`graph topo54`（35 组、105 个指数）——本轮已在 GRAPH_CLI_COMMANDS_zh.md 新增 §十四完整汇总（每组版本号/新增指数/对应硬化日志三列索引），GOS_ARCH_v2.md §5.1 补充概述并指向该章节为权威口径。
-- 5 篇滞留于 `doc/` 根目录的英文硬化日志（V3.16/V3.17/V3.20/V3.21/V3.23）、V2.55~V3.51 数篇双语/纯英文历史遗留——沿用既往轮次的处理原则（详见 06_运维维护/hardening 内对应文件）。
-- **[待处理]** [GOS测试报告书.xlsx](05_测试验证/GOS测试报告书.xlsx) 与 [GOS运维日志汇总.xlsx](06_运维维护/GOS运维日志汇总.xlsx) 的测试总数/硬化日志汇总表仍停留在早期版本（分别约 V2.14、8项测试概览），未反映 V2.15~V3.65 的增量（累计 1623 host tests，165 次硬化迭代）；本轮因两份文件均存在 `.~lock` 锁定文件（疑似正被其他进程/Excel 会话占用），为避免写入冲突未做改动，建议下一轮在确认锁释放后更新汇总表。
-- `implementation_plan_v0_1_zh.md` / `task_v0_1_zh.md` 的 Phase 划分基于 V0.1 早期规划，V2.66~V3.65 新增的拓扑指数命令族（含本轮 V3.31~V3.65）尚未在 Backlog 中登记为已完成任务；建议下一轮核对补全。
-- 本轮 GRAPH_CLI_COMMANDS_zh.md §十四为汇总索引形式（版本/指数/硬化日志三列），未逐条列出每个指数的完整公式与别名（该细节以对应硬化日志为权威口径，避免双写口径漂移）；若后续需要更细粒度的命令手册，可在此基础上扩展。
-- 本轮中文化的 12 篇硬化日志均为逐句人工核对翻译；受限于单轮篇幅，未对 V3.31~V3.65 中已判定为中文的 23 篇逐篇重新核对格式模板一致性，仅确认其 CJK 密度达标。
+- **[已处理]** 06_运维维护/hardening 目录内 16 篇纯英文/双语硬化日志（V3.77/78/84/85/86/87/88/89/90/93/94/95/97/98/99/100）——本轮已就地中文化，不改动版本号/文件路径/函数名/测试名/测试计数。
+- **[已处理，优先级高]** [GRAPH_CLI_COMMANDS_zh.md](03_详细设计/GRAPH_CLI_COMMANDS_zh.md)（v1.7→v1.8）与 [GOS_ARCH_v2.md](02_基本设计/GOS_ARCH_v2.md)（v2.7→v2.8）此前未收录 V3.66~V3.104 新增的 Neighborhood S-variant 拓扑指数命令族 `graph topo55`~`graph topo93`（39 组、117 个指数）——本轮已在 GRAPH_CLI_COMMANDS_zh.md 新增 §十五完整汇总，GOS_ARCH_v2.md §5.1 补充概述并指向该章节为权威口径。
+- **[新发现，待核实]** V3.66（topo55）、V3.102（topo91）两篇硬化日志文件在 `06_运维维护/hardening/` 与 `doc/` 根目录均未找到实体文件，仅能从相邻版本的交叉引用中还原内容摘要；本轮已在 README 索引表、GRAPH_CLI_COMMANDS_zh.md §十五中如实标注为缺失条目，未编造内容。建议下一轮核查源代码仓库的提交历史（如 `git log --all --diff-filter=A -- 'doc/**/*V3.66*' 'doc/**/*V3.102*'` 或等效方式），确认是否为归档遗漏、误删除，或版本号本身从未生成对应日志（例如被后续 commit 直接覆盖）。
+- **[新发现，待核实]** V3.100（topo89）硬化日志自述"宿主测试总数 1963（此前 1953）"，与 V3.99（topo88）自述的累计总数 1963 相矛盾（两者不能同时成立，差 10 项）；本轮未擅自修正数值，仅在 V3.100 中文译文与 GRAPH_CLI_COMMANDS_zh.md §十五中加注说明。建议下一轮通过实际运行 `cargo test --workspace` 统计口径，核实 V3.100 前后的真实累计测试数，并视情况订正本文档引用的约 2021 总数。
+- **[已核实，解除阻塞]** 此前多轮标记为"待处理"的 [GOS测试报告书.xlsx](05_测试验证/GOS测试报告书.xlsx)、[GOS运维日志汇总.xlsx](06_运维维护/GOS运维日志汇总.xlsx) 及其余 5 份 xlsx 文档管理台账的 `.~lock` 锁定文件，本轮核查其内部时间戳均为 **2026-06-30 21:18**（来自会话 `trusting-pensive-meitner`），距今已逾三周，可判定为陈旧残留锁（编辑会话早已结束但未正常释放），**并非当前活跃编辑冲突**。本轮出于时间与篇幅限制仍未展开 xlsx 内容更新，但该锁定顾虑已解除，建议下一轮直接更新汇总表（测试总数、硬化日志汇总行）而无需再以"锁定中"为由推迟，或联系用户确认可否清除陈旧锁文件。
+- **[持续遗留，已跨多轮]** `implementation_plan_v0_1_zh.md`（v2.2）与 `task_v0_1_zh.md`（v1.5）均仍停留在 2026-07-06（V3.06 基线，1033 host tests），此后 V3.07~V3.104（98 次硬化迭代、累计约 2021 host tests，含 §十三/§十四/§十五全部拓扑指数命令族与 §5.1 网络科学/结构分解算法套件）均未登记为 Backlog 已完成任务。该缺口已连续多轮标记但一直未处理，规模已显著扩大，建议作为独立任务安排专门轮次处理，而非依赖后续 doc 优化轮次顺带补齐。
+- 5 篇滞留于 `doc/` 根目录的英文硬化日志（V3.16/V3.17/V3.20/V3.21/V3.23）历史遗留——沿用既往轮次的处理原则（详见 06_运维维护/hardening 内对应文件）。
+- 本轮 GRAPH_CLI_COMMANDS_zh.md §十五沿用 §十四的汇总索引形式（版本/指数/硬化日志三列），未逐条列出每个指数的完整公式与别名（该细节以对应硬化日志为权威口径，避免双写口径漂移）。
+- V3.103 起新增的 k-rope 绳索物理子系统（XPBD 应变限制双向扫描、材质属性测试，共 18 项测试）为拓扑指数系列之外的新分支，目前无对应 CLI 命令，暂未纳入 GRAPH_CLI_COMMANDS_zh.md；若后续该模块暴露 shell 命令，需在设计文档中补充章节。
+- 本轮中文化的 16 篇硬化日志均为逐句人工核对翻译并交叉核对源码引用的函数名/公式；受限于单轮篇幅，未对 V3.66~V3.104 中已判定为中文的 21 篇逐篇重新核对格式模板一致性，仅确认其 CJK 密度达标。

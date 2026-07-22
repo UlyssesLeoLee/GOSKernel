@@ -4,10 +4,10 @@
 |---|---|
 | 文档编号 | GOS-DOC-03-04 |
 | 所属阶段 | 03・详细设计 |
-| 版本 / 状态 | v1.7 / 现行（口径：仅记录已实现命令） |
+| 版本 / 状态 | v1.8 / 现行（口径：仅记录已实现命令） |
 | 作成 / 审核 / 批准 | GOS 核心团队 |
 | 基线日期 | 2026-06-30 |
-| 最终更新 | 2026-07-19 |
+| 最终更新 | 2026-07-21 |
 
 **变更履历**
 
@@ -456,7 +456,61 @@ activate
 
 **注**：部分指数缩写在不同组号间重复出现（如 topo26 与 topo49 均含 "NRSO"，topo41~topo54 多组共用 "N*SO" Sombor 变体命名模式），系源代码命名空间本身的既成事实（字母序列受限产生的缩写复用），本文档如实记录，不做归并或改名。
 
-## 十五、输出说明
+## 十五、Neighborhood S-variant 拓扑指数命令族续篇（`graph topo55` ~ `graph topo93`，V3.66 ~ V3.104 新增）
+
+> 本节为 2026-07-21 本轮新增，承接 §十四（v1.7 收录至 `graph topo54`/V3.65）。V3.66~V3.104 共 39 次硬化迭代（其中 V3.66、V3.102 两版本文件缺失，详见下方说明），延续 §十四 的 Neighborhood S-variant 模式，将顶点/边幂次系列由 30 次幂推进至 67 次幂，Sombor 变体 α 由 46 推进至 122（命名法由单字母 → 第2轮单字母 → 第3轮双字母 "AA"~"AZ" → 第4轮双字母 "BA"~"BJ"）。
+
+**顶点/边幂次系列命名节点**：topo55~65 为 "triacontic"（30余次幂）尾段，topo66~75 为 "tetracontic"（40余次幂）段，topo76~85 为 "pentacontic"（50余次幂）段，topo86~93 为 "hexacontic"（60余次幂）段首8个。每组命令固定新增 3 个指数，配套独立 `gos-graph-topoN-harness`（10 项测试）。命令别名、精确公式推导、S-正则图闭式公式与逐图交叉验证表，以对应 `doc/06_运维维护/hardening/HARDENING_LOG_*.md` 为唯一权威口径，本节仅做索引汇总。
+
+| 组号 | 版本 | 新增指数（均为 S-变体） | 对应硬化日志 |
+|---|---|---|---|
+| topo55 | V3.66 | NNONATC（S²⁹顶点和）+ NHNONATC（边和）+ NZSO（α=46） | *文件缺失，仅见于 V3.67 等后续引用* |
+| topo56 | V3.67 | NTRIACTC（S³⁰）+ NHTRIACTC（S²⁹边和）+ NASO（α=48，第2轮字母复用起点） | HARDENING_LOG_2026-07-19_V3.67.md |
+| topo57 | V3.68 | NHENTRIACTC（S³¹）+ NHHENTRIACTC（S³⁰边和）+ NBSO（α=50） | HARDENING_LOG_2026-07-19_V3.68.md |
+| topo58 | V3.69 | NDOTRIACTC（S³²）+ NHDOTRIACTC（S³¹边和）+ NAASO（α=52，双字母序列起点） | HARDENING_LOG_2026-07-19_V3.69.md |
+| topo59 | V3.70 | NTRITRIACTC（S³³）+ NHTRITRIACTC（S³²边和）+ NABSO（α=54） | HARDENING_LOG_2026-07-19_V3.70.md |
+| topo60 | V3.71 | NTETRTRIACTC（S³⁴）+ NHTETRTRIACTC（S³³边和）+ NACSO（α=56） | HARDENING_LOG_2026-07-19_V3.71.md |
+| topo61 | V3.72 | NPENTTRIACTC（S³⁵）+ NHPENTTRIACTC（S³⁴边和）+ NADSO（α=58） | HARDENING_LOG_2026-07-19_V3.72.md |
+| topo62 | V3.73 | NHEXATRIACTC（S³⁶）+ NHHEXATRIACTC（S³⁵边和）+ NAESO（α=60） | HARDENING_LOG_2026-07-20_V3.73.md |
+| topo63 | V3.74 | NHEPTATRIACTC（S³⁷）+ NHHEPTATRIACTC（S³⁶边和）+ NAFSO（α=62） | HARDENING_LOG_2026-07-20_V3.74.md |
+| topo64 | V3.75 | NOCTATRIACTC（S³⁸）+ NHOCTATRIACTC（S³⁷边和）+ NAGSO（α=64） | HARDENING_LOG_2026-07-20_V3.75.md |
+| topo65 | V3.76 | NNONATRIACTC（S³⁹）+ NHNONATRIACTC（S³⁸边和）+ NAHSO（α=66） | HARDENING_LOG_2026-07-20_V3.76.md |
+| topo66 | V3.77 | NTETRAACTC（S⁴⁰）+ NHTETRAACTC（S³⁹边和）+ NAISO（α=68） | HARDENING_LOG_2026-07-20_V3.77.md |
+| topo67 | V3.78 | NHENTETRAACTC（S⁴¹）+ NHHENTETRAACTC（S⁴⁰边和）+ NAJSO（α=70） | HARDENING_LOG_2026-07-20_V3.78.md |
+| topo68 | V3.79 | NDOTETRAACTC（S⁴²）+ NHDOTETRAACTC（S⁴¹边和）+ NAKSO（α=72） | HARDENING_LOG_2026-07-20_V3.79.md |
+| topo69 | V3.80 | NTRITETRAACTC（S⁴³）+ NHTRITETRAACTC（S⁴²边和）+ NALSO（α=74） | HARDENING_LOG_2026-07-20_V3.80.md |
+| topo70 | V3.81 | NTETRATETRAACTC（S⁴⁴）+ NHTETRATETRAACTC（S⁴³边和）+ NAMSO（α=76） | HARDENING_LOG_2026-07-20_V3.81.md |
+| topo71 | V3.82 | NPENTETRAACTC（S⁴⁵）+ NHPENTETRAACTC（S⁴⁴边和）+ NANSO（α=78） | HARDENING_LOG_2026-07-20_V3.82.md |
+| topo72 | V3.83 | NHEXTETRAACTC（S⁴⁶）+ NHHEXTETRAACTC（S⁴⁵边和）+ NAOSO（α=80） | HARDENING_LOG_2026-07-20_V3.83.md |
+| topo73 | V3.84 | NHEPTETRAACTC（S⁴⁷）+ NHHEPTETRAACTC（S⁴⁶边和）+ NAPSO（α=82） | HARDENING_LOG_2026-07-20_V3.84.md |
+| topo74 | V3.85 | NOCTOTETRAACTC（S⁴⁸）+ NHOCTOTETRAACTC（S⁴⁷边和）+ NAQSO（α=84） | HARDENING_LOG_2026-07-20_V3.85.md |
+| topo75 | V3.86 | NNONATETRAACTC（S⁴⁹）+ NHNONATETRAACTC（S⁴⁸边和）+ NARSO（α=86） | HARDENING_LOG_2026-07-20_V3.86.md |
+| topo76 | V3.87 | NPENTAACTC（S⁵⁰，pentacontic 系列首个）+ NHPENTAACTC（S⁴⁹边和）+ NASSO（α=88） | HARDENING_LOG_2026-07-20_V3.87.md |
+| topo77 | V3.88 | NHENPENTAACTC（S⁵¹）+ NHHENPENTAACTC（S⁵⁰边和）+ NATSO（α=90） | HARDENING_LOG_2026-07-20_V3.88.md |
+| topo78 | V3.89 | NDOPENTAACTC（S⁵²）+ NHDOPENTAACTC（S⁵¹边和）+ NAUSO（α=92） | HARDENING_LOG_2026-07-20_V3.89.md |
+| topo79 | V3.90 | NTRIPENTAACTC（S⁵³）+ NHTRIPENTAACTC（S⁵²边和）+ NAVSO（α=94） | HARDENING_LOG_2026-07-20_V3.90.md |
+| topo80 | V3.91 | NTETRAPENTAACTC（S⁵⁴）+ NHTETRAPENTAACTC（S⁵³边和）+ NAWSO（α=96） | HARDENING_LOG_2026-07-20_V3.91.md |
+| topo81 | V3.92 | NPENTAPENTAACTC（S⁵⁵）+ NHPENTAPENTAACTC（S⁵⁴边和）+ NAXSO（α=98） | HARDENING_LOG_2026-07-20_V3.92.md |
+| topo82 | V3.93 | NHEXPENTAACTC（S⁵⁶）+ NHHEXPENTAACTC（S⁵⁵边和）+ NAYSO（α=100，Centyl Sombor） | HARDENING_LOG_2026-07-20_V3.93.md |
+| topo83 | V3.94 | NHEPTPENTAACTC（S⁵⁷）+ NHHEPTPENTAACTC（S⁵⁶边和）+ NAZSO（α=102，第3轮双字母收官） | HARDENING_LOG_2026-07-20_V3.94.md |
+| topo84 | V3.95 | NOCTOPENTAACTC（S⁵⁸）+ NHOCTOPENTAACTC（S⁵⁷边和）+ NBASO（α=104，第4轮双字母 "B" 段起点） | HARDENING_LOG_2026-07-20_V3.95.md |
+| topo85 | V3.96 | NNONAPENTAACTC（S⁵⁹，pentacontic 系列收官）+ NHNONAPENTAACTC（S⁵⁸边和）+ NBBSO（α=106） | HARDENING_LOG_2026-07-21_V3.96.md |
+| topo86 | V3.97 | NHEXAACTC（S⁶⁰，hexacontic 系列首个）+ NHHEXAACTC（S⁵⁹边和）+ NBCSO（α=108） | HARDENING_LOG_2026-07-21_V3.97.md |
+| topo87 | V3.98 | NHEXAENACTC（S⁶¹）+ NHHEXAENACTC（S⁶⁰边和）+ NBDSO（α=110） | HARDENING_LOG_2026-07-21_V3.98.md |
+| topo88 | V3.99 | NHEXADYACTC（S⁶²）+ NHHEXADYACTC（S⁶¹边和）+ NBESO（α=112） | HARDENING_LOG_2026-07-21_V3.99.md |
+| topo89 | V3.100 | NHEXATRIACTC（S⁶³，首个三位数版本号里程碑）+ NHHEXATRIACTC（S⁶²边和）+ NBFSO（α=114） | HARDENING_LOG_2026-07-21_V3.100.md |
+| topo90 | V3.101 | NHEXATETRAACTC（S⁶⁴）+ NHHEXATETRAACTC（S⁶³边和）+ NBGSO（α=116） | HARDENING_LOG_2026-07-21_V3.101.md |
+| topo91 | V3.102 | NHEXAPENTAACTC（S⁶⁵）+ NHHEXAPENTAACTC（S⁶⁴边和）+ NBHSO（α=118） | *文件缺失，仅见于 V3.101/V3.103/V3.104 交叉引用* |
+| topo92 | V3.103 | NHEXAHEXAACTC（S⁶⁶）+ NHHEXAHEXAACTC（S⁶⁵边和）+ NBISOS（α=120） | HARDENING_LOG_2026-07-21_V3.103.md |
+| topo93 | V3.104 | NHEXAHEPTACTC（S⁶⁷）+ NHHEXAHEPTACTC（S⁶⁶边和）+ NBJSO（α=122） | HARDENING_LOG_2026-07-21_V3.104.md |
+
+累计至 V3.104，Neighborhood S-variant 拓扑指数命令族（topo20~topo93）共 74 组、222 个指数；加上 §13.2 的 topo1~topo19（19 组、57 个指数）与 §13.1 的 Zagreb 四件套/谱/熵指标，`graph topo*` 系列合计 93 组、约 279 个拓扑指数，VectorAddress L4 命名空间占用 88~180（`graph-topo`~`graph-topo93`）。宿主测试总数随本系列持续增长，最新累计数见 [README.md](../README.md) 06 · 运维维护表格与最新硬化日志。
+
+**已知缺口**：V3.66（topo55）与 V3.102（topo91）两篇硬化日志文件在 `06_运维维护/hardening/` 与 `doc/` 根目录均未找到实体文件，其存在与内容仅能从相邻版本（V3.67、V3.68 及 V3.101/V3.103/V3.104）的交叉引用中还原，推测为归档时遗漏。本文档如实记录该缺口，不做内容臆造；建议下一轮核实是否为源仓库提交历史中的真实缺失，如是应作为已知缺陷登记，而非文档侧问题。
+
+**已知口径不一致**：V3.100（topo89）硬化日志自述"宿主测试总数 1963（此前 1953）"，但 V3.99（topo88）已自述其累计总数为 1963；两者不能同时成立（差 10 项，疑似 V3.100 落款时误抄 V3.99 的数值而非累计 +10）。本文档如实保留原文数值并在 V3.100 译文中加注说明，不擅自修正，建议以逐版本 `cargo test` 实际结果为准核实真实累计数。
+
+## 十六、输出说明
 
 ### `show`
 
@@ -503,7 +557,7 @@ edge 详情至少会显示：
 - capability 绑定
 - edge id
 
-## 十六、最短示例
+## 十七、最短示例
 
 ### 浏览主题关系
 
