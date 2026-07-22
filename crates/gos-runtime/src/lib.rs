@@ -21426,6 +21426,130 @@ impl GraphRuntime {
         (nheptatriactc, nhheptatriactc, nbpso, edge_count, nc)
     }
 
+    pub fn graph_topo_indices100_inner(&self) -> (u64, u64, u64, usize, usize) {
+        // 1. Compact node index.
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() {
+                slot_to_ci[i] = nc;
+                nc += 1;
+            }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+
+        // 2. Undirected adjacency bitmasks + edge count.
+        let mut adj        = [0u128; MAX_NODES];
+        let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl];
+            let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 {
+                adj[f_ci] |= 1u128 << t_ci;
+                adj[t_ci] |= 1u128 << f_ci;
+                edge_count += 1;
+            }
+        }
+
+        // 3. Degree array.
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+
+        // 4. Neighbor-degree sum S(v) = Σ_{w∈N(v)} deg(w).
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc {
+            let mut bits = adj[ci];
+            while bits != 0 {
+                let nb = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                sv[ci] += deg[nb];
+            }
+        }
+
+        // 5. Vertex scan: NHEPTATETRAACTC (S-Heptatetracontic vertex sum = Σ_v S(v)^74).
+        //
+        //    NHEPTATETRAACTC(G) = Σ_v S(v)^74  (exact u128→u64; S-Heptatetracontic vertex sum)
+        //
+        //    Extends heptacontic series: NHEPTATRIACTC=Σ S^73 (topo99) → NHEPTATETRAACTC=Σ S^74 (topo100).
+        //    FIFTH of the heptacontic (70-79) series.
+        //    NHEPTATETRAACTC = n·S^74 for S-regular.
+        //    Overflow: S^74 > u64::MAX for S≥2 → saturating u128 accumulator, clamp to u64::MAX.
+        //    Implementation: s^74 = s64 × s8 × s2  (74=64+8+2; 8 mults total).
+
+        let mut nheptatetraactc_acc: u128 = 0;
+        for ci in 0..nc {
+            let s   = sv[ci] as u128;
+            let s2  = s * s;
+            let s4  = s2 * s2;
+            let s8  = s4.saturating_mul(s4);
+            let s16 = s8.saturating_mul(s8);
+            let s32 = s16.saturating_mul(s16);
+            let s64 = s32.saturating_mul(s32);
+            let s72 = s64.saturating_mul(s8);
+            let s74 = s72.saturating_mul(s2);
+            nheptatetraactc_acc = nheptatetraactc_acc.saturating_add(s74);
+        }
+        let nheptatetraactc = nheptatetraactc_acc.min(u64::MAX as u128) as u64;
+
+        // 6. Edge scan (a < b): NHHEPTATETRAACTC (S-Heptatetracontic edge-sum) and NBQSO (S-Variant Sombor α=136).
+        //
+        //    NHHEPTATETRAACTC(G) = Σ_{uv∈E} (S_u+S_v)^73  (exact u128→u64; S-Heptatetracontic edge-sum)
+        //    Extends: NHHEPTATRIACTC=Σ(S+S)^72 (topo99) → NHHEPTATETRAACTC=Σ(S+S)^73 (topo100).
+        //    NHHEPTATETRAACTC = |E|·(2S)^73 for S-regular (saturates for |E|≥1,S≥1).
+        //    Overflow per edge: (2×16129)^73 → saturating u128 accumulator.
+        //    Implementation: ss^73 = ss64 × ss8 × ss  (73=64+8+1; 8 mults total).
+        //
+        //    NBQSO(G) = Σ_{uv∈E} (S_u²+S_v²)^68  (exact u128→u64; S-Variant Sombor α=136)
+        //    S-variant generalised Sombor SO^α with α=136: exact integer (no isqrt).
+        //    NBPSO(α=134,topo99) → NBQSO(α=136,topo100). (17th of NB series, letter Q.)
+        //    NBQSO = |E|·(2S²)^68 for S-regular.
+        //    Overflow per edge: (2×16129²)^68 → saturating u128 accumulator.
+        //    Implementation: s2s^68 = s2s64 × s2s4  (68=64+4; 7 mults total — efficient!).
+
+        let mut nhheptatetraactc_acc: u128 = 0;
+        let mut nbqso_acc:             u128 = 0;
+        for a in 0..nc {
+            let sa  = sv[a] as u128;
+            let mut bits = adj[a];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if b > a {
+                    let sb    = sv[b] as u128;
+                    // NHHEPTATETRAACTC: (S_a + S_b)^73 = ss64 × ss8 × ss  (8 mults)
+                    let ss    = sa + sb;
+                    let ss2   = ss * ss;
+                    let ss4   = ss2 * ss2;
+                    let ss8   = ss4.saturating_mul(ss4);
+                    let ss16  = ss8.saturating_mul(ss8);
+                    let ss32  = ss16.saturating_mul(ss16);
+                    let ss64  = ss32.saturating_mul(ss32);
+                    let ss72  = ss64.saturating_mul(ss8);
+                    let ss73  = ss72.saturating_mul(ss);
+                    nhheptatetraactc_acc = nhheptatetraactc_acc.saturating_add(ss73);
+                    // NBQSO: (S_a² + S_b²)^68 = s2s64 × s2s4  (7 mults — efficient!)
+                    let s2s   = sa * sa + sb * sb;
+                    let s2s2  = s2s * s2s;
+                    let s2s4  = s2s2.saturating_mul(s2s2);
+                    let s2s8  = s2s4.saturating_mul(s2s4);
+                    let s2s16 = s2s8.saturating_mul(s2s8);
+                    let s2s32 = s2s16.saturating_mul(s2s16);
+                    let s2s64 = s2s32.saturating_mul(s2s32);
+                    let s2s68 = s2s64.saturating_mul(s2s4);
+                    nbqso_acc = nbqso_acc.saturating_add(s2s68);
+                }
+            }
+        }
+        let nhheptatetraactc = nhheptatetraactc_acc.min(u64::MAX as u128) as u64;
+        let nbqso             = nbqso_acc.min(u64::MAX as u128) as u64;
+
+        (nheptatetraactc, nhheptatetraactc, nbqso, edge_count, nc)
+    }
+
     pub fn graph_topo_indices61_inner(&self) -> (u64, u64, u64, usize, usize) {
         // 1. Compact node index.
         let mut slot_to_ci = [usize::MAX; MAX_NODES];
@@ -26187,6 +26311,10 @@ pub fn graph_topo_indices98() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices99() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices99_inner()
+}
+
+pub fn graph_topo_indices100() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices100_inner()
 }
 
 /// Register a node vector as the handler for a particular IRQ number.

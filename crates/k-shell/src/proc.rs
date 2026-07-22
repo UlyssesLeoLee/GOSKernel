@@ -1329,6 +1329,12 @@ fn dispatch_text_command(
         super::dispatch_graph_topo_indices70(sink);
     } else if cmd == "graph topo71" || cmd == "gtopo71" || cmd == "neighborhood pentatetracontic" || cmd == "gnpentetraactc" || cmd == "neighborhood tetratetracontic edge" || cmd == "gnhpentetraactc" || cmd == "neighborhood pentatetracontyl sombor" || cmd == "gnnanso" || cmd == "gnpentetraactcnhpentetraactcnanso" {
         super::dispatch_graph_topo_indices71(sink);
+    } else if cmd == "graph topo100" || cmd == "gtopo100" || cmd == "neighborhood heptatetracontic" || cmd == "gnheptatetraactc" || cmd == "neighborhood heptatetracontic edge" || cmd == "gnnhheptatetraactc" || cmd == "neighborhood dohectyl sombor bq" || cmd == "gnnbqso" || cmd == "gnheptatetraactcnhheptatetraactcnbqso" {
+        super::dispatch_graph_topo_indices100(sink);
+    } else if cmd == "graph topo99" || cmd == "gtopo99" || cmd == "neighborhood heptatricontic" || cmd == "gnheptatriactc" || cmd == "neighborhood heptatricontic edge" || cmd == "gnnhheptatriactc" || cmd == "neighborhood dohectyl sombor bp" || cmd == "gnnbpso" || cmd == "gnheptatriactcnhheptatriactcnbpso" {
+        super::dispatch_graph_topo_indices99(sink);
+    } else if cmd == "graph topo98" || cmd == "gtopo98" || cmd == "neighborhood heptadicontic" || cmd == "gnheptadiactc" || cmd == "neighborhood heptadicontic edge" || cmd == "gnnhheptadiactc" || cmd == "neighborhood dohectyl sombor bo" || cmd == "gnnboso" || cmd == "gnheptadiactcnhheptadiactcnboso" {
+        super::dispatch_graph_topo_indices98(sink);
     } else if cmd == "graph topo97" || cmd == "gtopo97" || cmd == "neighborhood heptaencontic" || cmd == "gnheptaenactc" || cmd == "neighborhood heptacontic edge" || cmd == "gnnhheptaenactc" || cmd == "neighborhood dohectyl sombor bn" || cmd == "gnnbnso" || cmd == "gnheptaenactcnhheptaenactcnbnso" {
         super::dispatch_graph_topo_indices97(sink);
     } else if cmd == "graph topo96" || cmd == "gtopo96" || cmd == "neighborhood heptacontic" || cmd == "gnheptaactc" || cmd == "neighborhood heptacontic edge" || cmd == "gnnhheptaactc" || cmd == "neighborhood dohectyl sombor bm" || cmd == "gnnbmso" || cmd == "gnheptaactcnhheptaactcnbmso" {
