@@ -14001,7 +14001,8 @@ pub fn dispatch_graph_topo_indices114(sink: &ConsoleSink) {
         set_color(sink, 11, 0); // bright-cyan
         print_num_inline(sink, noctaoctactc as usize);
         set_color(sink, 8, 0);
-        print_str(sink, "   [\u{03a3}_v S(v)\u{2078}\u{2078}]  (exact)");
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2078}\u{2078}]  ");
+        print_str(sink, sat_label(noctaoctactc));
         set_color(sink, 7, 0);
         print_str(sink, "\n");
 
@@ -14011,7 +14012,8 @@ pub fn dispatch_graph_topo_indices114(sink: &ConsoleSink) {
         set_color(sink, 10, 0); // bright-green
         print_num_inline(sink, nhoctaoctactc as usize);
         set_color(sink, 8, 0);
-        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2078}\u{2077}]  (exact)");
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2078}\u{2077}]  ");
+        print_str(sink, sat_label(nhoctaoctactc));
         set_color(sink, 7, 0);
         print_str(sink, "\n");
 
@@ -14021,7 +14023,8 @@ pub fn dispatch_graph_topo_indices114(sink: &ConsoleSink) {
         set_color(sink, 13, 0); // bright-magenta
         print_num_inline(sink, nbeeso as usize);
         set_color(sink, 8, 0);
-        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2078}\u{00b2}]  (exact)");
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2078}\u{00b2}]  ");
+        print_str(sink, sat_label(nbeeso));
         set_color(sink, 7, 0);
         print_str(sink, "\n");
     }
@@ -18850,6 +18853,21 @@ fn redraw_console(sink: &ConsoleSink, state: &ShellState) {
     save_cursor(sink, 1);
     redraw_footer(sink, state, false);
     focus_footer_input(sink, state);
+}
+
+/// Label for a topological-index value that may have been clamped.
+///
+/// The `graph_topo_indices*` runtime functions accumulate in `u128` and finish
+/// with `.min(u64::MAX as u128) as u64`, so any index whose true value exceeds
+/// `u64::MAX` is reported as `u64::MAX`. Tagging such a value "(exact)" claims a
+/// precision the arithmetic did not deliver; high-exponent indices saturate on
+/// essentially every non-trivial graph.
+fn sat_label(v: u64) -> &'static str {
+    if v == u64::MAX {
+        "(SATURATED \u{2014} exceeds u64)"
+    } else {
+        "(exact)"
+    }
 }
 
 fn print_num_inline(sink: &ConsoleSink, mut value: usize) {

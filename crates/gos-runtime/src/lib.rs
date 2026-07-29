@@ -21598,7 +21598,8 @@ impl GraphRuntime {
 
         // 5. Vertex scan: NOCTAOCTACTC (S-Octaoctocontic vertex sum = Σ_v S(v)^88).
         //
-        //    NOCTAOCTACTC(G) = Σ_v S(v)^88  (exact u128→u64; S-Octaoctocontic vertex sum)
+        //    NOCTAOCTACTC(G) = Σ_v S(v)^88  (exact integer, but SATURATING at the
+        //    u128→u64 clamp; S-Octaoctocontic vertex sum)
         //
         //    NINTH of the octacontic (80-89) series.
         //    Extends: NOCTAHEPTACTC=Σ S^87 (topo113) → NOCTAOCTACTC=Σ S^88 (topo114).
@@ -21623,13 +21624,15 @@ impl GraphRuntime {
 
         // 6. Edge scan (a < b): NHOCTAOCTACTC (S-Octaoctocontic edge-sum) and NBEESO (S-Variant Sombor α=164).
         //
-        //    NHOCTAOCTACTC(G) = Σ_{uv∈E} (S_u+S_v)^87  (exact u128→u64; S-Octaoctocontic edge-sum)
+        //    NHOCTAOCTACTC(G) = Σ_{uv∈E} (S_u+S_v)^87  (exact integer, but SATURATING
+        //    at the u128→u64 clamp; S-Octaoctocontic edge-sum)
         //    Extends: NHOCTAHEPTACTC=Σ(S+S)^86 (topo113) → NHOCTAOCTACTC=Σ(S+S)^87 (topo114).
         //    NHOCTAOCTACTC = |E|·(2S)^87 for S-regular (saturates for |E|≥1,S≥1).
         //    Overflow per edge: (2×16129)^87 → saturating u128 accumulator.
         //    Implementation: ss^87 = ss64 × ss16 × ss4 × ss2 × ss  (87=64+16+4+2+1; 10 mults total).
         //
-        //    NBEESO(G) = Σ_{uv∈E} (S_u²+S_v²)^82  (exact u128→u64; S-Variant Sombor α=164)
+        //    NBEESO(G) = Σ_{uv∈E} (S_u²+S_v²)^82  (exact integer, but SATURATING at the
+        //    u128→u64 clamp; S-Variant Sombor α=164)
         //    S-variant generalised Sombor SO^α with α=164: exact integer (no isqrt).
         //    NBDDSO(α=162,topo113) → NBEESO(α=164,topo114). (31st of NB series, letters EE.)
         //    NBEESO = |E|·(2S²)^82 for S-regular.
