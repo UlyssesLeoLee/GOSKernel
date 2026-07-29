@@ -13981,6 +13981,63 @@ pub fn dispatch_graph_topo_indices97(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices112(sink: &ConsoleSink) {
+    let (noctahexactc, nhoctahexactc, nbccso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices112();
+
+    set_color(sink, 7, 0);
+    print_str(sink, " graph topo112 (NOCTAHEXACTC + NHOCTAHEXACTC + NBCCSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        // NOCTAHEXACTC (S-Octahexic vertex sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-octahexic-vtx          NOCTAHEXACTC  =");
+        set_color(sink, 11, 0); // bright-cyan
+        print_num_inline(sink, noctahexactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2078}\u{2076}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NHOCTAHEXACTC (S-Octahexic edge-sum)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-octahexic-edge        NHOCTAHEXACTC  =");
+        set_color(sink, 10, 0); // bright-green
+        print_num_inline(sink, nhoctahexactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2078}\u{2075}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        // NBCCSO (S-Variant Sombor, α=160)
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dohectyl-sombor-cc         NBCCSO     =  ");
+        set_color(sink, 13, 0); // bright-magenta
+        print_num_inline(sink, nbccso as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2078}\u{2070}]  (exact)");
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NOCTAHEXACTC=\u{03a3} S\u{2078}\u{2076} SEVENTH of octacontic (80-89); NBCCSO=SO\u{00b5}\u{00b9}\u{2076}\u{2070} on S, 29th of NB series)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_topo_indices111(sink: &ConsoleSink) {
     let (noctapentactc, nhoctapentactc, nbbso, edge_count, node_count) =
         gos_runtime::graph_topo_indices111();
