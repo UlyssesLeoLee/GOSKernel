@@ -178,8 +178,11 @@ D 和 E 可以并行启动；F 必须排在 D 之后；G 依赖 B.4 + E；H 是�
 ```
 month 1: D 全套                                     | E.1
 month 2: E.2 + E.3                                  | F.1
+          I.1（manifest 契约）+ I.3（重启退避）     |        ← 与主线并行，不阻塞
 month 3: B.4.1–B.4.5                                | F.2
+          I.4（ADR-005 + verify 脚本）              |        ← D 完成后可立即动
 month 4: F.3 + F.4                                  | E.4 或推迟
+          I.2（idempotency key，ADR-004 后）        |        ← V2.1 MutationDispatcher 前必须落地
 month 5: G.1 + G.2                                  | F.5
 month 6: G.3                                        | H 子项试点
 ```
@@ -188,10 +191,64 @@ month 6: G.3                                        | H 子项试点
 |---|---|
 | **M1: 可调试 OS** | D 全部完成；CI 绿；shell 看得到结构化日志 |
 | **M2: 真正的 OS** | E.1+E.2+E.3 + B.4 完成；至少一个 plugin 在 Ring 3 + 独立 CR3 |
+| **M2.5: 健壮插件架构** | I.1–I.4 全部完成；verify 脚本进 CI；harness 全绿 |
 | **M3: 持久 OS** | F.4 完成；reboot 后状态保留 |
 | **M4: 可扩展 OS** | G.1+G.2 完成；外部签名模块装载运行 |
 | **M5: 联网 OS** | G.3 完成；shell 能跑出站 TCP |
 | **M6: 自描述 OS** | H 任一子项试点跑通 |
+
+---
+
+## Phase I — 插件架构健壮性（与 V2.1–V2.2 并行）
+
+> 来源：对当前插件边界设计的系统性审查，补齐三个现有盲点：manifest 契约、mutation 幂等性、重启退避。
+> 前置：D 全套（harness 可跑）。与 V2.1（`MutationDispatcher`）协调，I.2 必须在 ADR-004 批准后落地。
+
+### I.1 Manifest 契约补全
+
+当前 `PluginManifest` 已有 `depends_on / permissions / exports / imports / required`，但缺少执行语义声明。
+
+**落地内容（`gos-protocol`）**：
+
+- `NodeSpec` 新增 `timeout_ms: Option<u32>`：节点单次 `on_event` 允许消耗的最长时间预算；`None` 表示无限制（仅限 bootstrap 节点）。supervisor `on_tick` 预算超出时按 `ExecStatus::Fault` 处理，触发 `ModuleFaultPolicy`。
+- `ImportSpec` 新增 `fallback_executor: Option<ExecutorId>`：当 import 的 capability 不可用时，自动降级到该 executor；`None` 保持现行行为（`ModuleRejected`）。
+- `PluginManifest` 新增 `min_host_abi_minor: u8`：声明自己依赖的最低 minor 版本，与现有 `abi_compatible()` 联动，比纯 major 匹配更精确。
+
+**完成判据**：supervisor harness 新增三个测试——timeout 超出触发 fault policy；fallback executor 在主 import 缺失时被激活；`min_host_abi_minor` 不满足时返回 `ModuleRejected`。所有现有 builtin 的 `timeout_ms: None`，零改动。
+
+### I.2 MutationBatch idempotency key（配合 V2.1）
+
+当前 `gos-cypher-mut` 的 `AuditedMutation` 没有幂等性保证。V2.1 的 `MutationDispatcher::apply` 在 retry 场景下会产生重复写入。
+
+**落地内容**（在 ADR-004 批准后、V2.1 `MutationDispatcher` 落地前）：
+
+- `MutationBatch` 增加 `idempotency_key: [u8; 16]`，由调用方用 `derive_stable_id(node_id, op_hash)` 派生。
+- `MutationDispatcher::apply` 在提交前查本 epoch 内的 key set：重复 key 直接返回 `Ok(prev_epoch)`，不重复写；epoch 提交后 key set 随 epoch 一起清理（与 epoch-published 语义天然对齐）。
+- `MutFault` 新增 `DuplicateKey` 变体，供调用方区分"真实失败"与"幂等重放"。
+
+**完成判据**：harness 验证——同一 key 提交两次，第二次返回 `Ok(same_epoch)` 且 graph 只写了一次；不同 key 的两次提交都生效。
+
+### I.3 Supervisor 重启退避（retry with jitter）
+
+当前 `process_next_restart` 在发现 fault 后立即重试，最多 `MAX_RESTARTS_BEFORE_DEGRADE = 5` 次。网络抖动或资源竞争场景下，多个模块可能在同一 tick 同时重启，形成重启风暴。
+
+**落地内容（`gos-supervisor`）**：
+
+- `ModuleRecord` 新增 `next_restart_tick: u64`（下次允许重启的最早绝对 tick）。
+- 退避公式：`delay = BASE_TICKS << min(restart_generation, 6)`，`BASE_TICKS = 12`（约 100 ms）。上限 `MAX_RESTART_BACKOFF_TICKS = 3600`（约 30 s @ 120 Hz PIT）。
+- Jitter：`jitter = (module_id.0[0] as u64 ^ restart_generation as u64) % BASE_TICKS`，用 module_id 字节做确定性扰动，避免同时重启的多个模块落在同一 tick。
+- `process_next_restart` 在 `next_restart_tick > current_tick` 时把 handle 重新压回队尾，跳过本轮；`gos_runtime::current_tick()` 提供当前 tick。
+- 全局 tick 计数由现有 `tick_pulse()` 路径维护，无需新增硬件依赖。
+
+**完成判据**：harness 验证——第 1 次重启延迟 ≥ BASE_TICKS；第 2 次 ≥ 2×BASE_TICKS；第 6 次及以后 ≤ MAX_RESTART_BACKOFF_TICKS；两个不同 module_id 在同代次的延迟不完全相同（jitter 有效）。
+
+### I.4 Plugin 划分治理（ADR-005）
+
+三条硬性规则写进 ADR-005，由 `cargo xtask verify` 机械执行：
+
+1. **Boot critical path 不可再细分**：`EntryPolicy::Bootstrap` 的节点（k-gdt/k-idt/k-pic/k-pit/k-pmm）不得依赖任何 `EntryPolicy::OnDemand` 或 `Background` 节点。违反 → CI 失败。
+2. **可降级能力必须声明 fallback 或标记 `required: false`**：所有 `PluginTier::App` 的 import，若 `required: true` 且无 `fallback_executor`，视为架构错误。验证脚本在 manifest 加载时检查。
+3. **禁止粒度退化**：不得新增单一功能函数级的 plugin（判据：plugin 的 `nodes` 数组长度 = 1 且 node 名含 `parse_` / `create_` / `render_` 前缀）。
 
 ---
 
