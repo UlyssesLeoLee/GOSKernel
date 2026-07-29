@@ -17,3 +17,9 @@ success.log
 test_log.txt
 qemu-int.log
 serial.log
+
+# Generated analysis artifacts
+/graphify-out/
+/.codegraph/
+# LibreOffice lock files
+.~lock.*#

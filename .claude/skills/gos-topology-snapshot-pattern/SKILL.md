@@ -1,0 +1,80 @@
+---
+name: gos-topology-snapshot-pattern
+description: When adding analytics functions to gos-runtime that iterate graph topology (O(V×E)), always use the snapshot pattern: lock RUNTIME → copy GraphTopologySnapshot → release RUNTIME → compute. Never hold RUNTIME during the iteration. Also covers how to extend GraphTopologySnapshot with new fields for weighted algorithms. Apply whenever adding any new graph analytics to crates/gos-runtime/src/lib.rs.
+---
+
+# GraphTopologySnapshot: Lock-Release-Compute Pattern
+
+## The rule
+
+Every analytics function that walks the graph must use this pattern:
+
+```rust
+// 1. Lock, snapshot, release
+pub fn graph_my_analytics<const N>() -> (...) {
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_my_analytics_inner::<N>(&snap)
+}
+
+// 2. Inner function: takes &GraphTopologySnapshot, not &self
+fn graph_my_analytics_inner<const N>(snap: &GraphTopologySnapshot) -> (...) {
+    // O(V×E) computation here — no RUNTIME lock held
+}
+```
+
+**Never** do:
+```rust
+pub fn graph_my_analytics<const N>() -> (...) {
+    RUNTIME.lock().graph_my_analytics_inner::<N>()  // WRONG: holds lock during O(V×E)
+}
+```
+
+## Why it's non-obvious
+
+`spin::Mutex` does NOT disable interrupts. If `post_irq_signal()` fires while RUNTIME is held for a long O(V×E) computation, it tries to acquire RUNTIME from interrupt context → **deadlock**. This doesn't manifest in tests (which have no IRQs) but kills the kernel at runtime.
+
+The inner `_inner` function must be `fn` (private), NOT `pub fn`. Making it `pub fn` with a `&GraphTopologySnapshot` parameter (which is a private struct) triggers Rust's `private_interfaces` lint — the private type leaks through the public interface.
+
+## GOSKernel context
+
+- `GraphTopologySnapshot` defined in `crates/gos-runtime/src/lib.rs` (around line 302)
+- `topology_snapshot()` is an `impl GraphRuntime` method that copies node/edge arrays under lock
+- `post_irq_signal()` (line 5212+) acquires RUNTIME from interrupt context
+- All analytics since V2.42 (katz, pagerank, hits, community) use this pattern
+
+## Extending GraphTopologySnapshot with new fields
+
+When a new algorithm needs data not yet in the snapshot (e.g. edge weights for MST/Dijkstra), add a field to the struct AND populate it in `topology_snapshot()`:
+
+```rust
+struct GraphTopologySnapshot {
+    // existing fields ...
+    edge_weight: [f32; MAX_EDGES],   // ← new field
+}
+
+fn topology_snapshot(&self) -> GraphTopologySnapshot {
+    let mut snap = GraphTopologySnapshot {
+        // existing field inits ...
+        edge_weight: [1.0f32; MAX_EDGES],  // ← default (not 0 — unregistered edges default to weight 1.0)
+    };
+    for i in 0..MAX_EDGES {
+        if let Some(e) = self.edges[i] {
+            snap.edge_live[i]   = true;
+            snap.edge_from[i]   = e.spec.from_node;
+            snap.edge_to[i]     = e.spec.to_node;
+            snap.edge_weight[i] = e.spec.weight;  // ← populate new field
+        }
+    }
+    snap
+}
+```
+
+**Why default 1.0, not 0.0?** Edge weights default to 1.0 in `EdgeSpec` (set at registration time). Uninitialized slots (where `edge_live[i] = false`) are never read by algorithms that guard on `edge_live[i]`, so the default value doesn't matter functionally — but 1.0 is semantically cleaner if code ever reads without checking live status.
+
+Once added to the snapshot, **all future weighted algorithms** can access `snap.edge_weight` without holding the RUNTIME lock — no additional runtime queries needed.
+
+## From this session
+
+CodeRabbit comment 3515944030 flagged the original implementation holding RUNTIME for the entire O(V×E) katz/pagerank/hits/community iteration. Fixed in commit 9878a3c by introducing `GraphTopologySnapshot`. Also discovered that making `_inner` functions `pub fn` triggers `private_interfaces` warnings — they must be private `fn`.
+
+V2.48 (Prim's MST): extended snapshot with `edge_weight: [f32; MAX_EDGES]` to enable weighted graph algorithms. Before this, snapshot only had topology (from/to/live); weights required reading `EdgeRecord.spec.weight` separately under lock.
