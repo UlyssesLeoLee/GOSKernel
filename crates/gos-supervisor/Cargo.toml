@@ -11,7 +11,7 @@ host-testing = []
 [dependencies]
 gos-protocol = { path = "../gos-protocol" }
 gos-runtime = { path = "../gos-runtime" }
-gos-rewrite = { path = "../gos-rewrite" }
+gos-mutation-dispatch = { path = "../gos-mutation-dispatch" }
 gos-sign = { path = "../gos-sign" }
 k-vmm = { path = "../k-vmm", optional = true }
 spin = "0.9"

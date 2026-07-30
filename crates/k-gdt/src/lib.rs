@@ -194,7 +194,7 @@ pub fn init_gdt() {
 /// `gdt_on_init` does (write the static GdtState into HAL_MATRIX) and
 /// what `init_gdt` does (lgdt + CS reload + load_tss).  Callable
 /// directly from `hypervisor::main::step_gdt_init` (the
-/// `gos_rewrite::boot::gos_kernel::GDT_INIT` boot node) before the runtime
+/// `gos_mutation_dispatch::boot::gos_kernel::GDT_INIT` boot node) before the runtime
 /// pump has had a chance to run on_init for this node.
 pub fn boot_init_gdt() {
     unsafe {

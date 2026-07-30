@@ -41,11 +41,11 @@ Cypher 创建的 node 是 **provisional** 的：可见、可连边、可渲染�
 
 本 ADR 写于 2026-06-08，彼时 V2.2/V2.3/V2.4 均未落地。§三 倾向 A 但列了两项"需要先确认"——现状如下：
 
-1. **"provisional node 的渲染策略，接 ADR-002 §六的渲染模型决定"**——ADR-002 §六已批准 B「图即场景」，V2.3c 落地的 `propagate_with`（[`gos_rewrite::reactive`](../crates/gos-rewrite/src/reactive.rs)）就是"renderer 是 graph subscription 的纯函数"的具体实现：它只看 `Subscription{target,subscriber,region}` 表，不查询、也无法查询任何"是否已 promote"标志。**渲染策略对 provisional/promoted 一视同仁，因为 B 选型本身就让渲染对 promote 状态不可知**——这不是新设计，是 B 已经蕴含的推论。
+1. **"provisional node 的渲染策略，接 ADR-002 §六的渲染模型决定"**——ADR-002 §六已批准 B「图即场景」，V2.3c 落地的 `propagate_with`（[`gos_mutation_dispatch::reactive`](../crates/gos-mutation-dispatch/src/reactive.rs)）就是"renderer 是 graph subscription 的纯函数"的具体实现：它只看 `Subscription{target,subscriber,region}` 表，不查询、也无法查询任何"是否已 promote"标志。**渲染策略对 provisional/promoted 一视同仁，因为 B 选型本身就让渲染对 promote 状态不可知**——这不是新设计，是 B 已经蕴含的推论。
 
-2. **"promote 的触发者与权限，接 ADR-001 §五"**——V2.4b/c 落地的 `capability_check`/`grant_edges_from_specs`（[`gos_rewrite::capability`](../crates/gos-rewrite/src/capability.rs)）+ V2.4c 的"claim/revoke 退化为 Grant 边的 create/delete"（参见 [ADR-006](./ADR-006-capability-graph-migration.md)）已把"谁能把一条 Grant 边接到 X"这件事完全机制化。**promote(provisional_node) 可以是同一机制的特例：promoter 对 provisional_node 新增一条 `Call`/`Use` 边，`capability_check` 从 `false` 变 `true`，"是否已 promote"无需独立状态位——它就是"capability_check(claim_authority, node) 是否为真"本身（与 V2.4c 的 claim≡边 完全同形）。
+2. **"promote 的触发者与权限，接 ADR-001 §五"**——V2.4b/c 落地的 `capability_check`/`grant_edges_from_specs`（[`gos_mutation_dispatch::capability`](../crates/gos-mutation-dispatch/src/capability.rs)）+ V2.4c 的"claim/revoke 退化为 Grant 边的 create/delete"（参见 [ADR-006](./ADR-006-capability-graph-migration.md)）已把"谁能把一条 Grant 边接到 X"这件事完全机制化。**promote(provisional_node) 可以是同一机制的特例：promoter 对 provisional_node 新增一条 `Call`/`Use` 边，`capability_check` 从 `false` 变 `true`，"是否已 promote"无需独立状态位——它就是"capability_check(claim_authority, node) 是否为真"本身（与 V2.4c 的 claim≡边 完全同形）。
 
-新增 host harness（`gos-rewrite-harness/tests/provisional_render.rs`，2 条 property test，30/30 全绿）把以上两点机械证明出来：一个在 `capability_check` 下不可达（"未 promote"）的 `gos_protocol::NodeId`，其对应的 render `Subscription` 照常 `propagate_with`；而"promote"——给它新增一条 Grant 边——除了让 `capability_check` 变真之外，不触碰渲染表分毫。**两个前置确认现已是已验证事实，而非待证假设**——但这不等于"选向 A"：上述事实对 B/C 同样成立（B/C 下 provisional 节点压根不会以这种"未 promote"形态出现，第 1/2 点自动真空满足）。**A/B/C 仍待你选向**；本更新只是把选 A 的"实现成本"从"未知"降到"零新原语，CREATE 接线本身才是新工作"。
+新增 host harness（`gos-mutation-dispatch-harness/tests/provisional_render.rs`，2 条 property test，30/30 全绿）把以上两点机械证明出来：一个在 `capability_check` 下不可达（"未 promote"）的 `gos_protocol::NodeId`，其对应的 render `Subscription` 照常 `propagate_with`；而"promote"——给它新增一条 Grant 边——除了让 `capability_check` 变真之外，不触碰渲染表分毫。**两个前置确认现已是已验证事实，而非待证假设**——但这不等于"选向 A"：上述事实对 B/C 同样成立（B/C 下 provisional 节点压根不会以这种"未 promote"形态出现，第 1/2 点自动真空满足）。**A/B/C 仍待你选向**；本更新只是把选 A 的"实现成本"从"未知"降到"零新原语，CREATE 接线本身才是新工作"。
 
 ## 五、2026-06-12 决定：选项 A（provisional nodes）
 
@@ -55,7 +55,7 @@ Cypher 创建的 node 是 **provisional** 的：可见、可连边、可渲染�
 
 1. 给 `gos_runtime` 的 node 记录加上 provisional/promoted 区分（最小形式：复用既有 `NodeBinding::Unbound` 状态作为"provisional"标记，还是需要新枚举值——取决于 boot 注册的 22 个 builtin 当前是否已经全部 `Bound`，需先读 `gos-runtime/src/lib.rs` 的 `register_node` 调用点确认）。
 2. `gos-cypher-mut` 新增 `CreateNode` mutation 变体：识别 `CREATE (n:Label {props})` 中未被 `MATCH` 绑定的 node pattern，调用 `gos_runtime::register_node` 注册一个 provisional 节点（`graph_epoch` 自动 bump，V2.5c 已确认 `vk_auto_refresh` 自动捕获，零新 k-vk-host 代码）。
-3. "promote" 机制：给 provisional node 新增一条 Grant（`Call`/`Use`）边即视为 promoted（`gos_rewrite::capability::capability_check` 由假变真）——是否需要把 `capability_check` 接入 `gos-supervisor` 的实时 claim 路径（ADR-006 选项 B，此前因"依赖 ADR-005 先选向"而推迟）现在可以重新评估，但建议作为独立步骤，不与 CreateNode 初版耦合。
+3. "promote" 机制：给 provisional node 新增一条 Grant（`Call`/`Use`）边即视为 promoted（`gos_mutation_dispatch::capability::capability_check` 由假变真）——是否需要把 `capability_check` 接入 `gos-supervisor` 的实时 claim 路径（ADR-006 选项 B，此前因"依赖 ADR-005 先选向"而推迟）现在可以重新评估，但建议作为独立步骤，不与 CreateNode 初版耦合。
 4. Soul demo 收尾：`MATCH...CREATE` 跑通 → 下一帧 `k-vk-host` 自动出现新 node（V2.5c 确认的管线）。
 
 ## 六、2026-06-12 V2.5d：步骤 1 落地——`gos_runtime::create_provisional_node`

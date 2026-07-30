@@ -4,7 +4,7 @@
 //! ready-set to quiescence; the causal-depth meter is tracked; a runaway rule
 //! is caught by the depth guard (reported, not hung, not silently truncated);
 //! and the ratified render-model-B mechanism (reactive `Subscribe`
-//! propagation, via [`gos_rewrite::reactive::propagate`]) reaches quiescence
+//! propagation, via [`gos_mutation_dispatch::reactive::propagate`]) reaches quiescence
 //! for both the theme-diffusion case (`Region::EVERYTHING`) and the
 //! dirty-rect case (region-scoped subscriptions, V2.3 Demo C).
 //!
@@ -20,7 +20,7 @@
 //!   (t3:Function {name: "runaway_rule_is_caught_by_depth_guard_not_hung", type: "function"}),
 //!   (t4:Function {name: "reactive_subscribe_propagation_quiesces", type: "function"}),
 //!   (t5:Function {name: "dirty_rect_propagation_is_region_scoped", type: "function"}),
-//!   (sub:Module {name: "gos_rewrite::reactive", type: "module"}),
+//!   (sub:Module {name: "gos_mutation_dispatch::reactive", type: "module"}),
 //!   (f)-[:CONTAINS]->(noop), (f)-[:CONTAINS]->(chain), (f)-[:CONTAINS]->(loop_), (f)-[:CONTAINS]->(react),
 //!   (f)-[:CONTAINS]->(t1), (f)-[:CONTAINS]->(t2), (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4), (f)-[:CONTAINS]->(t5),
 //!   (chain)-[:HAS_METHOD]->(t2), (loop_)-[:HAS_METHOD]->(t3), (react)-[:HAS_METHOD]->(t4), (react)-[:HAS_METHOD]->(t5),
@@ -28,8 +28,8 @@
 //! ```
 
 use gos_protocol::Region;
-use gos_rewrite::reactive::{propagate, Subscription};
-use gos_rewrite::{Emit, Engine, NodeId, Rule, Signal};
+use gos_mutation_dispatch::reactive::{propagate, Subscription};
+use gos_mutation_dispatch::{Emit, Engine, NodeId, Rule, Signal};
 
 const KIND_STEP: u32 = 1;
 const KIND_MUTATE: u32 = 10;
@@ -60,7 +60,7 @@ impl Rule for SelfLoop {
 
 /// Render-model B: a `mutate` at a node fans out `repaint` to its
 /// subscribers via the V2.3a reverse-propagation index
-/// ([`gos_rewrite::reactive::propagate`]), scoped by each subscription's
+/// ([`gos_mutation_dispatch::reactive::propagate`]), scoped by each subscription's
 /// [`Region`] (ADR-001 §2.2). `repaint` is terminal. The *same* `table` +
 /// `propagate` mechanism backs both theme diffusion
 /// (`reactive_subscribe_propagation_quiesces`, `Region::EVERYTHING`) and

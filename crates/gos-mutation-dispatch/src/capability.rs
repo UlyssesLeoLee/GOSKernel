@@ -40,7 +40,7 @@
 //! ```cypher
 //! CREATE
 //!   (f:File {name: "capability.rs", type: "file", language: "rust"}),
-//!   (m:Module {name: "gos_rewrite::capability", type: "module"}),
+//!   (m:Module {name: "gos_mutation_dispatch::capability", type: "module"}),
 //!   (ge:Class {name: "GrantEdge", type: "struct", signature: "{from,to: NodeId}"}),
 //!   (ge_new:Function {name: "GrantEdge::new", type: "function", visibility: "pub"}),
 //!   (rg:Function {name: "reachable_via_grant", type: "function", visibility: "pub"}),

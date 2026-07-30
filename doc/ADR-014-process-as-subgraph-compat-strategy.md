@@ -10,7 +10,7 @@ V3 计划的兼容支柱（V3.2 WASI、V3.5 POSIX-lite）和生态支柱（V3.1 
 
 - `gpm install hello.wasm`（附录 B）写下"子图出现在 3D 视图"，但子图的*形状*未定义。
 - 兼容层的资源访问（文件/网络/内存）如果发明自己的权限表，就违反 Parity 不变式（V3 风险表："兼容层把身份拖成 Unix 克隆"，致命级，对策是"ADR-014 必须先给出'进程=子图、fd=边'的完整映射才准写实现代码")。
-- 现有 substrate 调研（见下）显示：**V2.4a/b 已经把"capability 检查＝Grant 路径图查询"实现完毕**（`gos-rewrite::capability::reachable_via_grant`/`capability_check`，[ADR-001 §2.2](./ADR-001-edge-algebra-constitution.md)）；`RuntimeEdgeType::Use`/`Call` 已经携带 `Grant` 位（`edge_algebra.rs` `lower()`，`grant_edges_from_specs` 据此过滤）；`gos_runtime::create_provisional_node` + `CypherMutation::CreateNode`（[ADR-005 §六/§七](./ADR-005-node-mutation.md)）已经能在 mutation gate 后铸造新节点。**这三块拼起来，"进程=子图、fd=边、access=capability_check"在今天的代码里已经有 90% 的地基**——缺的是把它们组装成一个具体的"进程"形状，以及谁/何时触发 ADR-005 §五 step 3 设想的"promote"（加一条 Grant 边）。本 ADR 的核心贡献是给出这个组装方式。
+- 现有 substrate 调研（见下）显示：**V2.4a/b 已经把"capability 检查＝Grant 路径图查询"实现完毕**（`gos-mutation-dispatch::capability::reachable_via_grant`/`capability_check`，[ADR-001 §2.2](./ADR-001-edge-algebra-constitution.md)）；`RuntimeEdgeType::Use`/`Call` 已经携带 `Grant` 位（`edge_algebra.rs` `lower()`，`grant_edges_from_specs` 据此过滤）；`gos_runtime::create_provisional_node` + `CypherMutation::CreateNode`（[ADR-005 §六/§七](./ADR-005-node-mutation.md)）已经能在 mutation gate 后铸造新节点。**这三块拼起来，"进程=子图、fd=边、access=capability_check"在今天的代码里已经有 90% 的地基**——缺的是把它们组装成一个具体的"进程"形状，以及谁/何时触发 ADR-005 §五 step 3 设想的"promote"（加一条 Grant 边）。本 ADR 的核心贡献是给出这个组装方式。
 
 ## 二、进程＝子图映射（选项无关，建议先行接线）
 
@@ -29,7 +29,7 @@ WASI 的 capability 句柄模型和 POSIX 的 fd 表，都是"一个整数 → �
 
 - **`RuntimeEdgeType::Use`**（`Refer+Bind+Grant`，exclusive，`edge_algebra.rs:290-292`）：适配"进程独占持有、生命周期耦合"的 fd——典型如一个打开的文件描述符（进程退出应连带释放）。`Bind` 位天然表达"目标的生命周期与本边绑定"。
 - **`RuntimeEdgeType::Call`**（`Refer+Send+Grant`，`edge_algebra.rs:256-258`）：适配"可调用的能力引用"——典型如一个 socket 端点或一个预开放目录的"打开"能力（WASI 的 `fd_prestat`）。`Send` 位天然表达"经此边发起调用/消息"。
-- 两者都携带 `Grant` 位——`grant_edges_from_specs`（`gos-rewrite/src/capability.rs:136-148`）已经把"`edge_type.lower().bits.grant` 为真的边"自动收进 `GrantEdge` 表。**WASI 的 capability 句柄和 Grant 边不是"类比"，是同一个枚举位**——V3 附录 A"同构"的说法在今天的代码里已经成立，不需要新发明。
+- 两者都携带 `Grant` 位——`grant_edges_from_specs`（`gos-mutation-dispatch/src/capability.rs:136-148`）已经把"`edge_type.lower().bits.grant` 为真的边"自动收进 `GrantEdge` 表。**WASI 的 capability 句柄和 Grant 边不是"类比"，是同一个枚举位**——V3 附录 A"同构"的说法在今天的代码里已经成立，不需要新发明。
 - fd 的整数索引 = 进程节点在其 `ExecutorContext`（`NodeExecutorVTable`，`gos-protocol/src/lib.rs:1507-1523`）里维护的 `[EdgeId; N]` 本地投影——边本身是事实来源，整数表只是解释器侧的缓存，镜像 `capability.rs` "the table is the graph" 的既有风格（`grant_edges_from_specs` 已经是这种"interned 投影"的先例）。
 - 目标节点：文件型资源指向 [ADR-010](./ADR-010-f5-persistent-storage-path.md) F.5-graph-integration 设想的 `:File{path}` 节点（带 `EdgeAttrs::persistent`）；socket 型指向 `k-net` 暴露的资源节点（`RESOURCE_SOCKET`）；两者今天的真实后端成熟度不同（`k-net` 已是真实 e1000/virtio 驱动；文件写入依赖 ADR-010 F.5-wiring，目前 0 接线）——这是后端完备性问题，不影响图层映射本身。
 

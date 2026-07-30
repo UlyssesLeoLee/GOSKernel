@@ -7,7 +7,7 @@
 //!   * a dependency cycle is reported, not hung (ADR-002 §4: a cycle = a boot
 //!     graph that can never reach quiescence).
 //!
-//! `NODES`/`DEPS` come from [`gos_rewrite::boot::gos_kernel`] — the *same*
+//! `NODES`/`DEPS` come from [`gos_mutation_dispatch::boot::gos_kernel`] — the *same*
 //! consts `hypervisor::main::run_boot` resolves to order real boot. This is
 //! no longer a hand-modeled copy of the boot graph: it *is* the boot graph,
 //! so this test and the kernel cannot drift apart.
@@ -19,18 +19,18 @@
 //!   (t1:Function {name: "resolves_real_boot_order_matching_kernel_main", type: "function"}),
 //!   (t2:Function {name: "reordered_dep_declarations_still_resolve_validly", type: "function"}),
 //!   (t3:Function {name: "dependency_cycle_is_reported_not_hung", type: "function"}),
-//!   (gk:Module {name: "gos_rewrite::boot::gos_kernel", type: "module"}),
+//!   (gk:Module {name: "gos_mutation_dispatch::boot::gos_kernel", type: "module"}),
 //!   (f)-[:CONTAINS]->(h), (f)-[:CONTAINS]->(t1), (f)-[:CONTAINS]->(t2), (f)-[:CONTAINS]->(t3),
 //!   (t1)-[:CALLS]->(h), (t2)-[:CALLS]->(h),
 //!   (t1)-[:USES]->(gk), (t2)-[:USES]->(gk), (t3)-[:USES]->(gk);
 //! ```
 
-use gos_rewrite::boot::gos_kernel::{
+use gos_mutation_dispatch::boot::gos_kernel::{
     ACTIVATE_KERNEL_TIER, BUILTIN_GRAPH, CPU_FEATURES, DEPS, GDT_INIT, HAL_INIT, IDT_INIT,
     INSTALL_MODULES, NODES, PIC_INIT, PS2_DRAIN, REALIZE_MODULES, RING3, STEADY_STATE,
     SUPERVISOR_BOOTSTRAP,
 };
-use gos_rewrite::boot::{resolve_boot_order, BootNodeId, BootResolveError, Depend};
+use gos_mutation_dispatch::boot::{resolve_boot_order, BootNodeId, BootResolveError, Depend};
 
 /// True iff `order` lists every `on` before its dependent `node`.
 fn respects_deps(order: &[BootNodeId], deps: &[Depend]) -> bool {

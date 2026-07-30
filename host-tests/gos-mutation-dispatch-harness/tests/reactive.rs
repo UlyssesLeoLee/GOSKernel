@@ -1,5 +1,5 @@
 //! V2.3c — `propagate_with`, the closure-based form of the V2.3a reverse-
-//! propagation index ([`gos_rewrite::reactive::propagate`]).
+//! propagation index ([`gos_mutation_dispatch::reactive::propagate`]).
 //!
 //! `propagate` (exercised via `Engine`/`Rule` in `engine.rs`) enqueues
 //! repaint signals into an `Emit` sink. `propagate_with` is the same
@@ -26,8 +26,8 @@
 //! ```
 
 use gos_protocol::Region;
-use gos_rewrite::reactive::{propagate_with, Subscription};
-use gos_rewrite::NodeId;
+use gos_mutation_dispatch::reactive::{propagate_with, Subscription};
+use gos_mutation_dispatch::NodeId;
 
 const KIND_REPAINT: u32 = 11;
 

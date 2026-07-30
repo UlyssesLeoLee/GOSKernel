@@ -148,7 +148,7 @@ pub fn resolve_boot_order(
 /// `hypervisor::main` resolves [`DEPS`] over [`NODES`] with
 /// [`resolve_boot_order`] and dispatches each step through the result,
 /// instead of hardcoding the call sequence as source order (ADR-002 §3:
-/// "boot order is solved, not encoded"). `host-tests/gos-rewrite-harness`'s
+/// "boot order is solved, not encoded"). `host-tests/gos-mutation-dispatch-harness`'s
 /// `boot_order.rs` imports these same consts, so "the manifest under test"
 /// and "the manifest the kernel actually boots from" cannot drift apart —
 /// shuffling [`DEPS`]' declaration order still resolves to a valid sequence,
@@ -156,7 +156,7 @@ pub fn resolve_boot_order(
 ///
 /// ```cypher
 /// CREATE
-///   (m:Module {name: "gos_rewrite::boot::gos_kernel", type: "module"}),
+///   (m:Module {name: "gos_mutation_dispatch::boot::gos_kernel", type: "module"}),
 ///   (nodes:Const {name: "NODES", type: "const"}),
 ///   (deps:Const {name: "DEPS", type: "const"}),
 ///   (m)-[:CONTAINS]->(nodes), (m)-[:CONTAINS]->(deps),

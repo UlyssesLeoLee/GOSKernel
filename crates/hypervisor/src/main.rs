@@ -8,12 +8,12 @@ mod ring3;
 
 use bootloader::{entry_point, BootInfo};
 use core::fmt::{self, Write};
-use gos_rewrite::boot::gos_kernel::{
+use gos_mutation_dispatch::boot::gos_kernel::{
     ACTIVATE_KERNEL_TIER, BUILTIN_GRAPH, CPU_FEATURES, DEPS, GDT_INIT, HAL_INIT, IDT_INIT,
     INSTALL_MODULES, NODES, PIC_INIT, PS2_DRAIN, REALIZE_MODULES, RING3, STEADY_STATE,
     SUPERVISOR_BOOTSTRAP,
 };
-use gos_rewrite::boot::{resolve_boot_order, BootNodeId};
+use gos_mutation_dispatch::boot::{resolve_boot_order, BootNodeId};
 
 entry_point!(kernel_main);
 
@@ -27,7 +27,7 @@ struct BootContext {
 
 type BootStep = fn(&mut BootContext);
 
-/// Binds each [`gos_rewrite::boot::gos_kernel`] `BootNodeId` to its step
+/// Binds each [`gos_mutation_dispatch::boot::gos_kernel`] `BootNodeId` to its step
 /// implementation. [`run_boot`] resolves the fire order from [`DEPS`]
 /// (ADR-002 §3), so this table's *row order* is cosmetic — only [`DEPS`]
 /// determines what runs before what.
@@ -207,7 +207,7 @@ fn step_steady_state(_ctx: &mut BootContext) {
 /// V2.2b wiring (ADR-002 §3): resolve the fire order from [`DEPS`] (a
 /// `Depend` graph over [`NODES`]) and dispatch each step through it, instead
 /// of hardcoding the call sequence as source order. [`DEPS`]/[`NODES`] are
-/// shared with `host-tests/gos-rewrite-harness/tests/boot_order.rs`, which
+/// shared with `host-tests/gos-mutation-dispatch-harness/tests/boot_order.rs`, which
 /// proves shuffling `DEPS`' declaration order still resolves validly and that
 /// a cyclic manifest is reported, not hung.
 fn run_boot(ctx: &mut BootContext) {

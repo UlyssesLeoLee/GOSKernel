@@ -2584,15 +2584,15 @@ pub fn instance_domain_root(instance_id: NodeInstanceId) -> Option<u64> {
     Some(guard.modules[mod_slot].domain.root_table_phys)
 }
 
-/// One unit of supervisor/runtime work, modeled as a [`gos_rewrite::Rule`]
+/// One unit of supervisor/runtime work, modeled as a [`gos_mutation_dispatch::Rule`]
 /// firing (V2.2c, [`doc/ADR-002`] §3-4): drain the restart queue and
 /// lane-class ready queues into the runtime, pump, then apply fault policy
 /// to anything pump faulted. Re-posts itself (causal depth + 1) iff there is
 /// more work to do — an empty re-post is quiescence.
 struct CycleRule;
 
-impl gos_rewrite::Rule for CycleRule {
-    fn fire(&mut self, sig: gos_rewrite::Signal, out: &mut gos_rewrite::Emit) {
+impl gos_mutation_dispatch::Rule for CycleRule {
+    fn fire(&mut self, sig: gos_mutation_dispatch::Signal, out: &mut gos_mutation_dispatch::Emit) {
         let restarted = process_restart_queue().ok().flatten().is_some();
         // Drain supervisor lane-class ready queues into the runtime ready
         // queue so that pump() picks up scheduled instances on this tick.
@@ -2618,17 +2618,17 @@ impl gos_rewrite::Rule for CycleRule {
 /// Phase B.5's restart cap catches single-module loops, this cap catches
 /// multi-module round-robins that B.5 alone can't see. Same trip point as
 /// the old `MAX_CYCLE_ITERATIONS` hardcap, but the *outcome* differs: the
-/// returned [`gos_rewrite::QuiescenceReport`] reports `max_causal_depth` and
+/// returned [`gos_mutation_dispatch::QuiescenceReport`] reports `max_causal_depth` and
 /// `steps` instead of silently leaving the runtime mid-drain.
 pub const CYCLE_DEPTH_CAP: u32 = 2048;
 
 /// Drive one supervisor service cycle to quiescence (or to
 /// [`CYCLE_DEPTH_CAP`] causal depth). The caller decides what to do with a
-/// non-quiescent [`gos_rewrite::QuiescenceReport`] (e.g. log it) — this never
+/// non-quiescent [`gos_mutation_dispatch::QuiescenceReport`] (e.g. log it) — this never
 /// silently truncates.
-pub fn service_system_cycle() -> gos_rewrite::QuiescenceReport {
-    let mut engine = gos_rewrite::Engine::new(CycleRule);
-    engine.post(gos_rewrite::Signal::external(gos_rewrite::NodeId(0), 0));
+pub fn service_system_cycle() -> gos_mutation_dispatch::QuiescenceReport {
+    let mut engine = gos_mutation_dispatch::Engine::new(CycleRule);
+    engine.post(gos_mutation_dispatch::Signal::external(gos_mutation_dispatch::NodeId(0), 0));
     engine.run_to_quiescence(CYCLE_DEPTH_CAP)
 }
 

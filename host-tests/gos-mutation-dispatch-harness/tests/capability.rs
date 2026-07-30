@@ -1,5 +1,5 @@
 //! V2.4a — `reachable_via_grant`, the Grant-path capability-check query
-//! (`gos_rewrite::capability`, ADR-001 §2.2 `grant`).
+//! (`gos_mutation_dispatch::capability`, ADR-001 §2.2 `grant`).
 //!
 //! These tests pin down the graph-query semantics V2.4 defines "capability
 //! check" to be: a path of [`GrantEdge`]s from `from` to `to`. The hot-plug
@@ -25,8 +25,8 @@
 //!   (t4)-[:USES]->(rg), (t5)-[:USES]->(rg), (t6)-[:USES]->(rg), (t7)-[:USES]->(rg);
 //! ```
 
-use gos_rewrite::capability::{reachable_via_grant, GrantEdge};
-use gos_rewrite::NodeId;
+use gos_mutation_dispatch::capability::{reachable_via_grant, GrantEdge};
+use gos_mutation_dispatch::NodeId;
 
 const A: NodeId = NodeId(1);
 const B: NodeId = NodeId(2);

@@ -19,7 +19,7 @@ line 112（并行轨）：
 "gfx golden frame (lavapipe)" 和 "gfx-fuzz" 都是**host 侧 CI 测试基建**的标准词汇：
 
 - **lavapipe golden frame**：lavapipe 是 Mesa 的纯软件 Vulkan 实现，CI 里常用来在无 GPU 环境跑 Vulkan 渲染并把输出帧与一张参考（golden）图按字节/像素比较，判定渲染管线有没有跑偏。
-- **gfx-fuzz**：对显示协议的 parser/rasteriser 喂随机/畸形输入，断言不 panic、不越界——经典的 host 侧 property/fuzz harness 形态（类比 `gos-rewrite-harness` 里已有的各 property test）。
+- **gfx-fuzz**：对显示协议的 parser/rasteriser 喂随机/畸形输入，断言不 panic、不越界——经典的 host 侧 property/fuzz harness 形态（类比 `gos-mutation-dispatch-harness` 里已有的各 property test）。
 
 **两者字面定义都是"host 进程读写 host 文件系统"，与"内核态 FAT32 write"无关。** "F.5 并入" 把它们绑定在一起，是 line 98/113/146 三处共享的额外推断，不是 line 100/112 本身的要求。
 

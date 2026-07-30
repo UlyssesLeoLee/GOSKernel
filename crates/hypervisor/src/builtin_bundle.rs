@@ -1787,7 +1787,7 @@ fn idt_load_hook(_ctx: &mut BootContext) {
 /// (max 64 iterations) so a misbehaving controller can't hang us.
 ///
 /// V2.2d: called from `hypervisor::main::step_ps2_drain`, the
-/// `gos_rewrite::boot::gos_kernel::PS2_DRAIN` boot node — BIOS/QEMU init
+/// `gos_mutation_dispatch::boot::gos_kernel::PS2_DRAIN` boot node — BIOS/QEMU init
 /// leaves a stale byte in port 0x60 (observed IRQ1=1 right after boot); as
 /// long as it sits there the i8042 controller won't raise IRQ1 again, so
 /// user keystrokes queue in the cable but never reach the CPU.
@@ -1808,7 +1808,7 @@ pub(crate) fn drain_ps2_buffer() {
 /// Phase G.1 — synchronous on_init pass for Kernel-tier nodes.
 ///
 /// V2.2d: called from `hypervisor::main::step_activate_kernel_tier`, the
-/// `gos_rewrite::boot::gos_kernel::ACTIVATE_KERNEL_TIER` boot node (after
+/// `gos_mutation_dispatch::boot::gos_kernel::ACTIVATE_KERNEL_TIER` boot node (after
 /// GDT/IDT/PIC/PS2_DRAIN). Each `gos_runtime::activate(vec)` runs the node's
 /// on_init (first time) then on_resume.  Order matches BUILTIN_MODULES
 /// topological order so dependencies (k-pmm before k-vmm before k-heap, etc)

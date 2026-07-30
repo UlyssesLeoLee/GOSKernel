@@ -1,5 +1,5 @@
 #![no_std]
-//! # gos-rewrite — rewrite-engine core (V2.2a walking skeleton, [`doc/ADR-002`])
+//! # gos-mutation-dispatch — rewrite-engine core (V2.2a walking skeleton, [`doc/ADR-002`])
 //!
 //! This is the **scheduling core** of the V2.2 rewrite engine, in isolation:
 //! it models ADR-002 §3 (scheduling = edge propagation) and §4 (quiescence is
@@ -23,7 +23,7 @@
 //! ```cypher
 //! CREATE
 //!   (f:File {name: "lib.rs", type: "file", language: "rust"}),
-//!   (m:Module {name: "gos_rewrite", type: "module"}),
+//!   (m:Module {name: "gos_mutation_dispatch", type: "module"}),
 //!   (nid:Class {name: "NodeId", type: "struct"}),
 //!   (sig:Class {name: "Signal", type: "struct"}),
 //!   (emit:Class {name: "Emit", type: "struct"}),

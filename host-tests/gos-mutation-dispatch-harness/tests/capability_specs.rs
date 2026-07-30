@@ -1,6 +1,6 @@
 //! V2.4b — `grant_edges_from_specs` / `capability_check`: bridging V2.4a's
 //! abstract `reachable_via_grant` primitive to real `gos_protocol::EdgeSpec`
-//! records (`gos_rewrite::capability`, ADR-001 §2.3).
+//! records (`gos_mutation_dispatch::capability`, ADR-001 §2.3).
 //!
 //! These tests pin down the *filter*: which `RuntimeEdgeType`s carry `grant`
 //! (currently `Use` and `Call`, per `EdgeBits::grant`'s `lower()` table) and
@@ -42,8 +42,8 @@
 //! ```
 
 use gos_protocol::{EdgeId, EdgeSpec, NodeId, RoutePolicy, RuntimeEdgeType};
-use gos_rewrite::capability::{capability_check, grant_edges_from_specs, GrantEdge, MAX_CAPABILITY_NODES};
-use gos_rewrite::NodeId as Idx;
+use gos_mutation_dispatch::capability::{capability_check, grant_edges_from_specs, GrantEdge, MAX_CAPABILITY_NODES};
+use gos_mutation_dispatch::NodeId as Idx;
 
 const A: NodeId = NodeId([1u8; 16]);
 const B: NodeId = NodeId([2u8; 16]);

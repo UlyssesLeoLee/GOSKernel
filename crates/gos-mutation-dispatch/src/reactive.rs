@@ -29,7 +29,7 @@
 //! ```cypher
 //! CREATE
 //!   (f:File {name: "reactive.rs", type: "file", language: "rust"}),
-//!   (m:Module {name: "gos_rewrite::reactive", type: "module"}),
+//!   (m:Module {name: "gos_mutation_dispatch::reactive", type: "module"}),
 //!   (sub:Class {name: "Subscription", type: "struct", signature: "{target,subscriber: NodeId, region: Region}"}),
 //!   (sub_new:Function {name: "Subscription::new", type: "function", visibility: "pub"}),
 //!   (prop:Function {name: "propagate", type: "function", visibility: "pub"}),

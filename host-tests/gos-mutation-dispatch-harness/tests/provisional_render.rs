@@ -3,10 +3,10 @@
 //! 显式 promote") against the two independent primitives V2.3c and V2.4b/c
 //! already shipped:
 //!
-//!   * [`gos_rewrite::reactive::propagate_with`] (V2.3c) — render-Subscribe
+//!   * [`gos_mutation_dispatch::reactive::propagate_with`] (V2.3c) — render-Subscribe
 //!     propagation over a `&[Subscription]` table, keyed by
-//!     `gos_rewrite::NodeId` (table-local render index).
-//!   * [`gos_rewrite::capability::capability_check`] (V2.4b/c) — Grant-path
+//!     `gos_mutation_dispatch::NodeId` (table-local render index).
+//!   * [`gos_mutation_dispatch::capability::capability_check`] (V2.4b/c) — Grant-path
 //!     reachability over a `&[gos_protocol::EdgeSpec]` table, keyed by
 //!     `gos_protocol::NodeId` (V2 graph identity).
 //!
@@ -33,9 +33,9 @@
 //! ```
 
 use gos_protocol::{EdgeId, EdgeSpec, NodeId, Region, RoutePolicy, RuntimeEdgeType};
-use gos_rewrite::capability::capability_check;
-use gos_rewrite::reactive::{propagate_with, Subscription};
-use gos_rewrite::NodeId as Idx;
+use gos_mutation_dispatch::capability::capability_check;
+use gos_mutation_dispatch::reactive::{propagate_with, Subscription};
+use gos_mutation_dispatch::NodeId as Idx;
 
 const KIND_REPAINT: u32 = 11;
 

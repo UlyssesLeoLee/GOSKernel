@@ -338,7 +338,7 @@ impl Region {
 /// with the [`Region`] predicate payload. Not a 5th primitive —
 /// [`EdgeForm::recognize`] already returns `None` for any reactive form
 /// (V2.0); `Subscribe` is exactly that form plus the region V2.0 deferred.
-/// The engine's reverse-propagation index (`gos_rewrite::reactive`, V2.3a)
+/// The engine's reverse-propagation index (`gos_mutation_dispatch::reactive`, V2.3a)
 /// consumes `(target, subscriber, region)` triples built from this form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subscribe {

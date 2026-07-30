@@ -780,29 +780,29 @@ fn sync_theme_use_edges(theme: u8) -> bool {
 }
 
 /// Abstract reactive-subscriber identities for theme diffusion (V2.3c).
-/// `gos_rewrite::NodeId` is the *engine's* opaque identity (a bare `u32`)
+/// `gos_mutation_dispatch::NodeId` is the *engine's* opaque identity (a bare `u32`)
 /// used only to index [`THEME_SUBSCRIPTIONS`] / [`reactive_target_vector`] —
 /// distinct from the `gos_protocol::NodeId` graph-node identities derived
 /// via `derive_node_id` elsewhere in this file.
-const REACT_THEME_CURRENT: gos_rewrite::NodeId = gos_rewrite::NodeId(0);
-const REACT_VGA: gos_rewrite::NodeId = gos_rewrite::NodeId(1);
+const REACT_THEME_CURRENT: gos_mutation_dispatch::NodeId = gos_mutation_dispatch::NodeId(0);
+const REACT_VGA: gos_mutation_dispatch::NodeId = gos_mutation_dispatch::NodeId(1);
 
 /// Repaint-signal kind threaded through
-/// [`gos_rewrite::reactive::propagate_with`]. Opaque to the table scan;
+/// [`gos_mutation_dispatch::reactive::propagate_with`]. Opaque to the table scan;
 /// [`reactive_target_vector`] is what gives a subscriber meaning.
 const KIND_THEME_REPAINT: u32 = 1;
 
 /// Reactive-subscription table for theme diffusion (V2.3 plan deliverables
 /// 1+2; ADR-001 §2.2 `Subscribe` = `Refer` + reactive; V2.3a
-/// `gos_rewrite::reactive` reverse-propagation index, wired here in V2.3c).
+/// `gos_mutation_dispatch::reactive` reverse-propagation index, wired here in V2.3c).
 ///
 /// `theme.current` mutating is region-independent (`Region::EVERYTHING`,
 /// per ADR-001 §2.2), so every row here repaints on a theme switch. Adding a
 /// render target that should also repaint on theme change is a new row plus
 /// a [`reactive_target_vector`] arm — not a new dispatch call site
 /// (Demo C "0 行代码扩散").
-static THEME_SUBSCRIPTIONS: &[gos_rewrite::reactive::Subscription] =
-    &[gos_rewrite::reactive::Subscription::new(REACT_THEME_CURRENT, REACT_VGA, Region::EVERYTHING)];
+static THEME_SUBSCRIPTIONS: &[gos_mutation_dispatch::reactive::Subscription] =
+    &[gos_mutation_dispatch::reactive::Subscription::new(REACT_THEME_CURRENT, REACT_VGA, Region::EVERYTHING)];
 
 /// Resolve an abstract theme-repaint subscriber ([`THEME_SUBSCRIPTIONS`]) to
 /// the signal target [`apply_theme_choice_raw`] sends `DISPLAY_CONTROL_THEME`
@@ -811,7 +811,7 @@ static THEME_SUBSCRIPTIONS: &[gos_rewrite::reactive::Subscription] =
 /// `REACT_VGA` honours the caller's `console_target` override, falling back
 /// to the VGA console — the same resolution `apply_theme_choice_raw`
 /// performed inline before V2.3c.
-fn reactive_target_vector(subscriber: gos_rewrite::NodeId, console_target: u64) -> Option<u64> {
+fn reactive_target_vector(subscriber: gos_mutation_dispatch::NodeId, console_target: u64) -> Option<u64> {
     match subscriber {
         REACT_VGA => Some(if console_target == 0 { VGA_VEC.as_u64() } else { console_target }),
         _ => None,
@@ -822,7 +822,7 @@ fn apply_theme_choice_raw(abi: &KernelAbi, from: u64, console_target: u64, theme
     let graph_ok = sync_theme_use_edges(theme);
 
     let mut visual_ok = true;
-    gos_rewrite::reactive::propagate_with(
+    gos_mutation_dispatch::reactive::propagate_with(
         THEME_SUBSCRIPTIONS,
         REACT_THEME_CURRENT,
         Region::EVERYTHING,

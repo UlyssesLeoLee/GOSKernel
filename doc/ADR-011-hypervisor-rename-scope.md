@@ -1,8 +1,8 @@
 # ADR-011：`crates/hypervisor` 改名范围——目标名字与 diff 大小
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V2 计划 line 25/104](../plan/V2_DEVELOPMENT_PLAN.md)（"`hypervisor` → `gos-graph-engine` 改名（不只是改名，是 identity shift——它已缩成 rewrite engine 本身）"）、[crates/gos-rewrite](../crates/gos-rewrite)（既有的图重写算法库）、V3 计划（Linux 兼容/VM guest = 明确 V4+ 非目标）
+> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V2 计划 line 25/104](../plan/V2_DEVELOPMENT_PLAN.md)（"`hypervisor` → `gos-graph-engine` 改名（不只是改名，是 identity shift——它已缩成 rewrite engine 本身）"）、[crates/gos-mutation-dispatch](../crates/gos-mutation-dispatch)（既有的图重写算法库）、V3 计划（Linux 兼容/VM guest = 明确 V4+ 非目标）
 >
-> 口径：V2 line 104 的抱怨是真实的——"hypervisor"这个目录名暗示 VM/guest 虚拟化，与 V3 计划明确写下的非目标矛盾。但调查发现这个 crate 的 **Cargo 包名早就不是 "hypervisor" 了**——是 `gos-kernel`，且 `gos-kernel`/`x86_64-gos-kernel` 已是构建系统（target-spec、CI、Makefile、`.cargo/config.toml`）的事实标准（21 处引用）。真正过时的只是**目录名**这一处。而 V2 line 104 提议的目标名 `gos-graph-engine`，会与早已存在、且确实是"rewrite engine 本身"的 `crates/gos-rewrite` 产生概念重叠。
+> 口径：V2 line 104 的抱怨是真实的——"hypervisor"这个目录名暗示 VM/guest 虚拟化，与 V3 计划明确写下的非目标矛盾。但调查发现这个 crate 的 **Cargo 包名早就不是 "hypervisor" 了**——是 `gos-kernel`，且 `gos-kernel`/`x86_64-gos-kernel` 已是构建系统（target-spec、CI、Makefile、`.cargo/config.toml`）的事实标准（21 处引用）。真正过时的只是**目录名**这一处。而 V2 line 104 提议的目标名 `gos-graph-engine`，会与早已存在、且确实是"rewrite engine 本身"的 `crates/gos-mutation-dispatch` 产生概念重叠。
 
 ## 一、问题陈述
 
@@ -55,7 +55,7 @@ qemu-system-x86_64 \
 目录 + 包名 + target-spec 文件名（`x86_64-gos-kernel.json` → `x86_64-gos-graph-engine.json`，位于仓库根目录）全部改为 `gos-graph-engine`。
 
 - **diff**：选项 A 的 3 处 + **全部 21 处 `gos-kernel`/`x86_64-gos-kernel` 引用**（CI workflow、Makefile ×2、`.cargo/config.toml` ×3、`xtask`、`run.ps1`、`host-tests` 校验脚本、`build-installer.ps1`、target-spec JSON 文件本身的重命名）。
-- **代价：与 `crates/gos-rewrite` 概念重叠**。`gos-rewrite`（`no_std` 算法库：ready-set 传播、quiescence、因果深度计、`capability_check`/`reachable_via_grant`）**已经是**"rewrite engine 本身"——这正是 V2 line 104 用来描述改名目标的措辞。`crates/hypervisor`（现 `gos-kernel`）不是这个引擎本身，而是**托管**它的可启动二进制：链接 `gos-rewrite` + `gos-runtime` + 30+ 个 `k-*` 驱动 crate，跑 `kernel_main`。把后者命名为 `gos-graph-engine`，会让不熟悉代码库的人合理地猜测它和 `gos-rewrite` 是同一样东西，或存在某种显而易见的包装关系——但实际依赖方向是反过来的（`gos-kernel` 依赖 `gos-rewrite`，不是 `gos-rewrite` 依赖/是 `gos-kernel`）。
+- **代价：与 `crates/gos-mutation-dispatch` 概念重叠**。`gos-mutation-dispatch`（`no_std` 算法库：ready-set 传播、quiescence、因果深度计、`capability_check`/`reachable_via_grant`）**已经是**"rewrite engine 本身"——这正是 V2 line 104 用来描述改名目标的措辞。`crates/hypervisor`（现 `gos-kernel`）不是这个引擎本身，而是**托管**它的可启动二进制：链接 `gos-mutation-dispatch` + `gos-runtime` + 30+ 个 `k-*` 驱动 crate，跑 `kernel_main`。把后者命名为 `gos-graph-engine`，会让不熟悉代码库的人合理地猜测它和 `gos-mutation-dispatch` 是同一样东西，或存在某种显而易见的包装关系——但实际依赖方向是反过来的（`gos-kernel` 依赖 `gos-mutation-dispatch`，不是 `gos-mutation-dispatch` 依赖/是 `gos-kernel`）。
 - target-spec 文件改名前建议先 `cargo clean`（`/target` 已在 `.gitignore`，风险低但路径假设会变）。
 
 ### 选项 C —— 不改，留给 V3 统一命名 pass
@@ -66,6 +66,6 @@ V3 还会引入 `gos-sdk`、gpm 包格式、`crates/k-wasm`（ADR-014）等新�
 
 ## 三、建议与门禁
 
-倾向 **A**：`crates/hypervisor/` → `crates/gos-kernel/`。这是全计划里少见的"三选项中一个选项的 diff 严格是另一个的子集，且子集本身就完整解决了被引用的抱怨"的情况——A 是 B 的前 3 行 diff，且 A 已经让目录名追上构建系统 21 处早已采用的身份（`gos-kernel`），不需要再造 `gos-graph-engine` 这个会与 `gos-rewrite` 冲突的新词。"GOS 的核心是图重写引擎"这个概念本身已经有名字了——`gos-rewrite`（算法）+ `gos-runtime`（活图状态）+ `gos-kernel`（托管前两者的可启动 binary）三者合起来即是，不需要第四个名字。
+倾向 **A**：`crates/hypervisor/` → `crates/gos-kernel/`。这是全计划里少见的"三选项中一个选项的 diff 严格是另一个的子集，且子集本身就完整解决了被引用的抱怨"的情况——A 是 B 的前 3 行 diff，且 A 已经让目录名追上构建系统 21 处早已采用的身份（`gos-kernel`），不需要再造 `gos-graph-engine` 这个会与 `gos-mutation-dispatch` 冲突的新词。"GOS 的核心是图重写引擎"这个概念本身已经有名字了——`gos-mutation-dispatch`（算法）+ `gos-runtime`（活图状态）+ `gos-kernel`（托管前两者的可启动 binary）三者合起来即是，不需要第四个名字。
 
 **门禁**：选项 A 的 4 处编辑（`git mv` + `Cargo.toml:4` + `verify-graph-architecture.ps1` 两处 + `scratch_cypher.py` 一处）是纯机械操作，rename 后跑 `cargo check --workspace` + 治理脚本 + boot-smoke 三件套即可验证零行为变更（mirrors ADR-007/009/010 之类"现状已大致到位、只缺一次对齐"的轻量执行）。历史 ADR/V2 计划文档里 `../crates/hypervisor/...` 形式的链接是否批量替换为 `../crates/gos-kernel/...`，还是保留作"撰写时刻快照"——两种做法都不影响功能，留给选向时一并决定；若选 B，额外门禁是 target-spec JSON 重命名前先 `cargo clean`，并确认 21 处引用逐一更新不遗漏。
