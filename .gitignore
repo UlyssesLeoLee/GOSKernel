@@ -1,5 +1,6 @@
 /target
 **/target
+target/
 /dist
 /.claude/worktrees/
 *.log

@@ -78,9 +78,62 @@ pub struct StructuredBackend {
     pub publish: unsafe extern "C" fn(record: *const LogRecord),
 }
 
+/// Capacity of the in-kernel recent-log ring buffer.  Sized so the
+/// `log` shell command can page through boot + runtime events without
+/// overwhelming the VGA output buffer.
+pub const LOG_RING_CAPACITY: usize = 64;
+
+struct LogRing {
+    entries: [LogRecord; LOG_RING_CAPACITY],
+    head: usize,
+    count: usize,
+}
+
+impl LogRing {
+    const fn new() -> Self {
+        Self {
+            entries: [LogRecord::empty(); LOG_RING_CAPACITY],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, record: LogRecord) {
+        self.entries[self.head] = record;
+        self.head = (self.head + 1) % LOG_RING_CAPACITY;
+        if self.count < LOG_RING_CAPACITY {
+            self.count += 1;
+        }
+    }
+
+    /// Copy up to `out.len()` of the most-recent entries into `out`,
+    /// oldest first.  Returns the number written.
+    fn read_recent(&self, out: &mut [LogRecord]) -> usize {
+        let n = out.len().min(self.count);
+        if n == 0 {
+            return 0;
+        }
+        // The oldest live entry starts at `head - count` (mod N).
+        let start = (self.head + LOG_RING_CAPACITY - self.count) % LOG_RING_CAPACITY;
+        // We want the last `n` entries, so skip `count - n` from start.
+        let skip = self.count.saturating_sub(n);
+        let read_start = (start + skip) % LOG_RING_CAPACITY;
+        for i in 0..n {
+            out[i] = self.entries[(read_start + i) % LOG_RING_CAPACITY];
+        }
+        n
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.count = 0;
+    }
+}
+
 static SERIAL_BACKEND: Mutex<Option<SerialBackend>> = Mutex::new(None);
 static STRUCTURED_BACKEND: Mutex<Option<StructuredBackend>> = Mutex::new(None);
 static MIN_LEVEL: Mutex<LogLevel> = Mutex::new(LogLevel::Info);
+static LOG_RING: Mutex<LogRing> = Mutex::new(LogRing::new());
 
 pub fn install_serial_backend(backend: SerialBackend) {
     *SERIAL_BACKEND.lock() = Some(backend);
@@ -117,18 +170,32 @@ pub fn dispatch(level: LogLevel, source: [u8; 16], args: fmt::Arguments<'_>) {
         }
     }
 
+    let mut record = LogRecord::empty();
+    record.level = level;
+    record.source = source;
+    let n = (buf.len).min(LOG_PAYLOAD_BYTES);
+    record.payload[..n].copy_from_slice(&buf.bytes[..n]);
+    record.payload_len = n as u16;
+    record.truncated = buf.truncated;
+
+    LOG_RING.lock().push(record);
+
     if let Some(backend) = *STRUCTURED_BACKEND.lock() {
-        let mut record = LogRecord::empty();
-        record.level = level;
-        record.source = source;
-        let n = (buf.len).min(LOG_PAYLOAD_BYTES);
-        record.payload[..n].copy_from_slice(&buf.bytes[..n]);
-        record.payload_len = n as u16;
-        record.truncated = buf.truncated;
         unsafe {
             (backend.publish)(&record as *const _);
         }
     }
+}
+
+/// Copy the most-recent log entries (oldest first, up to `out.len()`)
+/// into `out`.  Returns the number written.
+pub fn recent_logs(out: &mut [LogRecord]) -> usize {
+    LOG_RING.lock().read_recent(out)
+}
+
+/// Clear the in-kernel log ring buffer.
+pub fn clear_log_ring() {
+    LOG_RING.lock().clear();
 }
 
 /// Formatting buffer — bounded so `gos-log` can run pre-allocator (the
