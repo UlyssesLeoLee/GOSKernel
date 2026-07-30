@@ -25858,6 +25858,17 @@ pub fn drain_signal() -> Option<(VectorAddress, Signal)> {
     rt.signal_queue.pop().map(|rs| (rs.target, rs.signal))
 }
 
+/// Drain one pending runtime Signal from the high-priority control queue
+/// (Control / Spawn / Terminate signals -- see `post_signal`).  Returns
+/// `(target_vector, signal)` or None when the queue is empty.  Companion to
+/// `drain_signal` for test harnesses: since control-class signals never land
+/// in the normal `signal_queue`, verifying their delivery requires draining
+/// this queue too.
+pub fn drain_control_signal() -> Option<(VectorAddress, Signal)> {
+    let mut rt = RUNTIME.lock();
+    rt.control_signal_queue.pop().map(|rs| (rs.target, rs.signal))
+}
+
 /// Check whether a node with `id` is currently present in the live graph.
 /// Used by the supervisor's `RuntimeGraphView` for rewrite-rule pattern
 /// evaluation.

@@ -162,6 +162,9 @@ fn non_use_edge(from: NodeId, to: NodeId, etype: RuntimeEdgeType, key: &str) -> 
 
 fn drain_all_signals() -> Vec<(VectorAddress, Signal)> {
     let mut out = Vec::new();
+    while let Some(item) = gos_runtime::drain_control_signal() {
+        out.push(item);
+    }
     while let Some(item) = gos_runtime::drain_signal() {
         out.push(item);
     }
