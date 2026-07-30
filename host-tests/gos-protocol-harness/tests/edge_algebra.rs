@@ -26,22 +26,37 @@
 
 use gos_protocol::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm, RuntimeEdgeType};
 
-/// All 9 historical edges, in discriminant order.
-fn all_edges() -> [RuntimeEdgeType; 9] {
+/// All 10 historical edges, in discriminant order. `Link` (0x0A) was added
+/// after this table was written (not yet reconciled into ADR-001 §2.3) --
+/// see `depend_link_share_one_form` for why it isn't in `bijective_edges`.
+fn all_edges() -> [RuntimeEdgeType; 10] {
     use RuntimeEdgeType::*;
-    [Call, Spawn, Depend, Signal, Return, Mount, Sync, Stream, Use]
+    [Call, Spawn, Depend, Signal, Return, Mount, Sync, Stream, Use, Link]
 }
 
-/// The 6 edges whose `EdgeForm` is unique, so they round-trip exactly.
-fn bijective_edges() -> [RuntimeEdgeType; 6] {
+/// The 5 edges whose `EdgeForm` is unique, so they round-trip exactly.
+/// `Depend` moved out of this set when `Link` was added: both lower to the
+/// same Refer-only form (`EdgeBits::new(true, false, false, false)`), so
+/// `recognize` cannot distinguish them -- see `depend_link_share_one_form`.
+fn bijective_edges() -> [RuntimeEdgeType; 5] {
     use RuntimeEdgeType::*;
-    [Call, Spawn, Depend, Mount, Stream, Use]
+    [Call, Spawn, Mount, Stream, Use]
 }
 
 /// The collision class — these three share one `EdgeForm`.
 fn collision_class() -> [RuntimeEdgeType; 3] {
     use RuntimeEdgeType::*;
     [Signal, Return, Sync]
+}
+
+/// `Depend`/`Link` collide the same way `Signal`/`Return`/`Sync` do: both
+/// lower to the Refer-only form, so they are a second, smaller collision
+/// class (predicted by the fact that neither has any Send/Bind/Grant/
+/// cardinality distinction in the current 4-bit + attrs model). `recognize`
+/// returns the canonical `Depend` (declared first in `recognize`'s match).
+fn depend_link_collision_class() -> [RuntimeEdgeType; 2] {
+    use RuntimeEdgeType::*;
+    [Depend, Link]
 }
 
 /// Zero-behavior-change guard: the wire discriminants must be exactly what they
@@ -58,6 +73,7 @@ fn discriminants_are_stable() {
     assert_eq!(RuntimeEdgeType::Sync as u8, 0x07);
     assert_eq!(RuntimeEdgeType::Stream as u8, 0x08);
     assert_eq!(RuntimeEdgeType::Use as u8, 0x09);
+    assert_eq!(RuntimeEdgeType::Link as u8, 0x0A);
 }
 
 /// Totality + the refer-floor invariant: every edge lowers without panic, and
@@ -93,6 +109,12 @@ fn decomposition_matches_constitution() {
                 EdgeBits::new(true, false, true, true),
                 EdgeAttrs::new(false, true, Cardinality::One, false),
             ),
+            // Not yet reconciled into ADR-001 §2.3 (added after this
+            // table was written) -- same Refer-only shape as Depend.
+            // See gos-protocol/src/edge_algebra.rs's lower() comment.
+            RuntimeEdgeType::Link => {
+                EdgeForm::new(EdgeBits::new(true, false, false, false), plain)
+            }
         }
     };
     for e in all_edges() {
@@ -125,6 +147,20 @@ fn signal_return_sync_share_one_form() {
         assert_eq!(e.lower().recognize(), Some(RuntimeEdgeType::Signal));
         // Form-stability: lower ∘ recognize ∘ lower == lower (the honest
         // restatement of "round-trip" for a surjective class).
+        let twice = e.lower().recognize().unwrap().lower();
+        assert_eq!(twice, e.lower(), "{e:?} form was not stable under re-lowering");
+    }
+}
+
+/// `Depend`/`Link` collapse to one form (both are Refer-only in the current
+/// model). `recognize` returns the canonical `Depend`, and form-stability
+/// holds for both -- same shape as `signal_return_sync_share_one_form`.
+#[test]
+fn depend_link_share_one_form() {
+    let canonical = RuntimeEdgeType::Depend.lower();
+    for e in depend_link_collision_class() {
+        assert_eq!(e.lower(), canonical, "{e:?} should share the Depend form");
+        assert_eq!(e.lower().recognize(), Some(RuntimeEdgeType::Depend));
         let twice = e.lower().recognize().unwrap().lower();
         assert_eq!(twice, e.lower(), "{e:?} form was not stable under re-lowering");
     }
