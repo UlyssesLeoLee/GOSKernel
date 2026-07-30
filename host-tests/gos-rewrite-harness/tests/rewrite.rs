@@ -59,6 +59,7 @@ impl GraphView for MockGraphView {
             edge_count: self.edges.len(),
             ready_queue_len: 0,
             signal_queue_len: 0,
+            control_queue_len: 0,
             tick: 0,
         }
     }
