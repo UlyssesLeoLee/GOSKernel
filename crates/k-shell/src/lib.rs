@@ -13981,6 +13981,63 @@ pub fn dispatch_graph_topo_indices97(sink: &ConsoleSink) {
     print_str(sink, "\n");
 }
 
+pub fn dispatch_graph_topo_indices116(sink: &ConsoleSink) {
+    let (nennaactc, nhennaactc, nbggso, edge_count, node_count) =
+        gos_runtime::graph_topo_indices116();
+
+    set_color(sink, 7, 0);
+    print_str(sink, " graph topo116 (NENNAACTC + NHENNAACTC + NBGGSO S-variant indices)\n");
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+
+    if node_count == 0 {
+        set_color(sink, 8, 0);
+        print_str(sink, "  (empty graph)\n");
+    } else {
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-ennacontic-vtx      NENNAACTC   =");
+        set_color(sink, 11, 0);
+        print_num_inline(sink, nennaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_v S(v)\u{2079}\u{2070}]  ");
+        print_str(sink, sat_label(nennaactc));
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-ennacontic-edge    NHENNAACTC   =");
+        set_color(sink, 10, 0);
+        print_num_inline(sink, nhennaactc as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u+S_v)\u{2078}\u{2079}]  ");
+        print_str(sink, sat_label(nhennaactc));
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+
+        set_color(sink, 8, 0);
+        print_str(sink, "  S-dohectyl-sombor-gg          NBGGSO     =  ");
+        set_color(sink, 13, 0);
+        print_num_inline(sink, nbggso as usize);
+        set_color(sink, 8, 0);
+        print_str(sink, "   [\u{03a3}_{uv\u{2208}E} (S_u\u{00b2}+S_v\u{00b2})\u{2078}\u{2074}]  ");
+        print_str(sink, sat_label(nbggso));
+        set_color(sink, 7, 0);
+        print_str(sink, "\n");
+    }
+
+    set_color(sink, 8, 0);
+    print_str(sink, " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n");
+    set_color(sink, 7, 0);
+    print_num_inline(sink, node_count);
+    set_color(sink, 8, 0);
+    print_str(sink, " node(s)  ");
+    print_num_inline(sink, edge_count);
+    print_str(sink, " edge(s)  (S-variant family: NENNAACTC=\u{03a3} S\u{2079}\u{2070} FIRST of ennacontic (90-99); NBGGSO=SO\u{00b5}\u{00b9}\u{2076}\u{2078} on S, 33rd of NB series)");
+    set_color(sink, 7, 0);
+    print_str(sink, "\n");
+}
+
 pub fn dispatch_graph_topo_indices115(sink: &ConsoleSink) {
     let (noctaennactc, nhoctaennactc, nbffso, edge_count, node_count) =
         gos_runtime::graph_topo_indices115();

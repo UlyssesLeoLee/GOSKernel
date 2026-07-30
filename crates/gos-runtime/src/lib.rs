@@ -21552,6 +21552,64 @@ impl GraphRuntime {
         (nheptapentactc, nhheptapentactc, nbrso, edge_count, nc)
     }
 
+    pub fn graph_topo_indices116_inner(&self) -> (u64, u64, u64, usize, usize) {
+        let mut slot_to_ci = [usize::MAX; MAX_NODES];
+        let mut nc = 0usize;
+        for i in 0..MAX_NODES {
+            if self.nodes[i].is_some() { slot_to_ci[i] = nc; nc += 1; }
+        }
+        if nc == 0 { return (0, 0, 0, 0, 0); }
+        let mut adj = [0u128; MAX_NODES]; let mut edge_count = 0usize;
+        for ei in 0..MAX_EDGES {
+            let edge = match self.edges[ei] { Some(e) => e, None => continue };
+            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
+            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
+            let f_ci = slot_to_ci[f_sl]; let t_ci = slot_to_ci[t_sl];
+            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+            if (adj[f_ci] >> t_ci) & 1 == 0 { adj[f_ci] |= 1u128 << t_ci; adj[t_ci] |= 1u128 << f_ci; edge_count += 1; }
+        }
+        let mut deg = [0u64; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
+        let mut sv = [0u64; MAX_NODES];
+        for ci in 0..nc { let mut bits = adj[ci]; while bits != 0 { let nb = bits.trailing_zeros() as usize; bits &= bits - 1; sv[ci] += deg[nb]; } }
+        // NENNAACTC: S_v S(v)^90. s^90=s88*s2, s88=s64*s16*s8. FIRST of ennacontic(90-99).
+        let mut nennaactc_acc: u128 = 0;
+        for ci in 0..nc {
+            let s=sv[ci] as u128; let s2=s*s; let s4=s2*s2;
+            let s8=s4.saturating_mul(s4); let s16=s8.saturating_mul(s8);
+            let s32=s16.saturating_mul(s16); let s64=s32.saturating_mul(s32);
+            let s80=s64.saturating_mul(s16); let s88=s80.saturating_mul(s8);
+            let s90=s88.saturating_mul(s2);
+            nennaactc_acc=nennaactc_acc.saturating_add(s90);
+        }
+        let nennaactc=nennaactc_acc.min(u64::MAX as u128) as u64;
+        // NHENNAACTC: (S_u+S_v)^89; NBGGSO: (S_u^2+S_v^2)^84 alpha=168.
+        let mut nhennaactc_acc:u128=0; let mut nbggso_acc:u128=0;
+        for a in 0..nc {
+            let sa=sv[a] as u128; let mut bits=adj[a];
+            while bits!=0 { let b=bits.trailing_zeros() as usize; bits&=bits-1;
+                if b>a {
+                    let sb=sv[b] as u128;
+                    let ss=sa+sb; let ss2=ss*ss; let ss4=ss2*ss2;
+                    let ss8=ss4.saturating_mul(ss4); let ss16=ss8.saturating_mul(ss8);
+                    let ss32=ss16.saturating_mul(ss16); let ss64=ss32.saturating_mul(ss32);
+                    let ss80=ss64.saturating_mul(ss16); let ss88=ss80.saturating_mul(ss8);
+                    let ss89=ss88.saturating_mul(ss);
+                    nhennaactc_acc=nhennaactc_acc.saturating_add(ss89);
+                    let s2s=sa*sa+sb*sb; let s2s2=s2s*s2s;
+                    let s2s4=s2s2.saturating_mul(s2s2); let s2s8=s2s4.saturating_mul(s2s4);
+                    let s2s16=s2s8.saturating_mul(s2s8); let s2s32=s2s16.saturating_mul(s2s16);
+                    let s2s64=s2s32.saturating_mul(s2s32); let s2s80=s2s64.saturating_mul(s2s16);
+                    let s2s84=s2s80.saturating_mul(s2s4);
+                    nbggso_acc=nbggso_acc.saturating_add(s2s84);
+                }
+            }
+        }
+        let nhennaactc=nhennaactc_acc.min(u64::MAX as u128) as u64;
+        let nbggso=nbggso_acc.min(u64::MAX as u128) as u64;
+        (nennaactc,nhennaactc,nbggso,edge_count,nc)
+    }
+
     pub fn graph_topo_indices115_inner(&self) -> (u64, u64, u64, usize, usize) {
         // 1. Compact node index.
         let mut slot_to_ci = [usize::MAX; MAX_NODES];
@@ -28224,6 +28282,10 @@ pub fn graph_topo_indices100() -> (u64, u64, u64, usize, usize) {
 
 pub fn graph_topo_indices101() -> (u64, u64, u64, usize, usize) {
     RUNTIME.lock().graph_topo_indices101_inner()
+}
+
+pub fn graph_topo_indices116() -> (u64, u64, u64, usize, usize) {
+    RUNTIME.lock().graph_topo_indices116_inner()
 }
 
 pub fn graph_topo_indices115() -> (u64, u64, u64, usize, usize) {
