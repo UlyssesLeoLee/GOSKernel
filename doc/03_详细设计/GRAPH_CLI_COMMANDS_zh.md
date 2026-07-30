@@ -4,15 +4,18 @@
 |---|---|
 | 文档编号 | GOS-DOC-03-04 |
 | 所属阶段 | 03・详细设计 |
-| 版本 / 状态 | v1.8 / 现行（口径：仅记录已实现命令） |
+| 版本 / 状态 | v1.10 / 现行（口径：仅记录已实现命令） |
 | 作成 / 审核 / 批准 | GOS 核心团队 |
 | 基线日期 | 2026-06-30 |
-| 最终更新 | 2026-07-21 |
+| 最终更新 | 2026-07-29 |
 
 **变更履历**
 
 | 版本 | 日期 | 变更内容 | 作成者 |
 |---|---|---|---|
+| v1.10 | 2026-07-29 | 补齐 V3.126 新增的 topo115（NOCTAENNACTC + NHOCTAENNACTC + NBFFSO，八旬系列第10个/最终，NB 系列第 32 个字母组 FF，α=166），更新 §十五表头、引言统计（61 次硬化迭代）与累计口径（2231 项测试、L4 占用至 202）；将 gos-graph-topo115-harness 10 项测试收入版本记录 | GOS 核心团队 |
+| v1.9 | 2026-07-29 | 对照硬化日志及源码提交历史补齐 V3.105~V3.125（21 次硬化迭代）新增的 Neighborhood S-variant 拓扑指数命令族 `graph topo94`~`graph topo114`（21 组、63 个指数），扩展 §十五表格与统计口径；新发现 topo99（V3.110）、topo100（V3.111）、topo102（V3.113）三版本硬化日志文件缺失——本轮已用 `git log --all --oneline` 核实对应 `feat(vX.XXX)` 提交确实存在（代码与测试均已合入，仅文档缺失），如实标注并附提交哈希；同时用同一方法核实此前标记为「待核实」的 V3.66、V3.102 缺口，结论相同（均为文档侧遗漏，非代码缺失或误删），解除该待跟进项；发现 V3.117 硬化日志自述累计测试数「2141」与 V3.116 重复（应为 2151），经核对 V3.118 的起始基数确认为 V3.117 落款时误抄上一版本数值，如实标注不擅自修正 | GOS 核心团队 |
+| v1.8 | 2026-07-21 | 对照硬化日志补齐 V3.66~V3.104（39 项硬化迭代，其中 V3.66、V3.102 两版本文件缺失）新增的 Neighborhood S-variant 拓扑指数命令族 `graph topo55`~`graph topo93`（39 组、117 个指数），新增 §十五完整索引，原 §十五/§十六 顺延为 §十六/§十七（本行为补记：此前 v1.8 发布时遗漏在本表登记变更履历，本轮一并补齐） | GOS 核心团队 |
 | v1.7 | 2026-07-19 | 对照源码及硬化日志补齐 V3.31~V3.65（共 35 项）Neighborhood S-variant 拓扑指数命令族 `graph topo20`~`graph topo54`（105 个指数），新增 §十四，原 §十四/§十五（输出说明/最短示例）顺延为 §十五/§十六。此前 v1.6 索引截至 V3.30（graph topo19），是本次修订前口径滞后最严重的部分（README.md 已连续多轮标记为高优先级待处理项） | GOS 核心团队 |
 | v1.0 | 2026-06-30 | 纳入日系工程阶段目录（03_详细设计） | GOS 核心团队 |
 | v1.1 | 2026-07-01 | 补充文档管理信息 | GOS 核心团队 |
@@ -456,9 +459,9 @@ activate
 
 **注**：部分指数缩写在不同组号间重复出现（如 topo26 与 topo49 均含 "NRSO"，topo41~topo54 多组共用 "N*SO" Sombor 变体命名模式），系源代码命名空间本身的既成事实（字母序列受限产生的缩写复用），本文档如实记录，不做归并或改名。
 
-## 十五、Neighborhood S-variant 拓扑指数命令族续篇（`graph topo55` ~ `graph topo93`，V3.66 ~ V3.104 新增）
+## 十五、Neighborhood S-variant 拓扑指数命令族续篇（`graph topo55` ~ `graph topo115`，V3.66 ~ V3.126 新增）
 
-> 本节为 2026-07-21 本轮新增，承接 §十四（v1.7 收录至 `graph topo54`/V3.65）。V3.66~V3.104 共 39 次硬化迭代（其中 V3.66、V3.102 两版本文件缺失，详见下方说明），延续 §十四 的 Neighborhood S-variant 模式，将顶点/边幂次系列由 30 次幂推进至 67 次幂，Sombor 变体 α 由 46 推进至 122（命名法由单字母 → 第2轮单字母 → 第3轮双字母 "AA"~"AZ" → 第4轮双字母 "BA"~"BJ"）。
+> 本节为 2026-07-21 本轮新增，2026-07-29 本轮扩展（v1.9→v1.10）。承接 §十四（v1.7 收录至 `graph topo54`/V3.65）。V3.66~V3.126 共 61 次硬化迭代（其中 V3.66、V3.102、V3.110、V3.111、V3.113 五版本文件缺失，详见下方说明），延续 §十四 的 Neighborhood S-variant 模式，将顶点/边幂次系列由 30 次幂推进至 89 次幂，Sombor 变体 α 由 46 推进至 166。NB 系列命名法沿用各硬化日志自述的字母/双字母标识（本文档仅逐条转录，不代为归纳统一规则），topo94~topo109 延续单段字母 K~Z，topo110 起硬化日志自述切换为 "AA"、单字母 "B"、双字母重复 "CC"/"DD"/"EE"/"FF" 等不完全规律的标识（详见下表逐条备注），如实转录，不做规则性总结或猜测性修正。
 
 **顶点/边幂次系列命名节点**：topo55~65 为 "triacontic"（30余次幂）尾段，topo66~75 为 "tetracontic"（40余次幂）段，topo76~85 为 "pentacontic"（50余次幂）段，topo86~93 为 "hexacontic"（60余次幂）段首8个。每组命令固定新增 3 个指数，配套独立 `gos-graph-topoN-harness`（10 项测试）。命令别名、精确公式推导、S-正则图闭式公式与逐图交叉验证表，以对应 `doc/06_运维维护/hardening/HARDENING_LOG_*.md` 为唯一权威口径，本节仅做索引汇总。
 
@@ -503,12 +506,47 @@ activate
 | topo91 | V3.102 | NHEXAPENTAACTC（S⁶⁵）+ NHHEXAPENTAACTC（S⁶⁴边和）+ NBHSO（α=118） | *文件缺失，仅见于 V3.101/V3.103/V3.104 交叉引用* |
 | topo92 | V3.103 | NHEXAHEXAACTC（S⁶⁶）+ NHHEXAHEXAACTC（S⁶⁵边和）+ NBISOS（α=120） | HARDENING_LOG_2026-07-21_V3.103.md |
 | topo93 | V3.104 | NHEXAHEPTACTC（S⁶⁷）+ NHHEXAHEPTACTC（S⁶⁶边和）+ NBJSO（α=122） | HARDENING_LOG_2026-07-21_V3.104.md |
+| topo94 | V3.105 | NHEXAOCTACTC（S⁶⁸，hexacontic 系列第9个）+ NHHEXAOCTACTC（边和）+ NBKSO（α=124） | HARDENING_LOG_2026-07-21_V3.105.md |
+| topo95 | V3.106 | NHEXAENNACTC（S⁶⁹，hexacontic 系列收官/第10个）+ NHHEXAENNACTC（边和）+ NBLSO（α=126） | HARDENING_LOG_2026-07-21_V3.106.md |
+| topo96 | V3.107 | NHEPTAACTC（S⁷⁰，heptacontic 系列首个）+ NHHEPTAACTC（边和）+ NBMSO（α=128） | HARDENING_LOG_2026-07-21_V3.107.md |
+| topo97 | V3.108 | NHEPTAENACTC（S⁷¹）+ NHHEPTAENACTC（边和）+ NBNSO（α=130） | HARDENING_LOG_2026-07-21_V3.108.md |
+| topo98 | V3.109 | NHEPTADIACTC（S⁷²）+ NHHEPTADIACTC（边和）+ NBOSO（α=132） | HARDENING_LOG_2026-07-21_V3.109.md |
+| topo99 | V3.110 | NHEPTATRIACTC（S⁷³）+ NHHEPTATRIACTC（边和）+ NBPSO（α=134） | *文件缺失，仅见于 git 提交 `1d074aa feat(v3.110)`* |
+| topo100 | V3.111 | NHEPTATETRAACTC（S⁷⁴）+ NHHEPTATETRAACTC（边和）+ NBQSO（α=136） | *文件缺失，仅见于 git 提交 `9784244 feat(v3.111)`* |
+| topo101 | V3.112 | NHEPTAPENTACTC（S⁷⁵）+ NHHEPTAPENTACTC（边和）+ NBRSO（α=138） | HARDENING_LOG_2026-07-22_V3.112.md |
+| topo102 | V3.113 | NHEPTAHEXAACTC（S⁷⁶）+ NHHEPTAHEXAACTC（边和）+ NBSSO（α=140） | *文件缺失，仅见于 git 提交 `90b891e feat(v3.113)`* |
+| topo103 | V3.114 | NHEPTAHEPTAACTC（S⁷⁷）+ NHHEPTAHEPTAACTC（边和）+ NBTSO（α=142） | HARDENING_LOG_2026-07-22_V3.114.md |
+| topo104 | V3.115 | NHEPTAOCTAACTC（S⁷⁸）+ NHHEPTAOCTAACTC（边和）+ NBUSO（α=144） | HARDENING_LOG_2026-07-22_V3.115.md |
+| topo105 | V3.116 | NHEPTAENNACTC（S⁷⁹，heptacontic 系列收官/第10个）+ NHHEPTAENNACTC（边和）+ NBVSO（α=146） | HARDENING_LOG_2026-07-22_V3.116.md |
+| topo106 | V3.117 | NOCTAACTC（S⁸⁰，octacontic 系列首个）+ NHOCTAACTC（边和）+ NBWSO（α=148） | HARDENING_LOG_2026-07-22_V3.117.md |
+| topo107 | V3.118 | NOCTAMONOACTC（S⁸¹）+ NHOCTAMONOACTC（边和）+ NBXSO（α=150） | HARDENING_LOG_2026-07-28_V3.118.md |
+| topo108 | V3.119 | NOCTADIACTC（S⁸²）+ NHOCTADIACTC（边和）+ NBYSO（α=152） | HARDENING_LOG_2026-07-29_V3.119.md |
+| topo109 | V3.120 | NOCTATRIACTC（S⁸³）+ NHOCTATRIACTC（边和）+ NBZSO（α=154） | HARDENING_LOG_2026-07-29_V3.120.md |
+| topo110 | V3.121 | NOCTATETRAACTC（S⁸⁴）+ NHOCTATETRAACTC（边和）+ NBAASO（α=156，硬化日志自述标识切换为 "AA"） | HARDENING_LOG_2026-07-29_V3.121.md |
+| topo111 | V3.122 | NOCTAPENTACTC（S⁸⁵）+ NHOCTAPENTACTC（边和）+ NBBSO（α=158，硬化日志自述标识为单字母 "B"） | HARDENING_LOG_2026-07-29_V3.122.md |
+| topo112 | V3.123 | NOCTAHEXACTC（S⁸⁶）+ NHOCTAHEXACTC（边和）+ NBCCSO（α=160，硬化日志自述标识为重复字母 "CC"） | HARDENING_LOG_2026-07-29_V3.123.md |
+| topo113 | V3.124 | NOCTAHEPTACTC（S⁸⁷）+ NHOCTAHEPTACTC（边和）+ NBDDSO（α=162，"DD"） | HARDENING_LOG_2026-07-29_V3.124.md |
+| topo114 | V3.125 | NOCTAOCTACTC（S⁸⁸）+ NHOCTAOCTACTC（边和）+ NBEESO（α=164，"EE"） | HARDENING_LOG_2026-07-29_V3.125.md |
+| topo115 | V3.126 | NOCTAENNACTC（S⁸⁹，八旬系列第10个/最终）+ NHOCTAENNACTC（边和）+ NBFFSO（α=166，"FF"，第32个NB组） | HARDENING_LOG_2026-07-29_V3.126.md |
 
-累计至 V3.104，Neighborhood S-variant 拓扑指数命令族（topo20~topo93）共 74 组、222 个指数；加上 §13.2 的 topo1~topo19（19 组、57 个指数）与 §13.1 的 Zagreb 四件套/谱/熵指标，`graph topo*` 系列合计 93 组、约 279 个拓扑指数，VectorAddress L4 命名空间占用 88~180（`graph-topo`~`graph-topo93`）。宿主测试总数随本系列持续增长，最新累计数见 [README.md](../README.md) 06 · 运维维护表格与最新硬化日志。
+累计至 V3.126，Neighborhood S-variant 拓扑指数命令族（topo20~topo115）共 96 组、288 个指数；加上 §13.2 的 topo1~topo19（19 组、57 个指数）与 §13.1 的 Zagreb 四件套/谱/熵指标，`graph topo*` 系列合计 115 组、约 345 个拓扑指数，VectorAddress L4 命名空间占用 88~202（`graph-topo`~`graph-topo115`）。宿主测试总数 2231（topo115 harness 10 项全绿），最新累计数见 [README.md](../README.md) 06 · 运维维护表格与最新硬化日志。
 
-**已知缺口**：V3.66（topo55）与 V3.102（topo91）两篇硬化日志文件在 `06_运维维护/hardening/` 与 `doc/` 根目录均未找到实体文件，其存在与内容仅能从相邻版本（V3.67、V3.68 及 V3.101/V3.103/V3.104）的交叉引用中还原，推测为归档时遗漏。本文档如实记录该缺口，不做内容臆造；建议下一轮核实是否为源仓库提交历史中的真实缺失，如是应作为已知缺陷登记，而非文档侧问题。
+**已知缺口（5 项，均已用 `git log --all --oneline` 核实为文档侧遗漏，非代码或测试缺失）**：
 
-**已知口径不一致**：V3.100（topo89）硬化日志自述"宿主测试总数 1963（此前 1953）"，但 V3.99（topo88）已自述其累计总数为 1963；两者不能同时成立（差 10 项，疑似 V3.100 落款时误抄 V3.99 的数值而非累计 +10）。本文档如实保留原文数值并在 V3.100 译文中加注说明，不擅自修正，建议以逐版本 `cargo test` 实际结果为准核实真实累计数。
+| 版本 | topo | 对应 git 提交（`feat`，代码 + 测试均已合入） | docs 提交 |
+|---|---|---|---|
+| V3.66 | topo55 | `755aa5e feat(v3.66): NNONATC + NHNONATC + NZSO ... (10 tests)` | 未找到 |
+| V3.102 | topo91 | `e7d5c74 feat(v3.102): NHEXAPENTACTC + NHHEXAPENTACTC + NBHSO ... (10 tests)` | 未找到 |
+| V3.110 | topo99 | `1d074aa feat(v3.110): NHEPTATRIACTC + NHHEPTATRIACTC + NBPSO ... (10 新测试)` | 未找到 |
+| V3.111 | topo100 | `9784244 feat(v3.111): NHEPTATETRAACTC + NHHEPTATETRAACTC + NBQSO ... (10 新测试)` | 未找到 |
+| V3.113 | topo102 | `90b891e feat(v3.113): NHEPTAHEXAACTC + NHHEPTAHEXAACTC + NBSSO ... (10 新测试)` | 未找到 |
+
+上一轮（2026-07-21）曾将 V3.66/V3.102 标记为「待核实是否为归档遗漏、误删除，或版本号本身从未生成对应日志」；本轮已用 `git log --all --oneline --diff-filter=A -- '*V3.66*' '*V3.102*'` 等命令核实：五个版本号均确有对应的 `feat(vX.XXX)` 提交（代码与 harness 测试均已合入主线并通过），但均从未出现对应的 `docs(vX.XXX): 强化日志归档` 提交——即硬化日志 markdown 文件在这五个版本上从未被创建过，属于文档编写环节的一次性遗漏，而非归档丢失、误删除或代码缺失。该待核实项自本轮起解除阻塞。
+
+**已知口径不一致（2 项，均如实保留原文数值，未擅自修正）**：
+
+1. V3.100（topo89）硬化日志自述"宿主测试总数 1963（此前 1953）"，但 V3.99（topo88）已自述其累计总数为 1963；两者不能同时成立（差 10 项，疑似 V3.100 落款时误抄 V3.99 的数值而非累计 +10）。建议以逐版本 `cargo test` 实际结果为准核实真实累计数。
+2. **（本轮新发现）** V3.117（topo106）硬化日志摘要与「测试结果」两处均自述「宿主测试套件累计：2131 → 2141」，与 V3.116（topo105）自述的累计终值完全相同（应为 2141 → 2151）；经核对 V3.118（topo107）摘要自述起始基数为 2141（即以 2151 为其累计终值的前提反推，V3.118 = 2141+10=2151 成立），可判定 V3.117 落款时误将 V3.116 的数值原样复制、忘记递增，但该错误未影响后续版本的真实累计计数（V3.118 起已自行恢复正确基数）。本文档如实保留 V3.117 原文数值，不擅自修正。
 
 ## 十六、输出说明
 
