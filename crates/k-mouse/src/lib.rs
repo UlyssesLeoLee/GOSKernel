@@ -86,6 +86,18 @@ pub fn take_motion() -> (i32, i32, u8) {
     })
 }
 
+// ── Phase I.3.11 — public mouse cursor state ───────────────────────
+//
+// Published by `proc::apply_delta` on every PS/2 packet so non-text
+// UIs (the kernel's mode-13h 3D scene painter, future VBE LFB
+// targets) can read cursor position + button mask directly.  The
+// internal 640×400 grid is halved into mode-13h's 320×200 pixels on
+// the way out.
+pub static MOUSE_X: AtomicI32 = AtomicI32::new(160);
+pub static MOUSE_Y: AtomicI32 = AtomicI32::new(100);
+/// PS/2 button mask: bit0 left, bit1 right, bit2 middle.
+pub static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
 #[repr(C)]
 struct MouseState {
     display_target: u64,

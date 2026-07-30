@@ -1,0 +1,47 @@
+# GOS Kernel — KernelAbi (插件↔内核 ABI 接口)
+#
+# Source of truth: gos_protocol::KernelAbi struct.
+# 每个字段是 Option<extern "C" fn(...)>，插件 executor 通过
+# ctx.abi 读取，类似 syscall vtable.
+#
+# Caller 要先 None check (older kernel 可能不提供新 fn).
+
+abi_version: "0.2.0"
+
+functions:
+
+  # ── Core 调度 ───────────────────────────────────────────────────
+  - name: emit_signal
+    signature: "fn(target: VectorAddress, signal: KernelSignalPacket) -> i32"
+    purpose: 异步 post 一个 signal 到目标节点 (fire-and-forget)
+    available_since: A.1
+  - name: resolve_capability
+    signature: "fn(ns_ptr: *const u8, ns_len: usize, cap_ptr: *const u8, cap_len: usize) -> u64"
+    purpose: 按 (namespace, name) 解析 provider 节点的 VectorAddress (u64).
+             P0 #1 自动创建 Use edge.
+    available_since: A.3
+    audit_phases_touched: [P0_1, J_4]
+
+  # ── 堆 ────────────────────────────────────────────────────────
+  - name: heap_alloc
+    signature: "fn(size: usize, align: usize) -> *mut u8"
+    purpose: 在插件的 instance 配额内分配字节.
+    available_since: B.1
+  - name: heap_free
+    signature: "fn(ptr: *mut u8, size: usize, align: usize)"
+    available_since: B.1
+
+  # ── 控制平面 / 日志 ─────────────────────────────────────────
+  - name: emit_envelope
+    signature: "fn(env: *const ControlPlaneEnvelope)"
+    purpose: 推送控制平面 envelope. J.2 自动 mirror 到 journal ring.
+    available_since: B.4
+
+  # ── J.3 RPC 子系统 (kernel-internal 目前; ABI exposure future) ──
+  # rpc_invoke / rpc_invoke_buf / rpc_reply 不通过 vtable;
+  # 直接调用 gos_runtime 函数 (kernel-side caller only).
+
+# 备注:
+# - 所有 fn 是 extern "C" with #[no_mangle] 在 hypervisor side.
+# - Plugin 用 abi.fn_name 风格调用.
+# - None 字段表示这个 build 没有这个能力, plugin 必须降级或拒绝运行.

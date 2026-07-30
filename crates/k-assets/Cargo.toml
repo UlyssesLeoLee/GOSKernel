@@ -1,0 +1,10 @@
+[package]
+name = "k-assets"
+version = "0.2.0"
+edition = "2021"
+
+# no_std crate that embeds the pre-baked .pal asset binaries (from
+# tools/assets/) into the kernel via include_bytes!.  Provides typed
+# accessors so callers don't have to remember the byte layout.
+
+[dependencies]

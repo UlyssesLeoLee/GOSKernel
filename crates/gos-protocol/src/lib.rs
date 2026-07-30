@@ -734,6 +734,85 @@ pub enum RuntimeNodeType {
     Vector = 0xFF,
 }
 
+/// Audit P2 #4 — supervisor sub-domain class derived from a node's
+/// `RuntimeNodeType`.  Each runtime node maps to exactly one
+/// sub-domain so the supervisor (and tooling) can apply
+/// class-uniform isolation/observability policy across plugins:
+/// every Hardware node shares the same bare-metal sub-domain, every
+/// Driver node shares the kernel-driver sub-domain, etc.  The
+/// supervisor's per-plugin domain remains the unit of CR3 isolation;
+/// this enum partitions nodes ORTHOGONALLY by class so policy lookup
+/// can be `(plugin_domain, sub_domain)` keyed.
+///
+/// Gen-1 surfaces this on `GraphNodeSummary` so the visualizer and
+/// Cypher can colour/filter by sub-domain.  A future supervisor
+/// change will use the same mapping for hard isolation buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeSubDomain {
+    Hardware = 0x01,
+    KernelDriver = 0x02,
+    Service = 0x03,
+    Compute = 0x04,
+    Routing = 0x05,
+    Vector = 0x06,
+}
+
+// ── Phase J.6 — class-based ACL ───────────────────────────────────
+//
+// Constrain which NodeSubDomain classes are allowed to be on the
+// source end of which edge type pointing at which target class.
+// Today the policy is intentionally narrow — just one rule that
+// keeps Hardware nodes accessible only through their owning
+// KernelDriver — but the framework is in place so additional rules
+// can land without touching every callsite.
+//
+// The rule space is (source, edge_kind, target).  Mount/Use/Link
+// are the receptive (user-mutable) edge kinds; the others are
+// runtime-internal and not gated here.  An edge_kind not listed
+// in the policy table is always allowed.
+//
+// Wired into `gos_supervisor::apply_cypher_mutation` so any Cypher
+// CREATE / LINK / REBIND that violates the ACL is rejected with
+// `MutationError::DispatcherRejected(ACL_VIOLATION)`.
+
+/// Returns true if a graph mutation creating an edge of kind
+/// `edge_kind` from a node in `source_class` to a node in
+/// `target_class` is permitted by the runtime ACL.  See module
+/// docs for the rule set.
+pub const fn sub_domain_allows_edge(
+    source_class: NodeSubDomain,
+    target_class: NodeSubDomain,
+    edge_kind: u8,
+) -> bool {
+    // Rule J.6.A — only KernelDriver may Mount Hardware.  This is
+    // the bedrock isolation: user-class code (Service / Compute /
+    // Routing / Vector) cannot directly mount a hardware node into
+    // its namespace; it must go through the driver.  Use and Link
+    // remain unrestricted in this round.
+    if matches!(target_class, NodeSubDomain::Hardware)
+        && edge_kind == 1 // ReceptiveEdgeKind::Mount as u8
+    {
+        return matches!(source_class, NodeSubDomain::KernelDriver);
+    }
+    true
+}
+
+impl RuntimeNodeType {
+    pub const fn sub_domain(self) -> NodeSubDomain {
+        match self {
+            RuntimeNodeType::Hardware => NodeSubDomain::Hardware,
+            RuntimeNodeType::Driver => NodeSubDomain::KernelDriver,
+            RuntimeNodeType::Service => NodeSubDomain::Service,
+            RuntimeNodeType::PluginEntry => NodeSubDomain::Service,
+            RuntimeNodeType::Compute => NodeSubDomain::Compute,
+            RuntimeNodeType::Router => NodeSubDomain::Routing,
+            RuntimeNodeType::Aggregator => NodeSubDomain::Routing,
+            RuntimeNodeType::Vector => NodeSubDomain::Vector,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RuntimeEdgeType {
@@ -746,6 +825,15 @@ pub enum RuntimeEdgeType {
     Sync = 0x07,
     Stream = 0x08,
     Use = 0x09,
+    /// Phase H.1.x.3.link — user-declared correspondence between a
+    /// graph node and an interface-file node, established via the
+    /// Cypher `LINK` verb.  Semantically distinct from Mount (which
+    /// attaches a node into another's namespace) and Use (which
+    /// selects one of several providers): a Link declares "this
+    /// runtime node IS represented by that interface descriptor."
+    /// No automatic routing happens on Link edges in Gen-1 — they're
+    /// metadata edges traversed by tooling.
+    Link = 0x0A,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,6 +905,9 @@ pub enum ControlPlaneMessageKind {
     /// caller-supplied source attestation ([u8;16]); `arg0` encodes the
     /// mutation kind and first operand; `arg1` encodes the second operand.
     /// Every `apply_cypher_mutation` success produces exactly one of these.
+    /// (Phase H.1.x named this `CypherMutationAudited` on a separate fork;
+    /// this is the same wire value and concept under the name already
+    /// established elsewhere in this codebase.)
     MutationAudit = 0x09,
     /// `service_system_cycle` hit its per-cycle iteration cap — indicates a
     /// deep causal chain or livelock candidate.  `arg0` = iteration depth at
@@ -855,6 +946,18 @@ pub struct PermissionSpec {
 pub struct CapabilitySpec {
     pub name: &'static str,
     pub namespace: &'static str,
+    /// Phase J.4 — semantic version of this exported capability.
+    /// Resolver picks the highest version that falls inside any
+    /// caller's `[min_version, max_version]` window so providers
+    /// can evolve without breaking older consumers.  Default for
+    /// legacy exports is `CAPABILITY_VERSION_DEFAULT = 1`.
+    pub version: u32,
+}
+
+impl CapabilitySpec {
+    /// Default version stamp for capabilities that haven't been
+    /// re-versioned since J.4.  Equals 1.
+    pub const DEFAULT_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -862,6 +965,21 @@ pub struct ImportSpec {
     pub capability: &'static str,
     pub namespace: &'static str,
     pub required: bool,
+    /// Phase J.4 — inclusive lower bound on the provider's version.
+    /// Default for legacy imports is `1`.
+    pub min_version: u32,
+    /// Phase J.4 — inclusive upper bound on the provider's version.
+    /// Default for legacy imports is `u32::MAX` (accept anything).
+    pub max_version: u32,
+}
+
+impl ImportSpec {
+    /// Construct a version-agnostic import accepting any provider
+    /// version (1..=u32::MAX).  Convenience constructor used by
+    /// legacy plugins; new plugins should specify min/max explicitly.
+    pub const fn any_version(namespace: &'static str, capability: &'static str, required: bool) -> Self {
+        Self { capability, namespace, required, min_version: 1, max_version: u32::MAX }
+    }
 }
 
 // MODULE_ABI_VERSION uses the same packed-semver layout as GOS_ABI_VERSION.
@@ -1333,6 +1451,31 @@ pub struct PluginManifest {
     pub policy_hash: [u8; 16],
 }
 
+/// Audit P2 #5 — verify every declared edge in a plugin manifest is
+/// well-formed and self-rooted.  Returns `true` when all edges pass:
+///   * `edge_id != EdgeId::ZERO` (real hash output)
+///   * `from_node != NodeId::ZERO` and `to_node != NodeId::ZERO`
+///   * `from_node` matches one of the manifest's own `nodes` entries
+///
+/// Cross-plugin edges must flow through `imports`/`depends_on`, which
+/// the bundle loader auto-synthesises into Mount/Depend edges.  This
+/// check closes the spoof hole where a malicious plugin could declare
+/// an edge that *originates* in some other plugin's node.
+pub fn manifest_edges_well_formed(manifest: &PluginManifest) -> bool {
+    for edge in manifest.edges {
+        if edge.edge_id == EdgeId::ZERO
+            || edge.from_node == NodeId::ZERO
+            || edge.to_node == NodeId::ZERO
+        {
+            return false;
+        }
+        if !manifest.nodes.iter().any(|n| n.node_id == edge.from_node) {
+            return false;
+        }
+    }
+    true
+}
+
 impl PluginManifest {
     pub const fn empty(plugin_id: PluginId, name: &'static str) -> Self {
         Self {
@@ -1605,6 +1748,7 @@ pub struct GraphNodeSummary {
     pub plugin_name: &'static str,
     pub local_node_key: &'static str,
     pub node_type: RuntimeNodeType,
+    pub sub_domain: NodeSubDomain,
     pub lifecycle: NodeLifecycle,
     pub entry_policy: EntryPolicy,
     pub executor_id: ExecutorId,
@@ -1621,6 +1765,7 @@ impl GraphNodeSummary {
         plugin_name: "",
         local_node_key: "",
         node_type: RuntimeNodeType::Hardware,
+        sub_domain: NodeSubDomain::Hardware,
         lifecycle: NodeLifecycle::Discovered,
         entry_policy: EntryPolicy::Manual,
         executor_id: ExecutorId::ZERO,

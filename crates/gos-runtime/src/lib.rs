@@ -3,19 +3,92 @@
 use core::mem::transmute;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use gos_cypher_mut::{
+    CypherMutation, MutationDispatcher, MutationError, ReceptiveEdgeKind,
+};
 use gos_protocol::{
-    packet_to_signal, signal_to_packet, BootContext, CellDeclaration, CellResult,
-    ConditionalRoute, ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EdgeSpec,
-    EdgeVector, ExecStatus, ExecutorContext, GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind,
-    GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
-    KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
-    NodeId, NodeInstanceId, NodeLifecycle, NodeLogEntry, NodeProcSummary, NodeSpec, NodeState,
-    NodeTelemetry, NodeTraceEntry,
+    derive_edge_id, packet_to_signal, signal_to_packet, BootContext, CapabilitySpec,
+    CellDeclaration, CellResult, ConditionalRoute, ControlPlaneEnvelope,
+    ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
+    GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind, GraphEdgeDirection, GraphEdgeSummary,
+    GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket, MAX_CONDITIONAL_ROUTES,
+    NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId, NodeLifecycle,
+    NodeLogEntry, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry, NodeTraceEntry,
     PluginId, PluginManifest, PluginState, PluginSummary, RoutePolicy, RuntimeEdgeType, Signal,
     StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
 };
 use spin::Mutex;
+
+/// Monotonic counter incremented on every successful edge mutation
+/// applied through `apply_edge_mutation` / `RuntimeDispatcher`.
+/// Subscribers (k-scene, shell `show mutations`, journal flush) use it
+/// as a cheap "did anything change?" probe without locking RUNTIME.
+static GRAPH_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Stable key used when deriving the EdgeId for a Cypher-introduced
+/// Mount edge.  Keeping it constant means the same (from, to) pair
+/// always maps to the same EdgeId — which makes RemoveEdge addressable
+/// without the caller remembering the id we returned.
+const MUTATION_MOUNT_EDGE_KEY: &str = "cypher.mount";
+const MUTATION_USE_EDGE_KEY: &str = "cypher.use";
+const MUTATION_LINK_EDGE_KEY: &str = "cypher.link";
+/// Boot-manifest self-repair only; matches the literal used by the
+/// inline `MutationDispatcher for GraphRuntime` impl above.
+const MUTATION_DEPEND_EDGE_KEY: &str = "manifest.depend";
+
+/// Capacity of the audited-mutation ring.  Shell `show mutations`
+/// renders the contents in reverse insertion order; older entries are
+/// overwritten silently when the supervisor gate continues to fire.
+pub const AUDIT_RING_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy)]
+struct AuditRing {
+    slots: [Option<ControlPlaneEnvelope>; AUDIT_RING_CAPACITY],
+    /// Next write position; ring is full once `wrote >= capacity`.
+    head: usize,
+    /// Total push count (saturating).  Lets shell render "since boot:
+    /// N" without scanning the ring.
+    wrote: u64,
+}
+
+impl AuditRing {
+    const fn new() -> Self {
+        Self {
+            slots: [None; AUDIT_RING_CAPACITY],
+            head: 0,
+            wrote: 0,
+        }
+    }
+
+    fn push(&mut self, env: ControlPlaneEnvelope) {
+        self.slots[self.head] = Some(env);
+        self.head = (self.head + 1) % AUDIT_RING_CAPACITY;
+        self.wrote = self.wrote.saturating_add(1);
+    }
+
+    /// Copy entries into `out` in newest-first order, up to `out.len()`.
+    /// Returns the number actually written.
+    fn snapshot(&self, out: &mut [Option<ControlPlaneEnvelope>]) -> usize {
+        let mut count = 0;
+        for offset in 1..=AUDIT_RING_CAPACITY {
+            if count >= out.len() {
+                break;
+            }
+            let idx = (self.head + AUDIT_RING_CAPACITY - offset) % AUDIT_RING_CAPACITY;
+            match self.slots[idx] {
+                Some(env) => {
+                    out[count] = Some(env);
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        count
+    }
+}
+
+static AUDIT_RING: Mutex<AuditRing> = Mutex::new(AuditRing::new());
 
 pub const MAX_PLUGINS: usize = 32;
 pub const MAX_NODES: usize = 128;
@@ -24,6 +97,32 @@ pub const MAX_SUBSCRIBE_PAIRS: usize = 64;
 pub const MAX_READY_QUEUE: usize = 256;
 pub const MAX_SIGNAL_QUEUE: usize = 512;
 pub const MAX_FAULT_QUEUE: usize = 32;
+
+/// Audit P1 #3 — node-granular fault attribution.
+///
+/// When a native executor returns `ExecStatus::Fault`, the runtime
+/// captures the failing node together with the caller-chain context and
+/// the terminal status.  Prior to this struct the fault queue stored
+/// only the bare `VectorAddress`, which made it impossible for the
+/// supervisor or audit log to distinguish "module X faulted on its own"
+/// from "module X faulted while servicing a signal posted by module Y".
+/// The caller field is `None` for top-of-stack dispatches (boot
+/// bootstrap, idle pump) and `Some(prev_dispatch_vec)` whenever the
+/// executor was invoked from inside another node's dispatch frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultEvent {
+    pub callee: VectorAddress,
+    pub caller: Option<VectorAddress>,
+    pub status: ExecStatus,
+}
+
+impl FaultEvent {
+    pub const EMPTY: Self = Self {
+        callee: VectorAddress::new(0, 0, 0, 0),
+        caller: None,
+        status: ExecStatus::Done,
+    };
+}
 pub const MAX_CALL_FRAMES: usize = 64;
 pub const MAX_WAITSETS: usize = 64;
 pub const MAX_BARRIERS: usize = 32;
@@ -108,6 +207,58 @@ impl<T: Copy, const N: usize> RingQueue<T, N> {
         self.buffer[self.head] = Some(value);
         self.head = next_head;
         Ok(())
+    }
+
+    /// J.7 — return entries oldest-first as a Vec-like collection
+    /// (caller copies out).  Used by the priority-aware ready
+    /// queue scanner; could become an Iterator but we collect for
+    /// simpler logic.
+    fn snapshot_oldest_first(&self) -> [Option<T>; N] {
+        let mut out = [None; N];
+        let mut cursor = self.tail;
+        let mut i = 0usize;
+        while cursor != self.head {
+            out[i] = self.buffer[cursor];
+            i += 1;
+            cursor = (cursor + 1) % N;
+        }
+        out
+    }
+
+    /// J.7 — remove the i-th entry from the oldest-first snapshot
+    /// order, sliding subsequent entries forward.  Used to extract
+    /// a chosen non-head entry without destroying queue order.
+    fn remove_at_index(&mut self, target: usize) -> Option<T> {
+        if self.head == self.tail {
+            return None;
+        }
+        // Build a fresh sequence excluding the target.
+        let snap = self.snapshot_oldest_first();
+        let mut got = None;
+        let mut new_tail_seq: [Option<T>; N] = [None; N];
+        let mut write = 0;
+        let mut read = 0;
+        while let Some(item) = snap[read] {
+            if read == target {
+                got = Some(item);
+            } else {
+                new_tail_seq[write] = Some(item);
+                write += 1;
+            }
+            read += 1;
+            if read >= N { break; }
+        }
+        // Reset and re-push.
+        self.tail = 0;
+        self.head = 0;
+        self.buffer = [None; N];
+        for i in 0..write {
+            if let Some(v) = new_tail_seq[i] {
+                self.buffer[self.head] = Some(v);
+                self.head = (self.head + 1) % N;
+            }
+        }
+        got
     }
 
     fn pop(&mut self) -> Option<T> {
@@ -195,7 +346,32 @@ struct NodeRecord {
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
     route_count: u8,
+    /// Phase J.7 — scheduling priority hint.  128 = normal (default);
+    /// >128 = high priority (jumps the ready queue); <128 = background.
+    /// `next_work_item` scans the ready queue and pops the highest-
+    /// priority entry; FIFO order is preserved among entries of equal
+    /// priority.  Public API: `set_node_priority` / `node_priority`.
+    priority: u8,
+    /// Phase L.4 — soft deadline in RDTSC cycles.  0 means "no
+    /// deadline".  The dispatch wrapper measures cycle delta around
+    /// each executor invocation; when delta > deadline_cycles the
+    /// runtime emits a Fault control-plane envelope (NON-fatal — the
+    /// kernel can't preempt a single dispatch in-flight, but the
+    /// audit trail flags the overrun).  Public API:
+    /// `set_node_deadline` / `node_deadline` / `deadline_overrun_count`.
+    deadline_cycles: u64,
 }
+
+/// Default scheduling priority for newly-registered nodes.  See
+/// `NodeRecord::priority`.
+pub const NODE_PRIORITY_DEFAULT: u8 = 128;
+/// Helper constant for plugins that want their handlers to run
+/// ahead of the default-priority cohort (e.g., latency-critical
+/// IRQ servicers).
+pub const NODE_PRIORITY_HIGH: u8 = 192;
+/// Background priority — runs only when nothing more urgent is
+/// ready.  Useful for telemetry collectors, idle workers.
+pub const NODE_PRIORITY_BACKGROUND: u8 = 64;
 
 #[derive(Clone, Copy)]
 struct EdgeRecord {
@@ -354,11 +530,19 @@ pub struct GraphRuntime {
     /// Always drained before `signal_queue`.
     control_signal_queue: RingQueue<RuntimeSignal, MAX_CONTROL_SIGNAL_QUEUE>,
     signal_queue: RingQueue<RuntimeSignal, MAX_SIGNAL_QUEUE>,
-    fault_queue: RingQueue<VectorAddress, MAX_FAULT_QUEUE>,
+    fault_queue: RingQueue<FaultEvent, MAX_FAULT_QUEUE>,
     call_frames: [Option<CallFrame>; MAX_CALL_FRAMES],
     wait_sets: [Option<WaitSet>; MAX_WAITSETS],
     barriers: [Option<Barrier>; MAX_BARRIERS],
     control_plane: RingQueue<ControlPlaneEnvelope, MAX_CONTROL_PLANE_MESSAGES>,
+    /// Phase J.2 — durability primitive.  Every control-plane envelope
+    /// also lands here so the kernel maintains a continuous audit log
+    /// of its own graph mutations.  Capacity 512 = 20 KB; oldest
+    /// entries roll off the front of the ring when full.  Visible via
+    /// `journal_count`, `journal_envelope_at`, `journal_snapshot_into`
+    /// (for future VFS-backed persistence in J.2.B) and via the
+    /// `journal` command in the boot UI.
+    journal: gos_journal::JournalRing<512>,
     node_arena: NodeArena,
     adjacency_arena: AdjacencyArena,
     /// Monotonic epoch bumped on every structural mutation (node or edge
@@ -435,6 +619,7 @@ impl GraphRuntime {
             wait_sets: [None; MAX_WAITSETS],
             barriers: [None; MAX_BARRIERS],
             control_plane: RingQueue::new(),
+            journal: gos_journal::JournalRing::new(),
             node_arena: NodeArena::new(),
             adjacency_arena: AdjacencyArena::new(),
             graph_epoch: 0,
@@ -481,6 +666,32 @@ impl GraphRuntime {
         let _ = self.control_plane.push_control_plane(env);
         // Mirror into the persistent journal (not drained by consumers).
         CP_JOURNAL.lock().push(env);
+        // Phase J.2 — continuous audit log via the journal ring.
+        // Ring overwrites oldest when full so the kernel maintains a
+        // bounded recent-history window without ever blocking.
+        self.journal.push(&env);
+    }
+
+    /// Phase J.2 — number of journal entries currently stored.
+    pub fn journal_len(&self) -> usize {
+        self.journal.len()
+    }
+
+    /// Phase J.2 — lifetime envelope count (across overwrites).
+    pub fn journal_lifetime(&self) -> u64 {
+        self.journal.lifetime_pushed()
+    }
+
+    /// Phase J.2 — read the i-th OLDEST stored envelope.
+    pub fn journal_envelope_at(&self, i: usize) -> Option<ControlPlaneEnvelope> {
+        self.journal.envelope_at(i)
+    }
+
+    /// Phase J.2 — serialize the journal (header + records) into the
+    /// caller's buffer.  Used by the J.2.B follow-up that writes the
+    /// blob through VFS for true cross-reboot persistence.
+    pub fn journal_snapshot_into(&self, out: &mut [u8]) -> Result<usize, gos_journal::JournalError> {
+        self.journal.flush_into(out)
     }
 
     fn plugin_slot(&self, plugin_id: PluginId) -> Option<usize> {
@@ -566,6 +777,7 @@ impl GraphRuntime {
             plugin_name: self.plugin_name(record.plugin_id),
             local_node_key: record.spec.local_node_key,
             node_type: record.spec.node_type,
+            sub_domain: record.spec.node_type.sub_domain(),
             lifecycle: record.lifecycle,
             entry_policy: record.spec.entry_policy,
             executor_id: record.spec.executor_id,
@@ -1912,6 +2124,7 @@ impl GraphRuntime {
             gos_cypher_mut::ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
             gos_cypher_mut::ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
             gos_cypher_mut::ReceptiveEdgeKind::Depend => RuntimeEdgeType::Depend,
+            gos_cypher_mut::ReceptiveEdgeKind::Link => RuntimeEdgeType::Link,
         };
         self.edges.iter().flatten().any(|rec| {
             rec.spec.from_node == from
@@ -1981,6 +2194,8 @@ impl GraphRuntime {
             stream_out_count: 0,
             routes: [ConditionalRoute { key: 0xFF, target: VectorAddress::new(0, 0, 0, 0) }; MAX_CONDITIONAL_ROUTES],
             route_count: 0,
+            priority: NODE_PRIORITY_DEFAULT,
+            deadline_cycles: 0,
         });
 
         self.emit_control_plane(ControlPlaneMessageKind::NodeUpsert, spec.node_id.0, vector.as_u64(), runtime_page as u64);
@@ -2040,11 +2255,56 @@ impl GraphRuntime {
         routes: &[ConditionalRoute],
     ) -> Result<(), RuntimeError> {
         let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
-        let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+        let from_node_id = {
+            let record = self.nodes[slot].as_mut().ok_or(RuntimeError::NodeNotFound)?;
+            let count = routes.len().min(MAX_CONDITIONAL_ROUTES);
+            record.route_count = count as u8;
+            for (i, r) in routes.iter().take(count).enumerate() {
+                record.routes[i] = *r;
+            }
+            record.spec.node_id
+        };
+
+        // Audit P0 #2 — lift conditional-route static targets to declared
+        // Signal edges in the runtime graph.  Before this fix the route
+        // table populated by `register_node_routes` was a node-local
+        // dispatch hint invisible to the graph; cross-plugin signal flow
+        // bypassed the edge table entirely.  Each known target now becomes
+        // an idempotent Signal edge stamped with the route key so tooling
+        // (Cypher, visualizer) sees the topology.  Targets that aren't yet
+        // registered are skipped silently — boot ordering may resolve them
+        // later via a subsequent register_node_routes call.
         let count = routes.len().min(MAX_CONDITIONAL_ROUTES);
-        record.route_count = count as u8;
-        for (i, r) in routes.iter().take(count).enumerate() {
-            record.routes[i] = *r;
+        for r in routes.iter().take(count) {
+            let Some(to_node_id) = self.node_id_for_vec(r.target) else {
+                continue;
+            };
+            if from_node_id == to_node_id {
+                continue;
+            }
+            // Distinguish edges per route key so different keys yield distinct
+            // edges (route 0 vs route 1 to the same peer remain separate in
+            // the graph).  Gen-1 derive_edge_id label encodes the key byte.
+            let label_bytes = [b'r', b'o', b'u', b't', b'e', b'.', b'0' + (r.key / 100) % 10, b'0' + (r.key / 10) % 10, b'0' + r.key % 10];
+            // SAFETY: label_bytes is ASCII digits only — valid UTF-8.
+            let label = match core::str::from_utf8(&label_bytes) {
+                Ok(s) => s,
+                Err(_) => "route.???",
+            };
+            let edge_id = derive_edge_id(from_node_id, to_node_id, label);
+            let spec = EdgeSpec {
+                edge_id,
+                from_node: from_node_id,
+                to_node: to_node_id,
+                edge_type: RuntimeEdgeType::Signal,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::Direct,
+                capability_namespace: Some("route"),
+                capability_binding: None,
+                vector_ref: None,
+            };
+            let _ = self.register_edge(spec);
         }
         Ok(())
     }
@@ -2135,6 +2395,14 @@ impl GraphRuntime {
 
     pub fn node_summary(&self, vector: VectorAddress) -> Option<GraphNodeSummary> {
         let slot = self.node_slot_by_vec(vector)?;
+        self.node_summary_from_slot(slot)
+    }
+
+    /// J.6 — look up a node by NodeId.  Symmetric with `node_summary`
+    /// (which keys on VectorAddress).  Used by the supervisor's ACL
+    /// gate which sees mutations by node_id (Cypher's natural form).
+    pub fn node_summary_by_id(&self, node_id: NodeId) -> Option<GraphNodeSummary> {
+        let slot = self.node_slot_by_id(node_id)?;
         self.node_summary_from_slot(slot)
     }
 
@@ -2356,12 +2624,92 @@ impl GraphRuntime {
         namespace: &[u8],
         capability: &[u8],
     ) -> Option<VectorAddress> {
+        // Read-only variant retained for callers that don't want the
+        // graph-edge side effect (test fixtures, snapshot replay).
+        // The kernel ABI path goes through `resolve_capability_with_edge`
+        // so cross-plugin imports light up in the runtime graph.
         self.nodes.iter().flatten().find_map(|record| {
             let exported = record.spec.exports.iter().any(|export| {
                 export.namespace.as_bytes() == namespace && export.name.as_bytes() == capability
             });
             exported.then_some(record.vector)
         })
+    }
+
+    /// Phase H.1.x.5 — graph-attributed capability resolution.
+    ///
+    /// Same as `resolve_capability` for the lookup, but additionally
+    /// registers a `RuntimeEdgeType::Use` edge from the caller node
+    /// to the provider node with the matching capability strings
+    /// stamped on the edge.  Idempotent: subsequent calls with the
+    /// same `(caller, provider)` pair reuse the same EdgeId, so a
+    /// node that resolves the same capability every dispatch only
+    /// creates the edge once.
+    ///
+    /// Caller identity normally comes from `CURRENT_DISPATCH` (the
+    /// vector of the node the runtime is currently invoking — set
+    /// in the dispatch path); the free-function wrapper handles that
+    /// automatically.  `caller_vec = None` skips edge creation,
+    /// matching the read-only `resolve_capability` semantics.
+    pub fn resolve_capability_with_edge(
+        &mut self,
+        namespace: &[u8],
+        capability: &[u8],
+        caller_vec: Option<VectorAddress>,
+    ) -> Option<VectorAddress> {
+        // Find the providing node + grab its `&'static str` export
+        // strings (so the edge's `capability_namespace` /
+        // `capability_binding` fields stay statically-typed without
+        // an arena).
+        let mut found: Option<(VectorAddress, &'static str, &'static str)> = None;
+        for record_opt in self.nodes.iter() {
+            if let Some(record) = record_opt {
+                for export in record.spec.exports.iter() {
+                    if export.namespace.as_bytes() == namespace
+                        && export.name.as_bytes() == capability
+                    {
+                        found = Some((record.vector, export.namespace, export.name));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+        }
+        let (provider_vec, ns_str, cap_str) = match found {
+            Some(t) => t,
+            None => return None,
+        };
+        if let Some(caller_v) = caller_vec {
+            if caller_v != provider_vec {
+                let from_node = self.node_id_for_vec(caller_v);
+                let to_node = self.node_id_for_vec(provider_vec);
+                if let (Some(from_id), Some(to_id)) = (from_node, to_node) {
+                    // Gen-1: one Use edge per (caller, provider) pair.
+                    // Multiple distinct capabilities between the same
+                    // pair currently share the edge and the
+                    // first-recorded binding is preserved.  Tracked
+                    // for a follow-up that derives edge_id from
+                    // `(from, to, ns/cap)` instead.
+                    let edge_id = derive_edge_id(from_id, to_id, "cap.use");
+                    let spec = EdgeSpec {
+                        edge_id,
+                        from_node: from_id,
+                        to_node: to_id,
+                        edge_type: RuntimeEdgeType::Use,
+                        weight: 1.0,
+                        acl_mask: u64::MAX,
+                        route_policy: RoutePolicy::Direct,
+                        capability_namespace: Some(ns_str),
+                        capability_binding: Some(cap_str),
+                        vector_ref: None,
+                    };
+                    let _ = self.register_edge(spec);
+                }
+            }
+        }
+        Some(provider_vec)
     }
 
     pub fn enqueue_ready(&mut self, node_id: NodeId) -> Result<(), RuntimeError> {
@@ -6567,7 +6915,12 @@ impl GraphRuntime {
             RuntimeEdgeType::Spawn
             | RuntimeEdgeType::Signal
             | RuntimeEdgeType::Mount
-            | RuntimeEdgeType::Use => {
+            | RuntimeEdgeType::Use
+            | RuntimeEdgeType::Link => {
+                // Link is metadata (declared correspondence between a
+                // node and an interface-file node); routing a signal
+                // along one just delivers the payload like Mount/Use
+                // do, no special handling in Gen-1.
                 let target_vec = self.node_vector(edge.to_node)?;
                 self.post_signal(target_vec, signal)?;
             }
@@ -6678,6 +7031,8 @@ impl GraphRuntime {
         status: ExecStatus,
         initialized: bool,
         terminated: bool,
+        callee_vec: VectorAddress,
+        caller_vec: Option<VectorAddress>,
     ) {
         if let Some(mut record) = self.nodes[slot] {
             if let NodeBinding::Native(mut binding) = record.binding {
@@ -6695,13 +7050,26 @@ impl GraphRuntime {
             self.state_delta(record.spec.node_id, record.lifecycle);
 
             if status == ExecStatus::Fault {
-                let _ = self.fault_queue.push(record.vector);
+                // Audit P1 #3 — capture node-granular attribution
+                // (callee + caller + terminal status) instead of just
+                // the failing vector.  The supervisor's legacy path
+                // continues to work via drain_next_fault(), which
+                // projects FaultEvent::callee for callers that
+                // haven't migrated to the enriched API.
+                let event = FaultEvent {
+                    callee: callee_vec,
+                    caller: caller_vec.filter(|prev| *prev != callee_vec),
+                    status,
+                };
+                let _ = self.fault_queue.push(event);
                 FAULT_DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
-    pub fn drain_next_fault(&mut self) -> Option<VectorAddress> {
+    /// Drain the next fault event with full attribution context
+    /// (callee + caller + status).  Audit P1 #3.
+    pub fn drain_next_fault_event(&mut self) -> Option<FaultEvent> {
         self.fault_queue.pop()
     }
 
@@ -6717,7 +7085,12 @@ impl GraphRuntime {
         record.lifecycle = NodeLifecycle::Faulted;
         self.nodes[slot] = Some(record);
         self.state_delta(record.spec.node_id, NodeLifecycle::Faulted);
-        let _ = self.fault_queue.push(vector);
+        // No dispatch-loop caller context for an admin-forced fault.
+        let _ = self.fault_queue.push(FaultEvent {
+            callee: vector,
+            caller: None,
+            status: ExecStatus::Fault,
+        });
         Ok(())
     }
 
@@ -6736,13 +7109,57 @@ impl GraphRuntime {
         Ok(())
     }
 
+    /// Back-compat projection — returns only the failing node's vector.
+    /// New code should prefer `drain_next_fault_event` for full
+    /// attribution.
+    pub fn drain_next_fault(&mut self) -> Option<VectorAddress> {
+        self.fault_queue.pop().map(|e| e.callee)
+    }
+
     pub fn plugin_id_for_vec(&self, vector: VectorAddress) -> Option<PluginId> {
         self.node_slot_by_vec(vector)
             .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
     }
 
+    /// L.12 — invoke `f` for every exported capability across all
+    /// loaded plugins.  Callback receives:
+    ///   (plugin_id, plugin_name, capability)
+    ///
+    /// Order matches the plugin slot order (boot order in practice).
+    /// Used by k-cypher's SHOW CAPABILITIES verb.
+    pub fn for_each_exported_capability<F>(&self, mut f: F)
+    where
+        F: FnMut(PluginId, &'static str, &CapabilitySpec),
+    {
+        for slot in self.plugins.iter() {
+            let Some(record) = slot else { continue };
+            for cap in record.manifest.exports {
+                f(record.manifest.plugin_id, record.manifest.name, cap);
+            }
+        }
+    }
+
+    pub fn plugin_id_for_node(&self, node_id: NodeId) -> Option<PluginId> {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|record| record.plugin_id))
+    }
+
+    /// Phase H.1.x.2 — resolve the `from_node` of an edge.  Supervisor
+    /// gate uses this to find the owning plugin for a RemoveEdge target
+    /// without forcing the caller to remember it.
+    pub fn edge_from_node(&self, edge_id: EdgeId) -> Option<NodeId> {
+        self.edge_slot(edge_id)
+            .and_then(|slot| self.edges[slot].map(|record| record.spec.from_node))
+    }
+
     fn next_work_item(&mut self) -> Option<WorkItem> {
-        if let Some(node_id) = self.ready_queue.pop() {
+        // Phase J.7 — priority-aware ready queue.  Scan the ring
+        // for the highest-priority node id, rotating it to the
+        // front for pop.  Stable: FIFO order is preserved among
+        // entries of equal priority.  O(N) per pop where N is the
+        // current ready-queue depth (≤ MAX_READY_QUEUE = 256), so
+        // negligible vs the dispatch cost itself.
+        if let Some(node_id) = self.pop_highest_priority_ready() {
             return Some(WorkItem::Ready(node_id));
         }
         // High-priority lane: Control / Spawn / Terminate signals before Data.
@@ -6753,6 +7170,83 @@ impl GraphRuntime {
             return Some(WorkItem::Signal(signal));
         }
         None
+    }
+
+    /// J.7 helper — pop the highest-priority node from the ready
+    /// ring.  Stable in FIFO order for equal-priority entries.
+    fn pop_highest_priority_ready(&mut self) -> Option<NodeId> {
+        let snapshot = self.ready_queue.snapshot_oldest_first();
+        // Find the first non-None entry; that's the FIFO head.
+        let mut best_idx: Option<usize> = None;
+        let mut best_prio: u8 = 0;
+        for (i, slot) in snapshot.iter().enumerate() {
+            let Some(node_id) = slot else { break; }; // contiguous from front
+            let p = self.priority_for(*node_id);
+            match best_idx {
+                None => {
+                    best_idx = Some(i);
+                    best_prio = p;
+                }
+                Some(_) => {
+                    if p > best_prio {
+                        best_idx = Some(i);
+                        best_prio = p;
+                    }
+                }
+            }
+        }
+        self.ready_queue.remove_at_index(best_idx?)
+    }
+
+    fn priority_for(&self, node_id: NodeId) -> u8 {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|r| r.priority))
+            .unwrap_or(NODE_PRIORITY_DEFAULT)
+    }
+
+    /// J.7 — set a node's scheduling priority.  Takes effect at
+    /// the next ready-queue pop.
+    pub fn set_node_priority(&mut self, vector: VectorAddress, priority: u8) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        if let Some(mut record) = self.nodes[slot] {
+            record.priority = priority;
+            self.nodes[slot] = Some(record);
+            Ok(())
+        } else {
+            Err(RuntimeError::NodeNotFound)
+        }
+    }
+
+    pub fn node_priority(&self, vector: VectorAddress) -> Option<u8> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|r| r.priority))
+    }
+
+    /// L.4 — set a node's soft RDTSC deadline.  0 = no deadline.
+    pub fn set_node_deadline(&mut self, vector: VectorAddress, cycles: u64) -> Result<(), RuntimeError> {
+        let slot = self.node_slot_by_vec(vector).ok_or(RuntimeError::NodeNotFound)?;
+        if let Some(mut record) = self.nodes[slot] {
+            record.deadline_cycles = cycles;
+            self.nodes[slot] = Some(record);
+            Ok(())
+        } else {
+            Err(RuntimeError::NodeNotFound)
+        }
+    }
+
+    /// L.4 — read a node's soft RDTSC deadline.  Returns None if the
+    /// vector doesn't resolve; Some(0) means "no deadline configured".
+    pub fn node_deadline(&self, vector: VectorAddress) -> Option<u64> {
+        self.node_slot_by_vec(vector)
+            .and_then(|slot| self.nodes[slot].map(|r| r.deadline_cycles))
+    }
+
+    /// L.4 helper — look up deadline by NodeId for the dispatch wrapper.
+    /// 0 = no deadline configured for this node.
+    fn deadline_for(&self, node_id: NodeId) -> u64 {
+        self.node_slot_by_id(node_id)
+            .and_then(|slot| self.nodes[slot].map(|r| r.deadline_cycles))
+            .unwrap_or(0)
     }
 
     fn bump_tick(&mut self) {
@@ -6794,6 +7288,15 @@ impl GraphRuntime {
         self.control_plane.pop()
     }
 
+    /// Phase H.1.x.2 — append a pre-built envelope verbatim.  The
+    /// supervisor's `apply_cypher_mutation` gate uses this to surface
+    /// `MutationAudit` envelopes carrying source attribution
+    /// without round-tripping through the per-field `emit_control_plane`
+    /// helper.  Quietly drops on overflow (same backpressure semantics).
+    pub fn push_envelope(&mut self, envelope: ControlPlaneEnvelope) {
+        let _ = self.control_plane.push_control_plane(envelope);
+    }
+
     pub fn emit_hello(&mut self) {
         self.emit_control_plane(ControlPlaneMessageKind::Hello, [0; 16], self.snapshot().node_count as u64, self.tick);
     }
@@ -6806,6 +7309,10 @@ impl GraphRuntime {
             state: record.lifecycle,
             tick: self.tick,
         })
+    }
+
+    pub fn current_tick(&self) -> u64 {
+        self.tick
     }
 
     /// V2.84: Link prediction metrics for node pair (u, v).
@@ -25219,12 +25726,19 @@ pub fn boot_manifest_edges_healed() -> usize {
 // plain Mutex<Option<_>> is sufficient.
 static CURRENT_DISPATCH: Mutex<Option<VectorAddress>> = Mutex::new(None);
 
-fn set_current_dispatch(vector: VectorAddress) {
-    *CURRENT_DISPATCH.lock() = Some(vector);
+/// Sets the dispatching node and returns the previous value so the
+/// caller can restore it (stack-style nesting).  Audit P1 #3 — the
+/// previous dispatch is the *caller* in fault-attribution terms.
+fn set_current_dispatch(vector: VectorAddress) -> Option<VectorAddress> {
+    let mut slot = CURRENT_DISPATCH.lock();
+    let prev = *slot;
+    *slot = Some(vector);
+    prev
 }
 
-fn clear_current_dispatch() {
-    *CURRENT_DISPATCH.lock() = None;
+/// Restores a saved previous-dispatch value (or clears when None).
+fn restore_current_dispatch(prev: Option<VectorAddress>) {
+    *CURRENT_DISPATCH.lock() = prev;
 }
 
 fn current_dispatch_instance() -> Option<NodeInstanceId> {
@@ -25570,7 +26084,17 @@ unsafe extern "C" fn kernel_resolve_capability(
 
     let namespace = unsafe { core::slice::from_raw_parts(namespace, namespace_len) };
     let name = unsafe { core::slice::from_raw_parts(name, name_len) };
-    resolve_capability(namespace, name)
+    // Phase H.1.x.5 — the kernel ABI path reads CURRENT_DISPATCH to
+    // attribute the resolve to whichever node was executing.  This
+    // is what turns cross-plugin imports into real runtime graph
+    // edges (`Use` with capability_binding stamped), satisfying the
+    // architecture audit's P0 #1.  Test fixtures and snapshot
+    // replay use the bare `resolve_capability` free fn (below) and
+    // skip edge attribution by passing None.
+    let caller = *CURRENT_DISPATCH.lock();
+    RUNTIME
+        .lock()
+        .resolve_capability_with_edge(namespace, name, caller)
         .map(|vector| vector.as_u64())
         .unwrap_or(0)
 }
@@ -25779,6 +26303,58 @@ pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
     RUNTIME.lock().edge_id_for_vector(edge_vector)
 }
 
+pub fn node_summary_by_id(node_id: NodeId) -> Option<GraphNodeSummary> {
+    RUNTIME.lock().node_summary_by_id(node_id)
+}
+
+/// J.7 — set a node's scheduling priority.  Higher = run sooner.
+pub fn set_node_priority(vector: VectorAddress, priority: u8) -> Result<(), RuntimeError> {
+    RUNTIME.lock().set_node_priority(vector, priority)
+}
+
+/// J.7 — read a node's current scheduling priority.
+pub fn node_priority(vector: VectorAddress) -> Option<u8> {
+    RUNTIME.lock().node_priority(vector)
+}
+
+/// L.4 — set a node's soft RDTSC deadline.  When the dispatch
+/// wrapper measures > deadline_cycles between executor enter/exit,
+/// `deadline_overrun_count` increments and a Fault control-plane
+/// envelope is emitted (the kernel can't preempt an in-flight
+/// dispatch; this is observability + restart input).  0 = no deadline.
+pub fn set_node_deadline(vector: VectorAddress, cycles: u64) -> Result<(), RuntimeError> {
+    RUNTIME.lock().set_node_deadline(vector, cycles)
+}
+
+/// L.4 — read a node's deadline (cycles).  None if vector unknown;
+/// Some(0) if no deadline.
+pub fn node_deadline(vector: VectorAddress) -> Option<u64> {
+    RUNTIME.lock().node_deadline(vector)
+}
+
+/// L.4 — total lifetime count of deadline overruns observed by the
+/// dispatch wrapper.  Used by SHOW STATS and external monitoring.
+pub fn deadline_overrun_count() -> u64 {
+    DEADLINE_OVERRUN_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// L.4 helper exposed for the dispatch wrapper sites.  Records an
+/// overrun + emits a Fault envelope so it lands in the journal ring.
+fn record_deadline_overrun(node_id: NodeId, observed_cycles: u64, budget_cycles: u64) {
+    DEADLINE_OVERRUN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Emit a Fault envelope through the runtime so journal/scrollback
+    // observers (J.2/L.9) see the overrun in real time.
+    RUNTIME.lock().emit_control_plane(
+        ControlPlaneMessageKind::Fault,
+        node_id.0,
+        observed_cycles,
+        budget_cycles,
+    );
+}
+
+static DEADLINE_OVERRUN_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn node_summary(vector: VectorAddress) -> Option<GraphNodeSummary> {
     RUNTIME.lock().node_summary(vector)
 }
@@ -25920,6 +26496,21 @@ pub fn resolve_capability(namespace: &[u8], capability: &[u8]) -> Option<VectorA
     RUNTIME.lock().resolve_capability(namespace, capability)
 }
 
+/// Graph-attributed capability resolver — public wrapper around
+/// `Runtime::resolve_capability_with_edge` so test fixtures (and
+/// any in-tree caller that wants to bypass `CURRENT_DISPATCH` and
+/// pass an explicit caller vector) can drive the same path the
+/// kernel ABI uses on the IRQ-driven dispatch loop.
+pub fn resolve_capability_with_edge(
+    namespace: &[u8],
+    capability: &[u8],
+    caller: Option<VectorAddress>,
+) -> Option<VectorAddress> {
+    RUNTIME
+        .lock()
+        .resolve_capability_with_edge(namespace, capability, caller)
+}
+
 /// Register a conditional-route table for a node (LangGraph-style fan-out).
 ///
 /// Call this after the node is registered (e.g. in a `register_hook`).
@@ -25939,6 +26530,254 @@ pub fn enqueue_ready(node_id: NodeId) -> Result<(), RuntimeError> {
 
 pub fn post_signal(target: VectorAddress, signal: Signal) -> Result<(), RuntimeError> {
     RUNTIME.lock().post_signal(target, signal)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Phase J.3 — request-response RPC primitive
+// ══════════════════════════════════════════════════════════════════
+//
+// Synchronous call-into-another-node, kernel-internal.  The caller
+// invokes `rpc_invoke(target, request)`; the kernel dispatches the
+// target's executor with a `Signal::Call { from: request }`; the
+// target reads `rpc_request()` and writes its answer via
+// `rpc_reply(value)`; after dispatch returns, the caller receives
+// the response.
+//
+// One u64 in, one u64 out — the simplest complete primitive.
+// Higher-level RPC schemes (pointer + length payloads, multi-word
+// requests, async pipelines) all compose on top of this; the
+// architectural commitment is just "synchronous bidirectional call
+// between two graph nodes" which is the missing communication
+// primitive in the H/I era.
+//
+// Nested RPCs are supported via save/restore of the slot — if a
+// target node calls `rpc_invoke` to delegate to a deeper target,
+// the outer slot is preserved.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcError {
+    /// The target executor returned without calling `rpc_reply`.
+    NoReply,
+    /// Target lookup / dispatch errored — see RuntimeError variant.
+    Runtime(RuntimeError),
+    /// The target's dispatch ended in fault / terminate / other
+    /// non-OK status.
+    BadStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RpcSlot {
+    request: u64,
+    response: Option<u64>,
+}
+
+static RPC_SLOT: Mutex<Option<RpcSlot>> = Mutex::new(None);
+
+/// Phase J.3.B — pointer-payload RPC slot.  Parallel to RPC_SLOT
+/// (word path), but carries `(&[u8], &mut [u8])` for arbitrary-
+/// sized byte-stream calls.  Pointers are stored as usize so the
+/// struct is `Copy`; lifetime is bounded by the caller's stack
+/// frame which holds the original buffers alive until rpc_invoke_buf
+/// returns.
+#[derive(Debug, Clone, Copy)]
+struct RpcBufSlot {
+    request_ptr: usize,
+    request_len: usize,
+    response_ptr: usize,
+    response_cap: usize,
+    response_len: Option<usize>,
+}
+
+static RPC_BUF_SLOT: Mutex<Option<RpcBufSlot>> = Mutex::new(None);
+
+/// Phase L.8 — RPC counters.  Incremented on every rpc_invoke /
+/// rpc_invoke_buf call regardless of success.  Read via
+/// `rpc_call_count_word` / `rpc_call_count_buf`.  Useful for
+/// SHOW STATS, BENCH validation, and ad-hoc load measurement.
+static RPC_CALL_COUNT_WORD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RPC_CALL_COUNT_BUF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn rpc_call_count_word() -> u64 {
+    RPC_CALL_COUNT_WORD.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn rpc_call_count_buf() -> u64 {
+    RPC_CALL_COUNT_BUF.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Phase L.6 — internal RPC debug target.  Vector `0.0.0.0` is
+/// reserved as a runtime-handled "echo" service: `rpc_invoke`
+/// against it bypasses dispatch entirely and returns the request
+/// word unchanged.  Useful for benchmarking the RPC plumbing,
+/// validating end-to-end wiring from Cypher, and writing harness
+/// tests without needing a target plugin.
+pub const RPC_ECHO_VECTOR: VectorAddress = VectorAddress::new(0, 0, 0, 0);
+
+/// Synchronously dispatch a u64 request to `target` and return its
+/// u64 reply.  The target's executor must call `rpc_reply` from
+/// within its `on_event` handler before returning, otherwise this
+/// returns `Err(RpcError::NoReply)`.
+///
+/// Special case: `RPC_ECHO_VECTOR` (0.0.0.0) is a runtime-internal
+/// echo — request is returned verbatim without going through
+/// dispatch.  Useful for testing RPC plumbing.
+pub fn rpc_invoke(target: VectorAddress, request: u64) -> Result<u64, RpcError> {
+    RPC_CALL_COUNT_WORD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if target == RPC_ECHO_VECTOR {
+        return Ok(request);
+    }
+    // Save the outer slot so a nested rpc_invoke from inside the
+    // target's executor doesn't clobber this call's reply.
+    let prev = RPC_SLOT.lock().take();
+    *RPC_SLOT.lock() = Some(RpcSlot { request, response: None });
+
+    let dispatch_result = route_signal(target, Signal::Call { from: request });
+
+    let our_slot = RPC_SLOT.lock().take();
+    // Restore the outer slot (if any) so the caller's reply can
+    // continue to be written by an upstream executor.
+    *RPC_SLOT.lock() = prev;
+
+    let status = match dispatch_result {
+        Ok(CellResult::Done) | Ok(CellResult::Yield) => Ok(()),
+        Ok(_) => Err(RpcError::BadStatus),
+        Err(e) => Err(RpcError::Runtime(e)),
+    };
+    status?;
+
+    our_slot
+        .and_then(|s| s.response)
+        .ok_or(RpcError::NoReply)
+}
+
+/// Called from inside a target node's executor while servicing an
+/// RPC.  Stores the reply word in the active RPC slot.  No-op when
+/// not inside an RPC dispatch (so safe to call defensively).
+pub fn rpc_reply(value: u64) {
+    if let Some(slot) = RPC_SLOT.lock().as_mut() {
+        slot.response = Some(value);
+    }
+}
+
+/// Called from inside a target node's executor to retrieve the
+/// incoming RPC request word.  Returns None when not inside an RPC
+/// dispatch.
+pub fn rpc_request() -> Option<u64> {
+    RPC_SLOT.lock().as_ref().map(|s| s.request)
+}
+
+// ── Phase J.3.B — pointer-payload RPC ─────────────────────────────
+//
+// Word-sized rpc_invoke is the simplest possible primitive but
+// limits payloads to 8 bytes.  J.3.B adds an arbitrary-byte-stream
+// variant that carries a request slice in and writes the response
+// into a caller-provided output buffer.
+//
+// Surface:
+//   pub fn rpc_invoke_buf(target, payload: &[u8], response: &mut [u8])
+//        -> Result<usize, RpcError>;
+//
+//   // Inside the target's executor:
+//   pub fn rpc_payload_copy(out: &mut [u8]) -> usize;
+//   pub fn rpc_payload_len() -> usize;
+//   pub fn rpc_reply_buf(data: &[u8]) -> usize;  // returns bytes written
+//
+// Echo short-circuit: RPC_ECHO_VECTOR (0.0.0.0) copies the payload
+// into the response buffer without going through dispatch.
+
+pub fn rpc_invoke_buf(
+    target: VectorAddress,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, RpcError> {
+    RPC_CALL_COUNT_BUF.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if target == RPC_ECHO_VECTOR {
+        let n = payload.len().min(response.len());
+        response[..n].copy_from_slice(&payload[..n]);
+        return Ok(n);
+    }
+
+    // Save outer slots so nested rpc_invoke_buf works.
+    let prev_buf = RPC_BUF_SLOT.lock().take();
+    let prev_word = RPC_SLOT.lock().take();
+    *RPC_BUF_SLOT.lock() = Some(RpcBufSlot {
+        request_ptr: payload.as_ptr() as usize,
+        request_len: payload.len(),
+        response_ptr: response.as_mut_ptr() as usize,
+        response_cap: response.len(),
+        response_len: None,
+    });
+    // Also stash the request length as the word so executors that
+    // mix both paths can read either side.
+    *RPC_SLOT.lock() = Some(RpcSlot { request: payload.len() as u64, response: None });
+
+    let dispatch_result = route_signal(target, Signal::Call { from: payload.len() as u64 });
+
+    let our_buf = RPC_BUF_SLOT.lock().take();
+    *RPC_BUF_SLOT.lock() = prev_buf;
+    let _ = RPC_SLOT.lock().take();
+    *RPC_SLOT.lock() = prev_word;
+
+    let status = match dispatch_result {
+        Ok(CellResult::Done) | Ok(CellResult::Yield) => Ok(()),
+        Ok(_) => Err(RpcError::BadStatus),
+        Err(e) => Err(RpcError::Runtime(e)),
+    };
+    status?;
+
+    our_buf
+        .and_then(|s| s.response_len)
+        .ok_or(RpcError::NoReply)
+}
+
+/// Called from inside a target executor during a buf-path RPC.
+/// Copies the incoming payload into `out` and returns the number of
+/// bytes copied (`min(payload_len, out.len())`).  Returns 0 when
+/// not inside a buf-path RPC.
+pub fn rpc_payload_copy(out: &mut [u8]) -> usize {
+    let guard = RPC_BUF_SLOT.lock();
+    let Some(slot) = guard.as_ref() else { return 0; };
+    if slot.request_ptr == 0 {
+        return 0;
+    }
+    let n = slot.request_len.min(out.len());
+    // SAFETY: caller of rpc_invoke_buf holds the source buffer
+    // alive until we return from route_signal.
+    let src = unsafe {
+        core::slice::from_raw_parts(slot.request_ptr as *const u8, slot.request_len)
+    };
+    out[..n].copy_from_slice(&src[..n]);
+    n
+}
+
+/// Length of the incoming buf-path RPC payload.  Returns 0 outside
+/// a buf-path RPC dispatch.
+pub fn rpc_payload_len() -> usize {
+    RPC_BUF_SLOT
+        .lock()
+        .as_ref()
+        .map(|s| if s.request_ptr == 0 { 0 } else { s.request_len })
+        .unwrap_or(0)
+}
+
+/// Write a response payload from inside a target executor.  Caps
+/// at the caller-provided response_cap; returns the number of bytes
+/// actually written.  No-op outside a buf-path RPC dispatch.
+pub fn rpc_reply_buf(data: &[u8]) -> usize {
+    let mut guard = RPC_BUF_SLOT.lock();
+    let Some(slot) = guard.as_mut() else { return 0; };
+    if slot.response_ptr == 0 {
+        return 0;
+    }
+    let n = data.len().min(slot.response_cap);
+    // SAFETY: caller of rpc_invoke_buf holds the response buffer
+    // alive until we return.
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(slot.response_ptr as *mut u8, slot.response_cap)
+    };
+    dst[..n].copy_from_slice(&data[..n]);
+    slot.response_len = Some(n);
+    n
 }
 
 pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult, RuntimeError> {
@@ -25991,7 +26830,7 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             let mut status = ExecStatus::Done;
             let terminated = matches!(signal, Signal::Terminate);
 
-            set_current_dispatch(dispatch.vector);
+            let caller_vec = set_current_dispatch(dispatch.vector);
             // Phase B.4.4: bracket the native callback in a CR3
             // trampoline.  Currently a no-op when target root == live
             // CR3 (every builtin until ELF loader ships), but the
@@ -26008,6 +26847,9 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
             }
 
             if status != ExecStatus::Fault {
+                // L.4 — measure executor dispatch in RDTSC cycles.
+                let deadline = RUNTIME.lock().deadline_for(dispatch.node_id);
+                let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                 status = if terminated {
                     if let Some(on_teardown) = binding.vtable.on_teardown {
                         unsafe { on_teardown(&mut ctx) }
@@ -26024,10 +26866,17 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
                 } else {
                     ExecStatus::Done
                 };
+                let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+                if deadline > 0 {
+                    let observed = t1.wrapping_sub(t0);
+                    if observed > deadline {
+                        record_deadline_overrun(dispatch.node_id, observed, deadline);
+                    }
+                }
             }
 
             drop(_domain_guard);
-            clear_current_dispatch();
+            restore_current_dispatch(caller_vec);
 
             // ── Conditional routing (LangGraph-style) ────────────────────────
             // When on_event returns Route:
@@ -26060,7 +26909,14 @@ pub fn route_signal(target: VectorAddress, signal: Signal) -> Result<CellResult,
 
             {
                 let mut runtime = RUNTIME.lock();
-                runtime.finish_native_invocation(dispatch.slot, status, initialized, terminated);
+                runtime.finish_native_invocation(
+                    dispatch.slot,
+                    status,
+                    initialized,
+                    terminated,
+                    dispatch.vector,
+                    caller_vec,
+                );
             }
 
             // Phase E.1: soft preemption.  If the supervisor flagged the
@@ -26129,7 +26985,7 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             let mut initialized = binding.initialized;
             let mut status = ExecStatus::Done;
 
-            set_current_dispatch(dispatch.vector);
+            let caller_vec = set_current_dispatch(dispatch.vector);
             let _domain_guard = DomainGuard::enter(dispatch.instance_id);
 
             if !binding.initialized {
@@ -26142,19 +26998,36 @@ pub fn activate(target: VectorAddress) -> Result<CellResult, RuntimeError> {
             }
 
             if status != ExecStatus::Fault {
+                // L.4 — measure on_resume dispatch in RDTSC cycles.
+                let deadline = RUNTIME.lock().deadline_for(dispatch.node_id);
+                let t0 = unsafe { core::arch::x86_64::_rdtsc() };
                 status = if let Some(on_resume) = binding.vtable.on_resume {
                     unsafe { on_resume(&mut ctx) }
                 } else {
                     ExecStatus::Done
                 };
+                let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+                if deadline > 0 {
+                    let observed = t1.wrapping_sub(t0);
+                    if observed > deadline {
+                        record_deadline_overrun(dispatch.node_id, observed, deadline);
+                    }
+                }
             }
 
             drop(_domain_guard);
-            clear_current_dispatch();
+            restore_current_dispatch(caller_vec);
 
             {
                 let mut runtime = RUNTIME.lock();
-                runtime.finish_native_invocation(dispatch.slot, status, initialized, false);
+                runtime.finish_native_invocation(
+                    dispatch.slot,
+                    status,
+                    initialized,
+                    false,
+                    dispatch.vector,
+                    caller_vec,
+                );
             }
 
             // Phase E.1: soft preemption mirror of the route_signal path.
@@ -26249,12 +27122,90 @@ pub fn drain_control_plane() -> Option<ControlPlaneEnvelope> {
     RUNTIME.lock().drain_control_plane()
 }
 
+/// Phase J.2 — number of journal entries currently stored.  Stays
+/// at the ring capacity (512) once it fills; lifetime_pushed gives
+/// the unbounded total.
+pub fn journal_len() -> usize {
+    RUNTIME.lock().journal_len()
+}
+
+/// Phase J.2 — total envelopes the runtime has ever emitted, across
+/// ring overwrites.  Useful for diagnostics and for the kernel's
+/// `journal` shell command.
+pub fn journal_lifetime() -> u64 {
+    RUNTIME.lock().journal_lifetime()
+}
+
+/// Phase J.2 — read the i-th OLDEST currently-stored journal entry.
+pub fn journal_envelope_at(i: usize) -> Option<ControlPlaneEnvelope> {
+    RUNTIME.lock().journal_envelope_at(i)
+}
+
+/// Phase J.2 — serialize the journal (header + records) into the
+/// caller's buffer.  Required size = HEADER_BYTES + len() * ENVELOPE_RECORD_BYTES.
+pub fn journal_snapshot_into(out: &mut [u8]) -> Result<usize, gos_journal::JournalError> {
+    RUNTIME.lock().journal_snapshot_into(out)
+}
+
+pub fn push_envelope(envelope: ControlPlaneEnvelope) {
+    RUNTIME.lock().push_envelope(envelope)
+}
+
+pub fn current_tick() -> u64 {
+    RUNTIME.lock().current_tick()
+}
+
+/// Phase H.1.x.4 — append an audited mutation envelope to the
+/// audit ring.  The supervisor gate calls this AFTER pushing to the
+/// general control-plane queue so subscribers that only care about
+/// audited writes (shell `show mutations`, Phase I `k-scene`) don't
+/// need to filter every Hello/Metric/NodeUpsert.
+pub fn push_audit_envelope(envelope: ControlPlaneEnvelope) {
+    AUDIT_RING.lock().push(envelope);
+}
+
+/// Snapshot the audit ring in newest-first order.  Returns the number
+/// of entries copied into `out` (≤ `out.len()`, ≤ `AUDIT_RING_CAPACITY`).
+pub fn snapshot_audit_ring(out: &mut [Option<ControlPlaneEnvelope>]) -> usize {
+    AUDIT_RING.lock().snapshot(out)
+}
+
+/// Lifetime count of audited mutations pushed since boot (saturating).
+pub fn audit_ring_total() -> u64 {
+    AUDIT_RING.lock().wrote
+}
+
 pub fn last_state_delta(node_id: NodeId) -> Option<StateDelta> {
     RUNTIME.lock().last_state_delta(node_id)
 }
 
 pub fn drain_next_fault() -> Option<VectorAddress> {
     RUNTIME.lock().drain_next_fault()
+}
+
+/// Audit P1 #3 — drain a fault event with node-granular attribution
+/// (callee + caller + terminal status).  Returns None when the queue
+/// is empty.  Supervisor code should prefer this over the legacy
+/// `drain_next_fault` to take advantage of caller-aware fault policy.
+pub fn drain_next_fault_event() -> Option<FaultEvent> {
+    RUNTIME.lock().drain_next_fault_event()
+}
+
+pub fn plugin_id_for_node(node_id: NodeId) -> Option<PluginId> {
+    RUNTIME.lock().plugin_id_for_node(node_id)
+}
+
+pub fn edge_from_node(edge_id: EdgeId) -> Option<NodeId> {
+    RUNTIME.lock().edge_from_node(edge_id)
+}
+
+/// L.12 — iterate every exported capability across all loaded
+/// plugins; callback is `fn(plugin_id, plugin_name, &CapabilitySpec)`.
+pub fn for_each_exported_capability<F>(f: F)
+where
+    F: FnMut(PluginId, &'static str, &CapabilitySpec),
+{
+    RUNTIME.lock().for_each_exported_capability(f)
 }
 
 pub fn plugin_id_for_vec(vector: VectorAddress) -> Option<PluginId> {
@@ -26728,11 +27679,12 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
         from: NodeId,
         to: NodeId,
         kind: gos_cypher_mut::ReceptiveEdgeKind,
-    ) -> Result<(), u32> {
+    ) -> Result<EdgeId, u32> {
         let (edge_type, edge_key) = match kind {
             gos_cypher_mut::ReceptiveEdgeKind::Mount  => (RuntimeEdgeType::Mount,  "cypher.Mount"),
             gos_cypher_mut::ReceptiveEdgeKind::Use    => (RuntimeEdgeType::Use,    "cypher.Use"),
             gos_cypher_mut::ReceptiveEdgeKind::Depend => (RuntimeEdgeType::Depend, "manifest.depend"),
+            gos_cypher_mut::ReceptiveEdgeKind::Link   => (RuntimeEdgeType::Link,   "cypher.Link"),
         };
         let edge_id = gos_protocol::derive_edge_id(from, to, edge_key);
         let spec = EdgeSpec {
@@ -26747,14 +27699,14 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
             capability_binding: None,
             vector_ref: None,
         };
-        self.register_edge(spec).map(|_| ()).map_err(|_| 1u32)
+        self.register_edge(spec).map_err(|_| 1u32)
     }
 
-    fn remove_edge(&mut self, id: EdgeId) -> Result<(), u32> {
-        self.unregister_edge(id).map_err(|_| 2u32)
+    fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32> {
+        self.unregister_edge(id).map(|_| id).map_err(|_| 2u32)
     }
 
-    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<(), u32> {
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32> {
         // Remove the existing exclusive Use edge originating from `from`, if any.
         let old_id = self
             .edges
@@ -26780,7 +27732,7 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
             capability_binding: None,
             vector_ref: None,
         };
-        self.register_edge(spec).map(|_| ()).map_err(|_| 4u32)
+        self.register_edge(spec).map_err(|_| 4u32)
     }
 }
 
@@ -28801,4 +29753,175 @@ fn drain_irq_pending() {
             }
         }
     }
+}
+
+// ============================================================================
+// Phase H.1.x.1 — Cypher mutation primitives wired into the runtime edge
+// table.  Exposed as a `MutationDispatcher` impl so the supervisor's
+// H.1.x.2 gate can compose on top (degraded-module check, domain
+// boundary check, audit envelope stamping).  Callers that don't need
+// the supervisor gate (tests, boot-time fixtures) can drive the
+// dispatcher directly via `apply_edge_mutation`.
+//
+// Invariants:
+//   * Every successful mutation bumps `GRAPH_GENERATION` exactly once.
+//   * EdgeId derivation is deterministic on (from, to, edge_kind), so a
+//     subsequent RemoveEdge can re-derive without round-tripping.
+//   * register_edge already emits ControlPlaneMessageKind::EdgeUpsert,
+//     so subscribers see the change without us double-emitting here.
+// ============================================================================
+
+/// Monotonic graph generation; bumped on every successful edge mutation.
+/// `k-scene` polls this in its render loop to decide whether to rebuild
+/// instance buffers.
+pub fn graph_generation() -> u64 {
+    GRAPH_GENERATION.load(Ordering::Acquire)
+}
+
+fn edge_key_for(kind: ReceptiveEdgeKind) -> &'static str {
+    match kind {
+        ReceptiveEdgeKind::Mount => MUTATION_MOUNT_EDGE_KEY,
+        ReceptiveEdgeKind::Use => MUTATION_USE_EDGE_KEY,
+        ReceptiveEdgeKind::Depend => MUTATION_DEPEND_EDGE_KEY,
+        ReceptiveEdgeKind::Link => MUTATION_LINK_EDGE_KEY,
+    }
+}
+
+fn runtime_edge_type_for(kind: ReceptiveEdgeKind) -> RuntimeEdgeType {
+    match kind {
+        ReceptiveEdgeKind::Mount => RuntimeEdgeType::Mount,
+        ReceptiveEdgeKind::Use => RuntimeEdgeType::Use,
+        ReceptiveEdgeKind::Depend => RuntimeEdgeType::Depend,
+        ReceptiveEdgeKind::Link => RuntimeEdgeType::Link,
+    }
+}
+
+fn dispatcher_error_for(err: RuntimeError) -> u32 {
+    // Stable u32 tags; supervisor surfaces these via
+    // MutationError::DispatcherRejected without losing the original
+    // classification.
+    match err {
+        RuntimeError::EdgeTableFull => 1,
+        RuntimeError::EdgeNotFound => 2,
+        RuntimeError::NodeArenaFull => 3,
+        RuntimeError::NodeNotFound => 4,
+        RuntimeError::PluginNotFound => 5,
+        RuntimeError::PluginTableFull => 6,
+        RuntimeError::NodeTableFull => 7,
+        RuntimeError::ReadyQueueFull => 8,
+        RuntimeError::SignalQueueFull => 9,
+        RuntimeError::ControlPlaneQueueFull => 10,
+        RuntimeError::LegacyCellMissing => 11,
+        RuntimeError::NativeExecutorMissing => 12,
+        RuntimeError::Fault(_) => 13,
+        RuntimeError::SubscribeTableFull => 14,
+        RuntimeError::PropTableFull => 15,
+    }
+}
+
+impl GraphRuntime {
+    fn find_use_edge_from(&self, from: NodeId) -> Option<EdgeId> {
+        self.edges.iter().find_map(|slot| {
+            slot.and_then(|record| {
+                if record.spec.from_node == from
+                    && record.spec.edge_type == RuntimeEdgeType::Use
+                {
+                    Some(record.spec.edge_id)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+}
+
+/// Zero-size dispatcher that drives the live RUNTIME singleton.  Pass
+/// `&mut RuntimeDispatcher` to `gos_cypher_mut::apply_mutation` to
+/// execute mutations against the actual runtime edge table.
+pub struct RuntimeDispatcher;
+
+impl MutationDispatcher for RuntimeDispatcher {
+    fn lookup_node(&self, id: NodeId) -> bool {
+        RUNTIME.lock().node_slot_by_id(id).is_some()
+    }
+
+    fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        kind: ReceptiveEdgeKind,
+    ) -> Result<EdgeId, u32> {
+        let edge_id = derive_edge_id(from, to, edge_key_for(kind));
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: to,
+            edge_type: runtime_edge_type_for(kind),
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        let id = RUNTIME
+            .lock()
+            .register_edge(spec)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+
+    fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32> {
+        RUNTIME
+            .lock()
+            .unregister_edge(id)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32> {
+        // Step 1: tear down any existing Use edge sourced at `from`.
+        // RebindUse is permitted to start from a clean slate, so a
+        // missing prior edge is not an error.
+        let prior = RUNTIME.lock().find_use_edge_from(from);
+        if let Some(old_id) = prior {
+            RUNTIME
+                .lock()
+                .unregister_edge(old_id)
+                .map_err(dispatcher_error_for)?;
+        }
+
+        // Step 2: install the new Use edge.  Reuse add_edge so the
+        // EdgeId derivation + envelope emission paths stay single-
+        // sourced.
+        let edge_id = derive_edge_id(from, new_target, MUTATION_USE_EDGE_KEY);
+        let spec = EdgeSpec {
+            edge_id,
+            from_node: from,
+            to_node: new_target,
+            edge_type: RuntimeEdgeType::Use,
+            weight: 1.0,
+            acl_mask: u64::MAX,
+            route_policy: RoutePolicy::Direct,
+            capability_namespace: None,
+            capability_binding: None,
+            vector_ref: None,
+        };
+        let id = RUNTIME
+            .lock()
+            .register_edge(spec)
+            .map_err(dispatcher_error_for)?;
+        GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(id)
+    }
+}
+
+/// Public convenience entry point: validate + dispatch a `CypherMutation`
+/// against the live runtime edge table.  H.1.x.2 supervisor wraps this
+/// with policy gating; tests and boot fixtures can call directly.
+pub fn apply_edge_mutation(mutation: CypherMutation) -> Result<EdgeId, MutationError> {
+    let mut dispatcher = RuntimeDispatcher;
+    gos_cypher_mut::apply_mutation(&mut dispatcher, mutation)
 }

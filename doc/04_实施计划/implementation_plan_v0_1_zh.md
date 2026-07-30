@@ -4,15 +4,16 @@
 |---|---|
 | 文档编号 | GOS-DOC-04-01 |
 | 所属阶段 | 04・实施计划 |
-| 版本 / 状态 | v2.2 / 现行 |
+| 版本 / 状态 | v2.3 / 现行（详细逐迭代 backlog 核对滞后，见下方 v2.3 变更说明与文末提示） |
 | 作成 / 审核 / 批准 | GOS 核心团队 |
 | 基线日期 | 2026-06-30 |
-| 最终更新 | 2026-07-06 |
+| 最终更新 | 2026-07-30 |
 
 **变更履历**
 
 | 版本 | 日期 | 变更内容 | 作成者 |
 |---|---|---|---|
+| v2.3 | 2026-07-30 | **轻量状态同步**（非逐迭代 backlog 核对）：本文档 §一详细正文自 v2.2（2026-07-06，V3.06 基线，1033 host tests）起未再更新，期间 V3.07~V3.128 已交付 122 次硬化迭代、累计约 2251 host tests（含 §十三/§十四/§十五全部拓扑指数命令族，详见 [GRAPH_CLI_COMMANDS_zh.md](../03_详细设计/GRAPH_CLI_COMMANDS_zh.md) 与 [GOS_ARCH_v2.md](../02_基本设计/GOS_ARCH_v2.md)）。本轮仅更新顶部统计口径与 §一末尾的「现状同步提示」，**不**逐条改写已完成基线正文——完整的逐迭代 backlog 核对已连续多轮标记为独立任务，规模已达 122 项，建议专门安排一轮处理，而非依赖 doc 优化轮次顺带补齐 | GOS 核心团队 |
 | v1.0 | 2026-06-30 | 纳入日系工程阶段目录（04_实施计划） | GOS 核心团队 |
 | v2.0 | 2026-07-01 | **重大口径修正**：本文档此前把 Phase A/B 描述为"待完成"，但 [GOS_ARCH_v2.md §八](../02_基本设计/GOS_ARCH_v2.md) 已记录 Phase A 于 2026-04-25、Phase B（含 B.5）于 2026-04-26 完成，且 V2.0~V2.14 的一系列硬化任务已在 Phase B 骨架之上持续交付可观测性能力。本次按 GOS_ARCH_v2.md 权威口径同步更新 Phase A/B 状态，并将当前实施重心前移至 Phase B 残留缺口与 Phase C 准备 | GOS 核心团队 |
 | v2.1 | 2026-07-03 | **口径修正**：§一「当前仍未完成的核心问题」此前称"Phase C 的图原生控制面收口工作尚未开始"，与 [task_v0_1_zh.md](./task_v0_1_zh.md) 记载的 V2.8~V2.65（共 65 项硬化日志）已交付的进程管理 / 图论分析 / 图健康度 / 节点属性存储命令族事实不符；已更正为"观测性命令族已大量交付，GUI 可视化与开发者调试工作流文档尚未开始" | GOS 核心团队 |
@@ -34,6 +35,8 @@
 - V2.0~V2.14 硬化系列在 Phase B 骨架之上持续交付：`nodes`/`edges`/`graph diff`/`journal`/`metrics export`/`boot verify`/`proc` 等可观测性命令族（详见 [GRAPH_CLI_COMMANDS_zh.md §七](../03_详细设计/GRAPH_CLI_COMMANDS_zh.md)）
 - V2.16~V2.65 硬化系列持续扩展：进程生命周期管理、第一代/第二代图论分析（含 PageRank/HITS/community/MST/最短路径/最大流/介数中心性/吸引子分类）、图健康度指标（density/clustering/transitivity/kcore/assortativity）、节点属性存储（PAL_U32 图原生化重构）等命令族，累计 623 个 host tests（详见 [GRAPH_CLI_COMMANDS_zh.md §八~§十](../03_详细设计/GRAPH_CLI_COMMANDS_zh.md)）
 - V2.66~V3.06 硬化系列（共 41 项硬化日志）进一步扩展：网络科学扩展指标（reciprocity/modularity/rich-club/girth/wiener/harmonic/peripheral/center/efficiency/small-world/scale-free/power-law 等）、图分析工具化（指标快照对比、链路预测）、第三代结构分解与经典图论算法套件（割点/割边、欧拉路径、DAG 关键路径与分层、支配树、反馈弧集/点集、二分匹配、2ECC/BCC、k-truss、最大团/独立集、最小顶点覆盖/支配集/路径覆盖/生成树形图/全局最小割、Hamiltonian 检测、弦图识别、边介数中心性等）等命令族，累计 **1033** 个 host tests（详见 [GRAPH_CLI_COMMANDS_zh.md §十一~§十二](../03_详细设计/GRAPH_CLI_COMMANDS_zh.md)）
+
+> **现状同步提示（2026-07-30，v2.3）**：以上基线正文详细列举至 V3.06（1033 host tests，2026-07-06）。此后 V3.07~V3.128 共 122 次硬化迭代已将累计 host tests 推进至约 **2251** 个，新增内容以 [GRAPH_CLI_COMMANDS_zh.md §十三~§十五](../03_详细设计/GRAPH_CLI_COMMANDS_zh.md)（拓扑指数命令族，累计 117 组、约 351 个指数）与 [GOS_ARCH_v2.md §5.1](../02_基本设计/GOS_ARCH_v2.md)（v2.10，权威架构口径）为准。本文档 §一详细叙述与下方各 Phase 小节尚未逐项吸收这 122 次迭代，是已连续多轮标记、规模持续扩大的已知文档债，见 [README.md 待跟进事项](../README.md#待跟进事项)。
 
 当前仍未完成的核心问题：
 

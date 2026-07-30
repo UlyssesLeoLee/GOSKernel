@@ -282,6 +282,14 @@ impl RuntimeEdgeType {
                 EdgeBits::new(true, false, true, true),
                 EdgeAttrs::new(false, true, Cardinality::One, false),
             ),
+            // Link = Refer only (declared correspondence to an interface-file
+            // node; no Send/Bind/Grant — "no automatic routing happens on
+            // Link edges in Gen-1", same passive-reference shape as Depend).
+            // Not yet reconciled into the ADR-001 table; added here to keep
+            // `lower` total over RuntimeEdgeType.
+            RuntimeEdgeType::Link => {
+                EdgeForm::new(EdgeBits::refer_only(), EdgeAttrs::plain())
+            }
         }
     }
 }

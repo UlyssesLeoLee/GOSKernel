@@ -39,9 +39,23 @@ k-mouse = { path = "../k-mouse" }
 k-chat = { path = "../k-chat" }
 k-nim  = { path = "../k-nim" }
 k-fat32 = { path = "../k-fat32" }
-bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
-x86_64 = "0.14"
+k-fb = { path = "../k-fb" }
+k-rast = { path = "../k-rast" }
+k-assets = { path = "../k-assets" }
 libm = "0.2"
+spin = "0.9"
+# Already a dep (declared above) but kept for grep visibility — the
+# I.3.11 hit-test reads `MOUSE_X` / `MOUSE_Y` / `MOUSE_BUTTONS`
+# directly from k-mouse.
+# Phase I.3.0 — `vga_320x200` puts the VGA card into mode 13h (320×200
+# × 256-color palette, linear framebuffer at physical 0xA0000) before
+# kernel_main runs.  k-fb wraps the resulting framebuffer; the boot
+# loop paints kernel-node bars over it as the first graphical UI.
+# Trade-off: the legacy 0xB8000 text mode (used by k-vga's diagnostic
+# splash) is gone after boot; serial output via raw_serial_println
+# stays the canonical boot trace.
+bootloader = { version = "0.9.23", features = ["map_physical_memory", "vga_320x200"] }
+x86_64 = "0.14"
 
 [package.metadata.bootimage]
 # Default display (no -display): boots reliably. `-display gtk,gl=on` crashed
@@ -49,6 +63,12 @@ libm = "0.2"
 # For a flicker-free setup use the host Vulkan viewer with `-display none`
 # (window off; viewer is the display), or try `-display sdl` to keep a window.
 # `-serial tcp:...14445` (COM3) feeds gos-vk-viewer; keep it.
+#
+# claude/determined-hamilton-2c803b's I.11 full-screen/GL boot UI
+# (-display sdl,gl=on -full-screen -vga std) was NOT adopted here: same
+# GL-acceleration risk category as the gtk,gl=on crash documented above,
+# and it drops the COM3 serial line gos-vk-viewer depends on. Revisit
+# once GL stability on this host is separately verified.
 run-args = ["-accel", "whpx", "-accel", "tcg", "-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-serial", "tcp:127.0.0.1:14445,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"]
 test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
 test-success-exit-code = 33         # (0x10 << 1) | 1

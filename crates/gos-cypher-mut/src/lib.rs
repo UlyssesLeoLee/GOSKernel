@@ -74,6 +74,10 @@ pub enum ReceptiveEdgeKind {
     Use = 2,
     /// Boot-manifest self-repair only.  Maps to `RuntimeEdgeType::Depend`.
     Depend = 3,
+    /// Phase H.1.x.3.link — declared correspondence between a runtime
+    /// node and an interface-file node.  See `RuntimeEdgeType::Link`
+    /// for semantics; the Cypher surface is the `LINK` verb.
+    Link = 4,
 }
 
 /// Every accepted mutation produces one of these.  Caller writes it
@@ -133,7 +137,10 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
             edge_kind,
             ..
         } => match edge_kind {
-            ReceptiveEdgeKind::Mount | ReceptiveEdgeKind::Use | ReceptiveEdgeKind::Depend => Ok(()),
+            ReceptiveEdgeKind::Mount
+            | ReceptiveEdgeKind::Use
+            | ReceptiveEdgeKind::Depend
+            | ReceptiveEdgeKind::Link => Ok(()),
         },
         CypherMutation::RemoveEdge { .. } | CypherMutation::RebindUse { .. } => Ok(()),
     }
@@ -142,17 +149,30 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
 /// Adapter trait the supervisor implements; isolates this crate from
 /// runtime-side specifics.  H.1 keeps the verbs minimal; future
 /// slices (subgraph mutations, transactional batches) extend this.
+///
+/// `add_edge` and `rebind_use` return the newly created `EdgeId` so
+/// callers (and H.1.x.2 supervisor gate) can stamp it into the audit
+/// envelope without round-tripping through the runtime again.
+/// `remove_edge` echoes the input id for uniformity.
 pub trait MutationDispatcher {
     fn lookup_node(&self, id: NodeId) -> bool;
-    fn add_edge(&mut self, from: NodeId, to: NodeId, kind: ReceptiveEdgeKind) -> Result<(), u32>;
-    fn remove_edge(&mut self, id: EdgeId) -> Result<(), u32>;
-    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<(), u32>;
+    fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        kind: ReceptiveEdgeKind,
+    ) -> Result<EdgeId, u32>;
+    fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32>;
+    fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32>;
 }
 
+/// Apply a single Cypher mutation through a dispatcher.  Returns the
+/// `EdgeId` that was affected: the newly created edge for `AddEdge` /
+/// `RebindUse`, or the input id echoed back for `RemoveEdge`.
 pub fn apply_mutation<D: MutationDispatcher>(
     dispatcher: &mut D,
     mutation: CypherMutation,
-) -> Result<(), MutationError> {
+) -> Result<EdgeId, MutationError> {
     pre_validate(&mutation)?;
     match mutation {
         CypherMutation::AddEdge { from, to, edge_kind } => {

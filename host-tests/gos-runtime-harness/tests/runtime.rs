@@ -148,17 +148,22 @@ fn cypher_mutation_pre_validate_and_dispatch() {
         fn lookup_node(&self, id: NodeId) -> bool {
             self.known.iter().any(|n| *n == id)
         }
-        fn add_edge(&mut self, _: NodeId, _: NodeId, _: ReceptiveEdgeKind) -> Result<(), u32> {
+        fn add_edge(
+            &mut self,
+            _: NodeId,
+            _: NodeId,
+            _: ReceptiveEdgeKind,
+        ) -> Result<EdgeId, u32> {
             self.added += 1;
-            Ok(())
+            Ok(EdgeId([0xAA; 16]))
         }
-        fn remove_edge(&mut self, _: EdgeId) -> Result<(), u32> {
+        fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32> {
             self.removed += 1;
-            Ok(())
+            Ok(id)
         }
-        fn rebind_use(&mut self, _: NodeId, _: NodeId) -> Result<(), u32> {
+        fn rebind_use(&mut self, _: NodeId, _: NodeId) -> Result<EdgeId, u32> {
             self.rebound += 1;
-            Ok(())
+            Ok(EdgeId([0xBB; 16]))
         }
     }
     let mut d = Stub {
@@ -2310,4 +2315,1324 @@ fn v2_1_apply_cypher_mutation_emits_mutation_audit_envelope() {
 
     // Suppress unused import warning.
     let _ = GraphNodeSummary::EMPTY;
+}
+
+// Phase H.1.x.1 — gos-runtime::apply_edge_mutation end-to-end against the
+// live RUNTIME singleton.  Registers two synthetic nodes, applies the
+// receptive AddEdge / RebindUse / RemoveEdge verbs, and asserts:
+//   * the edge actually appears in the runtime edge table (via
+//     edge_id_for_vector lookup);
+//   * graph_generation() bumps exactly once per successful mutation;
+//   * register_edge's EdgeUpsert envelope reaches drain_control_plane()
+//     so H.1.x.4 subscribers can pick it up;
+//   * RebindUse swaps the Use edge target without leaving the prior
+//     edge behind;
+//   * UnknownEndpoint and EdgeNotFound surface through MutationError
+//     with the expected variants.
+#[test]
+fn apply_edge_mutation_round_trip_against_live_runtime() {
+    use gos_cypher_mut::{CypherMutation, MutationError, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_edge_vector, ControlPlaneMessageKind, EdgeId, EntryPolicy, ExecutorId, NodeSpec,
+        PluginId, PluginManifest, RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PLUGIN_ID: PluginId = PluginId::from_ascii("MUT_RT");
+    const KEY_A: &str = "mut.a";
+    const KEY_B: &str = "mut.b";
+    const KEY_C: &str = "mut.c";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.mut");
+    const VEC_A: VectorAddress = VectorAddress::new(1, 1, 1, 1);
+    const VEC_B: VectorAddress = VectorAddress::new(1, 1, 1, 2);
+    const VEC_C: VectorAddress = VectorAddress::new(1, 1, 1, 3);
+
+    let spec_a = NodeSpec {
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_A),
+        local_node_key: KEY_A,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_b = NodeSpec {
+        local_node_key: KEY_B,
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_B),
+        ..spec_a
+    };
+    let spec_c = NodeSpec {
+        local_node_key: KEY_C,
+        node_id: gos_protocol::derive_node_id(PLUGIN_ID, KEY_C),
+        ..spec_a
+    };
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PLUGIN_ID,
+        name: "MUT_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PLUGIN_ID).expect("loaded");
+    gos_runtime::register_node(PLUGIN_ID, VEC_A, spec_a).expect("node a");
+    gos_runtime::register_node(PLUGIN_ID, VEC_B, spec_b).expect("node b");
+    gos_runtime::register_node(PLUGIN_ID, VEC_C, spec_c).expect("node c");
+
+    let id_a = gos_runtime::node_id_for_vec(VEC_A).expect("id a");
+    let id_b = gos_runtime::node_id_for_vec(VEC_B).expect("id b");
+    let id_c = gos_runtime::node_id_for_vec(VEC_C).expect("id c");
+
+    // Drain anything emitted by register_node so we observe only
+    // mutation-driven envelopes below.
+    while gos_runtime::drain_control_plane().is_some() {}
+    let gen0 = gos_runtime::graph_generation();
+
+    // --- AddEdge (Mount) ---
+    let added = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_a,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Mount,
+    })
+    .expect("AddEdge mount applies");
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 1, "generation +1");
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(added)),
+        Some(added),
+        "edge resolvable via its vector"
+    );
+    let env = gos_runtime::drain_control_plane().expect("envelope emitted");
+    assert_eq!(env.kind, ControlPlaneMessageKind::EdgeUpsert);
+
+    // --- RebindUse: first install a Use edge a->b, then rebind to a->c ---
+    let use_ab = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_a,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Use,
+    })
+    .expect("AddEdge use a->b");
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 2);
+    while gos_runtime::drain_control_plane().is_some() {}
+
+    let use_ac = gos_runtime::apply_edge_mutation(CypherMutation::RebindUse {
+        from: id_a,
+        new_target: id_c,
+    })
+    .expect("RebindUse a->c");
+    // RebindUse performs unregister + register: two table mutations,
+    // but only one GRAPH_GENERATION bump on the new register (the
+    // unregister path is internal bookkeeping that doesn't surface as
+    // a separate generation tick).  Future slices may revisit this if
+    // subscribers want the intermediate state.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 3);
+    assert_ne!(use_ab, use_ac, "rebind produces a new EdgeId");
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(use_ab)),
+        None,
+        "prior Use edge gone"
+    );
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(use_ac)),
+        Some(use_ac),
+        "new Use edge present"
+    );
+
+    // --- RemoveEdge: tear down the Mount edge we added first ---
+    let removed = gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge { edge_id: added })
+        .expect("RemoveEdge mount");
+    assert_eq!(removed, added);
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+    assert_eq!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(added)),
+        None,
+        "mount edge gone"
+    );
+
+    // --- UnknownEndpoint surfaces from lookup_node ---
+    let ghost = gos_protocol::derive_node_id(PLUGIN_ID, "does.not.exist");
+    match gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: ghost,
+        to: id_b,
+        edge_kind: ReceptiveEdgeKind::Mount,
+    }) {
+        Err(MutationError::UnknownEndpoint(id)) => assert_eq!(id, ghost),
+        other => panic!("expected UnknownEndpoint, got {:?}", other),
+    }
+    // Failed mutation must NOT bump generation.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+
+    // --- EdgeNotFound surfaces from the runtime as DispatcherRejected ---
+    match gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge {
+        edge_id: EdgeId([0xCC; 16]),
+    }) {
+        Err(MutationError::DispatcherRejected(tag)) => assert_eq!(tag, 2, "EdgeNotFound tag"),
+        other => panic!("expected DispatcherRejected(2), got {:?}", other),
+    }
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 4);
+}
+
+// Phase H.1.x.3.link — LINK creates an edge classified as
+// `RuntimeEdgeType::Link` (distinct from Mount/Use), the supervisor
+// audit ring carries the same source attribution as other receptive
+// mutations, and identical endpoints produce a stable EdgeId
+// (deterministic for downstream tooling).
+#[test]
+fn cypher_link_creates_distinct_edge_kind() {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    use gos_protocol::{
+        derive_edge_vector, derive_node_id, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("LNK_RT");
+    const KEY_N: &str = "lnk.node";
+    const KEY_I: &str = "lnk.iface";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.lnk");
+    // Vector layout in the user-facing form is `l4.l3.l2.offset`; the
+    // user's `0.0.0.1` and `0.0.0.2` map directly to these.
+    const VEC_NODE: VectorAddress = VectorAddress::new(0, 0, 0, 1);
+    const VEC_IFACE: VectorAddress = VectorAddress::new(0, 0, 0, 2);
+
+    let spec_n = NodeSpec {
+        node_id: derive_node_id(PID, KEY_N),
+        local_node_key: KEY_N,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let spec_i = NodeSpec {
+        local_node_key: KEY_I,
+        node_id: derive_node_id(PID, KEY_I),
+        ..spec_n
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "LNK_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC_NODE, spec_n).expect("node");
+    gos_runtime::register_node(PID, VEC_IFACE, spec_i).expect("iface");
+
+    let id_node = gos_runtime::node_id_for_vec(VEC_NODE).expect("id_node");
+    let id_iface = gos_runtime::node_id_for_vec(VEC_IFACE).expect("id_iface");
+
+    let gen0 = gos_runtime::graph_generation();
+    let edge_id = gos_runtime::apply_edge_mutation(CypherMutation::AddEdge {
+        from: id_node,
+        to: id_iface,
+        edge_kind: ReceptiveEdgeKind::Link,
+    })
+    .expect("LINK applies");
+
+    // Generation bumps; edge classified as Link.
+    assert_eq!(gos_runtime::graph_generation(), gen0 + 1);
+    let summary = gos_runtime::edge_summary(derive_edge_vector(edge_id))
+        .expect("link edge resolvable by vector");
+    assert_eq!(
+        summary.edge_type,
+        RuntimeEdgeType::Link,
+        "edge classified as Link, not Mount/Use/Signal"
+    );
+
+    // Stable EdgeId across re-derivation: same (from, to, kind)
+    // produces the same id (downstream `DELETE EDGE 'e:V'` can find
+    // it again without remembering the returned id).
+    let re_derived = gos_protocol::derive_edge_id(id_node, id_iface, "cypher.link");
+    assert_eq!(re_derived, edge_id, "Link EdgeId is deterministic");
+
+    // RemoveEdge round-trip — confirms `cypher.link` matches the
+    // key the dispatcher's `add_edge` writes.
+    gos_runtime::apply_edge_mutation(CypherMutation::RemoveEdge { edge_id })
+        .expect("LINK edge removable");
+    assert!(
+        gos_runtime::edge_id_for_vector(derive_edge_vector(edge_id)).is_none(),
+        "link edge gone after RemoveEdge"
+    );
+}
+
+// Phase H.1.x.5 — audit ring wrap + ordering.
+//
+// Push more envelopes than AUDIT_RING_CAPACITY (16), then snapshot
+// into a fixed-size buffer.  The snapshot must:
+//   * report at most CAPACITY entries even though more were pushed;
+//   * order newest-first (most-recent push at index 0);
+//   * leave audit_ring_total() == cumulative push count.
+//
+// Also verifies the gos-verify invariant against the same numbers.
+#[test]
+fn audit_ring_snapshots_newest_first_and_caps_at_capacity() {
+    use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    // No gos_runtime::reset() here — reset() doesn't touch AUDIT_RING
+    // (intentional: ring carries across boot fixtures), so we read the
+    // baseline and assert deltas.
+    let baseline = gos_runtime::audit_ring_total();
+
+    const PUSHES: u32 = 25;
+    for i in 0..PUSHES {
+        let mut subject = [0u8; 16];
+        subject[0..4].copy_from_slice(&i.to_le_bytes());
+        gos_runtime::push_audit_envelope(ControlPlaneEnvelope {
+            version: 1,
+            kind: ControlPlaneMessageKind::MutationAudit,
+            subject,
+            arg0: i as u64,
+            arg1: 0,
+        });
+    }
+    assert_eq!(
+        gos_runtime::audit_ring_total(),
+        baseline + PUSHES as u64,
+        "lifetime counter tracks every push"
+    );
+
+    // Buffer larger than capacity: we should still only get capacity-
+    // many entries back.
+    let mut buf: [Option<ControlPlaneEnvelope>; 20] = [None; 20];
+    let returned = gos_runtime::snapshot_audit_ring(&mut buf);
+    assert_eq!(returned, gos_runtime::AUDIT_RING_CAPACITY);
+
+    // Newest-first: snapshot[0] should be the LAST push (i = 24).
+    let newest = buf[0].expect("newest entry");
+    assert_eq!(newest.arg0, (PUSHES - 1) as u64);
+    // snapshot[capacity-1] should be (PUSHES - capacity) = 9.
+    let oldest_kept =
+        buf[gos_runtime::AUDIT_RING_CAPACITY - 1].expect("oldest kept entry");
+    assert_eq!(
+        oldest_kept.arg0,
+        (PUSHES as usize - gos_runtime::AUDIT_RING_CAPACITY) as u64
+    );
+
+    // Caller buffer SMALLER than capacity: clamps to buffer size.
+    let mut small: [Option<ControlPlaneEnvelope>; 4] = [None; 4];
+    let returned_small = gos_runtime::snapshot_audit_ring(&mut small);
+    assert_eq!(returned_small, 4);
+    assert_eq!(small[0].unwrap().arg0, (PUSHES - 1) as u64);
+    assert_eq!(small[3].unwrap().arg0, (PUSHES - 4) as u64);
+
+    // Cross-check against the gos-verify abstract invariant: the
+    // returned count must respect all three bounds.
+    gos_verify::invariant_audit_ring_snapshot_bounded();
+}
+
+// Phase H.1.x.5 / Architecture P0 #1 — graph-attributed capability
+// resolution.  When a caller is supplied, `resolve_capability_with_edge`
+// must:
+//   1. return the same `VectorAddress` as the unattributed lookup
+//      (semantic equivalence — never block resolution by failing to
+//      register the edge)
+//   2. register exactly one `Use` edge from caller → provider
+//   3. stamp the matching capability namespace / name on the edge so
+//      Cypher tools and audit consumers can see WHICH capability the
+//      use refers to
+//   4. be idempotent: a second resolve of the same (caller, provider,
+//      ns, cap) does not bump the edge count
+//   5. skip edge registration when `caller_vec == None` (read-only
+//      mode for tests and snapshot replay)
+#[test]
+fn resolve_capability_with_edge_attributes_to_runtime_graph() {
+    use gos_protocol::{
+        derive_node_id, CapabilitySpec, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("CAP_RT");
+    const PROVIDER_KEY: &str = "cap.provider";
+    const CALLER_KEY: &str = "cap.caller";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.cap");
+    const PROVIDER_VEC: VectorAddress = VectorAddress::new(8, 8, 8, 1);
+    const CALLER_VEC: VectorAddress = VectorAddress::new(8, 8, 8, 2);
+
+    const EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
+        namespace: "vga",
+        name: "console",
+        version: 1,
+    }];
+
+    let provider_spec = NodeSpec {
+        node_id: derive_node_id(PID, PROVIDER_KEY),
+        local_node_key: PROVIDER_KEY,
+        node_type: RuntimeNodeType::Driver,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: EXPORTS,
+        vector_ref: None,
+    };
+    let caller_spec = NodeSpec {
+        node_id: derive_node_id(PID, CALLER_KEY),
+        local_node_key: CALLER_KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "CAP_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, PROVIDER_VEC, provider_spec).expect("provider");
+    gos_runtime::register_node(PID, CALLER_VEC, caller_spec).expect("caller");
+
+    // Sanity: unattributed resolve still works the legacy way.
+    assert_eq!(
+        gos_runtime::resolve_capability(b"vga", b"console"),
+        Some(PROVIDER_VEC)
+    );
+
+    // Edge table empty before any attributed resolve.
+    let mut edges_before = [gos_protocol::GraphEdgeSummary::EMPTY; 8];
+    let (edges_before_total, _) = gos_runtime::edge_page(0, &mut edges_before);
+    assert_eq!(edges_before_total, 0);
+
+    // First attributed resolve registers exactly one `Use` edge with
+    // the capability strings stamped.
+    let resolved = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(resolved, Some(PROVIDER_VEC));
+
+    let mut edges_after = [gos_protocol::GraphEdgeSummary::EMPTY; 8];
+    let (edges_after_total, edges_after_returned) =
+        gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(edges_after_total, 1, "exactly one edge registered");
+    assert_eq!(edges_after_returned, 1);
+    let edge = edges_after[0];
+    assert_eq!(edge.edge_type, RuntimeEdgeType::Use);
+    assert_eq!(edge.from_vector, CALLER_VEC);
+    assert_eq!(edge.to_vector, PROVIDER_VEC);
+
+    // Idempotency: second resolve of the same capability does not bump
+    // the edge count.
+    let resolved_2 = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(resolved_2, Some(PROVIDER_VEC));
+    let (total_after_2, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_2, 1, "idempotent — second resolve doesn't duplicate edge");
+
+    // Read-only mode (caller=None) returns the lookup but never
+    // touches the edge table.
+    let resolved_anon = gos_runtime::resolve_capability_with_edge(
+        b"vga",
+        b"console",
+        None,
+    );
+    assert_eq!(resolved_anon, Some(PROVIDER_VEC));
+    let (total_after_anon, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_anon, 1);
+
+    // Unknown capability returns None and does NOT register any edge.
+    let missing = gos_runtime::resolve_capability_with_edge(
+        b"nope",
+        b"missing",
+        Some(CALLER_VEC),
+    );
+    assert_eq!(missing, None);
+    let (total_after_miss, _) = gos_runtime::edge_page(0, &mut edges_after);
+    assert_eq!(total_after_miss, 1);
+}
+
+// Audit P0 #2 — `register_node_routes` must lift its conditional-route
+// targets into the runtime edge table as Signal edges so cross-plugin
+// routing topology is graph-visible.  Without this, plugins like k-ps2
+// dispatched signals through node-local route tables that the graph
+// never saw — circumventing the graph thesis for IRQ-driven traffic.
+//
+// The test verifies:
+//   1. registering routes to two distinct peers yields exactly two
+//      Signal edges with correct from/to wiring
+//   2. distinct route keys to the same peer remain distinct edges
+//      (so different signal channels stay separable in the graph)
+//   3. idempotency: calling register_node_routes again with the same
+//      table does not duplicate edges
+//   4. routes whose target node is not registered are skipped silently
+//      (boot ordering may resolve them on a later call)
+//   5. self-routes (target == source vector) do not produce edges
+#[test]
+fn register_node_routes_lifts_static_targets_to_signal_edges() {
+    use gos_protocol::{
+        derive_node_id, ConditionalRoute, EntryPolicy, ExecutorId, NodeSpec, PluginId,
+        PluginManifest, RuntimeEdgeType, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("ROUTE_RT");
+    const SRC_KEY: &str = "route.src";
+    const PEER_A_KEY: &str = "route.peer.a";
+    const PEER_B_KEY: &str = "route.peer.b";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.route");
+    const SRC_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 1);
+    const PEER_A_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 2);
+    const PEER_B_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 3);
+    const UNKNOWN_VEC: VectorAddress = VectorAddress::new(9, 0, 0, 99);
+
+    fn node(pid: PluginId, key: &'static str, exec: ExecutorId) -> NodeSpec {
+        NodeSpec {
+            node_id: derive_node_id(pid, key),
+            local_node_key: key,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: exec,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        }
+    }
+
+    let src_spec = node(PID, SRC_KEY, EXEC);
+    let a_spec = node(PID, PEER_A_KEY, EXEC);
+    let b_spec = node(PID, PEER_B_KEY, EXEC);
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "ROUTE_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, SRC_VEC, src_spec).expect("src");
+    gos_runtime::register_node(PID, PEER_A_VEC, a_spec).expect("peer a");
+    gos_runtime::register_node(PID, PEER_B_VEC, b_spec).expect("peer b");
+
+    // Edge table empty before any route registration.
+    let mut buf = [gos_protocol::GraphEdgeSummary::EMPTY; 16];
+    let (before, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(before, 0);
+
+    // Two routes to distinct peers → exactly two Signal edges.
+    let routes = [
+        ConditionalRoute { key: 0, target: PEER_A_VEC },
+        ConditionalRoute { key: 1, target: PEER_B_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &routes).expect("register routes");
+
+    let (after, ret) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after, 2, "two distinct peers ⇒ two edges");
+    assert_eq!(ret, 2);
+    for edge in &buf[..2] {
+        assert_eq!(edge.edge_type, RuntimeEdgeType::Signal);
+        assert_eq!(edge.from_vector, SRC_VEC);
+        assert!(edge.to_vector == PEER_A_VEC || edge.to_vector == PEER_B_VEC);
+    }
+
+    // Idempotency: re-registering the same table doesn't bump edge count.
+    gos_runtime::register_node_routes(SRC_VEC, &routes).expect("re-register");
+    let (after_again, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after_again, 2, "idempotent re-registration");
+
+    // Distinct route keys to the SAME peer remain distinct edges.
+    let multi_key = [
+        ConditionalRoute { key: 0, target: PEER_A_VEC },
+        ConditionalRoute { key: 7, target: PEER_A_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &multi_key).expect("multi-key");
+    let (after_multi, _) = gos_runtime::edge_page(0, &mut buf);
+    // We now have: (src→A,key=0), (src→B,key=1), (src→A,key=7).  The first
+    // two were registered above; the new key=7 adds a third.
+    assert_eq!(
+        after_multi, 3,
+        "different route keys to same peer ⇒ separate edges"
+    );
+
+    // Routes whose target isn't a registered node are skipped silently.
+    let with_unknown = [
+        ConditionalRoute { key: 9, target: UNKNOWN_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &with_unknown).expect("with unknown");
+    let (after_unknown, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(
+        after_unknown, 3,
+        "unknown target skipped, no new edge"
+    );
+
+    // Self-route is filtered (target == source).
+    let self_route = [
+        ConditionalRoute { key: 4, target: SRC_VEC },
+    ];
+    gos_runtime::register_node_routes(SRC_VEC, &self_route).expect("self route");
+    let (after_self, _) = gos_runtime::edge_page(0, &mut buf);
+    assert_eq!(after_self, 3, "self-route filtered, no new edge");
+}
+
+// Audit P1 #3 — fault attribution must surface the full
+// (callee, caller, status) triple, not just the callee vector.  The
+// legacy `drain_next_fault` projection continues to work so prior
+// supervisor code stays correct.
+//
+// We re-use the faulting executor at the top of this file: signalling
+// TEST_VECTOR triggers ExecStatus::Fault and pushes a FaultEvent onto
+// the queue.  Since the harness drives `route_signal` directly (no
+// outer node is dispatching), `caller` must be None — top-of-stack.
+#[test]
+fn fault_event_captures_node_granular_attribution() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    install_test_node();
+
+    // Sanity — queue empty.
+    assert!(gos_runtime::drain_next_fault_event().is_none());
+
+    let _ = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 });
+
+    let event = gos_runtime::drain_next_fault_event()
+        .expect("fault event captured");
+    assert_eq!(event.callee, TEST_VECTOR);
+    assert_eq!(event.caller, None, "top-of-stack dispatch ⇒ no caller");
+    assert_eq!(event.status, ExecStatus::Fault);
+
+    // Queue drained.
+    assert!(gos_runtime::drain_next_fault_event().is_none());
+
+    // Back-compat projection still works.
+    install_test_node();
+    let _ = gos_runtime::route_signal(TEST_VECTOR, Signal::Spawn { payload: 0 });
+    assert_eq!(gos_runtime::drain_next_fault(), Some(TEST_VECTOR));
+    assert!(gos_runtime::drain_next_fault().is_none());
+}
+
+// Audit P2 #4 — RuntimeNodeType must map deterministically into a
+// supervisor sub-domain class, and `GraphNodeSummary` must surface
+// the mapping so tooling can group/colour by sub-domain.  This locks
+// in the orthogonal partition (per-plugin domain × per-class
+// sub-domain) that a future supervisor change will key isolation off.
+#[test]
+fn node_type_maps_to_sub_domain_and_summary_surfaces_it() {
+    use gos_protocol::{NodeSubDomain, RuntimeNodeType};
+
+    // Pure-mapping audit: stable, covers every variant.
+    assert_eq!(RuntimeNodeType::Hardware.sub_domain(), NodeSubDomain::Hardware);
+    assert_eq!(RuntimeNodeType::Driver.sub_domain(), NodeSubDomain::KernelDriver);
+    assert_eq!(RuntimeNodeType::Service.sub_domain(), NodeSubDomain::Service);
+    assert_eq!(RuntimeNodeType::PluginEntry.sub_domain(), NodeSubDomain::Service);
+    assert_eq!(RuntimeNodeType::Compute.sub_domain(), NodeSubDomain::Compute);
+    assert_eq!(RuntimeNodeType::Router.sub_domain(), NodeSubDomain::Routing);
+    assert_eq!(RuntimeNodeType::Aggregator.sub_domain(), NodeSubDomain::Routing);
+    assert_eq!(RuntimeNodeType::Vector.sub_domain(), NodeSubDomain::Vector);
+
+    // Runtime path: the install_test_node() helper registers a Service
+    // node; its summary must report Service sub-domain.
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    install_test_node();
+
+    let mut nodes = [gos_protocol::GraphNodeSummary::EMPTY; 4];
+    let (total, returned) = gos_runtime::node_page(0, &mut nodes);
+    assert!(total >= 1);
+    assert!(returned >= 1);
+
+    let summary = nodes
+        .iter()
+        .find(|n| n.vector == TEST_VECTOR)
+        .copied()
+        .expect("test node visible in node_page");
+    assert_eq!(summary.node_type, RuntimeNodeType::Service);
+    assert_eq!(summary.sub_domain, NodeSubDomain::Service);
+}
+
+// Phase J.3.B — pointer-payload RPC.  rpc_invoke_buf carries an
+// arbitrary-length byte slice in and writes the target's response
+// into a caller-provided output buffer.  Tests:
+//   1. echo path: 0.0.0.0 copies payload → response verbatim
+//   2. round-trip through a real executor that uses rpc_payload_copy
+//      + rpc_reply_buf to transform input → uppercase output
+#[test]
+fn rpc_invoke_buf_echo_short_circuit_copies_payload_to_response() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+    let payload = b"hello echo";
+    let mut response = [0u8; 32];
+    let n = gos_runtime::rpc_invoke_buf(gos_runtime::RPC_ECHO_VECTOR, payload, &mut response)
+        .expect("echo buf must succeed");
+    assert_eq!(n, payload.len());
+    assert_eq!(&response[..n], payload);
+}
+
+#[test]
+fn rpc_invoke_buf_round_trip_through_target_uppercase() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
+        NodeExecutorVTable, NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress,
+        GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("BUFRPC");
+    const KEY: &str = "buf.upper";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.bufup");
+    const VEC: VectorAddress = VectorAddress::new(13, 0, 0, 7);
+
+    unsafe extern "C" fn upper(_c: *mut ExecutorContext, _e: *const NodeEvent) -> ExecStatus {
+        let mut buf = [0u8; 64];
+        let n = gos_runtime::rpc_payload_copy(&mut buf);
+        for b in buf[..n].iter_mut() {
+            if *b >= b'a' && *b <= b'z' {
+                *b -= 32;
+            }
+        }
+        gos_runtime::rpc_reply_buf(&buf[..n]);
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vt = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(upper),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "BUFRPC",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vt).expect("bind");
+
+    let payload = b"graph os kernel";
+    let mut response = [0u8; 64];
+    let n = gos_runtime::rpc_invoke_buf(VEC, payload, &mut response)
+        .expect("buf round trip ok");
+    assert_eq!(n, payload.len());
+    assert_eq!(&response[..n], b"GRAPH OS KERNEL");
+}
+
+// Phase L.4 — deadline-aware scheduling.  When a node's executor
+// dispatch exceeds its declared RDTSC budget, the runtime increments
+// `deadline_overrun_count` and emits a Fault envelope.  This test:
+//   1. registers a node whose executor deliberately wastes cycles
+//   2. sets a tiny deadline (10 cycles) so the call always overruns
+//   3. dispatches it once
+//   4. asserts overrun counter incremented
+#[test]
+fn deadline_overrun_increments_counter_when_executor_exceeds_budget() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent,
+        NodeExecutorVTable, NodeSpec, PluginId, PluginManifest, RuntimeNodeType, Signal,
+        VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("DEADLN");
+    const KEY: &str = "dl.slow";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.slow");
+    const VEC: VectorAddress = VectorAddress::new(14, 0, 0, 1);
+
+    unsafe extern "C" fn slow(_c: *mut ExecutorContext, _e: *const NodeEvent) -> ExecStatus {
+        // Burn a noticeable number of cycles so any sensible deadline
+        // is blown past.  Inline asm pause is portable and observable.
+        for _ in 0..10_000 {
+            unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+        }
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vt = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(slow),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "DEADLN",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vt).expect("bind");
+
+    // No deadline set yet — dispatch shouldn't count as overrun.
+    let before = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert_eq!(gos_runtime::deadline_overrun_count(), before,
+        "no overrun expected when deadline=0");
+
+    // Now set an absurdly tight deadline (10 cycles) and re-dispatch.
+    gos_runtime::set_node_deadline(VEC, 10).expect("set deadline");
+    assert_eq!(gos_runtime::node_deadline(VEC), Some(10));
+    let before2 = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert!(
+        gos_runtime::deadline_overrun_count() > before2,
+        "overrun counter must increment after 10 000 pause cycles vs 10-cycle deadline"
+    );
+
+    // Resetting to 0 disables enforcement again.
+    gos_runtime::set_node_deadline(VEC, 0).expect("clear deadline");
+    let before3 = gos_runtime::deadline_overrun_count();
+    let _ = gos_runtime::route_signal(VEC, Signal::Spawn { payload: 0 });
+    assert_eq!(
+        gos_runtime::deadline_overrun_count(),
+        before3,
+        "deadline=0 must suppress overrun tracking"
+    );
+}
+
+// Phase L.6 — runtime-internal RPC echo target at vector 0.0.0.0.
+// Calling rpc_invoke on RPC_ECHO_VECTOR returns the request word
+// unchanged WITHOUT going through executor dispatch.  Useful as a
+// debugging primitive and for benchmarking the RPC plumbing.
+#[test]
+fn rpc_echo_vector_returns_request_verbatim() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    // No need to register any node — the echo handler bypasses
+    // dispatch entirely.
+    let response = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, 42)
+        .expect("echo should always succeed");
+    assert_eq!(response, 42);
+
+    let response2 = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, u64::MAX)
+        .expect("echo should always succeed for max");
+    assert_eq!(response2, u64::MAX);
+
+    let response3 = gos_runtime::rpc_invoke(gos_runtime::RPC_ECHO_VECTOR, 0)
+        .expect("echo zero");
+    assert_eq!(response3, 0);
+}
+
+// Phase J.7 — priority-aware ready queue.  Three nodes enqueued in
+// FIFO order with priorities Low, High, Default.  After two pumps
+// the High-priority node must have run first, then Default, then
+// Low.  Verifies the architectural commitment that priority
+// scheduling is supported, not just declared.
+#[test]
+fn ready_queue_pops_highest_priority_first() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("PRIO_RT");
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.prio");
+    const VLOW: VectorAddress = VectorAddress::new(12, 0, 0, 1);
+    const VHIGH: VectorAddress = VectorAddress::new(12, 0, 0, 2);
+    const VDEF: VectorAddress = VectorAddress::new(12, 0, 0, 3);
+
+    // Each executor pushes its vector into a shared order log so we
+    // can assert dispatch order.
+    static ORDER: Mutex<[u32; 4]> = Mutex::new([0; 4]);
+    static IDX: AtomicUsize = AtomicUsize::new(0);
+
+    // pump() routes ready-queue entries through `activate` which
+    // invokes on_resume (NOT on_event).  Use on_resume so the
+    // priority-ordered ready-queue scheduling is exercised.
+    unsafe extern "C" fn record_low(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 1;
+        ExecStatus::Done
+    }
+    unsafe extern "C" fn record_high(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 2;
+        ExecStatus::Done
+    }
+    unsafe extern "C" fn record_def(_c: *mut ExecutorContext) -> ExecStatus {
+        let i = IDX.fetch_add(1, AtomicOrdering::SeqCst);
+        ORDER.lock().unwrap()[i] = 3;
+        ExecStatus::Done
+    }
+
+    let make_spec = |key: &'static str| NodeSpec {
+        node_id: derive_node_id(PID, key),
+        local_node_key: key,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let make_vt = |f: unsafe extern "C" fn(*mut ExecutorContext) -> ExecStatus| NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: None,
+        on_suspend: None,
+        on_resume: Some(f),
+        on_teardown: None,
+        on_telemetry: None,
+    };
+
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "PRIO_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VLOW, make_spec("prio.low")).expect("low");
+    gos_runtime::register_node(PID, VHIGH, make_spec("prio.high")).expect("high");
+    gos_runtime::register_node(PID, VDEF, make_spec("prio.def")).expect("def");
+    gos_runtime::bind_native_executor(VLOW, make_vt(record_low)).expect("bind low");
+    gos_runtime::bind_native_executor(VHIGH, make_vt(record_high)).expect("bind high");
+    gos_runtime::bind_native_executor(VDEF, make_vt(record_def)).expect("bind def");
+
+    gos_runtime::set_node_priority(VLOW, gos_runtime::NODE_PRIORITY_BACKGROUND)
+        .expect("set low priority");
+    gos_runtime::set_node_priority(VHIGH, gos_runtime::NODE_PRIORITY_HIGH)
+        .expect("set high priority");
+    // VDEF stays at NODE_PRIORITY_DEFAULT (128).
+
+    assert_eq!(
+        gos_runtime::node_priority(VHIGH),
+        Some(gos_runtime::NODE_PRIORITY_HIGH)
+    );
+    assert_eq!(
+        gos_runtime::node_priority(VLOW),
+        Some(gos_runtime::NODE_PRIORITY_BACKGROUND)
+    );
+    assert_eq!(
+        gos_runtime::node_priority(VDEF),
+        Some(gos_runtime::NODE_PRIORITY_DEFAULT)
+    );
+
+    // Enqueue in deliberately-bad FIFO order: low first, default second, high third.
+    let low_id = gos_protocol::derive_node_id(PID, "prio.low");
+    let def_id = gos_protocol::derive_node_id(PID, "prio.def");
+    let high_id = gos_protocol::derive_node_id(PID, "prio.high");
+    gos_runtime::enqueue_ready(low_id).expect("enq low");
+    gos_runtime::enqueue_ready(def_id).expect("enq def");
+    gos_runtime::enqueue_ready(high_id).expect("enq high");
+
+    // Three pumps to drain the ready queue.
+    gos_runtime::pump();
+    gos_runtime::pump();
+    gos_runtime::pump();
+
+    let order = ORDER.lock().unwrap();
+    // First out: high (2), then default (3), then low (1).
+    assert_eq!(order[0], 2, "high priority node ran first");
+    assert_eq!(order[1], 3, "default-priority ran second");
+    assert_eq!(order[2], 1, "background ran last");
+}
+
+// Phase J.3 — request-response RPC primitive.  Calling
+// `rpc_invoke(target, request)` synchronously runs the target's
+// executor and returns its `rpc_reply(value)` call as the response.
+// One u64 in, one u64 out — the primitive on which all higher-level
+// RPC schemes compose.
+#[test]
+fn rpc_invoke_round_trip_through_target_executor() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("RPC_RT");
+    const KEY: &str = "rpc.target";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.rpc");
+    const VEC: VectorAddress = VectorAddress::new(11, 0, 0, 1);
+
+    // Target executor: read the RPC request, double it, reply.
+    unsafe extern "C" fn rpc_double(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+        let req = gos_runtime::rpc_request().expect("rpc_request inside dispatch");
+        gos_runtime::rpc_reply(req.wrapping_mul(2));
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vtable = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(rpc_double),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "RPC_RT",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vtable).expect("bind");
+
+    // Outside any RPC dispatch: rpc_request returns None, rpc_reply is no-op.
+    assert!(gos_runtime::rpc_request().is_none());
+    gos_runtime::rpc_reply(99); // should be silently dropped
+
+    // Round-trip.
+    let response = gos_runtime::rpc_invoke(VEC, 21).expect("rpc_invoke ok");
+    assert_eq!(response, 42);
+
+    // Another round-trip with a different value to confirm the slot
+    // properly resets between calls.
+    let response2 = gos_runtime::rpc_invoke(VEC, 100).expect("rpc_invoke ok 2");
+    assert_eq!(response2, 200);
+
+    // Calling an unregistered target errors via Runtime variant.
+    let unknown = VectorAddress::new(99, 99, 99, 99);
+    let result = gos_runtime::rpc_invoke(unknown, 0);
+    assert!(matches!(result, Err(gos_runtime::RpcError::Runtime(_))));
+}
+
+// Phase J.3 — when the target's executor does NOT call rpc_reply,
+// the round trip surfaces `RpcError::NoReply` so the caller can
+// distinguish "remote ran but said nothing" from a runtime error.
+#[test]
+fn rpc_invoke_returns_no_reply_when_target_silent() {
+    use gos_protocol::{
+        derive_node_id, EntryPolicy, ExecStatus, ExecutorContext, ExecutorId, NodeEvent, NodeExecutorVTable,
+        NodeSpec, PluginId, PluginManifest, RuntimeNodeType, VectorAddress, GOS_ABI_VERSION,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    gos_runtime::reset();
+
+    const PID: PluginId = PluginId::from_ascii("RPC_QUIET");
+    const KEY: &str = "rpc.silent";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.quiet");
+    const VEC: VectorAddress = VectorAddress::new(11, 0, 0, 9);
+
+    unsafe extern "C" fn rpc_silent(_ctx: *mut ExecutorContext, _event: *const NodeEvent) -> ExecStatus {
+        // Deliberately don't call rpc_reply.
+        ExecStatus::Done
+    }
+
+    let spec = NodeSpec {
+        node_id: derive_node_id(PID, KEY),
+        local_node_key: KEY,
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: EXEC,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    let vtable = NodeExecutorVTable {
+        executor_id: EXEC,
+        on_init: None,
+        on_event: Some(rpc_silent),
+        on_suspend: None,
+        on_resume: None,
+        on_teardown: None,
+        on_telemetry: None,
+    };
+    let manifest = PluginManifest {
+        abi_version: GOS_ABI_VERSION,
+        plugin_id: PID,
+        name: "RPC_QUIET",
+        version: 1,
+        depends_on: &[],
+        permissions: &[],
+        exports: &[],
+        imports: &[],
+        nodes: &[],
+        edges: &[],
+        signature: None,
+        policy_hash: [0; 16],
+    };
+    gos_runtime::discover_plugin(manifest).expect("discover");
+    gos_runtime::mark_plugin_loaded(PID).expect("loaded");
+    gos_runtime::register_node(PID, VEC, spec).expect("register");
+    gos_runtime::bind_native_executor(VEC, vtable).expect("bind");
+
+    let result = gos_runtime::rpc_invoke(VEC, 42);
+    assert!(matches!(result, Err(gos_runtime::RpcError::NoReply)));
+}
+
+// Audit P2 #5 — `manifest_edges_well_formed` accepts well-formed
+// self-rooted edges and rejects:
+//   * zero edge_id / from_node / to_node
+//   * from_node that is not in the manifest's own `nodes` slice
+//
+// This is the integrity gate that prevents a plugin from declaring an
+// edge that *originates* in another plugin's node.  Cross-plugin
+// edges must flow through `imports`/`depends_on`, which the bundle
+// loader auto-synthesises into Mount/Depend.
+#[test]
+fn manifest_edges_well_formed_accepts_self_rooted_rejects_malformed() {
+    use gos_protocol::{
+        derive_edge_id, derive_node_id, manifest_edges_well_formed, EdgeId, EdgeSpec, EntryPolicy,
+        ExecutorId, NodeId, NodeSpec, PluginId, PluginManifest, RoutePolicy, RuntimeEdgeType,
+        RuntimeNodeType, GOS_ABI_VERSION,
+    };
+
+    const PID: PluginId = PluginId::from_ascii("EDGE_VAL");
+    const FROM_KEY: &str = "edge.from";
+    const TO_KEY: &str = "edge.to";
+    const EXEC: ExecutorId = ExecutorId::from_ascii("native.edge");
+    const FROM_NID: NodeId = derive_node_id(PID, FROM_KEY);
+    const TO_NID: NodeId = derive_node_id(PID, TO_KEY);
+    const FOREIGN_NID: NodeId = derive_node_id(PluginId::from_ascii("OTHER"), "their.node");
+
+    const NODES: &[NodeSpec] = &[
+        NodeSpec {
+            node_id: FROM_NID,
+            local_node_key: FROM_KEY,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: EXEC,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        },
+        NodeSpec {
+            node_id: TO_NID,
+            local_node_key: TO_KEY,
+            node_type: RuntimeNodeType::Service,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: EXEC,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        },
+    ];
+
+    fn manifest_with(edges: &'static [EdgeSpec]) -> PluginManifest {
+        PluginManifest {
+            abi_version: GOS_ABI_VERSION,
+            plugin_id: PID,
+            name: "EDGE_VAL",
+            version: 1,
+            depends_on: &[],
+            permissions: &[],
+            exports: &[],
+            imports: &[],
+            nodes: NODES,
+            edges,
+            signature: None,
+            policy_hash: [0; 16],
+        }
+    }
+
+    // Empty edges slice — trivially well-formed.
+    assert!(manifest_edges_well_formed(&manifest_with(&[])));
+
+    // Well-formed self-rooted edge.
+    const GOOD: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "good"),
+        from_node: FROM_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(manifest_edges_well_formed(&manifest_with(GOOD)));
+
+    // Zero edge_id — rejected.
+    const ZERO_ID: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: EdgeId::ZERO,
+        from_node: FROM_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_ID)));
+
+    // Zero from_node — rejected.
+    const ZERO_FROM: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "zero-from"),
+        from_node: NodeId::ZERO,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_FROM)));
+
+    // Zero to_node — rejected.
+    const ZERO_TO: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FROM_NID, TO_NID, "zero-to"),
+        from_node: FROM_NID,
+        to_node: NodeId::ZERO,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(ZERO_TO)));
+
+    // from_node references a foreign plugin's node — rejected (spoof
+    // attempt: declaring an edge that originates outside this plugin).
+    const FOREIGN_FROM: &[EdgeSpec] = &[EdgeSpec {
+        edge_id: derive_edge_id(FOREIGN_NID, TO_NID, "foreign"),
+        from_node: FOREIGN_NID,
+        to_node: TO_NID,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: u64::MAX,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    }];
+    assert!(!manifest_edges_well_formed(&manifest_with(FOREIGN_FROM)));
 }

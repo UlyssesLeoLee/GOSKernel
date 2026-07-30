@@ -122,9 +122,10 @@ D 和 E 可以并行启动；F 必须排在 D 之后；G 依赖 B.4 + E；H 是�
 - `replay(blob, sink)`：解析 header、逐条 deserialize、回调 sink；trailing bytes / unknown kind / version mismatch 都有独立 `JournalError`
 - 实际写盘 / 启动 replay 接入是 F.5（FAT32 write + supervisor boot hook）后续切片
 
-### F.5 写路径 + 安全 — 后续切片
+### F.5 写路径 + 安全 — 后续切片（与 Phase I 并行，不阻塞 Gen-1 UI）
 - FAT32 write、journal fsync
 - 拔电后 journal 完整
+- 详见 Phase F.5 独立 slice 计划（待 H.1.x + Phase I 启动后另起文档）
 
 ---
 
@@ -154,6 +155,25 @@ D 和 E 可以并行启动；F 必须排在 D 之后；G 依赖 B.4 + E；H 是�
 
 ---
 
+## 当前主线 (2026-05-17 起)
+
+**H.1.x → Phase I (Vulkan Gen-1) 串行；F.5 持久化与之并行。**
+
+理由：Gen-1 "次世代图论 3D UI" 的灵魂演示是 `MATCH ... CREATE/DELETE` 后下一帧场景实时变化。这强依赖 H.1.x（让 Cypher 写真的改 runtime 边表），不依赖 F.5（关机持久化）。F.5 可以并行推进，不阻塞 Gen-1 UI 可用。
+
+排序：
+
+```
+H.1.x (Cypher 写接通 runtime) ──> Phase I.0~I.3 (Vulkan host-bridge Gen-1)
+                                  │
+F.5 (FAT32 write + journal fsync) ─┴── 并行，Gen-1 release 前并入
+D.1/D.2 补完 (xtask qemu / CI)    ── Phase I 测试基础设施前置
+```
+
+完整 Phase I 设计见 [`doc/PHASE_I_GRAPHICS.md`](../doc/PHASE_I_GRAPHICS.md)。
+
+---
+
 ## Phase H — 自描述 OS（结构性 ✅ 已完成 2026-04-27）
 
 | 子项 | 状态 | 落地内容 |
@@ -165,7 +185,15 @@ D 和 E 可以并行启动；F 必须排在 D 之后；G 依赖 B.4 + E；H 是�
 | H.5 Snapshot / migration | ✅ | `gos-journal` 扩展：`SnapshotHeader/SnapshotNode/SnapshotEdge` 固定字节布局、`replay_snapshot(blob, on_node, on_edge)` 回调式遍历 |
 
 **后续切片（独立追踪，不阻塞 Phase H 视为完成）：**
-- H.1.x — supervisor 实现 `MutationDispatcher`，接到 runtime 边表
+- **H.1.x — supervisor 实现 `MutationDispatcher`，接到 runtime 边表 ← 当前主线**
+  - H.1.x.1 — `gos-runtime` 暴露 `apply_edge_mutation(AuditedMutation) -> Result<EdgeId, MutationError>` 公开 API；内部走现有边表 + restart_generation 簿记
+  - H.1.x.2 — supervisor `MutationDispatcher` impl：策略 gate（degraded module 拒绝 / 跨 domain 边拒绝 / mount target 必须是 mount-capable）→ 调 runtime → 产 `AuditedMutation` → 推 control-plane envelope 队列 → 推 journal ring
+  - H.1.x.3 — `k-cypher` parser 接受 `CREATE (a)-[:Mount]->(b)`、`MATCH (a)-[r:Mount]->(b) DELETE r`、`MATCH (theme.current)-[r:Use]->() CREATE (theme.current)-[:Use]->(target)` 三种语句，调 dispatcher
+  - H.1.x.4 — control-plane envelope 订阅：shell `show mutations` 实时显示最近 N 条；这是 Phase I `k-scene` 的输入源
+  - H.1.x.5 — 测试工程化：
+    - `host-tests/gos-runtime-harness` 加 `apply_edge_mutation_round_trip`：构造合成 graph → AddEdge → 断言 edge 存在 + envelope 已发 + journal ring 已写
+    - `host-tests/gos-supervisor-harness` 加 `mutation_gate_rejects_*`：degraded module / 跨 domain / 不存在端点 / non-receptive 边类型
+    - `gos-cypher-mut` property test（kani 模式）：对任意合法 mutation 序列，runtime 边表与 journal replay 结果一致
 - H.2.1 — 真实 LLM backend 注入（k-ai host bridge 缺典型化协议接通）
 - H.3.1 — 真实 cluster transport（TCP-over-smoltcp / 共享内存 IPC）
 - H.4.x — 更多 invariants（fault_module 收敛、charge_gpu_bytes 不超 quota、journal 序列化是恒等）

@@ -637,6 +637,7 @@ impl CapabilityRecord {
         spec: CapabilitySpec {
             namespace: "",
             name: "",
+            version: 0,
         },
     };
 }
@@ -3296,6 +3297,139 @@ pub fn heap_grant_summary(module: ModuleHandle, base: u64) -> Result<HeapGrantSu
     })
 }
 
+// ============================================================================
+// Phase H.1.x.2 — supervisor gate for Cypher mutations.
+//
+// `gos-runtime` already exposes `apply_edge_mutation`, which does
+// node-lookup + edge-table primitives but no policy.  The supervisor
+// is the policy authority: it owns module lifecycle (Faulted /
+// degraded), domain boundaries, and audit attribution.  Every Cypher
+// write that originates outside the kernel substrate (shell direct
+// entry, k-ai suggestion, future external admin) must flow through
+// `apply_cypher_mutation` so the gate sees it.
+//
+// Current gate (Gen-1):
+//   * Resolve the from-node of the mutation to its owning plugin/module.
+//   * Reject if that module is Faulted (degraded) — degraded modules
+//     shouldn't be able to rewrite the graph that the supervisor is
+//     trying to restart-loop them out of.
+//
+// Deferred to follow-up slices:
+//   * Cross-domain edge rejection (H.1.x.5)
+//   * Mount-target-must-be-mount-capable (H.1.x.5)
+//   * Journal ring append (F.5 integration)
+// ============================================================================
+
+/// Stable u32 tags returned through `MutationError::DispatcherRejected`
+/// for gate-level rejections.  Numbered above 1000 to leave the 1..=13
+/// range to `gos_runtime::dispatcher_error_for` (RuntimeError tags).
+pub const MUTATION_GATE_DEGRADED: u32 = 1001;
+pub const MUTATION_GATE_OWNER_UNKNOWN: u32 = 1002;
+pub const MUTATION_GATE_EDGE_NOT_FOUND: u32 = 1003;
+/// J.6 — sub-domain ACL rejected the mutation (e.g., user-class
+/// node tried to Mount a Hardware node).
+pub const MUTATION_GATE_ACL_VIOLATION: u32 = 1004;
+
+/// Apply a Cypher mutation under the supervisor gate.
+///
+/// `source` is the 16-byte attribution stamped into the audit envelope
+/// (e.g. `*b"K_SHELL\0\0\0\0\0\0\0\0\0"`, `*b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0"`).
+///
+/// Returns the affected EdgeId on success.  On failure, the runtime
+/// edge table is untouched and no audit envelope is emitted.
+pub fn apply_cypher_mutation(
+    mutation: gos_cypher_mut::CypherMutation,
+    source: [u8; 16],
+) -> Result<gos_protocol::EdgeId, gos_cypher_mut::MutationError> {
+    use gos_cypher_mut::{CypherMutation, MutationError};
+
+    // Step 1: pick the node we will gate on.  For AddEdge/RebindUse
+    // this is the explicit `from`; for RemoveEdge we have to resolve
+    // the edge first to discover its from-node.
+    let gate_node = match mutation {
+        CypherMutation::AddEdge { from, .. } | CypherMutation::RebindUse { from, .. } => from,
+        CypherMutation::RemoveEdge { edge_id } => gos_runtime::edge_from_node(edge_id).ok_or(
+            MutationError::DispatcherRejected(MUTATION_GATE_EDGE_NOT_FOUND),
+        )?,
+    };
+
+    // Step 2: gate on owning module's lifecycle.  An unknown owner
+    // (node deleted between cypher parse and gate) is also rejected —
+    // safer than passing through to runtime and getting a more cryptic
+    // UnknownEndpoint two layers down.
+    let owner_plugin = gos_runtime::plugin_id_for_node(gate_node).ok_or(
+        MutationError::DispatcherRejected(MUTATION_GATE_OWNER_UNKNOWN),
+    )?;
+    let owner_module = gos_protocol::ModuleId(owner_plugin.0);
+    {
+        let guard = SUPERVISOR.lock();
+        if let Some(handle) = guard.find_module_by_module_id(owner_module) {
+            if guard.is_module_faulted(handle) {
+                return Err(MutationError::DispatcherRejected(MUTATION_GATE_DEGRADED));
+            }
+        }
+        // Owner module not installed in supervisor (boot-time fixture,
+        // host-test plugin) -> permit.  The runtime gate above already
+        // confirmed the node exists; degraded check only blocks
+        // *installed* modules in Faulted state.
+    }
+
+    // Step 2.5: J.6 sub-domain ACL gate.  Look up source + target
+    // classes via the runtime's node summaries and reject any
+    // mutation that would create or rebind an edge whose (source,
+    // target, kind) triple isn't permitted by the policy in
+    // `gos_protocol::sub_domain_allows_edge`.  Today the only rule
+    // is "Hardware can only be Mounted by KernelDriver"; the
+    // framework supports adding more without touching this site.
+    if let Some((from_class, to_class, edge_kind_u8)) =
+        cypher_acl_endpoints(&mutation)
+    {
+        if !gos_protocol::sub_domain_allows_edge(from_class, to_class, edge_kind_u8) {
+            return Err(MutationError::DispatcherRejected(MUTATION_GATE_ACL_VIOLATION));
+        }
+    }
+
+    // Step 3: hand to runtime.  Runtime emits a low-level EdgeUpsert
+    // envelope from `register_edge`; the audited envelope below is the
+    // supervisor-attributed one.
+    let edge_id = gos_runtime::apply_edge_mutation(mutation)?;
+
+    // Step 4: emit the audited envelope.  Two sinks:
+    //   * general control-plane queue (existing subscribers)
+    //   * H.1.x.4 audit ring (shell `show mutations`, Phase I k-scene),
+    //     so audit consumers don't have to filter every Hello / Metric.
+    let audited = gos_cypher_mut::AuditedMutation {
+        mutation,
+        source,
+        tick: gos_runtime::current_tick(),
+    };
+    let envelope = audited.to_envelope();
+    gos_runtime::push_envelope(envelope);
+    gos_runtime::push_audit_envelope(envelope);
+
+    Ok(edge_id)
+}
+
+/// J.6 helper — extract (source sub_domain, target sub_domain,
+/// edge_kind_u8) for ACL gating.  Returns None when the mutation
+/// is one for which class restrictions don't apply (RemoveEdge —
+/// removing an edge is always permitted; the gate ran on creation).
+fn cypher_acl_endpoints(
+    mutation: &gos_cypher_mut::CypherMutation,
+) -> Option<(gos_protocol::NodeSubDomain, gos_protocol::NodeSubDomain, u8)> {
+    use gos_cypher_mut::CypherMutation;
+    let (from, to, kind) = match mutation {
+        CypherMutation::AddEdge { from, to, edge_kind } => (*from, *to, *edge_kind as u8),
+        CypherMutation::RebindUse { from, new_target } => {
+            (*from, *new_target, gos_cypher_mut::ReceptiveEdgeKind::Use as u8)
+        }
+        CypherMutation::RemoveEdge { .. } => return None,
+    };
+    let from_class = gos_runtime::node_summary_by_id(from)?.sub_domain;
+    let to_class = gos_runtime::node_summary_by_id(to)?.sub_domain;
+    Some((from_class, to_class, kind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3308,12 +3442,15 @@ mod tests {
     const TEST_EXPORTS: &[CapabilitySpec] = &[CapabilitySpec {
         namespace: "demo",
         name: "echo",
+        version: 1,
     }];
 
     const TEST_IMPORTS: &[ImportSpec] = &[ImportSpec {
         namespace: "demo",
         capability: "echo",
         required: true,
+        min_version: 1,
+        max_version: u32::MAX,
     }];
 
     const TEST_SEGMENTS: &[gos_protocol::ModuleImageSegment] = &[

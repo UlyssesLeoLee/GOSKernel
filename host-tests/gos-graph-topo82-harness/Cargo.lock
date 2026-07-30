@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gos-graph-topo81-harness"
+name = "gos-graph-topo82-harness"
 version = "0.1.0"
 dependencies = [
  "gos-cypher-mut",

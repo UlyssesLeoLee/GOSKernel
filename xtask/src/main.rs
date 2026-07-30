@@ -19,8 +19,15 @@
 //! works around the global target pin).
 
 use std::env;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -39,9 +46,12 @@ fn main() -> ExitCode {
         "check" => run_check(&workspace_root),
         "test" => run_test(&workspace_root),
         "lint" => run_lint(&workspace_root),
+        "qemu" => run_qemu_smoke(&workspace_root),
+        "check-interfaces" => run_check_interfaces(&workspace_root),
         "all" | "verify" => run_check(&workspace_root)
             .and_then(|_| run_test(&workspace_root))
-            .and_then(|_| run_lint(&workspace_root)),
+            .and_then(|_| run_lint(&workspace_root))
+            .and_then(|_| run_check_interfaces(&workspace_root)),
         "help" | "--help" | "-h" => {
             print_help();
             return ExitCode::SUCCESS;
@@ -66,7 +76,7 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "gos-xtask\n\nverbs:\n  check    cargo check -p gos-kernel (kernel target)\n  test     run every host-side harness\n  lint     cargo clippy on kernel + each host harness, -D warnings\n  all      check + test + lint (default)\n  verify   alias for all (future: graph-architecture verifier)\n  help     this message"
+        "gos-xtask\n\nverbs:\n  check               cargo check -p gos-kernel (kernel target)\n  test                run every host-side harness\n  lint                cargo clippy on kernel + each host harness, -D warnings\n  qemu                boot kernel under QEMU; pass once steady-state marker seen\n  check-interfaces    verify interfaces/plugins.yaml matches Rust builtin_bundle\n  all                 check + test + lint + check-interfaces (default)\n  verify              alias for all\n  help                this message"
     );
 }
 
@@ -83,6 +93,7 @@ fn run_test(root: &Path) -> Result<(), u8> {
     let harnesses = [
         "host-tests/gos-supervisor-harness",
         "host-tests/gos-runtime-harness",
+        "host-tests/gos-gfx-harness",
     ];
     for harness in harnesses {
         println!("xtask: cargo test in {}", harness);
@@ -92,6 +103,25 @@ fn run_test(root: &Path) -> Result<(), u8> {
             .status();
         forward_status(status)?;
     }
+
+    // Phase I.1.1 — gos-gfx-bridge-host runs under the *stable*
+    // toolchain (its rust-toolchain.toml pins stable; see that file
+    // for the rationale).  The kernel-pinned nightly's `build-std`
+    // setting bleeds into wgpu's 200-crate graph and either OOMs
+    // rustc-LLVM or trips E0152 duplicate lang items, so we route
+    // through `rustup run stable cargo test` here instead of
+    // delegating to the default toolchain.  When the kernel nightly
+    // pin advances past the blockers, this branch collapses back
+    // into the loop above.
+    let bridge_host = "crates/gos-gfx-bridge-host";
+    println!("xtask: rustup run stable cargo test in {}", bridge_host);
+    let status = Command::new("rustup")
+        .args(["run", "stable", "cargo", "test"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(root.join(bridge_host))
+        .status();
+    forward_status(status)?;
+
     Ok(())
 }
 
@@ -120,6 +150,7 @@ fn run_lint(root: &Path) -> Result<(), u8> {
     let harnesses = [
         "host-tests/gos-supervisor-harness",
         "host-tests/gos-runtime-harness",
+        "host-tests/gos-gfx-harness",
     ];
     for harness in harnesses {
         println!("xtask: cargo clippy --all-targets  (in {})", harness);
@@ -132,6 +163,234 @@ fn run_lint(root: &Path) -> Result<(), u8> {
         forward_status(status)?;
     }
     Ok(())
+}
+
+/// Phase D.2 — QEMU smoke verb.
+///
+/// Boots the kernel under QEMU via the workspace's `bootimage runner`
+/// (configured in `.cargo/config.toml`), tails stdout for the steady-
+/// state marker emitted right before the kernel starts servicing
+/// interrupts, then kills the child.  Pass if the marker is seen
+/// within `QEMU_SMOKE_TIMEOUT_SECS`; fail otherwise.
+///
+/// This is the foundation Phase I `gfx-smoke` and `gfx-interact` will
+/// build on — once Vulkan host-bridge lands, the same harness will
+/// add a `gfx: first frame submitted` marker check on top of this one.
+const QEMU_SMOKE_TIMEOUT_SECS: u64 = 90;
+const QEMU_SMOKE_MARKER: &str = "boot: enabling interrupts; entering steady-state";
+
+fn run_qemu_smoke(root: &Path) -> Result<(), u8> {
+    println!(
+        "xtask: qemu smoke — booting kernel, watching for `{}` (timeout {}s)",
+        QEMU_SMOKE_MARKER, QEMU_SMOKE_TIMEOUT_SECS
+    );
+
+    // `cargo run -p gos-kernel` invokes the bootimage runner configured
+    // in .cargo/config.toml, which in turn launches qemu-system-x86_64
+    // with `-serial stdio`.  That redirects the kernel's serial port
+    // straight onto our captured stdout, which is what we tail below.
+    let mut child = match Command::new("cargo")
+        .args(["run", "-p", "gos-kernel"])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("xtask: failed to spawn cargo run: {}", err);
+            return Err(1);
+        }
+    };
+    let child_pid = child.id();
+
+    let found = Arc::new(AtomicBool::new(false));
+    let mut reader_threads = Vec::new();
+    for (label, pipe) in [
+        ("stdout", child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)),
+        ("stderr", child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)),
+    ] {
+        if let Some(pipe) = pipe {
+            let found = Arc::clone(&found);
+            let label = label.to_string();
+            reader_threads.push(thread::spawn(move || {
+                let reader = BufReader::new(pipe);
+                for line in reader.lines().map_while(Result::ok) {
+                    println!("[{}] {}", label, line);
+                    if line.contains(QEMU_SMOKE_MARKER) {
+                        found.store(true, Ordering::Release);
+                    }
+                }
+            }));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(QEMU_SMOKE_TIMEOUT_SECS);
+    let outcome = loop {
+        if found.load(Ordering::Acquire) {
+            break Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Kernel exited on its own — only counts as success if
+                // the marker was also observed before exit.
+                if found.load(Ordering::Acquire) {
+                    break Ok(());
+                }
+                eprintln!(
+                    "xtask: qemu exited before marker (status: {})",
+                    status.code().unwrap_or(-1)
+                );
+                break Err(2);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("xtask: try_wait failed: {}", err);
+                break Err(1);
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "xtask: qemu smoke TIMEOUT after {}s — marker never seen",
+                QEMU_SMOKE_TIMEOUT_SECS
+            );
+            break Err(3);
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
+
+    // Cleanup: kill cargo (and on Windows, taskkill /t cascades to
+    // descendant qemu-system-x86_64.exe).  We deliberately don't
+    // .wait() here — on success the kernel runs forever; the user-
+    // visible measurement is whether the marker appeared.
+    let _ = kill_child_tree(&mut child, child_pid);
+    for handle in reader_threads {
+        let _ = handle.join();
+    }
+
+    match outcome {
+        Ok(()) => {
+            println!("xtask: qemu smoke PASS — marker observed");
+            Ok(())
+        }
+        Err(code) => Err(code),
+    }
+}
+
+fn kill_child_tree(child: &mut std::process::Child, pid: u32) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // On Windows the bootimage runner spawns qemu-system-x86_64.exe
+        // as a child of cargo; SIGKILL on cargo alone orphans QEMU and
+        // leaves the disk image locked for the next run.  taskkill /T
+        // walks the tree.
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status();
+        // Best-effort fallback in case taskkill couldn't find cargo.
+        let _ = child.kill();
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid; // suppress unused warning
+        child.kill()
+    }
+}
+
+/// L+ — validate that interfaces/plugins.yaml mentions exactly the
+/// same `plugin_id`s as the Rust-side `BuiltinPluginDescriptor`
+/// constants in `crates/hypervisor/src/builtin_bundle.rs`.  Catches
+/// drift between the human-readable contract and the source of truth.
+///
+/// We don't use serde_yaml — keeping xtask dependency-free and the
+/// parse trivial (`plugin_id: K_*` line scan vs `K_*_ID` const scan).
+fn run_check_interfaces(root: &Path) -> Result<(), u8> {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    let yaml_path = root.join("interfaces").join("plugins.yaml");
+    let bundle_path = root.join("crates").join("hypervisor").join("src").join("builtin_bundle.rs");
+
+    let yaml_text = match fs::read_to_string(&yaml_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("xtask: cannot read {}: {}", yaml_path.display(), e);
+            return Err(2);
+        }
+    };
+    let bundle_text = match fs::read_to_string(&bundle_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("xtask: cannot read {}: {}", bundle_path.display(), e);
+            return Err(2);
+        }
+    };
+
+    // YAML: scan for `plugin_id: K_FOO` (with optional surrounding
+    // whitespace/quotes) — strict enough to ignore comments + arbitrary
+    // value formatting.
+    let mut yaml_ids: BTreeSet<String> = BTreeSet::new();
+    for line in yaml_text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let trimmed = line.strip_prefix("- plugin_id:").or_else(|| line.strip_prefix("plugin_id:"));
+        if let Some(rest) = trimmed {
+            let val = rest
+                .trim()
+                .trim_matches(|c: char| c == '"' || c == '\'')
+                .to_string();
+            if !val.is_empty() {
+                yaml_ids.insert(val);
+            }
+        }
+    }
+
+    // Rust: scan for `const K_FOO_ID: PluginId = PluginId::from_ascii("K_FOO");`.
+    let mut rust_ids: BTreeSet<String> = BTreeSet::new();
+    for line in bundle_text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("const ") || !trimmed.contains("PluginId::from_ascii(\"") {
+            continue;
+        }
+        // Extract the string literal between from_ascii(" and the next ")
+        if let Some(start) = trimmed.find("from_ascii(\"") {
+            let after = &trimmed[start + "from_ascii(\"".len()..];
+            if let Some(end) = after.find('"') {
+                let val = &after[..end];
+                if !val.is_empty() {
+                    rust_ids.insert(val.to_string());
+                }
+            }
+        }
+    }
+
+    let missing_in_yaml: Vec<&String> = rust_ids.difference(&yaml_ids).collect();
+    let extra_in_yaml: Vec<&String> = yaml_ids.difference(&rust_ids).collect();
+
+    println!("xtask: check-interfaces");
+    println!("  plugins.yaml ids:    {}", yaml_ids.len());
+    println!("  builtin_bundle ids:  {}", rust_ids.len());
+
+    if missing_in_yaml.is_empty() && extra_in_yaml.is_empty() {
+        println!("  ✓ contracts in sync");
+        return Ok(());
+    }
+    if !missing_in_yaml.is_empty() {
+        eprintln!("  ✗ in Rust but missing from plugins.yaml:");
+        for id in &missing_in_yaml {
+            eprintln!("      {}", id);
+        }
+    }
+    if !extra_in_yaml.is_empty() {
+        eprintln!("  ✗ in plugins.yaml but missing from Rust:");
+        for id in &extra_in_yaml {
+            eprintln!("      {}", id);
+        }
+    }
+    Err(1)
 }
 
 fn forward_status(status: std::io::Result<std::process::ExitStatus>) -> Result<(), u8> {

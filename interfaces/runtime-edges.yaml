@@ -1,0 +1,97 @@
+# GOS Kernel — Runtime Edge Types (YAML mirror)
+#
+# 描述运行时图边的类型分类，以及哪些是 receptive (用户可通过 Cypher
+# 创建/删除) vs runtime-internal (只能由 runtime 自身产生).
+#
+# Source of truth: gos_protocol::RuntimeEdgeType 和
+# gos_cypher_mut::ReceptiveEdgeKind.
+
+edge_types:
+
+  # 运行时内部边 (用户通过 Cypher 不能直接创建)
+  - name: Call
+    discriminant: 0x01
+    receptive: false
+    color: NodeApp
+    style: SolidPulsed
+    description: 同步调用边. RPC 路径产生.
+  - name: Spawn
+    discriminant: 0x02
+    receptive: false
+    color: NodeApp
+    style: SolidPulsed
+    description: 子节点 spawn 关系.
+  - name: Depend
+    discriminant: 0x03
+    receptive: false
+    color: DimWhite
+    style: Dotted
+    description: depends_on manifest 字段自动产生.
+  - name: Signal
+    discriminant: 0x04
+    receptive: false
+    color: NodeApp
+    style: SolidPulsed
+    description: 异步 signal/conditional-route 自动产生.
+  - name: Return
+    discriminant: 0x05
+    receptive: false
+    color: DimWhite
+    style: Solid
+    description: Call 边的反向 reply path.
+  - name: Sync
+    discriminant: 0x07
+    receptive: false
+    color: DimWhite
+    style: Solid
+    description: 同步屏障 (barrier) edge.
+  - name: Stream
+    discriminant: 0x08
+    receptive: false
+    color: DimWhite
+    style: Solid
+    description: 流式 channel (未来扩展用).
+
+  # 用户可通过 Cypher 创建/删除的 receptive 边
+  - name: Mount
+    discriminant: 0x06
+    receptive: true
+    color: NodeDriver
+    style: DoubleSolid
+    description: 把一个节点 mount 进另一个的 namespace. J.6 ACL 限制 KernelDriver 才能 Mount Hardware.
+    cypher_verb: "CREATE MOUNT 'F' -> 'T'"
+  - name: Use
+    discriminant: 0x09
+    receptive: true
+    color: NodeService
+    style: Dashed
+    description: 能力使用. P0 #1 在 resolve_capability 时自动产生; Cypher CREATE USE 显式产生.
+    cypher_verb: "CREATE USE 'F' -> 'T' / REBIND USE 'F' -> 'T'"
+  - name: Link
+    discriminant: 0x0A
+    receptive: true
+    color: Highlight
+    style: GradientEnds
+    description: 元数据 link, 不路由 signal. H.1.x.3 通过 Cypher LINK 创建.
+    cypher_verb: "LINK 'F' -> 'T'"
+
+# Cypher 控制面 verb 列表 (Phase J/K/L)
+cypher_verbs:
+  reads:
+    - SHOW STATS
+    - SHOW NODES [OF CLASS X | WHERE class=X]
+    - SHOW EDGES [OF KIND X | FROM 'V' | TO 'V']
+    - SHOW PLUGINS
+    - SHOW JOURNAL [LIMIT N]
+    - SHOW CAPABILITIES
+    - SHOW PRIORITY 'V'
+  mutations:
+    - CREATE MOUNT 'F' -> 'T'
+    - CREATE USE 'F' -> 'T'
+    - LINK 'F' -> 'T'
+    - REBIND USE 'F' -> 'T'
+    - DELETE EDGE 'e:V'
+  actions:
+    - SET PRIORITY 'V' = N
+    - RESET PRIORITY 'V'
+    - INVOKE 'V' [WITH N]

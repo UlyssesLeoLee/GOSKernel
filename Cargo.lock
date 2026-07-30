@@ -25,6 +25,21 @@ name = "bootloader"
 version = "0.9.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f6a8a495d2f93fe3d6eb3a224f9aa749a63cfd746ed03eb5ddcbd00ade7d8f"
+dependencies = [
+ "font8x8 0.2.7",
+]
+
+[[package]]
+name = "font8x8"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e63201c624b8c8883921b1a1accc8916c4fa9dbfb15d122b26e4dde945b86bbf"
+
+[[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
 name = "gos-ai-bridge"
@@ -50,6 +65,10 @@ dependencies = [
  "gos-protocol",
  "spin",
 ]
+
+[[package]]
+name = "gos-gfx-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "gos-hal"
@@ -88,11 +107,13 @@ dependencies = [
  "gos-supervisor",
  "gos-vfs",
  "k-ai",
+ "k-assets",
  "k-chat",
  "k-cpuid",
  "k-cuda-host",
  "k-cypher",
  "k-fat32",
+ "k-fb",
  "k-gdt",
  "k-heap",
  "k-idt",
@@ -105,12 +126,14 @@ dependencies = [
  "k-pit",
  "k-pmm",
  "k-ps2",
+ "k-rast",
  "k-serial",
  "k-shell",
  "k-vga",
  "k-vk-host",
  "k-vmm",
  "libm",
+ "spin",
  "x86_64",
 ]
 
@@ -148,6 +171,7 @@ name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
  "gos-cypher-mut",
+ "gos-journal",
  "gos-protocol",
  "spin",
 ]
@@ -196,6 +220,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "k-assets"
+version = "0.2.0"
+
+[[package]]
 name = "k-chat"
 version = "0.1.0"
 dependencies = [
@@ -231,8 +259,10 @@ dependencies = [
 name = "k-cypher"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-protocol",
  "gos-runtime",
+ "gos-supervisor",
 ]
 
 [[package]]
@@ -241,6 +271,18 @@ version = "0.1.0"
 dependencies = [
  "gos-protocol",
  "gos-vfs",
+]
+
+[[package]]
+name = "k-fb"
+version = "0.2.0"
+dependencies = [
+ "font8x8 0.3.1",
+ "gos-hal",
+ "k-assets",
+ "libm",
+ "spin",
+ "x86_64",
 ]
 
 [[package]]
@@ -365,6 +407,7 @@ dependencies = [
  "gos-hal",
  "gos-protocol",
  "gos-runtime",
+ "k-fb",
  "k-ime",
  "k-pic",
  "k-shell",
@@ -375,9 +418,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "k-rast"
+version = "0.2.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "k-rope"
 version = "0.1.0"
 dependencies = [
+ "gos-protocol",
+ "libm",
+]
+
+[[package]]
+name = "k-scene"
+version = "0.2.0"
+dependencies = [
+ "gos-gfx-protocol",
  "gos-protocol",
  "libm",
 ]

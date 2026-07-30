@@ -329,7 +329,7 @@ const VMM_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphWrite, arg0: 0, arg1: 0 },
 ];
 const VMM_EXPORTS: &[CapabilitySpec] = &[
-    CapabilitySpec { namespace: "memory", name: "map_page" },
+    CapabilitySpec { namespace: "memory", name: "map_page", version: 1 },
 ];
 
 pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {

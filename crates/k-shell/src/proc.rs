@@ -3183,6 +3183,7 @@ fn dispatch_text_command(
                                         RuntimeEdgeType::Sync   => "sync",
                                         RuntimeEdgeType::Stream => "stream",
                                         RuntimeEdgeType::Use    => "use",
+                                        RuntimeEdgeType::Link   => "link",
                                     };
                                     use gos_protocol::GraphEdgeDirection;
                                     let (dir_sym, peer_key) = match edge.direction {
@@ -3334,6 +3335,7 @@ fn dispatch_text_command(
                             RuntimeEdgeType::Sync   => "Sync",
                             RuntimeEdgeType::Stream => "Stream",
                             RuntimeEdgeType::Use    => "Use",
+                            RuntimeEdgeType::Link   => "Link",
                         };
                         let rp_label = match edge.route_policy {
                             RoutePolicy::Direct    => "Direct",
@@ -3424,6 +3426,7 @@ fn dispatch_text_command(
                 RuntimeEdgeType::Sync   => "sync  ",
                 RuntimeEdgeType::Stream => "stream",
                 RuntimeEdgeType::Use    => "use   ",
+                RuntimeEdgeType::Link   => "link  ",
             };
             super::set_color(sink, et_color, 0);
             super::print_str(sink, "  ");

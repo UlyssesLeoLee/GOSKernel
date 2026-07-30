@@ -1,0 +1,344 @@
+# GOS Kernel — 全部 builtin 插件接口契约（YAML mirror）
+#
+# Source of truth 在每个插件 crate 的 BuiltinPluginDescriptor 里；
+# 这个文件是人类可读的 mirror，供工具链 / AI 助手 / 审计消费。
+# 修改 manifest 后请同步更新这里。
+#
+# 字段语义见 ../docs/ARCHITECTURE.md + interfaces/README.md。
+# 所有 version / min_version / max_version 是 J.4 capability versioning 的字段。
+
+abi_version: "0.2.0"
+
+plugins:
+
+  # ── Layer 0 — bedrock infrastructure ──────────────────────────────
+
+  - plugin_id: K_PANIC
+    name: k-panic
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on: []
+    permissions: []
+    edges: []
+
+  - plugin_id: K_SERIAL
+    name: k-serial
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: serial, name: write, version: 1 }
+    imports: []
+    depends_on: []
+    permissions:
+      - { kind: PortIo, arg0: "0x3F8", arg1: "0x3FF" }
+    edges: []
+
+  - plugin_id: K_VGA
+    name: k-vga
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: console, name: write, version: 1 }
+      - { namespace: display, name: pointer, version: 1 }
+    imports: []
+    depends_on: []
+    permissions:
+      - { kind: PortIo, arg0: "0x3C0", arg1: "0x3DF" }
+      - { kind: PortIo, arg0: "0x3C8", arg1: "0x3C9" }
+    edges: []
+
+  - plugin_id: K_GDT
+    name: k-gdt
+    version: 1
+    node_type: Hardware
+    sub_domain: Hardware
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on: []
+    permissions: []
+    edges: []
+
+  - plugin_id: K_CPUID
+    name: k-cpuid
+    version: 1
+    node_type: Hardware
+    sub_domain: Hardware
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on: []
+    permissions: []
+    edges: []
+
+  - plugin_id: K_PIC
+    name: k-pic
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on: []
+    permissions:
+      - { kind: PortIo, arg0: "0x20", arg1: "0x21" }
+      - { kind: PortIo, arg0: "0xA0", arg1: "0xA1" }
+    edges: []
+
+  - plugin_id: K_PIT
+    name: k-pit
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on:
+      - K_PIC
+    permissions:
+      - { kind: PortIo, arg0: "0x40", arg1: "0x43" }
+      - { kind: IrqBind, arg0: 0, arg1: 0 }
+    edges: []
+
+  - plugin_id: K_IDT
+    name: k-idt
+    version: 1
+    node_type: Hardware
+    sub_domain: Hardware
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on:
+      - K_GDT
+    permissions: []
+    edges: []
+
+  # ── Layer 1 — memory ──────────────────────────────────────────────
+
+  - plugin_id: K_PMM
+    name: k-pmm
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: memory, name: frame_alloc, version: 1 }
+    imports: []
+    depends_on: []
+    permissions:
+      - { kind: GraphWrite, arg0: 0, arg1: 0 }
+    edges: []
+
+  - plugin_id: K_VMM
+    name: k-vmm
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: memory, name: map_page, version: 1 }
+    imports: []
+    depends_on:
+      - K_PMM
+    permissions: []
+    edges: []
+
+  - plugin_id: K_HEAP
+    name: k-heap
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: memory, name: alloc, version: 1 }
+    imports: []
+    depends_on:
+      - K_VMM
+    permissions: []
+    edges: []
+
+  # ── Layer 2 — user input ──────────────────────────────────────────
+
+  - plugin_id: K_PS2
+    name: k-ps2
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    state_schema_hash: "0x2008"
+    exports: []
+    imports:
+      - { namespace: shell, capability: input, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_PIC
+    permissions:
+      - { kind: PortIo, arg0: "0x60", arg1: "0x64" }
+      - { kind: IrqBind, arg0: 1, arg1: 0 }
+    edges: []
+    nodes:
+      - local_key: ps2.entry
+        vector: "6.4.0.0"          # CORE_PS2
+        routes:
+          - { key: 0, target: K_SHELL }   # PS2_ROUTE_SHELL
+          - { key: 1, target: K_IME }     # PS2_ROUTE_IME
+
+  - plugin_id: K_MOUSE
+    name: k-mouse
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports: []
+    imports: []
+    depends_on:
+      - K_PIC
+    permissions:
+      - { kind: PortIo, arg0: "0x60", arg1: "0x64" }
+      - { kind: IrqBind, arg0: 12, arg1: 0 }
+    edges: []
+
+  # ── Layer 3 — IO/clipboard/networking ─────────────────────────────
+
+  - plugin_id: K_IME
+    name: k-ime
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: ime, name: control, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+      - { namespace: shell, capability: input, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on: []
+    permissions: []
+    edges: []
+
+  - plugin_id: K_NET
+    name: k-net
+    version: 1
+    node_type: Driver
+    sub_domain: KernelDriver
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: net, name: uplink, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_PIC
+    permissions:
+      - { kind: IrqBind, arg0: 11, arg1: 0 }   # e1000 default IRQ
+    edges: []
+
+  # ── Layer 4 — shell + cypher control plane ────────────────────────
+
+  - plugin_id: K_SHELL
+    name: k-shell
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: shell, name: input, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_VGA
+    permissions: []
+    edges: []
+
+  - plugin_id: K_CYPHER
+    name: k-cypher
+    version: 1
+    node_type: Router
+    sub_domain: Routing
+    entry_policy: Bootstrap
+    state_schema_hash: "0x2014"
+    exports:
+      - { namespace: cypher, name: query, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_VGA
+    permissions: []
+    edges: []
+    nodes:
+      - local_key: cypher.entry
+        vector: "6.6.0.0"
+
+  - plugin_id: K_CHAT
+    name: k-chat
+    version: 1
+    node_type: Service
+    sub_domain: Service
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: chat, name: bridge, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+      - { namespace: net,     capability: uplink, required: false, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_VGA
+    permissions: []
+    edges: []
+
+  - plugin_id: K_NIM
+    name: k-nim
+    version: 1
+    node_type: Compute
+    sub_domain: Compute
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: nim, name: inference, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+      - { namespace: net,     capability: uplink, required: false, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_VGA
+    permissions: []
+    edges: []
+
+  # ── Layer 5 — AI orchestration / CUDA ─────────────────────────────
+
+  - plugin_id: K_AI
+    name: k-ai
+    version: 1
+    node_type: Aggregator
+    sub_domain: Routing
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: ai,    name: supervisor,  version: 1 }
+      - { namespace: graph, name: orchestrate, version: 1 }
+    imports:
+      - { namespace: console, capability: write, required: true, min_version: 1, max_version: 4294967295 }
+      - { namespace: shell,   capability: input, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on:
+      - K_VGA
+      - K_SHELL
+    permissions: []
+    edges: []
+
+  - plugin_id: K_CUDA
+    name: k-cuda-host
+    version: 1
+    node_type: Compute
+    sub_domain: Compute
+    entry_policy: Bootstrap
+    exports:
+      - { namespace: cuda, name: bridge, version: 1 }
+    imports:
+      - { namespace: shell, capability: input, required: true, min_version: 1, max_version: 4294967295 }
+    depends_on: []
+    permissions: []
+    edges: []
+    nodes:
+      - local_key: cuda.host
+        vector: "6.7.0.0"

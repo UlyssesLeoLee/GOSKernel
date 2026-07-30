@@ -250,6 +250,9 @@ fn edge_color(t: RuntimeEdgeType) -> u32 {
         RuntimeEdgeType::Sync => 0x4f9a7b,
         RuntimeEdgeType::Stream => 0xc25e8a,
         RuntimeEdgeType::Use => 0x5b6b8c,
+        // Metadata/reference edge (no runtime routing) — neutral gray,
+        // visually distinct from the active data-flow edge colors above.
+        RuntimeEdgeType::Link => 0x999999,
     }
 }
 

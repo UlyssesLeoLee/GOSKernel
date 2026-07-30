@@ -10,6 +10,7 @@ members = [
     "crates/gos-cluster",
     "crates/gos-cypher-mut",
     "crates/gos-rewrite",
+    "crates/gos-gfx-protocol",
     "crates/gos-journal",
     "crates/gos-log",
     "crates/gos-sign",
@@ -41,4 +42,8 @@ members = [
     "crates/k-chat",
     "crates/k-nim",
     "crates/k-rope",
+    "crates/k-scene",
+    "crates/k-fb",
+    "crates/k-rast",
+    "crates/k-assets",
 ]

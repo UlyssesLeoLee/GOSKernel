@@ -1378,6 +1378,7 @@ pub fn dispatch_edges_list(sink: &ConsoleSink, filter_type: Option<RuntimeEdgeTy
         Some(RuntimeEdgeType::Sync)    => " sync edges\n",
         Some(RuntimeEdgeType::Stream)  => " stream edges\n",
         Some(RuntimeEdgeType::Use)     => " use edges\n",
+        Some(RuntimeEdgeType::Link)    => " link edges\n",
     };
     set_color(sink, 11, 0);
     print_str(sink, title);
@@ -1401,6 +1402,7 @@ pub fn dispatch_edges_list(sink: &ConsoleSink, filter_type: Option<RuntimeEdgeTy
                 RuntimeEdgeType::Signal => 12,
                 RuntimeEdgeType::Stream => 6,
                 RuntimeEdgeType::Return => 7,
+                RuntimeEdgeType::Link   => 8,
             };
             set_color(sink, fg, 0);
             print_str(sink, "  ");
@@ -1480,6 +1482,7 @@ pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
     let mut n_sync = 0usize;
     let mut n_stream = 0usize;
     let mut n_use = 0usize;
+    let mut n_link = 0usize;
 
     loop {
         let (total, returned) = gos_runtime::edge_page::<PAGE>(offset, &mut items);
@@ -1494,6 +1497,7 @@ pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
                 RuntimeEdgeType::Sync => n_sync += 1,
                 RuntimeEdgeType::Stream => n_stream += 1,
                 RuntimeEdgeType::Use => n_use += 1,
+                RuntimeEdgeType::Link => n_link += 1,
             }
         }
         offset += returned;
@@ -1507,7 +1511,7 @@ pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
     set_color(sink, 7, 0);
 
     let total_edges =
-        n_call + n_spawn + n_depend + n_signal + n_return + n_mount + n_sync + n_stream + n_use;
+        n_call + n_spawn + n_depend + n_signal + n_return + n_mount + n_sync + n_stream + n_use + n_link;
     if total_edges == 0 {
         set_color(sink, 8, 0);
         print_str(sink, "  (no edges)\n");
@@ -1536,6 +1540,7 @@ pub fn dispatch_edge_type_summary(sink: &ConsoleSink) {
     print_edge_count!("sync", n_sync, 7);
     print_edge_count!("stream", n_stream, 7);
     print_edge_count!("use", n_use, 13);
+    print_edge_count!("link", n_link, 8);
     set_color(sink, 7, 0);
     print_str(sink, "  total: ");
     print_num_inline(sink, total_edges);
@@ -16375,6 +16380,7 @@ fn edge_type_label(edge_type: gos_protocol::RuntimeEdgeType) -> &'static str {
         gos_protocol::RuntimeEdgeType::Sync => "sync",
         gos_protocol::RuntimeEdgeType::Stream => "stream",
         gos_protocol::RuntimeEdgeType::Use => "use",
+        gos_protocol::RuntimeEdgeType::Link => "link",
     }
 }
 
@@ -17533,6 +17539,64 @@ fn render_graph_footer(sink: &ConsoleSink, state: &ShellState, label: &str) {
     focus_footer_input(sink, state);
 }
 
+/// Phase H.1.x.4 — render the audited-mutation ring captured by the
+/// supervisor `apply_cypher_mutation` gate.  Newest entries are shown
+/// first; an empty ring renders a "no mutations yet" notice.
+fn render_mutations_overview(sink: &ConsoleSink, state: &mut ShellState) {
+    use gos_protocol::ControlPlaneEnvelope;
+    const ROWS: usize = 6;
+    let mut buf: [Option<ControlPlaneEnvelope>; ROWS] = [None; ROWS];
+    let returned = gos_runtime::snapshot_audit_ring(&mut buf);
+    let lifetime = gos_runtime::audit_ring_total();
+
+    state.graph_mode = GRAPH_MODE_INFO;
+    state.graph_offset = 0;
+    state.graph_total = returned;
+    clear_command_area(sink);
+
+    let mut title = LineBuf::<72>::new();
+    title.push_str("AUDITED MUTATIONS  ring=");
+    title.push_dec(returned as u64);
+    title.push_str("  lifetime=");
+    title.push_dec(lifetime);
+    draw_linebuf(sink, GRAPH_VIEW_TITLE_ROW, 4, 11, 0, &title);
+
+    if returned == 0 {
+        draw_text(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW,
+            4,
+            8,
+            0,
+            "no mutations yet",
+        );
+        draw_text(
+            sink,
+            GRAPH_VIEW_FIRST_ITEM_ROW + 1,
+            4,
+            8,
+            0,
+            "try: CREATE MOUNT 'V_from' -> 'V_to' (in cypher)",
+        );
+        render_graph_footer(sink, state, "audit ring");
+        return;
+    }
+
+    for row in 0..ROWS {
+        fill_band(sink, GRAPH_VIEW_FIRST_ITEM_ROW + row, 0, SCREEN_WIDTH, 0, 0);
+        let Some(env) = buf[row] else { break };
+        let mut line = LineBuf::<72>::new();
+        line.push_str("src=");
+        line.push_fixed_ascii(&env.subject);
+        line.push_str("  arg0=");
+        line.push_hex(env.arg0);
+        line.push_str("  arg1=");
+        line.push_hex(env.arg1);
+        draw_linebuf(sink, GRAPH_VIEW_FIRST_ITEM_ROW + row, 4, 7, 0, &line);
+    }
+    render_graph_footer(sink, state, "audit ring");
+}
+
 fn render_graph_notice(sink: &ConsoleSink, state: &mut ShellState, title: &str, line1: &str, line2: &str, fg: u8) {
     state.graph_mode = GRAPH_MODE_INFO;
     state.graph_offset = 0;
@@ -18343,6 +18407,12 @@ fn handle_graph_command(sink: &ConsoleSink, state: &mut ShellState, cmd: &str) -
         } else {
             render_graph_prev_page(sink, state);
         }
+        return true;
+    }
+    if cmd == "show mutations" {
+        begin_graph_command(sink, state);
+        push_graph_nav_state(state);
+        render_mutations_overview(sink, state);
         return true;
     }
     if cmd == "node" {
