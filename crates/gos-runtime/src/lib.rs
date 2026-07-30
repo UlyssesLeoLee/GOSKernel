@@ -185,8 +185,9 @@ struct NodeRecord {
     /// builtin nodes operate in this mode until the supervisor calls
     /// `bind_instance`.
     instance_id: NodeInstanceId,
-    /// Cumulative signals dispatched to this node (wraps at u64::MAX).
-    signal_count: u64,
+    /// Cumulative signals dispatched to this node since registration
+    /// (saturates at u32::MAX; matches `NodeProcSummary`/`NodeTraceEntry::serial`).
+    signal_count: u32,
     /// Count of outbound Stream edges from this node.  Used to short-circuit
     /// the O(MAX_EDGES) fan-out scan when there are no Stream subscribers.
     stream_out_count: u8,
@@ -194,8 +195,6 @@ struct NodeRecord {
     /// Populated via `register_node_routes` after the node is registered.
     routes: [ConditionalRoute; MAX_CONDITIONAL_ROUTES],
     route_count: u8,
-    /// Cumulative signal dispatches to this node since registration.
-    signal_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -571,7 +570,7 @@ impl GraphRuntime {
             entry_policy: record.spec.entry_policy,
             executor_id: record.spec.executor_id,
             export_count: record.spec.exports.len(),
-            signal_count: record.signal_count,
+            signal_count: record.signal_count as u64,
         })
     }
 
@@ -26517,6 +26516,8 @@ pub fn fault_node(vector: VectorAddress) -> Result<(), RuntimeError> {
 /// fault queue.  Returns `Err(NodeNotFound)` when no node has that vector address.
 pub fn resume_node(vector: VectorAddress) -> Result<(), RuntimeError> {
     RUNTIME.lock().resume_node(vector)
+}
+
 /// A non-consuming peek at one ready-queue entry.
 #[derive(Clone, Copy)]
 pub struct ReadyQueueEntry {

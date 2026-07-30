@@ -191,6 +191,7 @@ version = "0.2.0"
 dependencies = [
  "gos-protocol",
  "gos-runtime",
+ "k-net",
  "k-shell",
 ]
 
@@ -398,10 +399,14 @@ version = "0.2.0"
 dependencies = [
  "gos-hal",
  "gos-journal",
+ "gos-log",
  "gos-protocol",
  "gos-runtime",
  "gos-supervisor",
+ "k-heap",
+ "k-pmm",
  "spin",
+ "x86_64",
 ]
 
 [[package]]

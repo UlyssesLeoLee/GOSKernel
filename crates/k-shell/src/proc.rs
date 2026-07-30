@@ -2958,6 +2958,10 @@ fn dispatch_text_command(
                     ControlPlaneMessageKind::SnapshotChunk   => (8u8,  "snap    "),
                     ControlPlaneMessageKind::Fault           => (12u8, "FAULT   "),
                     ControlPlaneMessageKind::Metric          => (8u8,  "metric  "),
+                    ControlPlaneMessageKind::MutationAudit    => (13u8, "mut+    "),
+                    ControlPlaneMessageKind::CausalOverflow   => (12u8, "OVERFLOW"),
+                    ControlPlaneMessageKind::RuleApplied      => (13u8, "rule+   "),
+                    ControlPlaneMessageKind::SubscribeTriggered => (14u8, "sub!    "),
                 };
                 super::set_color(sink, color, 0);
                 super::print_str(sink, "  ");
