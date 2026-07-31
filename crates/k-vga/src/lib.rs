@@ -51,46 +51,6 @@ pub const BUFFER_WIDTH: usize = SCREEN_WIDTH;
 pub const BUFFER_HEIGHT: usize = SCREEN_HEIGHT;
 const CELL_COUNT: usize = BUFFER_WIDTH * BUFFER_HEIGHT;
 
-type ThemePalette = [[u8; 3]; 16];
-
-const PALETTE_WABI: ThemePalette = [
-    [4, 4, 4],
-    [9, 14, 21],
-    [14, 21, 15],
-    [17, 24, 22],
-    [23, 16, 13],
-    [22, 18, 24],
-    [30, 24, 18],
-    [43, 40, 34],
-    [21, 21, 20],
-    [19, 27, 36],
-    [24, 34, 24],
-    [29, 37, 34],
-    [38, 26, 22],
-    [34, 29, 37],
-    [44, 37, 28],
-    [58, 56, 50],
-];
-
-const PALETTE_SHOJI: ThemePalette = [
-    [5, 4, 3],
-    [10, 16, 28],
-    [18, 24, 16],
-    [19, 29, 28],
-    [28, 18, 16],
-    [28, 18, 27],
-    [41, 32, 19],
-    [51, 47, 39],
-    [25, 22, 18],
-    [20, 32, 46],
-    [30, 40, 24],
-    [36, 46, 44],
-    [43, 29, 24],
-    [42, 30, 40],
-    [55, 48, 24],
-    [63, 60, 52],
-];
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -189,13 +149,6 @@ fn update_hw_cursor(row: usize, col: usize) {
         data.write((pos & 0x00FF) as u8);
         index.write(0x0E);
         data.write((pos >> 8) as u8);
-    }
-}
-
-fn palette_for_theme(theme: u8) -> &'static ThemePalette {
-    match theme {
-        DISPLAY_THEME_SHOJI => &PALETTE_SHOJI,
-        _ => &PALETTE_WABI,
     }
 }
 

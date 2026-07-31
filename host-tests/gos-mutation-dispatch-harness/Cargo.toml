@@ -1,0 +1,10 @@
+[package]
+name = "gos-mutation-dispatch-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-mutation-dispatch = { path = "../../crates/gos-mutation-dispatch" }
+gos-protocol = { path = "../../crates/gos-protocol" }

@@ -7,6 +7,7 @@ edition = "2024"
 gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 gos-runtime = { path = "../gos-runtime" }
+gos-mutation-dispatch = { path = "../gos-mutation-dispatch" }
 gos-supervisor = { path = "../gos-supervisor", default-features = false }
 gos-journal = { path = "../gos-journal" }
 gos-log = { path = "../gos-log" }

@@ -153,7 +153,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut vk_keepalive_tick = vk_last_tick;
     loop {
         let lt0 = unsafe { core::arch::x86_64::_rdtsc() };
-        x86_64::instructions::interrupts::without_interrupts(gos_supervisor::service_system_cycle);
+        let report = x86_64::instructions::interrupts::without_interrupts(
+            gos_supervisor::service_system_cycle,
+        );
+        if !report.quiesced {
+            // ADR-002 §4: a non-quiescent cycle is reported, not silently
+            // truncated — see gos_supervisor::CYCLE_DEPTH_CAP.
+            raw_serial_println(format_args!(
+                "service_system_cycle: causal-depth guard tripped at depth={} (steps={})",
+                report.max_causal_depth, report.steps
+            ));
+        }
         let lt1 = unsafe { core::arch::x86_64::_rdtsc() };
         fbtest::render_frame();
         let lt2 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -3564,7 +3574,9 @@ impl Write for RawSerial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let mut port = x86_64::instructions::port::Port::<u8>::new(0x3F8);
         for byte in s.bytes() {
-            unsafe { port.write(byte); }
+            unsafe {
+                port.write(byte);
+            }
         }
         Ok(())
     }

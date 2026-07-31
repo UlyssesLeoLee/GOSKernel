@@ -6,9 +6,10 @@
 //! browse edges, `CALL activate(n)`, `CALL spawn(n)`, `CALL route(e)`).
 //! H.1 adds the *write* half — but on a leash:
 //!
-//!   * Only edge mutations and `Mount`/`Use` rebinds are accepted.
-//!     Node create/delete, NodeId reassignment, plugin manifest
-//!     mutation are all explicitly rejected.
+//!   * Edge mutations, `Mount`/`Use` rebinds, and (V2.5e, ADR-005 option A)
+//!     provisional node creation are accepted. Node *delete*, NodeId
+//!     reassignment, and plugin manifest mutation are still explicitly
+//!     rejected.
 //!   * Every accepted mutation produces an `AuditedMutation` record
 //!     suitable for control-plane envelope emission AND journal
 //!     persistence (F.4 hooks straight in).
@@ -16,9 +17,14 @@
 //!     parser and the AI suggestion path (H.2) feed the same gate.
 //!
 //! Why so restrictive: the whole Phase B substrate (instance binding,
-//! quota, fault attribution) hinges on stable `NodeId`s.  Allowing
-//! Cypher to invent or destroy nodes would invalidate every claim and
-//! restart_generation count downstream.
+//! quota, fault attribution) hinges on stable `NodeId`s. `CreateNode` is
+//! safe here because it only ever produces *provisional* nodes
+//! (`gos_runtime::create_provisional_node`, ADR-005 §六): `Unbound` /
+//! `NodeInstanceId::ZERO`, ineligible for claim/quota until explicitly
+//! promoted via a Grant edge (ADR-005 §五 step 3, not yet wired).
+//! Destroying or renumbering *existing* nodes would still invalidate
+//! every claim and restart_generation count downstream, so those
+//! remain rejected.
 
 use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, NodeId, VectorAddress};
 
@@ -55,6 +61,15 @@ pub enum CypherMutation {
         from: NodeId,
         new_target: NodeId,
     },
+    /// `CREATE (n:Label {props})` for a node pattern not bound by an
+    /// earlier `MATCH` (V2.5e, ADR-005 option A). Allocates a fresh
+    /// *provisional* node via `gos_runtime::create_provisional_node`:
+    /// visible, connectable, and rendered from the next `graph_epoch`
+    /// onward, but `Unbound` / `NodeInstanceId::ZERO` until promoted via
+    /// a Grant edge. `Label`/`{props}` storage isn't wired yet — the
+    /// dispatcher returns the allocated `NodeId` (see [`apply_mutation`])
+    /// so a same-statement `CREATE (a)-[:Mount]->(n)` can reference it.
+    CreateNode,
 }
 
 /// The narrow set of edge types Cypher mutations are allowed to
@@ -108,6 +123,12 @@ impl AuditedMutation {
             CypherMutation::RebindUse { from, new_target } => {
                 (node_id_low(from), node_id_low(new_target))
             }
+            // The allocated NodeId doesn't exist until the dispatcher runs
+            // (see `apply_mutation`), so there's nothing to pack here — this
+            // envelope just audits *that* `source` requested a create.
+            // `register_node` emits its own `NodeUpsert` with the real
+            // id/vector when the dispatcher actually applies it.
+            CypherMutation::CreateNode => (0, 0),
         };
         ControlPlaneEnvelope {
             version: 1,
@@ -142,7 +163,9 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
             | ReceptiveEdgeKind::Depend
             | ReceptiveEdgeKind::Link => Ok(()),
         },
-        CypherMutation::RemoveEdge { .. } | CypherMutation::RebindUse { .. } => Ok(()),
+        CypherMutation::RemoveEdge { .. }
+        | CypherMutation::RebindUse { .. }
+        | CypherMutation::CreateNode => Ok(()),
     }
 }
 
@@ -164,15 +187,23 @@ pub trait MutationDispatcher {
     ) -> Result<EdgeId, u32>;
     fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeId, u32>;
     fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32>;
+    /// Allocate a fresh provisional node (ADR-005 option A, V2.5e) and
+    /// return its `NodeId`. Backed by `gos_runtime::create_provisional_node`
+    /// in the real dispatcher.
+    fn create_node(&mut self) -> Result<NodeId, u32>;
 }
 
-/// Apply a single Cypher mutation through a dispatcher.  Returns the
-/// `EdgeId` that was affected: the newly created edge for `AddEdge` /
-/// `RebindUse`, or the input id echoed back for `RemoveEdge`.
+/// Apply a mutation through `dispatcher`. Returns `Ok(Some(node_id))` for
+/// [`CypherMutation::CreateNode`] (the freshly allocated node's id — there's
+/// nothing to return for the other variants, which mutate existing
+/// edges/bindings rather than mint new identities; their affected `EdgeId`
+/// is available from the dispatcher's own trait methods but not threaded
+/// back out here — edge-scoped callers that need it call the dispatcher
+/// directly instead of going through this generic entry point).
 pub fn apply_mutation<D: MutationDispatcher>(
     dispatcher: &mut D,
     mutation: CypherMutation,
-) -> Result<EdgeId, MutationError> {
+) -> Result<Option<NodeId>, MutationError> {
     pre_validate(&mutation)?;
     match mutation {
         CypherMutation::AddEdge { from, to, edge_kind } => {
@@ -184,10 +215,12 @@ pub fn apply_mutation<D: MutationDispatcher>(
             }
             dispatcher
                 .add_edge(from, to, edge_kind)
+                .map(|_edge_id| None)
                 .map_err(MutationError::DispatcherRejected)
         }
         CypherMutation::RemoveEdge { edge_id } => dispatcher
             .remove_edge(edge_id)
+            .map(|_edge_id| None)
             .map_err(MutationError::DispatcherRejected),
         CypherMutation::RebindUse { from, new_target } => {
             if !dispatcher.lookup_node(from) {
@@ -198,7 +231,12 @@ pub fn apply_mutation<D: MutationDispatcher>(
             }
             dispatcher
                 .rebind_use(from, new_target)
+                .map(|_edge_id| None)
                 .map_err(MutationError::DispatcherRejected)
         }
+        CypherMutation::CreateNode => dispatcher
+            .create_node()
+            .map(Some)
+            .map_err(MutationError::DispatcherRejected),
     }
 }

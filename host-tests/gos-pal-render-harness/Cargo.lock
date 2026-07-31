@@ -23,6 +23,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gos-journal"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
+name = "gos-mutation-dispatch"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+]
+
+[[package]]
 name = "gos-pal-render-harness"
 version = "0.1.0"
 dependencies = [
@@ -49,6 +64,7 @@ name = "gos-runtime"
 version = "0.2.0"
 dependencies = [
  "gos-cypher-mut",
+ "gos-journal",
  "gos-protocol",
  "spin",
 ]
@@ -66,6 +82,7 @@ name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
  "gos-cypher-mut",
+ "gos-mutation-dispatch",
  "gos-protocol",
  "gos-rewrite",
  "gos-runtime",

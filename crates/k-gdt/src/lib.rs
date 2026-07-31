@@ -207,8 +207,9 @@ pub fn init_gdt() {
 /// Phase G.1 — synchronous full-bootstrap GDT init.  Combines what
 /// `gdt_on_init` does (write the static GdtState into HAL_MATRIX) and
 /// what `init_gdt` does (lgdt + CS reload + load_tss).  Callable
-/// directly from `init_kernel_tier_drivers` before the runtime pump
-/// has had a chance to run on_init for this node.
+/// directly from `hypervisor::main::step_gdt_init` (the
+/// `gos_mutation_dispatch::boot::gos_kernel::GDT_INIT` boot node) before the runtime
+/// pump has had a chance to run on_init for this node.
 pub fn boot_init_gdt() {
     unsafe {
         init_hal_state();

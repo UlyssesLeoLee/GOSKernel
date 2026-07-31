@@ -1,0 +1,14 @@
+[package]
+name = "gos-shadow-kernel-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
+gos-protocol = { path = "../../crates/gos-protocol" }
+gos-runtime = { path = "../../crates/gos-runtime" }
+gos-mutation-dispatch = { path = "../../crates/gos-mutation-dispatch" }
+gos-sign = { path = "../../crates/gos-sign" }
+gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }

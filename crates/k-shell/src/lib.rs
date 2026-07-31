@@ -187,7 +187,6 @@ const WABI_PAPER: u8 = 7;
 const WABI_MOON: u8 = 15;
 const WABI_TEA: u8 = 6;
 const WABI_SAGE: u8 = 10;
-const THEME_EDGE_KEY: &str = "theme.use";
 const CLIPBOARD_EDGE_KEY: &str = "clipboard.mount";
 const THEME_NAME_WABI: &str = "wabi";
 const THEME_NAME_SHOJI: &str = "shoji";
@@ -609,10 +608,6 @@ fn theme_node_id(theme: u8) -> gos_protocol::NodeId {
     }
 }
 
-fn theme_edge_id(theme: u8) -> gos_protocol::EdgeId {
-    derive_edge_id(THEME_CURRENT_NODE_ID, theme_node_id(theme), THEME_EDGE_KEY)
-}
-
 fn linked_theme_kind() -> Option<u8> {
     let mut edges = [GraphEdgeSummary::EMPTY; 4];
     let Ok((_total, returned)) = gos_runtime::edge_page_for_node(THEME_CURRENT_NODE_VEC, 0, &mut edges) else {
@@ -808,24 +803,18 @@ fn append_clipboard_byte(sink: &ConsoleSink, state: &mut ShellState, byte: u8) {
     append_command_byte(sink, state, byte, false);
 }
 
+/// Repoint `theme.current`'s exclusive `Use` edge to the chosen theme.
+///
+/// Uses the atomic single-epoch `rebind_use` (ADR-004 §2.2): it removes any
+/// existing `Use` edge sourced at `theme.current` and inserts the new one under
+/// **one** `graph_epoch` bump, so no reader (e.g. the desktop renderer) ever
+/// observes `theme.current` holding zero `Use` edges mid-switch. This replaces
+/// the former `unregister`×2 + `register` dance, which bumped the epoch three
+/// times with zero-`Use` windows in between. Edge identity is now the unified
+/// `"use"` key (the rebind scans by source+type to remove, so it also cleans up
+/// any pre-rebind `"theme.use"`-keyed edge seeded before this change).
 fn sync_theme_use_edges(theme: u8) -> bool {
-    let _ = gos_runtime::unregister_edge(theme_edge_id(THEME_KIND_WABI));
-    let _ = gos_runtime::unregister_edge(theme_edge_id(THEME_KIND_SHOJI));
-
-    let spec = EdgeSpec {
-        edge_id: theme_edge_id(theme),
-        from_node: THEME_CURRENT_NODE_ID,
-        to_node: theme_node_id(theme),
-        edge_type: RuntimeEdgeType::Use,
-        weight: 1.0,
-        acl_mask: u64::MAX,
-        route_policy: RoutePolicy::Direct,
-        capability_namespace: None,
-        capability_binding: None,
-        vector_ref: None,
-    };
-
-    gos_runtime::register_edge(spec).is_ok()
+    gos_runtime::rebind_use(THEME_CURRENT_NODE_ID, theme_node_id(theme)).is_ok()
 }
 
 fn apply_theme_choice_raw(_abi: &KernelAbi, from: u64, _console_target: u64, theme: u8) -> bool {

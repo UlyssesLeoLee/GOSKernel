@@ -7,10 +7,12 @@
 
 pub mod block;
 pub mod edge_algebra;
-pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm};
+pub use edge_algebra::{Cardinality, EdgeAttrs, EdgeBits, EdgeForm, Region, Subscribe};
 pub mod socket;
 pub mod stem;
 pub use stem::*;
+pub mod theme;
+pub use theme::{palette_for_theme, Palette, PALETTE_SHOJI, PALETTE_WABI};
 
 pub mod trap;
 pub use trap::{TrapFrame, TrapVector, TrapClass, HardwareEvent};
@@ -1738,6 +1740,12 @@ pub struct GraphSnapshot {
     /// ahead of the normal `signal_queue`.
     pub control_queue_len: usize,
     pub tick: u64,
+    /// Structural epoch at which this snapshot was taken (ADR-004 §2.3).
+    /// A mutation committed at epoch `e` is visible iff `graph_epoch >= e`;
+    /// readers compare against a prior snapshot's epoch to decide whether the
+    /// graph changed. An atomic batch (e.g. a `Use` rebind) advances this by
+    /// exactly one, so no reader observes a half-applied mutation.
+    pub graph_epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy)]

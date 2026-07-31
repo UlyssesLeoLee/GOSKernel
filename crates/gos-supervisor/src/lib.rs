@@ -3103,15 +3103,15 @@ pub fn instance_domain_root(instance_id: NodeInstanceId) -> Option<u64> {
     Some(guard.modules[mod_slot].domain.root_table_phys)
 }
 
-pub fn service_system_cycle() {
-    // Hard cap: any individual cycle that can't drain in this many
-    // iterations is in a fault-restart loop or similar pathology.
-    // Bail rather than hang the kernel.  Phase B.5's restart cap
-    // catches single-module loops; this cap catches multi-module
-    // round-robins that B.5 alone can't see.
-    const MAX_CYCLE_ITERATIONS: u32 = 2048;
-    let mut iter: u32 = 0;
-    loop {
+/// One unit of supervisor/runtime work, modeled as a [`gos_mutation_dispatch::Rule`]
+/// firing (V2.2c, [`doc/ADR-002`] §3-4): drain the restart queue and
+/// lane-class ready queues into the runtime, pump, then apply fault policy
+/// to anything pump faulted. Re-posts itself (causal depth + 1) iff there is
+/// more work to do — an empty re-post is quiescence.
+struct CycleRule;
+
+impl gos_mutation_dispatch::Rule for CycleRule {
+    fn fire(&mut self, sig: gos_mutation_dispatch::Signal, out: &mut gos_mutation_dispatch::Emit) {
         let restarted = process_restart_queue().ok().flatten().is_some();
         // Drain supervisor lane-class ready queues into the runtime ready
         // queue so that pump() picks up scheduled instances on this tick.
@@ -3126,20 +3126,38 @@ pub fn service_system_cycle() {
                 }
             }
         }
-        if !restarted && dispatched == 0 {
-            break;
-        }
-        iter = iter.wrapping_add(1);
-        if iter >= MAX_CYCLE_ITERATIONS {
-            // Emit a CausalOverflow telemetry event so the shell `where`
-            // view and serial logs can surface deep chains or livelock
-            // candidates without silently truncating them.
-            gos_runtime::notify_causal_overflow(iter);
-            break;
+        if restarted || dispatched != 0 {
+            out.send(sig.to, sig.kind);
         }
     }
+}
+
+/// Causal-depth cap (ADR-002 §4): a cycle whose work doesn't settle within
+/// this many self-re-posts is a fault-restart loop or similar pathology —
+/// Phase B.5's restart cap catches single-module loops, this cap catches
+/// multi-module round-robins that B.5 alone can't see. Same trip point as
+/// the old `MAX_CYCLE_ITERATIONS` hardcap, but the *outcome* differs: the
+/// returned [`gos_mutation_dispatch::QuiescenceReport`] reports `max_causal_depth` and
+/// `steps` instead of silently leaving the runtime mid-drain.
+pub const CYCLE_DEPTH_CAP: u32 = 2048;
+
+/// Drive one supervisor service cycle to quiescence (or to
+/// [`CYCLE_DEPTH_CAP`] causal depth). The caller decides what to do with a
+/// non-quiescent [`gos_mutation_dispatch::QuiescenceReport`] (e.g. log it) — this never
+/// silently truncates.
+pub fn service_system_cycle() -> gos_mutation_dispatch::QuiescenceReport {
+    let mut engine = gos_mutation_dispatch::Engine::new(CycleRule);
+    engine.post(gos_mutation_dispatch::Signal::external(gos_mutation_dispatch::NodeId(0), 0));
+    let report = engine.run_to_quiescence(CYCLE_DEPTH_CAP);
+
     // Record peak dispatch depth for observability (V2.3 causal depth counter).
-    CAUSAL_DEPTH_MAX.fetch_max(iter as u64, Ordering::Relaxed);
+    CAUSAL_DEPTH_MAX.fetch_max(report.max_causal_depth as u64, Ordering::Relaxed);
+    if !report.quiesced {
+        // Emit a CausalOverflow telemetry event so the shell `where`
+        // view and serial logs can surface deep chains or livelock
+        // candidates without silently truncating them.
+        gos_runtime::notify_causal_overflow(report.max_causal_depth);
+    }
 
     // ── V2.2: Rewrite pass ────────────────────────────────────────────────────
     // After the dispatch loop quiesces, evaluate every registered rewrite rule
@@ -3177,6 +3195,8 @@ pub fn service_system_cycle() {
     if epoch_now == prev_epoch {
         IDLE_CYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+
+    report
 }
 
 /// Register a rewrite rule in the engine.  Rules are evaluated in insertion
@@ -3351,6 +3371,12 @@ pub fn apply_cypher_mutation(
         CypherMutation::RemoveEdge { edge_id } => gos_runtime::edge_from_node(edge_id).ok_or(
             MutationError::DispatcherRejected(MUTATION_GATE_EDGE_NOT_FOUND),
         )?,
+        // This gate is edge-scoped (mirrors `gos_runtime::apply_edge_mutation`,
+        // which has no `EdgeId` to return for `CreateNode`). Node-creation
+        // policy gating is a future slice; callers that want `CreateNode`
+        // go through `gos_runtime::apply_cypher_mutation` / `apply_mutation`
+        // directly instead of this edge-scoped gate.
+        CypherMutation::CreateNode => return Err(MutationError::UnsupportedMutation),
     };
 
     // Step 2: gate on owning module's lifecycle.  An unknown owner
@@ -3423,7 +3449,7 @@ fn cypher_acl_endpoints(
         CypherMutation::RebindUse { from, new_target } => {
             (*from, *new_target, gos_cypher_mut::ReceptiveEdgeKind::Use as u8)
         }
-        CypherMutation::RemoveEdge { .. } => return None,
+        CypherMutation::RemoveEdge { .. } | CypherMutation::CreateNode => return None,
     };
     let from_class = gos_runtime::node_summary_by_id(from)?.sub_domain;
     let to_class = gos_runtime::node_summary_by_id(to)?.sub_domain;

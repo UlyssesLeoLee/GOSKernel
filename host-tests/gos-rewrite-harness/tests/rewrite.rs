@@ -61,6 +61,7 @@ impl GraphView for MockGraphView {
             signal_queue_len: 0,
             control_queue_len: 0,
             tick: 0,
+            graph_epoch: self.epoch,
         }
     }
 }

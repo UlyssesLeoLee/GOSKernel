@@ -31,6 +31,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gos-mutation-dispatch"
+version = "0.1.0"
+dependencies = [
+ "gos-protocol",
+]
+
+[[package]]
 name = "gos-protocol"
 version = "0.2.0"
 
@@ -65,6 +72,7 @@ name = "gos-supervisor"
 version = "0.2.0"
 dependencies = [
  "gos-cypher-mut",
+ "gos-mutation-dispatch",
  "gos-protocol",
  "gos-rewrite",
  "gos-runtime",

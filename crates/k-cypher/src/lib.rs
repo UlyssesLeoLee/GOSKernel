@@ -494,6 +494,7 @@ fn print_help(sink: &ConsoleSink) {
     print_str(sink, "  LINK 'V_node' -> 'V_iface'\n");
     print_str(sink, "  DELETE EDGE 'e:V'\n");
     print_str(sink, "  REBIND USE 'V_from' -> 'V_to'\n");
+    print_str(sink, "  CREATE (n)\n");
 }
 
 /// Source attribution stamped into every audited mutation envelope
@@ -512,12 +513,36 @@ fn try_run_mutation(sink: &ConsoleSink, state: &mut CypherState, query: &str) ->
     let is_link = starts_with_ci(query, "link ") || starts_with_ci(query, "link\t");
     let is_delete_edge = contains_ci(query, "delete edge");
     let is_rebind_use = contains_ci(query, "rebind use");
+    // V2.5e (ADR-005 option A): `CREATE (n)` allocates a fresh provisional
+    // node. Handled separately from the edge verbs below: it has no
+    // from/to endpoints to gate on, so it calls gos_runtime directly
+    // rather than going through the edge-scoped supervisor gate.
+    let is_create_node = contains_ci(query, "create (");
 
-    if !(is_create_mount || is_create_use || is_link || is_delete_edge || is_rebind_use) {
+    if !(is_create_mount || is_create_use || is_link || is_delete_edge || is_rebind_use || is_create_node) {
         return false;
     }
 
     state.executions = state.executions.saturating_add(1);
+
+    if is_create_node {
+        match gos_runtime::create_provisional_node() {
+            Ok((_id, vector)) => {
+                set_color(sink, 10, 0);
+                print_str(sink, "cypher> created ");
+                print_vector(sink, vector);
+                print_byte(sink, b'\n');
+                set_color(sink, 7, 0);
+            }
+            Err(_) => {
+                set_color(sink, 12, 0);
+                print_str(sink, "cypher> create failed\n");
+                set_color(sink, 7, 0);
+                state.faults = state.faults.saturating_add(1);
+            }
+        }
+        return true;
+    }
 
     if is_delete_edge {
         let Some(literal) = extract_quoted_at(query, 0) else {
@@ -1838,6 +1863,28 @@ fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
                 print_str(sink, "cypher> route failed ");
                 print_edge_vector(sink, edge_vector);
                 print_byte(sink, b'\n');
+                state.faults = state.faults.saturating_add(1);
+            }
+        }
+        set_color(sink, 7, 0);
+        return;
+    }
+
+    // V2.5e (ADR-005 option A): `CREATE (n)` allocates a fresh provisional
+    // node directly via gos_runtime — same direct-call style as the CALL
+    // verbs above. `register_node` bumps `graph_epoch` synchronously, so the
+    // next `vk_auto_refresh` poll (V2.5c) picks the new node up with no pump.
+    if contains_ci(query, "create (") {
+        match gos_runtime::create_provisional_node() {
+            Ok((_id, vector)) => {
+                set_color(sink, 10, 0);
+                print_str(sink, "cypher> created ");
+                print_vector(sink, vector);
+                print_byte(sink, b'\n');
+            }
+            Err(_) => {
+                set_color(sink, 12, 0);
+                print_str(sink, "cypher> create failed\n");
                 state.faults = state.faults.saturating_add(1);
             }
         }

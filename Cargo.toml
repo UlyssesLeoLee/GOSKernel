@@ -4,6 +4,7 @@ members = [
     "crates/hypervisor",
     "crates/gos-protocol",
     "crates/gos-runtime",
+    "crates/gos-mutation-dispatch",
     "crates/gos-loader",
     "crates/gos-hal",
     "crates/gos-ai-bridge",

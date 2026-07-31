@@ -179,8 +179,8 @@ pub fn invariant_audit_ring_snapshot_bounded_proof() {
 //    — proves the restart cap actually converges to Degraded.
 // 2. "charge_gpu_bytes never accepts an allocation that would push
 //    gpu_bytes_used past gpu_bytes_quota."
-// 3. "ABI semver: abi_compatible(host, plugin) => major(host) ==
-//    major(plugin)."
+// 3. "ABI semver: abi_compatible(plugin, host) => major(plugin) ==
+//    major(host)."
 // 4. "Journal replay: serialize then deserialize is the identity."
 //    — round-trip property; needs a Kani-compatible formulation of
 //    ControlPlaneEnvelope.

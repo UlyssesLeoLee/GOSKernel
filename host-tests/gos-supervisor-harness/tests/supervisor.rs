@@ -16,9 +16,10 @@ use gos_supervisor::{
     fault_module, heap_grant_summary, install_module, instance_domain_root, instance_is_degraded,
     instance_resource_summaries, instance_restart_generation, module_handle_for_id,
     module_lifecycle, module_status_summaries, process_restart_queue, queue_restart,
-    realize_boot_modules, release_claim, restart_module, schedule_instance, set_gpu_quota,
-    snapshot, spawn_instance, template_for_module, InstanceResourceSummary, ModuleStatusSummary,
-    SupervisorError, MAX_CLAIMS, MAX_INSTANCES, MAX_MODULES, MAX_RESTARTS_BEFORE_DEGRADE,
+    realize_boot_modules, release_claim, restart_module, schedule_instance, service_system_cycle,
+    set_gpu_quota, snapshot, spawn_instance, template_for_module, InstanceResourceSummary,
+    ModuleStatusSummary, SupervisorError, CYCLE_DEPTH_CAP, MAX_CLAIMS, MAX_INSTANCES, MAX_MODULES,
+    MAX_RESTARTS_BEFORE_DEGRADE,
 };
 
 static START_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -285,6 +286,33 @@ fn queued_restart_restarts_module_through_scheduler_control_plane() {
 // Now each module is its own transaction: CONSUMER rolls back to a
 // clean Faulted state (no leaked instance/domain/capabilities) while
 // PROVIDER, installed alongside it, still comes up Running.
+#[test]
+fn service_system_cycle_quiesces_when_idle() {
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+
+    // Mirrors kernel_main's steady-state loop (V2.2c, ADR-002 §4): with no new
+    // external work arriving between ticks, each cycle's internal drain
+    // (restart queue -> ready queue -> runtime pump -> fault policy) must
+    // converge well under CYCLE_DEPTH_CAP, never silently truncate.
+    for _ in 0..4 {
+        let report = service_system_cycle();
+        assert!(
+            report.quiesced,
+            "idle cycle must drain to quiescence, not trip the depth guard: {report:?}"
+        );
+        assert!(!report.overflowed, "idle cycle must not overflow the pending queue");
+        assert!(report.steps >= 1, "the engine always fires at least once");
+        assert!(
+            report.max_causal_depth < CYCLE_DEPTH_CAP,
+            "idle cycle must stay far below the ADR-002 depth guard"
+        );
+    }
+}
+
 #[test]
 fn missing_dependency_is_rejected() {
     let _guard = test_guard();

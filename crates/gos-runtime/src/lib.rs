@@ -9,13 +9,13 @@ use gos_cypher_mut::{
 use gos_protocol::{
     derive_edge_id, packet_to_signal, signal_to_packet, BootContext, CapabilitySpec,
     CellDeclaration, CellResult, ConditionalRoute, ControlPlaneEnvelope,
-    ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, ExecStatus, ExecutorContext,
-    GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind, GraphEdgeDirection, GraphEdgeSummary,
-    GraphNodeSummary, GraphSnapshot, KernelAbi, KernelSignalPacket, MAX_CONDITIONAL_ROUTES,
-    NodeCell, NodeEvent, NodeExecutorVTable, NodeId, NodeInstanceId, NodeLifecycle,
-    NodeLogEntry, NodeProcSummary, NodeSpec, NodeState, NodeTelemetry, NodeTraceEntry,
-    PluginId, PluginManifest, PluginState, PluginSummary, RoutePolicy, RuntimeEdgeType, Signal,
-    StateDelta, VectorAddress,
+    ControlPlaneMessageKind, EdgeId, EdgeSpec, EdgeVector, EntryPolicy, ExecStatus,
+    ExecutorContext, ExecutorId, GOS_ABI_VERSION, GraphDiffEntry, GraphDiffKind,
+    GraphEdgeDirection, GraphEdgeSummary, GraphNodeSummary, GraphSnapshot, KernelAbi,
+    KernelSignalPacket, MAX_CONDITIONAL_ROUTES, NodeCell, NodeEvent, NodeExecutorVTable,
+    NodeId, NodeInstanceId, NodeLifecycle, NodeLogEntry, NodeProcSummary, NodeSpec, NodeState,
+    NodeTelemetry, NodeTraceEntry, PluginId, PluginManifest, PluginState, PluginSummary,
+    RoutePolicy, RuntimeEdgeType, RuntimeNodeType, Signal, StateDelta, VectorAddress,
     derive_edge_vector, CONTROL_PLANE_PROTOCOL_VERSION, DISPLAY_CONTROL_SUBSCRIBE_TRIGGERED,
 };
 use spin::Mutex;
@@ -2338,6 +2338,103 @@ impl GraphRuntime {
         self.fire_subscribers(from_node, self.graph_epoch);
         self.fire_subscribers(to_node, self.graph_epoch);
         Ok(())
+    }
+
+    /// Atomically repoint the exclusive `Use` edge out of `from` to
+    /// `new_target` (ADR-004 §2.2).  Removes every existing `Use` edge sourced
+    /// at `from`, then inserts `from -[Use]-> new_target`, under a **single**
+    /// `graph_epoch` bump.  Because the whole remove+insert happens within one
+    /// epoch transition, no reader can observe `from` holding zero or two
+    /// `Use` edges mid-rebind — which would violate the ADR-001 `Use`
+    /// exclusivity invariant (exactly one).  Contrast the multi-step
+    /// `unregister_edge`×N + `register_edge` path (3 separate epoch bumps,
+    /// with windows of zero `Use` edges) that `k-shell::sync_theme_use_edges`
+    /// uses today.  `register_edge`/`unregister_edge` keep their single-bump
+    /// semantics unchanged; this is an additional atomic entry, not a rewrite.
+    ///
+    /// If `from -[Use]-> new_target` already exists (the exclusivity
+    /// invariant guarantees it is the *only* `Use` edge from `from`), this is
+    /// a true no-op: no removal, no reinsertion, no `graph_epoch` bump, no
+    /// `EdgeUpsert`. Idempotent callers (e.g. a Cypher `MERGE` that lowers to
+    /// [`RuntimeDispatcher::add_edge`] for a `Use` edge that already points at
+    /// `new_target`) must not appear to mutate the graph when nothing changed.
+    pub fn rebind_exclusive_use(
+        &mut self,
+        from: NodeId,
+        new_target: NodeId,
+    ) -> Result<EdgeId, RuntimeError> {
+        self.rebind_exclusive_use_keyed(from, new_target, "use")
+    }
+
+    /// Same atomic contract as [`rebind_exclusive_use`], but deriving the new
+    /// edge's id from `key` instead of the hardcoded `"use"` — lets callers on
+    /// a different edge-key convention (e.g. `RuntimeDispatcher`'s
+    /// `MUTATION_USE_EDGE_KEY`) share the same single-epoch atomicity rather
+    /// than reimplementing the remove+insert dance with two separate bumps.
+    fn rebind_exclusive_use_keyed(
+        &mut self,
+        from: NodeId,
+        new_target: NodeId,
+        key: &str,
+    ) -> Result<EdgeId, RuntimeError> {
+        let edge_id = derive_edge_id(from, new_target, key);
+        if self.edge_slot(edge_id).is_some() {
+            return Ok(edge_id);
+        }
+
+        // Pass 1: drop every existing Use edge sourced at `from` (no bump yet).
+        // The match scope ends before the mutation so the edges/adjacency
+        // borrows stay disjoint.
+        let mut i = 0;
+        while i < self.edges.len() {
+            let drop_it = match &self.edges[i] {
+                Some(rec) => {
+                    rec.spec.edge_type == RuntimeEdgeType::Use && rec.spec.from_node == from
+                }
+                None => false,
+            };
+            if drop_it {
+                let edge_id = self.edges[i].as_ref().unwrap().spec.edge_id;
+                self.edges[i] = None;
+                self.adjacency_arena.release(edge_id);
+            }
+            i += 1;
+        }
+
+        // Pass 2: insert the new exclusive Use edge. `edge_id` is guaranteed
+        // absent here (Pass 1 only removes slots, and the function already
+        // returned early above if `edge_id` was present).
+        self.adjacency_arena.allocate(edge_id)?;
+        let slot = self
+            .edges
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(RuntimeError::EdgeTableFull)?;
+        *slot = Some(EdgeRecord {
+            edge_vector: derive_edge_vector(edge_id),
+            spec: EdgeSpec {
+                edge_id,
+                from_node: from,
+                to_node: new_target,
+                edge_type: RuntimeEdgeType::Use,
+                weight: 1.0,
+                acl_mask: u64::MAX,
+                route_policy: RoutePolicy::Direct,
+                capability_namespace: None,
+                capability_binding: None,
+                vector_ref: None,
+            },
+        });
+        self.emit_control_plane(
+            ControlPlaneMessageKind::EdgeUpsert,
+            edge_id.0,
+            from.0[0] as u64,
+            new_target.0[0] as u64,
+        );
+
+        // One epoch bump for the whole logical mutation (ADR-004 §2.2).
+        self.graph_epoch = self.graph_epoch.wrapping_add(1);
+        Ok(edge_id)
     }
 
     pub fn bind_legacy_cell(
@@ -7262,6 +7359,7 @@ impl GraphRuntime {
             signal_queue_len: self.signal_queue.len(),
             control_queue_len: self.control_signal_queue.len(),
             tick: self.tick,
+            graph_epoch: self.graph_epoch,
         }
     }
 
@@ -26268,6 +26366,99 @@ pub fn register_node(
     RUNTIME.lock().register_node(plugin_id, vector, spec)
 }
 
+/// First byte of every [`NodeId`] allocated by [`create_provisional_node`].
+///
+/// `derive_node_id` (used for builtin/plugin NodeIds) hashes plugin+key
+/// bytes, so its first byte is effectively uniform over `0..=255` — no fixed
+/// value is reserved a priori. A constant tag byte here instead makes
+/// "is this NodeId provisional" ([`is_provisional_node_id`]) an exact O(1)
+/// check rather than a probabilistic one, at the cost of reserving this one
+/// namespace point for ADR-005 option A node creation.
+const PROVISIONAL_NODE_ID_TAG: u8 = 0xC0;
+
+/// `VectorAddress.l4` for provisional nodes. Existing builtin/plugin vectors
+/// use small hand-assigned `l4` values (0-30 across the codebase); `0xC0`
+/// keeps the provisional range disjoint from those without needing a
+/// registry.
+const PROVISIONAL_VECTOR_L4: u8 = PROVISIONAL_NODE_ID_TAG;
+
+/// Plugin identity stamped on every node created via
+/// [`create_provisional_node`] (ADR-005 option A). Not a real plugin —
+/// `register_node` does not validate `plugin_id` against the plugin table —
+/// this exists purely so `node_summary`/`node_telemetry` can attribute
+/// provisional nodes to "Cypher CREATE" rather than a boot module.
+pub const PROVISIONAL_PLUGIN_ID: PluginId = PluginId::from_ascii("cypher.provisional");
+
+/// Monotonic source for provisional `NodeId`/`VectorAddress` allocation.
+/// Sequence 0 is never issued so `NodeId([0xC0, 0, ..., 0])` (all-zero
+/// sequence) stays distinguishable from a real allocation in debug output.
+static NEXT_PROVISIONAL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Register a fresh provisional node (ADR-005 option A, §五 step 1):
+/// visible / connectable / renderable (V2.5a `provisional_render.rs`,
+/// V2.5c `vk_auto_refresh`), but `NodeBinding::Unbound` +
+/// `NodeInstanceId::ZERO` — no claim/quota/instance until "promoted" via a
+/// Grant edge (§五 step 3, not yet wired).
+///
+/// Each call allocates a new, distinct `NodeId`/`VectorAddress` pair from
+/// [`NEXT_PROVISIONAL_SEQ`] — the returned pair is always fresh, so
+/// `register_node`'s idempotent-on-`node_id` short-circuit never triggers
+/// here (unlike boot nodes, which intentionally re-register the same
+/// `derive_node_id`-derived id every boot).
+pub fn create_provisional_node() -> Result<(NodeId, VectorAddress), RuntimeError> {
+    RUNTIME.lock().create_provisional_node_locked()
+}
+
+impl GraphRuntime {
+    /// Core of [`create_provisional_node`], operating on an already-held
+    /// `&mut self` instead of re-locking `RUNTIME` — used by
+    /// [`gos_cypher_mut::MutationDispatcher::create_node`] for `GraphRuntime`,
+    /// which is invoked while the caller already holds the `RUNTIME` guard
+    /// (re-locking would deadlock the non-reentrant `spin::Mutex`).
+    fn create_provisional_node_locked(&mut self) -> Result<(NodeId, VectorAddress), RuntimeError> {
+        let seq = NEXT_PROVISIONAL_SEQ.fetch_add(1, Ordering::Relaxed);
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes[0] = PROVISIONAL_NODE_ID_TAG;
+        id_bytes[8..16].copy_from_slice(&seq.to_be_bytes());
+        let node_id = NodeId(id_bytes);
+
+        let vector = VectorAddress {
+            l4: PROVISIONAL_VECTOR_L4,
+            l3: ((seq >> 24) & 0x0FFF) as u16,
+            l2: ((seq >> 12) & 0x0FFF) as u16,
+            offset: (seq & 0x0FFF) as u16,
+        };
+
+        // RuntimeNodeType::Vector is the existing "passive data node" type (cf.
+        // theme.current/theme.wabi/theme.shoji in builtin_bundle.rs);
+        // EntryPolicy::Manual means never auto-scheduled; ExecutorId::ZERO
+        // leaves the node NodeBinding::Unbound + NodeInstanceId::ZERO after
+        // register_node — exactly the "visible, connectable, renderable, but no
+        // claim/quota/instance" state ADR-005 §四 already proved is render- and
+        // capability-transparent.
+        let spec = NodeSpec {
+            node_id,
+            local_node_key: "cypher.provisional",
+            node_type: RuntimeNodeType::Vector,
+            entry_policy: EntryPolicy::Manual,
+            executor_id: ExecutorId::ZERO,
+            state_schema_hash: 0,
+            permissions: &[],
+            exports: &[],
+            vector_ref: None,
+        };
+        self.register_node(PROVISIONAL_PLUGIN_ID, vector, spec)
+            .map(|id| (id, vector))
+    }
+}
+
+/// `true` iff `node_id` was allocated by [`create_provisional_node`]
+/// (ADR-005 option A namespace marker, see [`PROVISIONAL_NODE_ID_TAG`]).
+pub fn is_provisional_node_id(node_id: NodeId) -> bool {
+    node_id.0[0] == PROVISIONAL_NODE_ID_TAG
+}
+
 pub fn register_edge(spec: EdgeSpec) -> Result<EdgeId, RuntimeError> {
     RUNTIME.lock().register_edge(spec)
 }
@@ -26301,6 +26492,13 @@ pub fn edge_vector_for_id(edge_id: EdgeId) -> Option<EdgeVector> {
 
 pub fn edge_id_for_vector(edge_vector: EdgeVector) -> Option<EdgeId> {
     RUNTIME.lock().edge_id_for_vector(edge_vector)
+}
+
+/// Atomically repoint the exclusive `Use` edge out of `from` to `new_target`
+/// under a single epoch bump (ADR-004 §2.2).  Free-function wrapper over
+/// [`GraphRuntime::rebind_exclusive_use`].
+pub fn rebind_use(from: NodeId, new_target: NodeId) -> Result<EdgeId, RuntimeError> {
+    RUNTIME.lock().rebind_exclusive_use(from, new_target)
 }
 
 pub fn node_summary_by_id(node_id: NodeId) -> Option<GraphNodeSummary> {
@@ -27733,6 +27931,12 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
             vector_ref: None,
         };
         self.register_edge(spec).map_err(|_| 4u32)
+    }
+
+    fn create_node(&mut self) -> Result<NodeId, u32> {
+        self.create_provisional_node_locked()
+            .map(|(id, _vector)| id)
+            .map_err(dispatcher_error_for)
     }
 }
 
@@ -29819,22 +30023,6 @@ fn dispatcher_error_for(err: RuntimeError) -> u32 {
     }
 }
 
-impl GraphRuntime {
-    fn find_use_edge_from(&self, from: NodeId) -> Option<EdgeId> {
-        self.edges.iter().find_map(|slot| {
-            slot.and_then(|record| {
-                if record.spec.from_node == from
-                    && record.spec.edge_type == RuntimeEdgeType::Use
-                {
-                    Some(record.spec.edge_id)
-                } else {
-                    None
-                }
-            })
-        })
-    }
-}
-
 /// Zero-size dispatcher that drives the live RUNTIME singleton.  Pass
 /// `&mut RuntimeDispatcher` to `gos_cypher_mut::apply_mutation` to
 /// execute mutations against the actual runtime edge table.
@@ -29882,46 +30070,71 @@ impl MutationDispatcher for RuntimeDispatcher {
     }
 
     fn rebind_use(&mut self, from: NodeId, new_target: NodeId) -> Result<EdgeId, u32> {
-        // Step 1: tear down any existing Use edge sourced at `from`.
-        // RebindUse is permitted to start from a clean slate, so a
-        // missing prior edge is not an error.
-        let prior = RUNTIME.lock().find_use_edge_from(from);
-        if let Some(old_id) = prior {
-            RUNTIME
-                .lock()
-                .unregister_edge(old_id)
-                .map_err(dispatcher_error_for)?;
-        }
-
-        // Step 2: install the new Use edge.  Reuse add_edge so the
-        // EdgeId derivation + envelope emission paths stay single-
-        // sourced.
-        let edge_id = derive_edge_id(from, new_target, MUTATION_USE_EDGE_KEY);
-        let spec = EdgeSpec {
-            edge_id,
-            from_node: from,
-            to_node: new_target,
-            edge_type: RuntimeEdgeType::Use,
-            weight: 1.0,
-            acl_mask: u64::MAX,
-            route_policy: RoutePolicy::Direct,
-            capability_namespace: None,
-            capability_binding: None,
-            vector_ref: None,
-        };
+        // Atomic single-epoch rebind (ADR-004 §2.2): removes any existing
+        // Use edge sourced at `from` and inserts the new one under one
+        // `graph_epoch` bump, so no reader observes `from` holding zero or
+        // two Use edges mid-rebind.
         let id = RUNTIME
             .lock()
-            .register_edge(spec)
+            .rebind_exclusive_use_keyed(from, new_target, MUTATION_USE_EDGE_KEY)
             .map_err(dispatcher_error_for)?;
         GRAPH_GENERATION.fetch_add(1, Ordering::AcqRel);
         Ok(id)
     }
+
+    /// `CREATE (n:Label {props})` for an unbound node pattern (ADR-005
+    /// option A, V2.5e) — allocates a fresh provisional node via
+    /// [`create_provisional_node`]. `Label`/`{props}` storage is left for a
+    /// follow-up step; the caller gets the new `NodeId` back so a
+    /// same-statement edge-add can reference it.
+    fn create_node(&mut self) -> Result<NodeId, u32> {
+        create_provisional_node()
+            .map(|(id, _vector)| id)
+            .map_err(dispatcher_error_for)
+    }
 }
 
-/// Public convenience entry point: validate + dispatch a `CypherMutation`
-/// against the live runtime edge table.  H.1.x.2 supervisor wraps this
-/// with policy gating; tests and boot fixtures can call directly.
+/// Public convenience entry point: validate + dispatch an edge-scoped
+/// `CypherMutation` against the live runtime edge table, returning the
+/// affected `EdgeId` directly.  H.1.x.2 supervisor wraps this with policy
+/// gating; tests and boot fixtures can call directly.
+///
+/// Scoped to `AddEdge` / `RemoveEdge` / `RebindUse` — [`CypherMutation::CreateNode`]
+/// has no `EdgeId` to return, so it goes through
+/// [`gos_cypher_mut::apply_mutation`] directly (see `RuntimeDispatcher::create_node`)
+/// rather than this entry point. This duplicates `apply_mutation`'s
+/// validate-then-dispatch shape instead of calling it, because
+/// `apply_mutation` returns `Option<NodeId>` (to also cover `CreateNode`)
+/// and would discard the `EdgeId` this function exists to surface.
 pub fn apply_edge_mutation(mutation: CypherMutation) -> Result<EdgeId, MutationError> {
     let mut dispatcher = RuntimeDispatcher;
-    gos_cypher_mut::apply_mutation(&mut dispatcher, mutation)
+    gos_cypher_mut::pre_validate(&mutation)?;
+    match mutation {
+        CypherMutation::AddEdge { from, to, edge_kind } => {
+            if !dispatcher.lookup_node(from) {
+                return Err(MutationError::UnknownEndpoint(from));
+            }
+            if !dispatcher.lookup_node(to) {
+                return Err(MutationError::UnknownEndpoint(to));
+            }
+            dispatcher
+                .add_edge(from, to, edge_kind)
+                .map_err(MutationError::DispatcherRejected)
+        }
+        CypherMutation::RemoveEdge { edge_id } => dispatcher
+            .remove_edge(edge_id)
+            .map_err(MutationError::DispatcherRejected),
+        CypherMutation::RebindUse { from, new_target } => {
+            if !dispatcher.lookup_node(from) {
+                return Err(MutationError::UnknownEndpoint(from));
+            }
+            if !dispatcher.lookup_node(new_target) {
+                return Err(MutationError::UnknownEndpoint(new_target));
+            }
+            dispatcher
+                .rebind_use(from, new_target)
+                .map_err(MutationError::DispatcherRejected)
+        }
+        CypherMutation::CreateNode => Err(MutationError::UnsupportedMutation),
+    }
 }
