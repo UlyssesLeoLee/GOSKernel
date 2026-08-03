@@ -46,16 +46,19 @@
 //!   (rg:Function {name: "reachable_via_grant", type: "function", visibility: "pub"}),
 //!   (gefs:Function {name: "grant_edges_from_specs", type: "function", visibility: "pub"}),
 //!   (cc:Function {name: "capability_check", type: "function", visibility: "pub"}),
+//!   (nifv:Function {name: "node_id_for_vector", type: "function", visibility: "pub"}),
 //!   (eb:Class {name: "gos_protocol::edge_algebra::EdgeBits", type: "struct"}),
 //!   (es:Class {name: "gos_protocol::EdgeSpec", type: "struct"}),
+//!   (va:Class {name: "gos_protocol::VectorAddress", type: "struct"}),
 //!   (f)-[:CONTAINS]->(m),
 //!   (m)-[:CONTAINS]->(ge), (m)-[:CONTAINS]->(rg),
-//!   (m)-[:CONTAINS]->(gefs), (m)-[:CONTAINS]->(cc),
+//!   (m)-[:CONTAINS]->(gefs), (m)-[:CONTAINS]->(cc), (m)-[:CONTAINS]->(nifv),
 //!   (ge)-[:HAS_METHOD]->(ge_new),
 //!   (rg)-[:USES]->(ge),
 //!   (ge)-[:REPRESENTS]->(eb),
 //!   (gefs)-[:READS]->(es), (gefs)-[:PRODUCES]->(ge),
-//!   (cc)-[:CALLS]->(gefs), (cc)-[:CALLS]->(rg);
+//!   (cc)-[:CALLS]->(gefs), (cc)-[:CALLS]->(rg),
+//!   (nifv)-[:READS]->(va);
 //! ```
 
 use crate::NodeId;
@@ -213,4 +216,38 @@ pub fn capability_check(specs: &[gos_protocol::EdgeSpec], from: gos_protocol::No
         NodeId(from_idx as u32),
         NodeId(to_idx as u32),
     )
+}
+
+/// Fixed 8-byte prefix tagging every [`node_id_for_vector`]-derived
+/// `NodeId` — a debugging aid (readable in a hex dump alongside ADR-005's
+/// `0xC0` provisional-node tag byte and manifest-derived
+/// `derive_node_id` ids), not load-bearing for correctness.
+const VECTOR_NODE_ID_PREFIX: [u8; 8] = *b"VECMAP\0\0";
+
+/// Deterministically derive a `gos_protocol::NodeId` for an existing
+/// runtime module/node that is identified today only by its
+/// `VectorAddress` (ADR-008 option B). Pure function, no storage: 16 bytes
+/// = the 8-byte [`VECTOR_NODE_ID_PREFIX`] + `v.as_u64()`'s 8 big-endian
+/// bytes.
+///
+/// This is deliberately *not* a bijection proof against some other global
+/// `NodeId` allocation scheme — it exists to give host-harness tests (and,
+/// once available, [`capability_check`]/[`doc/ADR-006`]'s equivalence
+/// harness) a concrete, non-placeholder `NodeId` for any of the 22 builtin
+/// modules today addressed only by a `pub const NODE_VEC: VectorAddress`
+/// (e.g. `k_vga::NODE_VEC`), instead of a hand-picked `NodeId([1u8; 16])`
+/// literal that carries no relationship to the module it's supposed to
+/// stand for.
+///
+/// Does **not** touch `route_signal` or any dispatch path — ADR-008 §one
+/// found that "is there a non-trivial cross-domain allow/deny set to prove
+/// equivalence against" is blocked on B.4.6 (ELF loader, real per-domain
+/// CR3), so wiring this into routing is explicitly out of scope until then.
+///
+/// [`doc/ADR-006`]: ../../../doc/ADR-006-capability-graph-migration.md
+pub fn node_id_for_vector(v: gos_protocol::VectorAddress) -> gos_protocol::NodeId {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&VECTOR_NODE_ID_PREFIX);
+    bytes[8..].copy_from_slice(&v.as_u64().to_be_bytes());
+    gos_protocol::NodeId(bytes)
 }
