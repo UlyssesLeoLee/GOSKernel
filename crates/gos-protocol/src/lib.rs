@@ -364,6 +364,11 @@ pub const NET_CONTROL_SET_IP2: u8 = 0xD6;
 /// Set target IP byte 3 (least-significant) before issuing NET_CONTROL_PING.
 pub const NET_CONTROL_SET_IP3: u8 = 0xD7;
 
+// ── virtio-gpu discovery skeleton (k-virtio-gpu ↔ k-shell, ADR-013 §选项A) ───
+/// Shell → k-virtio-gpu: report PCI discovery / BAR-mapping status. Re-probes
+/// first if the device hasn't been probed yet (mirrors NET_CONTROL_REPORT).
+pub const GPU_CONTROL_REPORT: u8 = 0xE0;
+
 // ── Chat bridge commands (k-chat ↔ k-shell) ──────────────────────────────────
 /// Shell → k-chat: submit the buffered user message to the AI bridge.
 pub const CHAT_CONTROL_SEND: u8 = 0xC0;

@@ -231,6 +231,9 @@ static CHAT_HTTP_MODE: AtomicU8 = AtomicU8::new(0);
 static NIM_TARGET: AtomicU64 = AtomicU64::new(0);
 /// 0 = normal shell, 1 = NIM inference mode.
 static NIM_MODE: AtomicU8 = AtomicU8::new(0);
+/// Resolved vector address of the k-virtio-gpu node (0 = not available).
+/// ADR-013 §选项A discovery skeleton — see `gpu status`.
+static GPU_TARGET: AtomicU64 = AtomicU64::new(0);
 /// Pinned graph epoch for `graph diff` — 0 means "since boot", any other value
 /// means "since epoch N was pinned via `graph diff pin`".
 pub(crate) static GRAPH_DIFF_PIN_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -19515,6 +19518,25 @@ unsafe extern "C" fn shell_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
     };
     NIM_TARGET.store(nim_target, Ordering::SeqCst);
     NIM_MODE.store(0, Ordering::SeqCst);
+
+    // Resolve k-virtio-gpu capability (ADR-013 discovery skeleton)
+    let gpu_target = {
+        let ctx_ref = unsafe { &*ctx };
+        let abi = unsafe { &*ctx_ref.abi };
+        if let Some(resolve_capability) = abi.resolve_capability {
+            unsafe {
+                resolve_capability(
+                    b"gpu".as_ptr(),
+                    b"gpu".len(),
+                    b"status".as_ptr(),
+                    b"status".len(),
+                )
+            }
+        } else {
+            0
+        }
+    };
+    GPU_TARGET.store(gpu_target, Ordering::SeqCst);
 
     unsafe {
         core::ptr::write(

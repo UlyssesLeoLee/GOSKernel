@@ -1,6 +1,6 @@
 # ADR-013：真机显示 MVP——一个条目里藏着两种成本
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V2 计划 line 104](../plan/V2_DEVELOPMENT_PLAN.md)（"真机显示（UEFI GOP / virtio-gpu backend）"）、[ADR-007](./ADR-007-display-hal-scope.md)（`gos-hal::display` LFB `Surface` trait 范围已收窄至本 ADR）、`crates/k-net`（PCI 发现层 + virtio 检测，本 ADR 的可复用precedent）、任务 #45（installer 真机验证，blocked on hardware）
+> 状态：**选项 A 已选向；virtio-gpu 发现骨架已落地**（2026-08-03）；UEFI GOP 仍待独立 ADR · 提案日期：2026-06-12 · 配套：[V2 计划 line 104](../plan/V2_DEVELOPMENT_PLAN.md)（"真机显示（UEFI GOP / virtio-gpu backend）"）、[ADR-007](./ADR-007-display-hal-scope.md)（`gos-hal::display` LFB `Surface` trait 范围已收窄至本 ADR）、`crates/k-net`（PCI 发现层 + virtio 检测，本 ADR 的可复用precedent）、任务 #45（installer 真机验证，blocked on hardware）
 >
 > 口径：V2 line 104 把"UEFI GOP"和"virtio-gpu"并列写在同一个括号里，读起来像"两个可互换的 backend 选项"。调查后发现二者的**依赖结构完全不同**——virtio-gpu 是 `k-net` 已经探测到、且有完整可复用 PCI 发现层的 PCI 设备，加一个驱动 crate 量级；UEFI GOP 需要从 `BootInfo` 拿到 framebuffer 句柄，而当前 `bootloader = "0.9.23"`（[main.rs:9](../crates/hypervisor/src/main.rs)）的 `BootInfo` **没有这个字段**——这是 bootloader 0.10/0.11 重写后才引入的，意味着"加 UEFI GOP backend"的真实第一步是**整条 boot pipeline 的大版本迁移**，量级与"显示 backend"完全不同。本 ADR 把这一个条目拆成两个，分别定价。
 
@@ -76,3 +76,15 @@ V2 line 104 的"真机显示"exit criterion 重新措辞为两段：virtio-gpu M
 倾向 **A**：把一个被并列书写、实则成本相差一个数量级的条目拆开——virtio-gpu MVP 复用 k-net 已经埋好的 `DRIVER_VIRTIO` 检测种子，是"现在就能做、QEMU 可验证、不碰构建管线"的 V2.6 范围；UEFI GOP 诚实标注为"bootloader 0.9→0.11+ 迁移"，拆给独立 ADR，与 #45 解除阻塞的时间线天然对齐（真机到位时，才是验证 UEFI GOP LFB 的合适时机；现在做这个迁移,验证手段仍只有 QEMU+OVMF，价值有限）。
 
 **门禁**：virtio-gpu MVP 的"最小"边界=设备发现+BAR 映射+状态机骨架（mirrors `k-net` 当前对 virtio-net 的"discovered; datapath pending"状态)——完整 2D 命令队列、与 `k-vk-host`/`gos-hal::display`（ADR-007）的对接方式是否需要、长什么样,是后续步骤,不在本 ADR 门禁内,避免重犯 V2 line 104"一句话掩盖巨大工作量"的错误。bootloader 迁移 ADR 的门禁是"先摸清 0.9→0.11 的完整 diff 清单"（entry point、`BootInfo` 字段、构建命令、CI），再决定是否值得在 V2.6 内做或推到 V3——本 ADR 不替那个迁移 ADR 拍板,只确认它的存在与大致形状。
+
+## 四、virtio-gpu MVP 落地状态（选项 A，2026-08-03）
+
+新 crate [`k-virtio-gpu`](../crates/k-virtio-gpu/src/lib.rs)：PCI 扫描（class 0x03 显示控制器 + vendor 0x1AF4）、BAR 解析、`pci_enable_device`，状态机停在 `STAGE_BAR_READY`——**没有** `STAGE_DEVICE_READY`（那意味着 virtqueue/命令队列已协商，本 MVP 明确不做）。逐字节复用 `k-net::probe_network_device`/`parse_pci_bars`/`pci_enable_device` 的既有形状（未共享 crate——两边各自 40 行左右，不值得为此拆一个依赖边）,只换了匹配的 PCI class。
+
+**接线**（`crates/gos-kernel/src/builtin_bundle.rs`）：完整 builtin module 注册（`K_VIRTIO_GPU_ID`、`GPU_PERMS`/`GPU_EXPORTS`/`GPU_IMPORTS`、`GPU_NODE_SPECS`、`GPU_MANIFEST`、`BuiltinModule::Native` 条目、`BUILTIN_SUPERVISOR_MODULES` 条目、`boot_dep_rule`（GPU 依赖 VGA）、`activate_kernel_tier_nodes` 里紧跟 `k_net::NODE_VEC` 之后），与 k-net 同一"tier"、同一形状——不是临时拼接。导出能力 `gpu`/`status`（`namespace: "gpu"`，与既有的 `cuda`/`bridge` 区分,因为 `gpu`/`gpu status` 这两个 shell 命令字符串**已经**被 k-cuda 的既有别名占用）。
+
+**shell 命令**：`vgpu` / `vgpu status`（不是 ADR 原文可能暗示的 `gpu status`——落地时发现 k-shell 里 `gpu`/`gpu status` 已经是 `cuda`/`cuda status` 的既有别名，命名冲突,与 ADR-017 的 `ai`/`ask` 冲突同类,同样选择改名而不是覆盖既有行为）。走既有的"resolve capability 到模块级 `AtomicU64` target（mirror `NIM_TARGET`）+ `emit_target_signal` + `gos_runtime::pump()`"模式,驱动自身通过 `GPU_CONTROL_REPORT` 信号在自己的控制台 sink 上打印完整探测报告（pci 地址、vendor/device、stage、BAR 值）。
+
+**验证**：`cargo check -p gos-kernel`、`cargo check --workspace`、`tools/verify-graph-architecture.ps1` 均绿。QEMU headless 实测两次（`qemu-system-x86_64 -display none`,`bootimage-gos-kernel.bin`）：带 `-device virtio-gpu-pci` 与不带,内核均稳定跑到"idle 稳态"(`vk-input` 轮询输出持续产生,无 panic、无卡死)——证明新 PCI 扫描代码在设备存在/不存在两种情况下都不会拖垮启动。未做的：没有自动化按键注入 + VGA framebuffer 截屏来逐字核对 `vgpu status` 的渲染文本——这需要一整套 QEMU 键盘/显示自动化,超出本切片验证预算;结构上与 `k-net` 的 `net status` 完全同型（同一批打印 helper、同一 `print_probe_report` 形状),置信度来自这一同构性,而非像素级截图比对。
+
+**明确未做（门禁外）**：完整 2D 命令队列（virtqueue 协商、`VIRTIO_GPU_CMD_*`）、与 `k-vk-host`/`gos-hal::display` 的对接、UEFI GOP（独立、待 bootloader 迁移 ADR，等真机 #45 解除阻塞后才是验证的合适时机——见本文件 §一 1.3、2026-08-03 前收到的用户上下文：目标真机是 2014 Mac mini,USB 引导,已确认存在但仍按"先完成开发再做安装包"的顺序排在后面）。

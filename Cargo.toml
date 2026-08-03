@@ -38,6 +38,7 @@ members = [
     "crates/k-cypher",
     "crates/k-ime",
     "crates/k-net",
+    "crates/k-virtio-gpu",
     "crates/k-mouse",
     "crates/k-core",
     "crates/k-chat",

@@ -16,6 +16,7 @@ use gos_protocol::{
     CHAT_CONTROL_API_TYPE, CHAT_CONTROL_HTTP_TOGGLE,
     CHAT_CONTROL_AI_PENDING, CHAT_CONTROL_AI_APPROVE, CHAT_CONTROL_AI_REJECT,
     CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET,
+    GPU_CONTROL_REPORT,
     IME_MODE_ASCII, IME_MODE_ZH_PINYIN,
     NET_CONTROL_PING, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
     NIM_CONTROL_SEND, NIM_CONTROL_EXIT,
@@ -724,6 +725,7 @@ fn dispatch_text_command(
         super::print_str(sink, "  cuda submit <job>   submit one host-backed cuda job\n");
         super::print_str(sink, "  cuda demo           send a sample saxpy-style job\n");
         super::print_str(sink, "  cuda reset          clear bridge counters and capture state\n");
+        super::print_str(sink, "  vgpu / vgpu status  virtio-gpu PCI discovery + BAR status (ADR-013)\n");
         super::print_str(sink, "  clipboard          show clipboard.mount node and mount edges\n");
         super::print_str(sink, "  clipboard clear    clear shared clipboard buffer\n");
         super::print_str(sink, "  clipboard mount <vector>    add node -[mount]-> clipboard.mount\n");
@@ -2117,6 +2119,19 @@ fn dispatch_text_command(
             super::print_str(sink, " empty cuda job\n");
         } else {
             let _ = super::dispatch_cuda_submit(sink, state, trimmed);
+        }
+    } else if cmd == "vgpu" || cmd == "vgpu status" {
+        // ADR-013 §选项A -- virtio-gpu PCI discovery + BAR-mapping status.
+        // Named `vgpu` (not `gpu`) so it doesn't collide with the existing
+        // `gpu`/`gpu status` alias for the k-cuda compute bridge above.
+        let gpu_target = super::GPU_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+        if super::emit_target_signal(sink, gpu_target, Signal::Control { cmd: GPU_CONTROL_REPORT, val: 0 }) {
+            gos_runtime::pump();
+            super::set_color(sink, 11, 0);
+            super::print_str(sink, " virtio-gpu status requested\n");
+        } else {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " virtio-gpu node unresolved\n");
         }
     } else if cmd == "chat" {
         // Enter interactive AI chat mode via the COM2 bridge.

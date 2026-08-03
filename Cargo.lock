@@ -131,6 +131,7 @@ dependencies = [
  "k-serial",
  "k-shell",
  "k-vga",
+ "k-virtio-gpu",
  "k-vk-host",
  "k-vmm",
  "libm",
@@ -487,6 +488,15 @@ dependencies = [
 name = "k-vga"
 version = "0.2.0"
 dependencies = [
+ "gos-protocol",
+ "x86_64",
+]
+
+[[package]]
+name = "k-virtio-gpu"
+version = "0.1.0"
+dependencies = [
+ "gos-hal",
  "gos-protocol",
  "x86_64",
 ]

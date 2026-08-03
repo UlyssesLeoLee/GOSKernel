@@ -84,6 +84,7 @@ const K_VMM_ID: PluginId = PluginId::from_ascii("K_VMM");
 const K_HEAP_ID: PluginId = PluginId::from_ascii("K_HEAP");
 const K_IME_ID: PluginId = PluginId::from_ascii("K_IME");
 const K_NET_ID: PluginId = PluginId::from_ascii("K_NET");
+const K_VIRTIO_GPU_ID: PluginId = PluginId::from_ascii("K_VIRTIO_GPU");
 const K_MOUSE_ID: PluginId = PluginId::from_ascii("K_MOUSE");
 const K_CYPHER_ID: PluginId = PluginId::from_ascii("K_CYPHER");
 const K_CUDA_ID: PluginId = PluginId::from_ascii("K_CUDA");
@@ -180,6 +181,11 @@ const NET_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
 ];
+const GPU_PERMS: &[PermissionSpec] = &[
+    PermissionSpec { kind: PermissionKind::PortIo, arg0: 0xCF8, arg1: 8 },
+    PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
+    PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
+];
 const MOUSE_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::PortIo, arg0: 0x60, arg1: 0x64 },
     PermissionSpec { kind: PermissionKind::IrqBind, arg0: 12, arg1: 0 },
@@ -233,6 +239,9 @@ const IME_EXPORTS: &[CapabilitySpec] = &[
 const NET_EXPORTS: &[CapabilitySpec] = &[
     CapabilitySpec { namespace: "net", name: "uplink", version: 1 },
 ];
+const GPU_EXPORTS: &[CapabilitySpec] = &[
+    CapabilitySpec { namespace: "gpu", name: "status", version: 1 },
+];
 
 const SHELL_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
@@ -268,6 +277,9 @@ const IME_IMPORTS: &[ImportSpec] = &[
 const NET_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
 ];
+const GPU_IMPORTS: &[ImportSpec] = &[
+    ImportSpec { namespace: "console", capability: "write", required: true, min_version: 1, max_version: u32::MAX },
+];
 const MOUSE_IMPORTS: &[ImportSpec] = &[
     ImportSpec { namespace: "display", capability: "pointer", required: true, min_version: 1, max_version: u32::MAX },
 ];
@@ -281,6 +293,7 @@ const DEP_IDT: &[PluginId] = &[K_GDT_ID, K_PIT_ID, K_PS2_ID];
 const DEP_VMM: &[PluginId] = &[K_PMM_ID];
 const DEP_HEAP: &[PluginId] = &[K_PMM_ID, K_VMM_ID];
 const DEP_NET: &[PluginId] = &[K_VGA_ID];
+const DEP_GPU: &[PluginId] = &[K_VGA_ID];
 const DEP_MOUSE: &[PluginId] = &[K_VGA_ID, K_PS2_ID, K_IDT_ID];
 const DEP_CYPHER: &[PluginId] = &[K_VGA_ID];
 const DEP_CUDA: &[PluginId] = &[K_VGA_ID, K_SERIAL_ID];
@@ -327,6 +340,10 @@ const MOD_DEP_HEAP: &[ModuleDependencySpec] = &[
     },
 ];
 const MOD_DEP_NET: &[ModuleDependencySpec] = &[ModuleDependencySpec {
+    module_id: module_id(K_VGA_ID),
+    required: true,
+}];
+const MOD_DEP_GPU: &[ModuleDependencySpec] = &[ModuleDependencySpec {
     module_id: module_id(K_VGA_ID),
     required: true,
 }];
@@ -434,6 +451,7 @@ const K_HEAP_NODE_ID: gos_protocol::NodeId = derive_node_id(K_HEAP_ID, "heap.ent
 const K_VGA_NODE_ID: gos_protocol::NodeId = derive_node_id(K_VGA_ID, "vga.entry");
 const K_IME_NODE_ID: gos_protocol::NodeId = derive_node_id(K_IME_ID, "ime.router");
 const K_NET_NODE_ID: gos_protocol::NodeId = derive_node_id(K_NET_ID, "net.uplink");
+const K_VIRTIO_GPU_NODE_ID: gos_protocol::NodeId = derive_node_id(K_VIRTIO_GPU_ID, "gpu.display");
 const K_MOUSE_NODE_ID: gos_protocol::NodeId = derive_node_id(K_MOUSE_ID, "mouse.pointer");
 const K_CYPHER_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CYPHER_ID, "cypher.query");
 const K_CUDA_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CUDA_ID, "cuda.bridge");
@@ -613,6 +631,18 @@ const NET_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     state_schema_hash: 0x2015,
     permissions: NET_PERMS,
     exports: NET_EXPORTS,
+    vector_ref: None,
+}];
+
+const GPU_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
+    node_id: K_VIRTIO_GPU_NODE_ID,
+    local_node_key: "gpu.display",
+    node_type: RuntimeNodeType::Driver,
+    entry_policy: EntryPolicy::Background,
+    executor_id: k_virtio_gpu::EXECUTOR_ID,
+    state_schema_hash: 0x2021,
+    permissions: GPU_PERMS,
+    exports: GPU_EXPORTS,
     vector_ref: None,
 }];
 
@@ -848,6 +878,12 @@ const NET_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     executor: k_net::EXECUTOR_VTABLE,
 }];
 
+const GPU_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
+    vector: k_virtio_gpu::NODE_VEC,
+    local_node_key: "gpu.display",
+    executor: k_virtio_gpu::EXECUTOR_VTABLE,
+}];
+
 const MOUSE_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_mouse::NODE_VEC,
     local_node_key: "mouse.pointer",
@@ -1022,6 +1058,15 @@ const NET_MANIFEST: PluginManifest = manifest_with_nodes(
     NET_EXPORTS,
     NET_IMPORTS,
     NET_NODE_SPECS,
+);
+const GPU_MANIFEST: PluginManifest = manifest_with_nodes(
+    K_VIRTIO_GPU_ID,
+    "K_VIRTIO_GPU",
+    DEP_GPU,
+    GPU_PERMS,
+    GPU_EXPORTS,
+    GPU_IMPORTS,
+    GPU_NODE_SPECS,
 );
 const MOUSE_MANIFEST: PluginManifest = manifest_with_nodes(
     K_MOUSE_ID,
@@ -1221,7 +1266,7 @@ const fn boot_dep_rule(from: gos_protocol::NodeId, to: gos_protocol::NodeId, lab
     }
 }
 
-pub const BOOT_MANIFEST_RULE_COUNT: usize = 27;
+pub const BOOT_MANIFEST_RULE_COUNT: usize = 28;
 
 static BOOT_MANIFEST_RULES: [RewriteRule; BOOT_MANIFEST_RULE_COUNT] = [
     // PIT depends on PIC
@@ -1239,6 +1284,8 @@ static BOOT_MANIFEST_RULES: [RewriteRule; BOOT_MANIFEST_RULE_COUNT] = [
     boot_dep_rule(K_HEAP_NODE_ID,   K_VMM_NODE_ID,    *b"dep.HEAP.VMM\0\0\0\0"),
     // NET depends on VGA
     boot_dep_rule(K_NET_NODE_ID,    K_VGA_NODE_ID,    *b"dep.NET.VGA\0\0\0\0\0"),
+    // GPU (virtio-gpu discovery skeleton, ADR-013) depends on VGA
+    boot_dep_rule(K_VIRTIO_GPU_NODE_ID, K_VGA_NODE_ID, *b"dep.GPU.VGA\0\0\0\0\0"),
     // MOUSE depends on VGA, PS2, IDT
     boot_dep_rule(K_MOUSE_NODE_ID,  K_VGA_NODE_ID,    *b"dep.MOUSE.VGA\0\0\0"),
     boot_dep_rule(K_MOUSE_NODE_ID,  K_PS2_NODE_ID,    *b"dep.MOUSE.PS2\0\0\0"),
@@ -1315,7 +1362,7 @@ impl BootManifestReport {
     }
 }
 
-const BUILTIN_MODULES: [BuiltinModule; 22] = [
+const BUILTIN_MODULES: [BuiltinModule; 23] = [
     BuiltinModule::Native(NativeModule {
         manifest: PANIC_MANIFEST,
         granted_permissions: NONE_PERMS,
@@ -1401,6 +1448,12 @@ const BUILTIN_MODULES: [BuiltinModule; 22] = [
         register_hook: None,
     }),
     BuiltinModule::Native(NativeModule {
+        manifest: GPU_MANIFEST,
+        granted_permissions: GPU_PERMS,
+        nodes: GPU_NATIVE_NODES,
+        register_hook: None,
+    }),
+    BuiltinModule::Native(NativeModule {
         manifest: MOUSE_MANIFEST,
         granted_permissions: MOUSE_PERMS,
         nodes: MOUSE_NATIVE_NODES,
@@ -1450,7 +1503,7 @@ const BUILTIN_MODULES: [BuiltinModule; 22] = [
     }),
 ];
 
-const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 22] = [
+const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 23] = [
     module_descriptor(
         K_PANIC_ID,
         "K_PANIC",
@@ -1575,6 +1628,15 @@ const BUILTIN_SUPERVISOR_MODULES: [ModuleDescriptor; 22] = [
         NET_PERMS,
         NET_EXPORTS,
         NET_IMPORTS,
+        ModuleFaultPolicy::RestartAlways,
+    ),
+    module_descriptor(
+        K_VIRTIO_GPU_ID,
+        "K_VIRTIO_GPU",
+        MOD_DEP_GPU,
+        GPU_PERMS,
+        GPU_EXPORTS,
+        GPU_IMPORTS,
         ModuleFaultPolicy::RestartAlways,
     ),
     module_descriptor(
@@ -2057,6 +2119,7 @@ pub(crate) fn activate_kernel_tier_nodes() {
         k_ps2::NODE_VEC, // initialises Ps2State, the Keyboard parse machine
         k_mouse::NODE_VEC,
         k_net::NODE_VEC,
+        k_virtio_gpu::NODE_VEC, // ADR-013 discovery skeleton -- no datapath, safe to activate early
         // Graph-native visual bridge — deterministic boot draw of the seed graph.
         k_vk_host::NODE_VEC,
     ];

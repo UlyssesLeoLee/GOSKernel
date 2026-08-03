@@ -36,6 +36,7 @@ k-vk-host = { path = "../k-vk-host" }
 k-cypher = { path = "../k-cypher" }
 k-ime = { path = "../k-ime" }
 k-net = { path = "../k-net" }
+k-virtio-gpu = { path = "../k-virtio-gpu" }
 k-mouse = { path = "../k-mouse" }
 k-chat = { path = "../k-chat" }
 k-nim  = { path = "../k-nim" }
