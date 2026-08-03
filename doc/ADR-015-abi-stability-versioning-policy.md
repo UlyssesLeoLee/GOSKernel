@@ -1,8 +1,14 @@
 # ADR-015：ABI 版本治理——三条轴线，一条已闭环，两条只半闭环
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（"#47 ADR-015，gates SDK publication"）、`gos-protocol`（Phase D.5 packed-semver 基建）、[gos-loader](../crates/gos-loader/src/lib.rs)、[gos-supervisor](../crates/gos-supervisor/src/lib.rs)、[gos-journal](../crates/gos-journal/src/lib.rs)、[ADR-012](./ADR-012-fast-path-node-tagging.md)（提议的 `PermissionKind::FastPathSnapshot=0x0A`——本 ADR minor-bump 判定规则的第一个真实测试用例）
+> 状态：**已选向：选项 A（审计 + 补齐轴线②）· 已落地** · 提案日期：2026-06-12 · 选向/落地日期：2026-08-03 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（"#47 ADR-015，gates SDK publication"）、`gos-protocol`（Phase D.5 packed-semver 基建）、[gos-loader](../crates/gos-loader/src/lib.rs)、[gos-supervisor](../crates/gos-supervisor/src/lib.rs)、[gos-journal](../crates/gos-journal/src/lib.rs)、[ADR-012](./ADR-012-fast-path-node-tagging.md)（提议的 `PermissionKind::FastPathSnapshot=0x0A`——本 ADR minor-bump 判定规则的第一个真实测试用例）
 >
 > 口径：V3 计划把 ADR-015 列为"ABI 稳定性与版本策略"待写——读起来像一张白纸。但 `gos-protocol` 早在"Phase D.5"就已经实现了一套 packed-semver 机制（`encode_abi(major,minor,patch)`、`abi_compatible(plugin_v, host_v)`、三个独立版本常量），其中一条轴线**已经在生产路径上强制执行**。本 ADR 不是设计新机制，是审计三条轴线各自的"设而不查"/"设而查之"状态、补齐缺口，并第一次把"什么算 minor bump"从隐含约定写成规则——为 V3.1 gos-sdk 的外部 `.gosmod` 模块准备一份它能依赖的契约。
+>
+> **落地状态回填**（本 ADR 撰写时三条轴线是"一闭环两半闭环"，现状已是**三条全闭环**——落地过程比本 ADR 记录的更早、分散在两次独立的后续 hardening 工作里，此处回填而非重新执行）：
+> - **轴线①**（`GOS_ABI_VERSION`）：本 ADR 撰写时即已闭环（Phase D.5，`gos-loader::validate_manifest`）。
+> - **轴线②**（`MODULE_ABI_VERSION`）：`gos_supervisor::validate_module` 已加 `abi_compatible(descriptor.abi_version, MODULE_ABI_VERSION)` 检查（[lib.rs:1287](../crates/gos-supervisor/src/lib.rs)，`SupervisorError::AbiVersionMismatch`），配 harness `incompatible_module_abi_version_is_rejected_at_bring_up`（`gos-supervisor-harness`）——由已合并的 `claude/module-abi-version-gate` 分支落地，早于本次回填。
+> - **轴线③**（`CONTROL_PLANE_PROTOCOL_VERSION`）：`gos_journal::deserialize_envelope` 已加版本校验（`JournalError::UnsupportedProtocolVersion`），配 harness `journal_rejects_envelope_with_stale_protocol_version`——详见 [OPS_JOURNAL_PROTOCOL_VERSION_GATE.md](./OPS_JOURNAL_PROTOCOL_VERSION_GATE.md)，该文档记录时即引用了本（当时未合并的）ADR。本 ADR §二选项 A 原判断"轴线③留作记录、不强制修"已被这次独立 hardening 超额完成，不是本 ADR 自身要求的范围。
+> - **本次真正新落地的**：minor-bump checklist（`gos-protocol/src/lib.rs`，`abi_compatible` 文档注释）——三条轴线里唯一在本 ADR 选向前仍是空白的部分。`gos-verify/src/lib.rs` 的参数顺序注释核查后发现已是正确顺序（`abi_compatible(plugin, host)`），无需改动。
 
 ## 一、问题陈述
 

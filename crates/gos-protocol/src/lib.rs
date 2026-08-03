@@ -59,6 +59,40 @@ pub const fn abi_patch(v: u32) -> u16 {
 /// must be greater than or equal to the plugin's minor (host knows
 /// strictly more or the same set of additive features).  Patch is
 /// observational only.
+///
+/// # What counts as a minor bump (ADR-015 §二)
+///
+/// `GOS_ABI_MINOR`/the module-vtable ABI's minor field exist so that
+/// `abi_compatible`'s `<=` rule can actually reject something — that only
+/// works if "additive" changes are bumped and "breaking" ones aren't
+/// silently folded into a minor bump too. Neither `GOS_ABI_VERSION` nor
+/// `MODULE_ABI_VERSION` has moved its minor field since Phase D.5, even
+/// though several changes since then meet the definition below — bumping
+/// them retroactively would be pure churn (no external observer exists yet:
+/// every `k-*`/`gos-*` crate is compiled in the same workspace, so
+/// `abi_compatible(2.0.0, 2.0.0)` is trivially true regardless). This
+/// checklist exists so the *first* external consumer (V3.1 `gos-sdk`'s
+/// externally-compiled `.gosmod` modules) has a rule to build against, not
+/// a retroactive audit of what should have bumped before it existed:
+///
+/// - Adding a new variant to a `#[repr(u8)]` enum consumed across the ABI
+///   boundary (`PermissionKind`, `RoutePolicy`, `RuntimeEdgeType`, ...) —
+///   pure addition, doesn't renumber existing discriminants — is a
+///   **minor bump**. An old plugin (unaware of the new variant) still
+///   loads on a new host; a new plugin (using the new variant) is
+///   correctly rejected by an old host via the `<=` check.
+/// - Adding a new **trailing** field to an ABI-boundary struct
+///   (`PluginManifest`, `NodeSpec`, `EdgeSpec`, `ModuleDescriptor`, ...)
+///   with a defined default is a **minor bump**, same reasoning.
+/// - Changing the meaning of an existing field or discriminant, or
+///   removing either, is a **major bump** — `abi_compatible`'s `==` on
+///   major makes this bidirectionally incompatible, which is correct: there
+///   is no safe direction to load across that change.
+///
+/// (ADR-012's proposed `PermissionKind::FastPathSnapshot` would be the
+/// first real instance of the first bullet, once/if it lands — it doesn't
+/// need to force a `GOS_ABI_VERSION` bump today for the same "no external
+/// observer yet" reason above, but the rule is what it would exercise.)
 pub const fn abi_compatible(plugin_v: u32, host_v: u32) -> bool {
     abi_major(plugin_v) == abi_major(host_v) && abi_minor(plugin_v) <= abi_minor(host_v)
 }
