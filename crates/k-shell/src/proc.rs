@@ -730,6 +730,8 @@ fn dispatch_text_command(
         super::print_str(sink, "  theme              show theme.current and its active use edge\n");
         super::print_str(sink, "  theme wabi         repoint theme.current -> theme.wabi\n");
         super::print_str(sink, "  theme shoji        repoint theme.current -> theme.shoji\n");
+        super::print_str(sink, "  gpm list           list packages mounted under packages.root (ADR-016 v0)\n");
+        super::print_str(sink, "  gpm install <name> create a package node + mount it under packages.root\n");
         super::print_str(sink, "  chat    enter AI chat mode (type 'exit' to quit)\n");
         super::print_str(sink, "  chat key <k>     set AI API key for current session\n");
         super::print_str(sink, "  chat model <m>   set model name (e.g. qwen2.5:7b)\n");
@@ -1931,6 +1933,49 @@ fn dispatch_text_command(
         }
         if listed == 0 {
             super::print_str(sink, "    none\n");
+        }
+    } else if cmd == "gpm list" || cmd == "gpm" {
+        let mut edges = [gos_protocol::GraphEdgeSummary::EMPTY; 32];
+        let returned = super::gpm_list_raw(&mut edges);
+        super::set_color(sink, 11, 0);
+        super::print_str(sink, " packages.root\n");
+        super::set_color(sink, 7, 0);
+        super::print_str(sink, "  installed:\n");
+        let mut listed = 0usize;
+        for summary in edges.iter().take(returned) {
+            if summary.edge_type != RuntimeEdgeType::Mount {
+                continue;
+            }
+            super::print_str(sink, "    ");
+            let mut line = super::LineBuf::<24>::new();
+            line.push_vector(summary.from_vector);
+            super::print_str(sink, core::str::from_utf8(line.as_slice()).unwrap_or("node"));
+            super::print_str(sink, "\n");
+            listed += 1;
+        }
+        if listed == 0 {
+            super::print_str(sink, "    none — try: gpm install <name>\n");
+        }
+    } else if let Some(name) = cmd.strip_prefix("gpm install ") {
+        let name = name.trim();
+        if name.is_empty() {
+            super::set_color(sink, 12, 0);
+            super::print_str(sink, " usage: gpm install <name>\n");
+        } else {
+            match super::gpm_install_raw(name) {
+                Some(_id) => {
+                    super::set_color(sink, 11, 0);
+                    super::print_str(sink, " gpm installed ");
+                    super::set_color(sink, 15, 0);
+                    super::print_str(sink, name);
+                    super::set_color(sink, 7, 0);
+                    super::print_str(sink, "  (ADR-016 v0: graph shape only — capability declarations stay prose)\n");
+                }
+                None => {
+                    super::set_color(sink, 12, 0);
+                    super::print_str(sink, " gpm install failed\n");
+                }
+            }
         }
     } else if cmd == "clipboard clear" || cmd == "clip clear" {
         if super::clipboard_clear(sink, state.clipboard_target) {

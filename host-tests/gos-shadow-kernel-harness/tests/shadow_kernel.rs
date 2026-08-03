@@ -25,19 +25,21 @@
 //!   (t3:Function {name: "shadow_kernel_survives_fault_and_restart_while_other_modules_keep_cycling", type: "function"}),
 //!   (t4:Function {name: "shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity", type: "function"}),
 //!   (t5:Function {name: "capability_granting_mutation_is_the_promote_trigger_adr014", type: "function"}),
+//!   (t6:Function {name: "gpm_install_mints_a_package_node_mounted_under_packages_root", type: "function"}),
 //!   (f)-[:CONTAINS]->(boot), (f)-[:CONTAINS]->(t1), (f)-[:CONTAINS]->(t2),
-//!   (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4), (f)-[:CONTAINS]->(t5),
+//!   (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4), (f)-[:CONTAINS]->(t5), (f)-[:CONTAINS]->(t6),
 //!   (t1)-[:CALLS]->(boot), (t2)-[:CALLS]->(boot), (t3)-[:CALLS]->(boot), (t4)-[:CALLS]->(boot),
-//!   (t5)-[:CALLS]->(boot);
+//!   (t5)-[:CALLS]->(boot), (t6)-[:CALLS]->(boot);
 //! ```
 
 use std::sync::Mutex;
 
 use gos_cypher_mut::{apply_mutation, CypherMutation, MutationDispatcher, ReceptiveEdgeKind};
 use gos_protocol::{
-    derive_edge_id, derive_edge_vector, ModuleAbiV1, ModuleCallStatus, ModuleDescriptor,
-    ModuleEntry, ModuleFaultPolicy, ModuleHandle, ModuleId, ModuleImageFormat,
-    ModuleImageSegment, ModuleSegmentKind, NodeId, MODULE_ABI_VERSION,
+    derive_edge_id, derive_edge_vector, derive_node_id, EntryPolicy, ExecutorId, GraphEdgeSummary,
+    ModuleAbiV1, ModuleCallStatus, ModuleDescriptor, ModuleEntry, ModuleFaultPolicy, ModuleHandle,
+    ModuleId, ModuleImageFormat, ModuleImageSegment, ModuleSegmentKind, NodeId, NodeSpec,
+    PluginId, RuntimeEdgeType, RuntimeNodeType, VectorAddress, MODULE_ABI_VERSION,
 };
 use gos_supervisor::{
     bootstrap, current_instance, install_module, realize_boot_modules, service_system_cycle,
@@ -406,6 +408,79 @@ fn capability_granting_mutation_is_the_promote_trigger_adr014() {
         !gos_mutation_dispatch::capability::capability_check(&no_edges, proc, resource),
         "after the granting edge is removed, capability_check must revoke the path -- \
          an isolated provisional node with no Grant out-edges is harmless by construction"
+    );
+
+    run_steady_state_cycles(2);
+}
+
+// ── ADR-016 option A — gpm install/list mechanism ─────────────────────────
+//
+// Mirrors `k-shell::gpm_install_raw`/`gpm_list_raw` exactly (CreateNode +
+// AddEdge{Mount} to a packages-root anchor, through the standard
+// supervisor-gated mutation path with a b"K_GPM" source stamp), but against
+// a synthetic anchor node registered here directly rather than the real
+// builtin `packages.root` (k-shell is a no_std kernel crate tied to VGA/PS2
+// hardware access and isn't host-compilable, matching every other
+// k-shell-adjacent test in this codebase -- `cargo check -p gos-kernel`
+// is what proves k-shell's own gpm_install_raw/gpm_list_raw wiring
+// compiles; this test proves the *mechanism* those functions perform).
+fn register_packages_root_anchor() -> (PluginId, VectorAddress, NodeId) {
+    let plugin = PluginId::from_ascii("GPM_TEST_HARNESS");
+    let vector = VectorAddress::new(0xF2, 0, 0, 0);
+    let node_id = derive_node_id(plugin, "packages.root");
+    let spec = NodeSpec {
+        node_id,
+        local_node_key: "packages.root",
+        node_type: RuntimeNodeType::Service,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: ExecutorId::ZERO,
+        state_schema_hash: 0,
+        permissions: &[],
+        exports: &[],
+        vector_ref: None,
+    };
+    gos_runtime::register_node(plugin, vector, spec).expect("register packages.root anchor");
+    (plugin, vector, node_id)
+}
+
+#[test]
+fn gpm_install_mints_a_package_node_mounted_under_packages_root() {
+    let _guard = test_guard();
+    boot_two_modules();
+    run_steady_state_cycles(2);
+
+    let (_plugin, root_vector, root_id) = register_packages_root_anchor();
+
+    // gpm_install_raw's CreateNode step -- mirrors k-shell exactly (bypasses
+    // the audited-envelope gate the same way k-cypher's own `CREATE (n)`
+    // does; see gpm_install_raw's doc comment for why).
+    let pkg_id = create_node();
+
+    // gpm_install_raw's Mount step -- through the standard supervisor gate,
+    // stamped b"K_GPM" instead of b"K_SHELL"/b"K_AI".
+    gos_supervisor::apply_cypher_mutation(
+        CypherMutation::AddEdge { from: pkg_id, to: root_id, edge_kind: ReceptiveEdgeKind::Mount },
+        *b"K_GPM\0\0\0\0\0\0\0\0\0\0\0",
+    )
+    .expect("gpm install's mount mutation must apply through the standard gate");
+
+    // gpm_list_raw's read step: walk packages.root's edges (inbound, since
+    // the package is `from` and packages.root is `to`) and find the Mount.
+    let mut buf = [GraphEdgeSummary::EMPTY; 8];
+    let (_total, returned) =
+        gos_runtime::edge_page_for_node(root_vector, 0, &mut buf).expect("edge_page_for_node");
+    let found = buf[..returned]
+        .iter()
+        .any(|e| e.edge_type == RuntimeEdgeType::Mount && e.to_vector == root_vector);
+    assert!(found, "gpm list must see the freshly installed package as a Mount edge into packages.root");
+
+    // The installed package is a real, individually-addressable node too --
+    // node_page/render_live_graph (ADR-012's fast-path read) would surface
+    // it in the 3D view, matching Appendix B's "subgraph appears in 3D
+    // view" demo criterion.
+    assert!(
+        gos_runtime::node_summary_by_id(pkg_id).is_some(),
+        "the installed package must be a real, individually-queryable node"
     );
 
     run_steady_state_cycles(2);

@@ -442,6 +442,7 @@ const K_THEME_WABI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "t
 const K_THEME_SHOJI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.shoji");
 const K_THEME_CURRENT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "theme.current");
 const K_CLIPBOARD_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "clipboard.mount");
+const K_PACKAGES_ROOT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_SHELL_ID, "packages.root");
 const K_AI_NODE_ID: gos_protocol::NodeId = derive_node_id(K_AI_ID, "ai.supervisor");
 const K_CHAT_NODE_ID: gos_protocol::NodeId = derive_node_id(K_CHAT_ID, "chat.bridge");
 const K_NIM_NODE_ID:  gos_protocol::NodeId = derive_node_id(K_NIM_ID,  "nim.inference");
@@ -694,6 +695,19 @@ const SHELL_NODE_SPECS: &[NodeSpec] = &[NodeSpec {
     exports: CLIPBOARD_EXPORTS,
     vector_ref: None,
 }, NodeSpec {
+    // ADR-016 option A — the mount anchor `gpm install` hangs each
+    // package's provisional node off of. Passive: no permissions/exports
+    // of its own, matching the all-None PACKAGES_EXECUTOR_VTABLE.
+    node_id: K_PACKAGES_ROOT_NODE_ID,
+    local_node_key: "packages.root",
+    node_type: RuntimeNodeType::Service,
+    entry_policy: EntryPolicy::Manual,
+    executor_id: k_shell::PACKAGES_EXECUTOR_ID,
+    state_schema_hash: 0x2023,
+    permissions: &[],
+    exports: &[],
+    vector_ref: None,
+}, NodeSpec {
     node_id: K_THEME_WABI_NODE_ID,
     local_node_key: "theme.wabi",
     node_type: RuntimeNodeType::Vector,
@@ -870,6 +884,10 @@ const SHELL_NATIVE_NODES: &[NativeNodeBinding] = &[NativeNodeBinding {
     vector: k_shell::CLIPBOARD_NODE_VEC,
     local_node_key: "clipboard.mount",
     executor: k_shell::CLIPBOARD_EXECUTOR_VTABLE,
+}, NativeNodeBinding {
+    vector: k_shell::PACKAGES_ROOT_NODE_VEC,
+    local_node_key: "packages.root",
+    executor: k_shell::PACKAGES_EXECUTOR_VTABLE,
 }, NativeNodeBinding {
     vector: k_shell::THEME_WABI_NODE_VEC,
     local_node_key: "theme.wabi",

@@ -75,11 +75,19 @@ pub const THEME_CURRENT_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 3, 0)
 pub const CLIPBOARD_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 4, 0);
 pub const PALETTE_CYAN_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 5, 0); // V2.62
 pub const PALETTE_GOLD_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 6, 0); // V2.62
+/// ADR-016 option A — the conventional mount anchor `gpm install` hangs
+/// each package's provisional node off of, so installed packages are
+/// discoverable as one hub's `Mount` out-edges instead of scattered
+/// unconnected nodes. Purely a graph anchor point (mirrors
+/// `PALETTE_EXECUTOR_VTABLE`'s all-`None` shape below) — it runs no code
+/// of its own.
+pub const PACKAGES_ROOT_NODE_VEC: VectorAddress = VectorAddress::new(6, 1, 7, 0); // V3.1 ADR-016
 const VGA_VEC: VectorAddress = VectorAddress::new(1, 1, 0, 0);
 pub const EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.shell");
 pub const THEME_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.theme");
 pub const CLIPBOARD_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.clip");
 pub const PALETTE_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.pal"); // V2.62
+pub const PACKAGES_EXECUTOR_ID: ExecutorId = ExecutorId::from_ascii("native.pkg"); // V3.1 ADR-016
 pub const EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: EXECUTOR_ID,
     on_init: Some(shell_on_init),
@@ -110,6 +118,15 @@ pub const CLIPBOARD_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
 // V2.62: passive data-store executor for CYAN/GOLD palette nodes — no event handlers needed.
 pub const PALETTE_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
     executor_id: PALETTE_EXECUTOR_ID,
+    on_init: None,
+    on_event: None,
+    on_suspend: None,
+    on_resume: None,
+    on_teardown: None,
+    on_telemetry: None,
+};
+pub const PACKAGES_EXECUTOR_VTABLE: NodeExecutorVTable = NodeExecutorVTable {
+    executor_id: PACKAGES_EXECUTOR_ID,
     on_init: None,
     on_event: None,
     on_suspend: None,
@@ -830,6 +847,62 @@ fn apply_theme_choice_raw(_abi: &KernelAbi, from: u64, _console_target: u64, the
 
 fn apply_theme_choice(sink: &ConsoleSink, theme: u8) -> bool {
     apply_theme_choice_raw(sink.abi, sink.from, sink.target, theme)
+}
+
+/// ADR-016 option A — `gpm install <name>`: mint a provisional node
+/// representing the package (`CypherMutation::CreateNode`, ADR-005 option
+/// A) and `Mount` it under [`PACKAGES_ROOT_NODE_VEC`], so installed
+/// packages are discoverable as one hub's `Mount` out-edges. The Mount
+/// edge is stamped `b"K_GPM"` and goes through the exact same
+/// `gos-cypher-mut` gate a human (`b"K_SHELL"`) or AI (`b"K_AI"`) mutation
+/// uses — `gpm` isn't a second privileged path (V3 Parity invariant).
+///
+/// `manifest.cypher v0`'s capability declarations (`IMPORTS`/`EXPORTS`/
+/// `DEPENDS_ON`) are explicitly **not** wired here — they stay `//`-style
+/// prose (same convention as `k-net`'s own header comment) until a future
+/// option-B slice extends `ReceptiveEdgeKind` to cover them (ADR-016 §二
+/// option B). `name` itself isn't stored anywhere yet either (`CreateNode`
+/// doesn't carry a `{props}` payload — V2.5e's own documented limitation)
+/// — this v0 proves the graph shape, not a full package registry.
+///
+/// Returns the new package node's id on success.
+pub fn gpm_install_raw(_name: &str) -> Option<gos_protocol::NodeId> {
+    use gos_cypher_mut::{apply_mutation, CypherMutation, MutationDispatcher};
+
+    // CreateNode bypasses the audited-envelope gate the same way
+    // k-cypher's own `CREATE (n)` shell verb does: apply_mutation's
+    // CreateNode arm has no `EdgeId` to hand a caller and no `{props}`
+    // payload to audit yet (see this fn's own doc comment above).
+    let mut dispatcher = gos_runtime::RuntimeDispatcher;
+    let pkg_id = apply_mutation(&mut dispatcher, CypherMutation::CreateNode).ok()??;
+
+    const GPM_SOURCE: [u8; 16] = *b"K_GPM\0\0\0\0\0\0\0\0\0\0\0";
+    let root_id = gos_runtime::node_id_for_vec(PACKAGES_ROOT_NODE_VEC)?;
+    gos_supervisor::apply_cypher_mutation(
+        gos_cypher_mut::CypherMutation::AddEdge {
+            from: pkg_id,
+            to: root_id,
+            edge_kind: gos_cypher_mut::ReceptiveEdgeKind::Mount,
+        },
+        GPM_SOURCE,
+    )
+    .ok()?;
+    Some(pkg_id)
+}
+
+/// ADR-016 option A — `gpm list`: walk [`PACKAGES_ROOT_NODE_VEC`]'s `Mount`
+/// out-edges. Read-only, not a mutation, so it doesn't go through the
+/// cypher-mut gate — mirrors how `theme`/`clipboard status` are plain
+/// reads over `edge_page_for_node`.
+pub fn gpm_list_raw(out: &mut [gos_protocol::GraphEdgeSummary]) -> usize {
+    let mut buf = [gos_protocol::GraphEdgeSummary::EMPTY; 64];
+    let (_total, returned) = match gos_runtime::edge_page_for_node::<64>(PACKAGES_ROOT_NODE_VEC, 0, &mut buf) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let n = returned.min(out.len());
+    out[..n].copy_from_slice(&buf[..n]);
+    n
 }
 
 fn parse_theme_selector(cmd: &str) -> Option<u8> {

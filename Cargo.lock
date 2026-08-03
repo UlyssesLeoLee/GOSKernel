@@ -465,6 +465,7 @@ dependencies = [
 name = "k-shell"
 version = "0.2.0"
 dependencies = [
+ "gos-cypher-mut",
  "gos-hal",
  "gos-journal",
  "gos-log",

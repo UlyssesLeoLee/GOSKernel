@@ -1,6 +1,6 @@
 # ADR-016：gpm 包格式——Appendix B 的草图引用了一个比 H.1 receptive subset 更大的 Cypher 方言
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V3 计划 Appendix B](../plan/V3_DEVELOPMENT_PLAN.md#附录-b--包子图格式草图adr-016-输入)（"包=子图格式草图，ADR-016 输入"）、[gos-cypher-mut](../crates/gos-cypher-mut/src/lib.rs)（H.1 receptive mutation subset）、`crates/k-net/src/lib.rs:12-29`（Appendix B 引用的"现有每文件 Cypher 拓扑头"precedent）、[gos-loader](../crates/gos-loader/src/lib.rs)（`.gosmod` ET_DYN ELF，B.4.6 既有）、`gos-sign`/`gos-verify`（签名，G.2 既有）、[ADR-015](./ADR-015-abi-stability-versioning-policy.md)（minor-bump checklist——本 ADR 选项 B 若选中，会是该 checklist 的第一个真实用例）
+> 状态：**已选向：选项 A（manifest.cypher v0 + gpm 作为 k-shell 子命令）· 已落地；选项 B（ReceptiveEdgeKind 扩 Imports/Exports/DependsOn）未落地** · 提案日期：2026-06-12 · 选向/落地日期：2026-08-03 · 配套：[V3 计划 Appendix B](../plan/V3_DEVELOPMENT_PLAN.md#附录-b--包子图格式草图adr-016-输入)（"包=子图格式草图，ADR-016 输入"）、[gos-cypher-mut](../crates/gos-cypher-mut/src/lib.rs)（H.1 receptive mutation subset）、`crates/k-net/src/lib.rs:12-29`（Appendix B 引用的"现有每文件 Cypher 拓扑头"precedent）、[gos-loader](../crates/gos-loader/src/lib.rs)（`.gosmod` ET_DYN ELF，B.4.6 既有）、`gos-sign`/`gos-verify`（签名，G.2 既有）、[ADR-015](./ADR-015-abi-stability-versioning-policy.md)（minor-bump checklist——本 ADR 选项 B 若选中，会是该 checklist 的第一个真实用例）
 >
 > 口径：V3 计划 Appendix B 给 ADR-016 准备了一个看起来相当具体的输入草图——`hello-pkg/{manifest.cypher, bin/*.gosmod, signature}`，并声称 `manifest.cypher` 与"现有每文件 Cypher 拓扑头同一词汇——k-net 等 crate 已示范该约定"。调查后发现：这个草图里**三个组件中两个是真实存在的既有机制**（`.gosmod` ET_DYN ELF = B.4.6，`signature` = G.2 gos-sign/verify），但**第三个——`manifest.cypher` 的方言——其"已示范"的 precedent 本身是从未被解析过的 `//` 注释**，而 `gos-cypher-mut`（H.1，唯一的"重放经 gate"入口）的 receptive subset 既不包含 `MERGE`，也不包含 Appendix B 点名的 `IMPORTS`/`EXPORTS`/`DEPENDS_ON` 等边类型，更**明确地、有意地拒绝**`gpm remove` 所需的 `DETACH DELETE`（节点删除）。本 ADR 把"包=子图格式"按这三个组件的真实成熟度拆开定价。
 
@@ -97,3 +97,13 @@ crate 顶部文档（line 9-12）说得非常直白：
 - B（`ReceptiveEdgeKind` 新变体）排期在 A 之后，落地前应有一个一句话的 ADR-015 式判定记录（"`ReceptiveEdgeKind` 是否属于 `GOS_ABI`/`MODULE_ABI` 任一轴线"——若 gpm/未来外部模块直接构造 `CypherMutation` 值跨编译边界，则属于；若 `gos-cypher-mut` 的调用方始终与内核同编译，则不属于、minor-bump checklist 不强制但仍是良好实践）。
 - `gpm remove`/节点删除不在本 ADR 门禁内——明确记录为"暂不支持"，避免 V3.1 demo 范围蔓延到一个与 Phase B 不变式冲突、需要独立设计的问题。
 - 选项 C 不落地，但其指出的"两份真相"（k-net 头部 `//` 注释 vs `PluginManifest.{depends_on,imports,exports}`）观察值得记录：本 ADR 选 A/B 后，`manifest.cypher` 的 capability 声明最终目标是成为**第三份**与前两者一致的真相来源——三者长期应通过治理脚本互相校验，而非各自维护，但这是 V3.1 之后的收尾，不在本 ADR 门禁内。
+
+## 四、A 落地状态（2026-08-03）
+
+`manifest.cypher v0`（Cypher 文本解析未落地——门禁本身允许"进一步简化为固定模板"，选了后者）：`gpm install <name>` = 一个 `CreateNode`（provisional 节点代表包，`{name}` 本身暂不落盘——V2.5e 既有限制，非本次新缺口）+ 一个 `AddEdge{Mount}` 把包节点挂到新增的 `packages.root` builtin 锚点节点下。`packages.root`（`crates/gos-kernel/src/builtin_bundle.rs`，`k-shell::PACKAGES_ROOT_NODE_VEC`/`PACKAGES_EXECUTOR_VTABLE`，全 `None` 回调，纯锚点、不跑代码）是本次新增的唯一真正的"设计决定"——ADR 草稿未点名具体锚点节点该怎么落地，选了与既有 `clipboard.mount` 同型的建 builtin 节点方案，而非动态创建（动态创建会遇到"约定俗成的稳定 NodeId 从哪来"的新问题，builtin 节点天然有 `derive_node_id` 保证的稳定身份）。
+
+`gpm` 身份：`k-shell` 新增 `gpm_install_raw`/`gpm_list_raw`（`crates/k-shell/src/lib.rs`）+ `gpm install <name>`/`gpm list` shell 命令（`proc.rs`），复用 `apply_theme_choice_raw` 同型的"function → mutation → source 戳"模式，`b"K_GPM"` 替换 `b"K_SHELL"`，Mount 边经 `gos_supervisor::apply_cypher_mutation`（与人类/AI 共用同一 gate，Parity 不变式成立）。`gpm remove` 未实现，按门禁记录为"暂不支持"。
+
+Capability 声明（`IMPORTS`/`EXPORTS`/`DEPENDS_ON`）按选项 A 仍是 prose，未落地——选项 B 保持"提案待选向"。
+
+**验证**：`k-shell` 是 no_std 内核 crate（PS/2、VGA 硬件访问），不可 host-test——`cargo check -p gos-kernel` + `tools/verify-graph-architecture.ps1` 证明 `gpm_install_raw`/`gpm_list_raw`/dispatch 接线编译正确。机制本身（CreateNode + AddEdge{Mount} 经标准 gate、`gpm list` 读回）在 `gos-shadow-kernel-harness/tests/shadow_kernel.rs` 的 `gpm_install_mints_a_package_node_mounted_under_packages_root` 中对一个手工注册的等价锚点节点验证——镜像 `k-shell` 的真实逻辑，而非依赖它编译进 host 测试。
