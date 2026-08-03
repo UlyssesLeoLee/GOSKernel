@@ -117,3 +117,42 @@ fn rebind_use_is_atomic_single_epoch_and_exclusive() {
     // so it reports absence (proving it isn't a stub that always says true).
     assert!(!d.lookup_node(theme_current), "no node registered -> lookup is false");
 }
+
+// ADR-001 exclusivity regression: `add_edge(.., Use)` must not bypass the
+// same atomicity `rebind_use` gets. A bare `register_edge` here would leave
+// two Use edges from `from` when the source already has one — this is
+// exactly the gap a discarded duplicate `RuntimeDispatcher` (from the
+// v2-mutation-dispatcher merge) handled correctly but the real one didn't,
+// until `add_edge` special-cased `Use` to delegate to `rebind_use`.
+#[test]
+fn add_edge_with_use_kind_stays_exclusive_via_rebind() {
+    let from = NodeId([0x60; 16]);
+    let first_target = NodeId([0x70; 16]);
+    let second_target = NodeId([0x80; 16]);
+
+    let mut d = gos_runtime::RuntimeDispatcher;
+    d.add_edge(from, first_target, ReceptiveEdgeKind::Use)
+        .expect("first add_edge(Use) applies");
+    assert!(dispatcher_use_edge_present(from, first_target));
+
+    let before = gos_runtime::snapshot();
+    d.add_edge(from, second_target, ReceptiveEdgeKind::Use)
+        .expect("second add_edge(Use) applies");
+    let after = gos_runtime::snapshot();
+
+    // Same single-epoch atomicity as an explicit rebind_use call.
+    assert_eq!(
+        after.graph_epoch,
+        before.graph_epoch + 1,
+        "add_edge(.., Use) on an already-Use'd source must be a single-epoch rebind, not a bare add"
+    );
+    assert_eq!(after.edge_count, before.edge_count, "must still hold exactly one Use edge from `from`");
+    assert!(
+        dispatcher_use_edge_present(from, second_target),
+        "new Use edge must be present"
+    );
+    assert!(
+        !dispatcher_use_edge_present(from, first_target),
+        "old Use edge must be gone -- add_edge(Use) must not create a second Use edge from the same source"
+    );
+}

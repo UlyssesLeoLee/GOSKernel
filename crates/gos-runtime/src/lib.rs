@@ -30039,6 +30039,14 @@ impl MutationDispatcher for RuntimeDispatcher {
         to: NodeId,
         kind: ReceptiveEdgeKind,
     ) -> Result<EdgeId, u32> {
+        // `Use` carries the ADR-001 exclusivity invariant (exactly one Use
+        // edge per source node). A Cypher `MERGE ... -[:USE]->` lowers to
+        // `add_edge(.., Use)`, which must take the same atomic
+        // remove-old/insert-new path as `rebind_use` — a bare `register_edge`
+        // here could leave two Use edges from `from`.
+        if matches!(kind, ReceptiveEdgeKind::Use) {
+            return self.rebind_use(from, to);
+        }
         let edge_id = derive_edge_id(from, to, edge_key_for(kind));
         let spec = EdgeSpec {
             edge_id,
