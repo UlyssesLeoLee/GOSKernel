@@ -56,7 +56,7 @@ reviews:
         iterations) that terminates when dispatched==0 && !restarted - flag
         any change that could make it loop unboundedly or skip the cap.
 
-    - path: "crates/hypervisor/src/**/*.rs"
+    - path: "crates/gos-kernel/src/**/*.rs"
       instructions: >
         no_std/no_main kernel entry point (gos-kernel). `kernel_main`'s boot
         order is load-bearing: vaddr/meta init -> supervisor bootstrap ->
@@ -97,7 +97,7 @@ reviews:
         Windows PowerShell tooling (build/run scripts). Flag destructive
         defaults (force-deleting, overwriting without confirmation) and any
         change to QEMU `run-args` - cross-check against
-        crates/hypervisor/Cargo.toml's `[package.metadata.bootimage]` notes,
+        crates/gos-kernel/Cargo.toml's `[package.metadata.bootimage]` notes,
         since some flags (e.g. `-display gtk,gl=on`, large `-m` sizes) have
         previously broken QEMU on this host.
 

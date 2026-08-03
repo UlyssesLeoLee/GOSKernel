@@ -300,7 +300,7 @@ fn kill_child_tree(child: &mut std::process::Child, pid: u32) -> std::io::Result
 
 /// L+ — validate that interfaces/plugins.yaml mentions exactly the
 /// same `plugin_id`s as the Rust-side `BuiltinPluginDescriptor`
-/// constants in `crates/hypervisor/src/builtin_bundle.rs`.  Catches
+/// constants in `crates/gos-kernel/src/builtin_bundle.rs`.  Catches
 /// drift between the human-readable contract and the source of truth.
 ///
 /// We don't use serde_yaml — keeping xtask dependency-free and the
@@ -310,7 +310,7 @@ fn run_check_interfaces(root: &Path) -> Result<(), u8> {
     use std::fs;
 
     let yaml_path = root.join("interfaces").join("plugins.yaml");
-    let bundle_path = root.join("crates").join("hypervisor").join("src").join("builtin_bundle.rs");
+    let bundle_path = root.join("crates").join("gos-kernel").join("src").join("builtin_bundle.rs");
 
     let yaml_text = match fs::read_to_string(&yaml_path) {
         Ok(t) => t,

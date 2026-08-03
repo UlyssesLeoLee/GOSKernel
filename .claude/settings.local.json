@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(wc -l /e/GOSKernel/crates/*/src/lib.rs /e/GOSKernel/crates/hypervisor/src/*.rs)",
+      "Bash(wc -l /e/GOSKernel/crates/*/src/lib.rs /e/GOSKernel/crates/gos-kernel/src/*.rs)",
       "Bash(cargo check:*)",
       "Bash(git add *)",
       "Bash(python3 -)",

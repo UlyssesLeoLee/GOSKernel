@@ -2,7 +2,7 @@ import os
 import re
 
 # Paths
-bundle_path = r"e:\GOSKernel\crates\hypervisor\src\builtin_bundle.rs"
+bundle_path = r"e:\GOSKernel\crates\gos-kernel\src\builtin_bundle.rs"
 crates_dir = r"e:\GOSKernel\crates"
 
 # Map Crate Name to Plugin ID (as defined in builtin_bundle.rs)

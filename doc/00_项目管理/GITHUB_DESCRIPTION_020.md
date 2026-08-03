@@ -59,7 +59,7 @@ GOS 是一个完全使用 Rust 编写的实验性图原生（graph-native）操�
 | **迁移中组件** | `gos-loader` | 仍在 workspace 中，但已退出 `kernel_main` 主启动路径，仅作为迁移期部件 |
 | **硬件驱动** | `k-gdt` `k-idt` `k-pic` `k-pit` `k-ps2` `k-mouse` `k-serial` `k-vga` `k-cpuid` `k-pmm` `k-vmm` `k-heap` | x86_64 模块化硬件驱动（`k-pit/k-ps2/k-idt/k-pmm/k-vmm/k-heap` 现列为 legacy 迁移岛，见治理文档 §三） |
 | **用户可见服务** | `k-shell` `k-ai` `k-ime` `k-cypher` `k-net` `k-cuda-host` `k-vk-host` `k-panic` `k-mouse` | 面向用户的图控制服务与扩展点 |
-| **内核入口** | `hypervisor` | 启动入口、CPU 特性初始化、supervisor 编排 |
+| **内核入口** | `gos-kernel`（目录 `crates/gos-kernel`，Cargo 包名与目录名统一，ADR-011） | 启动入口、CPU 特性初始化、supervisor 编排 |
 
 > **文档缺口提示**：`gos-ai-bridge`、`gos-cluster`、`gos-cypher-mut`、`gos-journal`、`gos-log`、`gos-rewrite`、`gos-sign`、`gos-verify`、`gos-vfs`、`k-core`、`k-chat`、`k-fat32`、`k-nim` 等 V2 阶段新增 crate 尚未在 [GOS_ARCH_v2.md](../02_基本设计/GOS_ARCH_v2.md) 中获得逐一职责说明。建议列入 04_实施计划 的文档同步待办（见 [task_v0_1_zh.md](../04_实施计划/task_v0_1_zh.md)），后续版本补齐后本表将同步更新。
 
@@ -113,7 +113,7 @@ GOS 是一个完全使用 Rust 编写的实验性图原生（graph-native）操�
 cargo install bootimage
 
 # 在 QEMU 中构建并运行
-cd crates/hypervisor
+cd crates/gos-kernel
 cargo bootimage
 qemu-system-x86_64 \
   -drive format=raw,file=target/x86_64-gos-kernel/debug/bootimage-gos-kernel.bin \

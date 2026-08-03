@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hypervisor",
+    "crates/gos-kernel",
     "crates/gos-protocol",
     "crates/gos-runtime",
     "crates/gos-mutation-dispatch",

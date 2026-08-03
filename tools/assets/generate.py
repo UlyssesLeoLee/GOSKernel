@@ -6,7 +6,7 @@ Outputs PPM (binary P6) into `assets/` at the workspace root.  PPM is
 trivial to consume from `pack_palette.py` next stage.
 
 The ray-traced sphere shader mirrors the in-kernel one in
-`crates/hypervisor/src/main.rs::draw_node_sphere` so the offline
+`crates/gos-kernel/src/main.rs::draw_node_sphere` so the offline
 renderings are a higher-quality "reference" of what the kernel paints
 in real time (more samples, true cubemap reflection, no palette
 quantization).
@@ -42,7 +42,7 @@ def vec_reflect(d, n):
     k = 2 * vec_dot(d, n)
     return (d[0] - k * n[0], d[1] - k * n[1], d[2] - k * n[2])
 
-# ── Material profiles — mirror crates/hypervisor/src/main.rs ───────
+# ── Material profiles — mirror crates/gos-kernel/src/main.rs ───────
 
 MATERIALS = {
     # name            tint              metallic rough  rim   bumpA bumpF aniso

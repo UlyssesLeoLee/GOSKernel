@@ -23,7 +23,7 @@
 //! kernel binds k-fb; tests can bind a mock.
 //!
 //! Math precision: `f32` end-to-end.  The kernel boot path enables
-//! OSFXSR + OSXMMEXCPT (see `crates/hypervisor/src/main.rs`) so SSE
+//! OSFXSR + OSXMMEXCPT (see `crates/gos-kernel/src/main.rs`) so SSE
 //! float ops are legal.  `libm` provides `sinf` / `cosf` / `sqrtf`
 //! for the no_std build.
 
