@@ -909,6 +909,20 @@ pub enum PermissionKind {
     CapabilityConsume = 0x07,
     ExternalSync = 0x08,
     ScheduleHint = 0x09,
+    /// ADR-012 option B — the node's executor is allowed to call
+    /// `gos_runtime::node_page`/`edge_page` for a bulk snapshot read,
+    /// bypassing per-edge `on_event`/`Subscribe` delivery. This is a
+    /// declarative governance marker (`PluginManifest.permissions` is
+    /// already a governance-audited array), not a runtime-enforced gate —
+    /// `node_page`/`edge_page` themselves don't check the caller declared
+    /// this. Any node declaring it takes on an equivalence obligation: its
+    /// snapshot reads must be provably a projection of what per-edge
+    /// delivery would have produced (see the harness in
+    /// `gos-runtime-harness/tests/fast_path_snapshot.rs`), not a
+    /// second, independent source of truth. Pure addition — `0x0A` doesn't
+    /// renumber `0x01`-`0x09`, so per ADR-015's minor-bump checklist this is
+    /// the kind of change that bumps `GOS_ABI_MINOR`, not `GOS_ABI_MAJOR`.
+    FastPathSnapshot = 0x0A,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

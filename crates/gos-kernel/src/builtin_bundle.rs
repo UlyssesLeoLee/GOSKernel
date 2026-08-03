@@ -162,6 +162,12 @@ const VK_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::CapabilityConsume, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::CapabilityExport, arg0: 0, arg1: 0 },
     PermissionSpec { kind: PermissionKind::ExternalSync, arg0: 0, arg1: 0 },
+    // ADR-012 option B: render_live_graph (k-vk-host) is the reference
+    // fast-path node -- it bulk-reads node_page/edge_page once per frame
+    // instead of a per-edge on_event/Subscribe dispatch. Declarative only;
+    // see the equivalence-obligation harness in
+    // gos-runtime-harness/tests/fast_path_snapshot.rs.
+    PermissionSpec { kind: PermissionKind::FastPathSnapshot, arg0: 0, arg1: 0 },
 ];
 const IME_PERMS: &[PermissionSpec] = &[
     PermissionSpec { kind: PermissionKind::GraphRead, arg0: 0, arg1: 0 },

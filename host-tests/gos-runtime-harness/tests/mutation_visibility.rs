@@ -9,21 +9,31 @@
 //!   * `RuntimeDispatcher` is wired to the real edge table — it is the
 //!     replacement for the harness `Stub`.
 //!
-//! This file is its own test binary, so it gets a fresh process-global runtime;
-//! the single `#[test]` fn runs with no parallel mutators, making the
-//! `graph_epoch` deltas deterministic.
+//! This file is its own test binary and shares one process-global runtime
+//! across every `#[test]` fn in it — Rust's default test runner runs those
+//! in parallel threads, so each test takes `TEST_LOCK` and calls
+//! `gos_runtime::reset()` first to get a clean, serialized graph. Without
+//! that, two tests racing the same `RUNTIME` static produce nondeterministic
+//! `graph_epoch` deltas (exactly the failure mode these tests exist to rule
+//! out in the *design under test* — don't let it leak into the *test
+//! harness* itself).
 //!
 //! ```cypher
 //! CREATE
 //!   (f:File {name: "mutation_visibility.rs", type: "file", language: "rust"}),
 //!   (h:Function {name: "use_edge_present", type: "function", visibility: "private"}),
 //!   (t:Function {name: "rebind_use_is_atomic_single_epoch_and_exclusive", type: "function"}),
-//!   (f)-[:CONTAINS]->(h), (f)-[:CONTAINS]->(t),
-//!   (t)-[:CALLS]->(h);
+//!   (t2:Function {name: "add_edge_with_use_kind_stays_exclusive_via_rebind", type: "function"}),
+//!   (f)-[:CONTAINS]->(h), (f)-[:CONTAINS]->(t), (f)-[:CONTAINS]->(t2),
+//!   (t)-[:CALLS]->(h), (t2)-[:CALLS]->(h);
 //! ```
+
+use std::sync::Mutex;
 
 use gos_cypher_mut::{MutationDispatcher, ReceptiveEdgeKind};
 use gos_protocol::{derive_edge_id, derive_edge_vector, EdgeSpec, NodeId, RoutePolicy, RuntimeEdgeType};
+
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn use_edge_present(from: NodeId, to: NodeId) -> bool {
     let id = derive_edge_id(from, to, "use");
@@ -62,6 +72,9 @@ fn use_edge_spec(from: NodeId, to: NodeId) -> EdgeSpec {
 
 #[test]
 fn rebind_use_is_atomic_single_epoch_and_exclusive() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    gos_runtime::reset();
+
     // Distinct, arbitrary node identities (we test edge mechanics, not nodes).
     let theme_current = NodeId([0x10; 16]);
     let wabi = NodeId([0x20; 16]);
@@ -126,6 +139,9 @@ fn rebind_use_is_atomic_single_epoch_and_exclusive() {
 // until `add_edge` special-cased `Use` to delegate to `rebind_use`.
 #[test]
 fn add_edge_with_use_kind_stays_exclusive_via_rebind() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    gos_runtime::reset();
+
     let from = NodeId([0x60; 16]);
     let first_target = NodeId([0x70; 16]);
     let second_target = NodeId([0x80; 16]);

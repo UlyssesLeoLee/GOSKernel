@@ -1,8 +1,10 @@
 # ADR-012：Fast-path 标签节点——给已经在跑的 bulk-read 模式一个名字和门禁
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V2 计划风险表 line 136](../plan/V2_DEVELOPMENT_PLAN.md)（"真热路径走 fast-path 标签节点"）、[ADR-002](./ADR-002-rewrite-engine.md)（"性能需 fast-path 标签节点兜底"）、[V3 计划 line 27](../plan/V3_DEVELOPMENT_PLAN.md)（"性能逃生舱走 fast-path 标签节点，ADR-012 待起草"）、[ADR-006 选项 A](./ADR-006-capability-graph-migration.md)（影子验证/等价性证明方法论，本 ADR 复用）、[ADR-014 §3.1/§四](./ADR-014-process-as-subgraph-compat-strategy.md)（wasm 解释器把本 ADR 列为解释开销的长期答案）
+> 状态：**已选向：选项 B（`PermissionKind::FastPathSnapshot`）· 已落地** · 提案日期：2026-06-12 · 选向/落地日期：2026-08-03 · 配套：[V2 计划风险表 line 136](../plan/V2_DEVELOPMENT_PLAN.md)（"真热路径走 fast-path 标签节点"）、[ADR-002](./ADR-002-rewrite-engine.md)（"性能需 fast-path 标签节点兜底"）、[V3 计划 line 27](../plan/V3_DEVELOPMENT_PLAN.md)（"性能逃生舱走 fast-path 标签节点，ADR-012 待起草"）、[ADR-006 选项 A](./ADR-006-capability-graph-migration.md)（影子验证/等价性证明方法论，本 ADR 复用）、[ADR-014 §3.1/§四](./ADR-014-process-as-subgraph-compat-strategy.md)（wasm 解释器把本 ADR 列为解释开销的长期答案）
 >
 > 口径：三份文档三次承诺"fast-path 标签节点"是 GOS"重可表达性 > 极限性能"取舍的逃生舱，但都没定义"标签"是什么、贴在哪、解锁什么。同时，`k-vk-host::render_live_graph`（B3b）已经在跑一个具体机制——bulk `node_page`/`edge_page` 读，绕过逐节点 `on_event` 派发——却没有名字、没有声明式开关、没有治理脚本可见性。本 ADR 不是"设计新机制"，是"命名已经在跑的机制，给它一个 governance-visible 的入口和等价性义务"——与 ADR-007/009/010 同型的"文档落后于现实"，只是这次现实跑在了文档前面。
+>
+> **落地状态**：`PermissionKind::FastPathSnapshot = 0x0A` 已加入 `gos-protocol`（纯加法，`0x01`-`0x09` 判别值不变，按 ADR-015 minor-bump checklist 属于 minor 级变更）；`render_live_graph`（`k-vk-host`）经 `builtin_bundle.rs` 的 `VK_NODE_SPECS`/`VK_PERMS` 补声明该 permission，完成"retrofit"（零运行时代码变更，符合选项 B 的预期代价）。等价性义务已用 harness 落地：`gos-runtime-harness/tests/fast_path_snapshot.rs` 证明 `node_page`/`edge_page` 的批量读与逐节点 `node_summary`/逐边查询在合成场景下完全一致（覆盖数量、字段两个维度）。运行时强制（选项 B 代价段落所述"声明与强制的差距"）不在本次落地范围内，留给未来需要时的 ADR-006-B 同型独立问题。
 
 ## 一、问题陈述
 
