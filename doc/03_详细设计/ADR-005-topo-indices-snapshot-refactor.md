@@ -4,10 +4,10 @@
 |---|---|
 | 文档编号 | GOS-DOC-03-03 |
 | 所属阶段 | 03・详细设计（ADR） |
-| 版本 / 状态 | v1.2 / **提案（待批准）** |
-| 作成 / 审核 / 批准 | GOS 核心团队 / 待全员评审 / 待批准（见 §八批准检查单） |
+| 版本 / 状态 | v1.3 / **已实施（方案 B）** |
+| 作成 / 审核 / 批准 | GOS 核心团队 / 待全员评审 / 已批准并落地 |
 | 基线日期 | 2026-07-16 |
-| 最终更新 | 2026-07-19 |
+| 最终更新 | 2026-08-03（落地） |
 
 **变更履历**
 
@@ -225,3 +225,21 @@ fn snapshot_compact_adjacency(snap: &GraphTopologySnapshot)
 
 *本 ADR 由 2026-07-16 会话中的架构债务自查与用户确认的涌现式设计方向共同产出，
 v1.1 于 2026-07-17 实施前核实基线数字。*
+
+---
+
+## 九、落地状态（v1.3，2026-08-03）
+
+**范围核定**：实施开始时 HEAD 上已提交的 `graph_topo_indices`（无编号）到 `graph_topo_indices117`，共 117 个函数，逐一对应 `host-tests/gos-graph-topo{N}-harness`（117 个 crate）。全部已提交、对应 host-test 全绿——无在制品需要排除。
+
+**实现落点**：`snapshot_compact_adjacency(snap: &GraphTopologySnapshot) -> ([u128; MAX_NODES], usize)`，定义于 `crates/gos-runtime/src/lib.rs`，紧邻 `impl GraphTopologySnapshot { fn node_slot_by_id(...) }` 之后（与 §实现约束第 1 条一致）。
+
+**与提案文本的一处偏差（经证明安全）**：辅助函数签名从提案的 3 元组 `(adj, node_count, edge_count)` 简化为 2 元组 `(adj, node_count)`。原因：交叉核对全部 117 个函数后发现，"edge_count 在预处理阶段一并算出"这个假设并不对所有函数成立——部分函数（如 `graph_topo_indices`/`graph_topo_indices2`）的 `edge_count` 是在预处理**之后**的算法主体循环里累加的，与预处理阶段无关。为避免对这部分函数的语义做任何假设，`edge_count`（以及 `deg`）改为**调用方按需**从 `adj` 用 `count_ones()` 派生——这与原地累加在数学上完全等价（两者都是"最终邻接位图里被置位的比特数"，与何时/如何累加无关），但把"要不要产出 edge_count/deg"这个决定完全留给每个函数自己，不对辅助函数的调用方做任何隐藏假设。117 个函数中 108 个需要 `deg` 派生、113 个需要 `edge_count` 派生（`if` 语句按需插入）。
+
+**接线**：全部 117 个 wrapper（`pub fn graph_topo_indicesN()`）与 `_inner` 函数（签名从 `pub fn ...(&self)` 改为私有 `fn ...(snap: &GraphTopologySnapshot)`，与 katz/pagerank/hits/community 已确立的做法一致）均已按 §实现约束机械改造；`_inner` 函数体除预处理块外**逐字节未改动**（脚本化验证：预处理块之后不再出现任何 `self.` 引用，才允许对该函数应用变换——117 个全部通过此项前置校验，零例外需要人工特殊处理）。
+
+**验证**：`cargo check -p gos-runtime`、`cargo check -p gos-kernel`、`cargo check --workspace`、`tools/verify-graph-architecture.ps1` 全绿；117 个 `host-tests/gos-graph-topo*-harness` 全部 `cargo +nightly test` 通过（117/117，含变换前后两轮回归，中间夹着一次纯空白/注释清理，两轮均全绿）——这正是 §决定第 3 点承诺的"输出可证明不变，现有全部 host-test 即为回归测试网"的直接兑现。
+
+**未来防护已落地**：`.claude/skills/gos-topology-snapshot-pattern` 已加入"新建 topoN 函数标准起手式"一节，把 `snapshot_compact_adjacency` 调用方式写为下一次自动强化循环应当复制的范例（见 §未来防护 的原始设想）。
+
+**实现方式说明**：117 处机械改动（预处理块替换 + 签名变更，逐函数完全同型）通过一次性脚本化文本变换完成，而非逐函数手工编辑——这与 §决定第 3 点"这不是预先设计的抽象,而是已被反复验证过的实际重复模式"的论证一致：变换前对全部 117 个函数的预处理块做了结构校验（容忍空白差异，拒绝任何 `self.` 残留),变换后跑满全部回归测试,而不是信任"看起来应该一样"。

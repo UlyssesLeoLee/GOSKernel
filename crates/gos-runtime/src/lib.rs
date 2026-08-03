@@ -521,6 +521,47 @@ impl GraphTopologySnapshot {
     }
 }
 
+/// ADR-005 (03_详细设计, Plan B) — shared adjacency-construction helper for
+/// the `graph_topo_indicesN` family. Extracted from ~117 byte-identical
+/// (modulo whitespace) copies of the same "compact node index + undirected
+/// adjacency bitmask" preamble. Pure function of a snapshot — no lock,
+/// no `self` — so every `_inner` function that calls it no longer needs
+/// `&GraphRuntime` at all, just `&GraphTopologySnapshot` (ADR-005's Problem
+/// 1: none of them may run under the RUNTIME lock any more).
+///
+/// Returns `(adj, node_count)`. Callers that need per-node degree or a
+/// total undirected edge count derive them from `adj` via `count_ones()`
+/// (see call sites) — both are provably equal to what each function used
+/// to compute inline, since both are just "bits set in the final adjacency
+/// bitmask", independent of how/when they were tallied during construction.
+fn snapshot_compact_adjacency(snap: &GraphTopologySnapshot) -> ([u128; MAX_NODES], usize) {
+    // 1. Compact node index.
+    let mut slot_to_ci = [usize::MAX; MAX_NODES];
+    let mut nc = 0usize;
+    for si in 0..snap.node_count {
+        let slot = snap.node_slots[si];
+        slot_to_ci[slot] = nc;
+        nc += 1;
+    }
+
+    // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
+    let mut adj = [0u128; MAX_NODES];
+    for ei in 0..MAX_EDGES {
+        if !snap.edge_live[ei] { continue; }
+        let f_sl = match snap.node_slot_by_id(snap.edge_from[ei]) { Some(s) => s, None => continue };
+        let t_sl = match snap.node_slot_by_id(snap.edge_to[ei])   { Some(s) => s, None => continue };
+        let f_ci = slot_to_ci[f_sl];
+        let t_ci = slot_to_ci[t_sl];
+        if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
+        if (adj[f_ci] >> t_ci) & 1 == 0 {
+            adj[f_ci] |= 1u128 << t_ci;
+            adj[t_ci] |= 1u128 << f_ci;
+        }
+    }
+
+    (adj, nc)
+}
+
 pub struct GraphRuntime {
     plugins: [Option<PluginRecord>; MAX_PLUGINS],
     nodes: [Option<NodeRecord>; MAX_NODES],
@@ -12157,32 +12198,9 @@ impl GraphRuntime {
     ///                                                                                (Furtula 2010)
     /// All three use the same O(V+E) undirected edge scan with integer Newton-Raphson isqrt.
     /// Pendant-pendant edges (both deg=1, q=0) contribute 0 to AZI (undefined term skipped).
-    pub fn graph_topo_indices_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12249,32 +12267,9 @@ impl GraphRuntime {
     /// H:   contribution = floor(2_000_000 / s)  where s = da+db  (error ≤ 1 ppm per edge)
     /// ABC: contribution = floor(√((s−2)×10^12 / p))  where p = da·db; 0 when s=2 (pendant-pendant)
     /// F:   exact; node scan of deg³.  Isolated nodes contribute 0.
-    pub fn graph_topo_indices2_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices2_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12345,32 +12340,9 @@ impl GraphRuntime {
     ///      ISI = |E|·Δ/2 for any Δ-regular graph (exact)
     /// NI:  contribution = isqrt64((da+db) × 10^12)
     ///      NI = |E|·√(2Δ) for Δ-regular (exact when 2Δ is a perfect square)
-    pub fn graph_topo_indices3_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices3_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12432,32 +12404,9 @@ impl GraphRuntime {
     ///      SO = |E| · da · √2 for Δ-regular (exact when 2Δ² perfect square, i.e. never for Δ≥1)
     /// RM₂: exact integer; 0 for pendant edges (da=1 or db=1); = |E|·(Δ-1)² for Δ-regular
     /// σ:   exact integer; 0 for regular graphs (da=db always); measures total degree imbalance
-    pub fn graph_topo_indices4_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices4_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12528,32 +12477,9 @@ impl GraphRuntime {
     ///   K₄ (Δ=3): HM₁=6×36=216; HM₂=6×81=486; AG=6_000_000 (regular)
     ///   K_{1,4}: HM₁=4×25=100; HM₂=4×16=64; AG=4×1_250_000=5_000_000
     ///   K_{2,3}: HM₁=6×25=150; HM₂=6×36=216; AG=6×1_020_620=6_123_720
-    pub fn graph_topo_indices5_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices5_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12611,32 +12537,9 @@ impl GraphRuntime {
     ///   em1    = EM₁(G)    where EM₁ = Σ_{uv∈E} (da+db-2)²               (exact u64; Milićević et al. 2004)
     ///   abs_ppm = ABS×10^6  where ABS = Σ_{uv∈E} √((da+db-2)/(da+db))    (floor isqrt64; Chen et al. 2022)
     ///   rrr_ppm = RRR×10^6  where RRR = Σ_{uv∈E} √((da-1)·(db-1))        (floor isqrt64; Li & Shi 2008)
-    pub fn graph_topo_indices6_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices6_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-            }
-        }
 
         // 3. Undirected degree per compact-index node.
         let mut deg = [0u64; MAX_NODES];
@@ -12691,7 +12594,7 @@ impl GraphRuntime {
         (em1_acc, abs_acc, rrr_acc, edge_count, nc)
     }
 
-    pub fn graph_topo_indices8_inner(&self) -> (u64, u64, u32, u32, usize, usize) {
+    fn graph_topo_indices8_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u32, u32, usize, usize) {
         // Eccentricity-based topological indices:
         //   ECI = ξ(G) = Σ_v deg(v) × ecc(v)          (exact integer; Sharma, Goswami & Madan 1997)
         //   avg_ecc_ppm = (Σ_v ecc(v)) / n × 10^6     (floor ppm; Buckley & Harary 1990)
@@ -12701,36 +12604,13 @@ impl GraphRuntime {
         // ecc(v) = max BFS distance from v to any reachable node (0 for isolated nodes).
         // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj  = [0u128; MAX_NODES];
-        let mut deg  = [0u32; MAX_NODES];
+        let mut deg = [0u32; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u32; }
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                deg[f_ci] += 1;
-                deg[t_ci] += 1;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source; compute eccentricity ecc[src].
         const INF: u8 = 255;
@@ -12791,7 +12671,7 @@ impl GraphRuntime {
         (eci, avg_ecc_ppm, diameter, radius, edge_count, nc)
     }
 
-    pub fn graph_topo_indices7_inner(&self) -> (u64, u64, u64, usize, usize) {
+    fn graph_topo_indices7_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
         // Distance-based topological indices: Wiener W, Harary H (ppm), Hyper-Wiener WW.
         //   W  = Σ_{u<v} d(u,v)                           (exact; Wiener 1947)
         //   H  = Σ_{u<v} 1/d(u,v) × 10^6                 (floor ppm; Plavšić et al. 1993)
@@ -12800,33 +12680,11 @@ impl GraphRuntime {
         // Disconnected pairs (d=∞): contribute 0 to all three indices.
         // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source; accumulate W, H_ppm, WW over pairs (src < v).
         const INF: u8 = 255;
@@ -12869,7 +12727,7 @@ impl GraphRuntime {
         (wiener, harary_ppm, hyper_wiener, edge_count, nc)
     }
 
-    pub fn graph_topo_indices9_inner(&self) -> (u64, u64, u64, usize, usize) {
+    fn graph_topo_indices9_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
         // Degree-distance hybrid topological indices:
         //   W_S  = Schultz MTI  = Σ_{u<v} (deg(u)+deg(v)) × d(u,v)   (exact; Schultz 1989)
         //   W_G  = Gutman index = Σ_{u<v} deg(u)×deg(v)×d(u,v)        (exact; Gutman 1994)
@@ -12878,36 +12736,13 @@ impl GraphRuntime {
         // Isolated nodes (ecc=0): contribute 0 to CξE (deg=0 as well).
         // Algorithm: BFS from each node on undirected projection, O(n·(n+m)).
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + degree array.
-        let mut adj       = [0u128; MAX_NODES];
-        let mut deg       = [0u32;  MAX_NODES];
+        let mut deg = [0u32; MAX_NODES];
+        for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u32; }
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                deg[f_ci] += 1;
-                deg[t_ci] += 1;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source; accumulate W_S, W_G over pairs (src < v); record ecc[src].
         const INF: u8 = 255;
@@ -12966,7 +12801,7 @@ impl GraphRuntime {
         (ws, wg, cxe_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices10_inner(&self) -> (u64, u64, u64, usize, usize) {
+    fn graph_topo_indices10_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
         // Edge-partition distance topological indices (BFS on undirected projection):
         //   Sz  = Σ_{uv∈E} n_u(uv)·n_v(uv)                        (exact; Gutman & Klavžar 1995)
         //   rSz = Σ_{uv∈E} (n_u+n₀/2)·(n_v+n₀/2) × 10^6          (floor ppm; Pisanski & Randić 2010)
@@ -12979,33 +12814,12 @@ impl GraphRuntime {
         // Tree invariant: n₀=0 for every tree edge → Sz = rSz = Wiener index.
         // Vertex-transitive invariant: n_u = n_v for all edges → Mo = 0.
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
+
         if edge_count == 0 { return (0, 0, 0, 0, nc); }
 
         // 3. Build undirected edge list (canonical a < b).
@@ -13084,7 +12898,7 @@ impl GraphRuntime {
         (sz, rsz_ppm, mo, edge_count, nc)
     }
 
-    pub fn graph_topo_indices11_inner(&self) -> (u64, u64, u64, usize, usize) {
+    fn graph_topo_indices11_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
         // Transmission-based topological indices (BFS on undirected projection):
         //   j_ppm  = J(G)  × 10^6  (floor ppm; Balaban 1982)
         //          J = (m/μ) × Σ_{uv∈E} 1/√(T_u·T_v)
@@ -13100,33 +12914,12 @@ impl GraphRuntime {
         // Disconnected: T_v counts only within-component distances (BFS only
         //   reaches the same component); J uses μ = max(1, m−n+2) globally.
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
+
         if edge_count == 0 { return (0, 0, 0, 0, nc); }
 
         // 3. Build undirected edge list (canonical a < b).
@@ -13212,7 +13005,7 @@ impl GraphRuntime {
         (j_ppm, ti, piv, edge_count, nc)
     }
 
-    pub fn graph_topo_indices12_inner(&self) -> (u64, u64, u64, usize, usize) {
+    fn graph_topo_indices12_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
         // Zagreb eccentricity indices (BFS on undirected projection):
         //   m1e  = M1*(G) = Σ_v ecc(v)²                 (exact u64; Vukičević & Graovac 2010)
         //   m2e  = M2*(G) = Σ_{uv∈E} ecc(u)×ecc(v)      (exact u64; Das et al. 2013)
@@ -13222,33 +13015,11 @@ impl GraphRuntime {
         // M3* = 0 iff self-centered (all ecc equal, e.g. Kn, even cycles, K_{r,s}).
         // M1*(Kn) = n; M2*(Kn) = m; M3*(Kn) = 0.
 
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks (directed→undirected dedup, self-loops excluded).
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source; compute eccentricity ecc[src].
         const INF: u8 = 255;
@@ -13316,34 +13087,12 @@ impl GraphRuntime {
     /// T_v = Σ_{w reachable, w≠v} d(v,w) = vertex transmission.
     /// Isolated nodes: T_v=0, contribute 0 to TM₁, no edge contribution.
     /// GA_t = |E|×10^6 iff transmission-regular (all T_v equal).
-    pub fn graph_topo_indices13_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices13_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source to compute vertex transmission T_v.
         //    T_v = sum of BFS distances to all reachable nodes (excluding self).
@@ -13424,34 +13173,12 @@ impl GraphRuntime {
         (tm1, tm2, ga_t, edge_count, nc)
     }
 
-    pub fn graph_topo_indices14_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices14_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source: compute ecc(v) and T_v simultaneously.
         //    ecc(v) = max BFS distance to any reachable node (0 for isolated).
@@ -13539,34 +13266,12 @@ impl GraphRuntime {
         (te, eds, gea, edge_count, nc)
     }
 
-    pub fn graph_topo_indices15_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices15_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. BFS from each source: compute d2[src] = |{w : d(src,w) = 2}|.
         //    d2(v) = 2-distance degree (Naji, Soner & Gutman 2017).
@@ -13628,34 +13333,12 @@ impl GraphRuntime {
         (lm1, lm2, lm3, edge_count, nc)
     }
 
-    pub fn graph_topo_indices16_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices16_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Newton-Raphson integer sqrt (no float, no_std safe).
         fn isqrt64(n: u64) -> u64 {
@@ -13725,34 +13408,12 @@ impl GraphRuntime {
     //
     // Algorithm: single O(V+E) degree scan — no BFS, no complement scan.
     // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) ≈ 3KB total.
-    pub fn graph_topo_indices17_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices17_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array + accumulate M₁, M₂, F in a single scan.
         let mut deg = [0u64; MAX_NODES];
@@ -13808,34 +13469,12 @@ impl GraphRuntime {
     //
     // Algorithm: O(V+E) — compute S(v) from adj+deg, then edge scan.
     // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) + sv[128](u64=1KB) ≈ 4KB total.
-    pub fn graph_topo_indices18_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices18_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -13920,34 +13559,12 @@ impl GraphRuntime {
     //   Phase 1: BFS from each node → ecc[], comp_wiener[], TW.
     //   Phase 2: BFS from each node → RCW (needs per-component D_c from phase 1).
     //   Stack: adj[128](u128=2KB) + aux arrays (~2KB) + dist/queue(256B) ≈ 4.5KB total.
-    pub fn graph_topo_indices19_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices19_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Phase 0: connected-component detection O(V+E).
         //    comp_id[ci]: component index (0..n_comp-1); u8::MAX = unvisited.
@@ -14088,34 +13705,12 @@ impl GraphRuntime {
     //
     // Algorithm: O(V+E) — degree array from adj bitmasks; single undirected edge scan.
     // Stack: adj[128](u128=2KB) + deg[128](u64=1KB) ≈ 3KB total.
-    pub fn graph_topo_indices20_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices20_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Newton-Raphson integer sqrt helpers (no float, no_std safe).
         fn isqrt64(n: u64) -> u64 {
@@ -14187,34 +13782,12 @@ impl GraphRuntime {
     ///   ABC₄ per edge: isqrt64((S_u+S_v−2)×10^12/(S_u×S_v)); 0 if S_u+S_v=2
     ///   NH   per edge: 2_000_000 / (S_u+S_v)  (integer floor)
     ///   NSO  per edge: isqrt128((S_u²+S_v²) as u128 × 10^12) cast to u64
-    pub fn graph_topo_indices21_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices21_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Integer sqrt helpers (Newton-Raphson, no float, no_std safe).
         fn isqrt64(n: u64) -> u64 {
@@ -14277,34 +13850,12 @@ impl GraphRuntime {
         (abc4_ppm, nh_ppm, nso_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices22_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices22_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Integer sqrt helper (Newton-Raphson, no float, no_std safe).
         fn isqrt64(n: u64) -> u64 {
@@ -14359,34 +13910,12 @@ impl GraphRuntime {
         (nr_ppm, nf, nsc_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices23_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices23_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14440,34 +13969,12 @@ impl GraphRuntime {
         (nhm1, nsdd_ppm, nm3, edge_count, nc)
     }
 
-    pub fn graph_topo_indices24_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices24_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14527,34 +14034,12 @@ impl GraphRuntime {
         (nisi_ppm, nazi_milli, nem1, edge_count, nc)
     }
 
-    pub fn graph_topo_indices25_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices25_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14640,34 +14125,12 @@ impl GraphRuntime {
         (nhm2_acc as u64, nag_ppm, nabs_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices26_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices26_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14748,34 +14211,12 @@ impl GraphRuntime {
         (npc_ppm, nrm2, nrso_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices27_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices27_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14847,34 +14288,12 @@ impl GraphRuntime {
         (nrr_ppm, nsos_ppm, nrso_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices28_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices28_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -14942,34 +14361,12 @@ impl GraphRuntime {
         (nni_ppm, nnmi_ppm, nsm1, edge_count, nc)
     }
 
-    pub fn graph_topo_indices29_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices29_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15046,34 +14443,12 @@ impl GraphRuntime {
         (nz0_ppm, nem2, nse_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices30_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices30_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15160,34 +14535,12 @@ impl GraphRuntime {
         (nvq, nrgs_ppm, nhcs, edge_count, nc)
     }
 
-    pub fn graph_topo_indices31_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices31_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15261,34 +14614,12 @@ impl GraphRuntime {
         (nsig, nhqs, nps, edge_count, nc)
     }
 
-    pub fn graph_topo_indices32_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices32_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15388,34 +14719,12 @@ impl GraphRuntime {
         (nsh, nhps, nwso_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices33_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices33_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15516,34 +14825,12 @@ impl GraphRuntime {
         (nshp, nhse, ncso_ppm, edge_count, nc)
     }
 
-    pub fn graph_topo_indices34_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices34_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15625,34 +14912,12 @@ impl GraphRuntime {
         (noc, nhhs, nfso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices35_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices35_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15737,34 +15002,12 @@ impl GraphRuntime {
         (nnc, nhoc, nhso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices36_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices36_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15852,34 +15095,12 @@ impl GraphRuntime {
         (ndc, nhnc, noso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices37_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices37_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -15967,34 +15188,12 @@ impl GraphRuntime {
         (nuc, nhdc, ntso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices38_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices38_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16082,34 +15281,12 @@ impl GraphRuntime {
         (ndoc, nhuc, ndso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices39_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices39_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16198,34 +15375,12 @@ impl GraphRuntime {
         (ntc, nhdoc, neso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices40_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices40_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16315,34 +15470,12 @@ impl GraphRuntime {
         (nqtc, nhtc, ngso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices41_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices41_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16433,34 +15566,12 @@ impl GraphRuntime {
         (nptc, nhqtc, nioso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices42_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices42_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16548,34 +15659,12 @@ impl GraphRuntime {
         (nstc, nhptc, njso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices43_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices43_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16664,34 +15753,12 @@ impl GraphRuntime {
         (nheptc, nhstc, nkso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices44_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices44_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16782,34 +15849,12 @@ impl GraphRuntime {
         (noctc, nhoctc, nlso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices45_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices45_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -16901,34 +15946,12 @@ impl GraphRuntime {
         (nnontc, nhnontc, nmso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices46_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices46_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17019,34 +16042,12 @@ impl GraphRuntime {
         (neictc, nheictc, nnso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices47_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices47_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17138,34 +16139,12 @@ impl GraphRuntime {
         (nhentc, nhhentc, npso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices48_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices48_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17261,34 +16240,12 @@ impl GraphRuntime {
         (ndoctc, nhdoctc, nqso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices49_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices49_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17384,34 +16341,12 @@ impl GraphRuntime {
         (ntrictc, nhtrictc, nrso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices54_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices54_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17509,34 +16444,12 @@ impl GraphRuntime {
         (noctatc, nhoctatc, nyso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices62_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices62_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17638,34 +16551,12 @@ impl GraphRuntime {
         (nhexatriactc, nhhexatriactc, naeso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices63_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices63_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17767,34 +16658,12 @@ impl GraphRuntime {
         (nheptatriactc, nhheptatriactc, nafso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices64_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices64_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -17892,34 +16761,12 @@ impl GraphRuntime {
         (noctatriactc, nhoctatriactc, nagso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices65_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices65_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18018,34 +16865,12 @@ impl GraphRuntime {
         (nnonatriactc, nhnonatriactc, nahso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices66_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices66_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18144,34 +16969,12 @@ impl GraphRuntime {
         (ntetraactc, nhtetraactc, naiso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices67_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices67_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18270,34 +17073,12 @@ impl GraphRuntime {
         (nhentetraactc, nhhentetraactc, najso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices68_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices68_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18397,34 +17178,12 @@ impl GraphRuntime {
         (ndotetraactc, nhdotetraactc, nakso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices69_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices69_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18517,34 +17276,12 @@ impl GraphRuntime {
         (ntritetraactc, nhtritetraactc, nalso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices70_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices70_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18637,34 +17374,12 @@ impl GraphRuntime {
         (ntetratetraactc, nhtetratetraactc, namso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices71_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices71_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18755,34 +17470,12 @@ impl GraphRuntime {
         (npentetraactc, nhpentetraactc, nanso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices72_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices72_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18873,34 +17566,12 @@ impl GraphRuntime {
         (nhextetraactc, nhhextetraactc, naoso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices73_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices73_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -18991,34 +17662,12 @@ impl GraphRuntime {
         (nheptetraactc, nhheptetraactc, napso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices74_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices74_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19109,34 +17758,12 @@ impl GraphRuntime {
         (noctotetraactc, nhoctotetraactc, naqso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices75_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices75_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19227,34 +17854,12 @@ impl GraphRuntime {
         (nnonatetraactc, nhnonatetraactc, narso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices76_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices76_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19345,34 +17950,12 @@ impl GraphRuntime {
         (npentaactc, nhpentaactc, nasso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices77_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices77_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19463,34 +18046,12 @@ impl GraphRuntime {
         (nhenpentaactc, nhhenpentaactc, natso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices78_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices78_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19581,34 +18142,12 @@ impl GraphRuntime {
         (ndopentaactc, nhdopentaactc, nauso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices79_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices79_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19699,34 +18238,12 @@ impl GraphRuntime {
         (ntripentaactc, nhtripentaactc, navso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices80_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices80_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19817,34 +18334,12 @@ impl GraphRuntime {
         (ntetrapentaactc, nhtetrapentaactc, nawso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices81_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices81_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -19935,34 +18430,12 @@ impl GraphRuntime {
         (npentapentaactc, nhpentapentaactc, naxso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices82_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices82_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20053,34 +18526,12 @@ impl GraphRuntime {
         (nhexpentaactc, nhhexpentaactc, nayso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices83_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices83_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20171,34 +18622,12 @@ impl GraphRuntime {
         (nheptpentaactc, nhheptpentaactc, nazso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices84_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices84_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20289,34 +18718,12 @@ impl GraphRuntime {
         (noctopentaactc, nhoctopentaactc, nbaso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices85_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices85_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20408,34 +18815,12 @@ impl GraphRuntime {
         (nnonapentaactc, nhnonapentaactc, nbbso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices86_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices86_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20527,34 +18912,12 @@ impl GraphRuntime {
         (nhexaactc, nhhexaactc, nbcso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices87_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices87_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20646,34 +19009,12 @@ impl GraphRuntime {
         (nhexaenactc, nhhexaenactc, nbdso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices88_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices88_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20765,34 +19106,12 @@ impl GraphRuntime {
         (nhexadyactc, nhhexadyactc, nbeso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices89_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices89_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -20884,34 +19203,12 @@ impl GraphRuntime {
         (nhexatriactc, nhhexatriactc, nbfso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices90_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices90_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21003,34 +19300,12 @@ impl GraphRuntime {
         (nhexatetraactc, nhhexatetraactc, nbgso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices91_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices91_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21123,34 +19398,12 @@ impl GraphRuntime {
         (nhexapentactc, nhhexapentactc, nbhso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices92_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices92_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21244,34 +19497,12 @@ impl GraphRuntime {
         (nhexahexaactc, nhhexahexaactc, nbisos, edge_count, nc)
     }
 
-    pub fn graph_topo_indices93_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices93_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21366,34 +19597,12 @@ impl GraphRuntime {
         (nhexaheptactc, nhhexaheptactc, nbjso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices94_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices94_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21488,34 +19697,12 @@ impl GraphRuntime {
         (nhexaoctactc, nhhexaoctactc, nbkso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices95_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices95_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21610,34 +19797,12 @@ impl GraphRuntime {
         (nhexaennactc, nhhexaennactc, nblso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices96_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices96_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21733,34 +19898,12 @@ impl GraphRuntime {
         (nheptaactc, nhheptaactc, nbmso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices97_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices97_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21858,34 +20001,12 @@ impl GraphRuntime {
         (nheptaenactc, nhheptaenactc, nbnso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices98_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices98_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -21982,34 +20103,12 @@ impl GraphRuntime {
         (nheptadiactc, nhheptadiactc, nboso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices99_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices99_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22106,34 +20205,12 @@ impl GraphRuntime {
         (nheptatriactc, nhheptatriactc, nbpso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices101_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices101_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22232,19 +20309,13 @@ impl GraphRuntime {
         (nheptapentactc, nhheptapentactc, nbrso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices117_inner(&self) -> (u64, u64, u64, usize, usize) {
-        let mut slot_to_ci = [usize::MAX; MAX_NODES]; let mut nc = 0usize;
-        for i in 0..MAX_NODES { if self.nodes[i].is_some() { slot_to_ci[i] = nc; nc += 1; } }
+    fn graph_topo_indices117_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-        let mut adj = [0u128; MAX_NODES]; let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl]; let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 { adj[f_ci] |= 1u128 << t_ci; adj[t_ci] |= 1u128 << f_ci; edge_count += 1; }
-        }
+        let mut edge_count = 0usize;
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
+
         let mut deg = [0u64; MAX_NODES];
         for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
         let mut sv = [0u64; MAX_NODES];
@@ -22288,22 +20359,13 @@ impl GraphRuntime {
         (nennamonoactc,nhennamonoactc,nbhhso,edge_count,nc)
     }
 
-    pub fn graph_topo_indices116_inner(&self) -> (u64, u64, u64, usize, usize) {
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() { slot_to_ci[i] = nc; nc += 1; }
-        }
+    fn graph_topo_indices116_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-        let mut adj = [0u128; MAX_NODES]; let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl]; let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 { adj[f_ci] |= 1u128 << t_ci; adj[t_ci] |= 1u128 << f_ci; edge_count += 1; }
-        }
+        let mut edge_count = 0usize;
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
+
         let mut deg = [0u64; MAX_NODES];
         for ci in 0..nc { deg[ci] = adj[ci].count_ones() as u64; }
         let mut sv = [0u64; MAX_NODES];
@@ -22346,34 +20408,12 @@ impl GraphRuntime {
         (nennaactc,nhennaactc,nbggso,edge_count,nc)
     }
 
-    pub fn graph_topo_indices115_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices115_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22476,34 +20516,12 @@ impl GraphRuntime {
         (noctaennactc, nhoctaennactc, nbffso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices114_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices114_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22606,34 +20624,12 @@ impl GraphRuntime {
         (noctaoctactc, nhoctaoctactc, nbeeso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices113_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices113_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22734,34 +20730,12 @@ impl GraphRuntime {
         (noctaheptactc, nhoctaheptactc, nbddso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices112_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices112_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22860,34 +20834,12 @@ impl GraphRuntime {
         (noctahexactc, nhoctahexactc, nbccso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices111_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices111_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -22988,34 +20940,12 @@ impl GraphRuntime {
         (noctapentactc, nhoctapentactc, nbbso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices110_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices110_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23115,34 +21045,12 @@ impl GraphRuntime {
         (noctatetraactc, nhoctatetraactc, nbaaso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices109_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices109_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23242,34 +21150,12 @@ impl GraphRuntime {
         (noctatriactc, nhoctatriactc, nbzso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices108_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices108_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23367,34 +21253,12 @@ impl GraphRuntime {
         (noctadiactc, nhoctadiactc, nbyso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices107_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices107_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23492,34 +21356,12 @@ impl GraphRuntime {
         (noctamonoactc, nhoctamonoactc, nbxso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices106_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices106_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23618,34 +21460,12 @@ impl GraphRuntime {
         (noctaactc, nhoctaactc, nbwso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices105_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices105_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23746,34 +21566,12 @@ impl GraphRuntime {
         (nheptaennactc, nhheptaennactc, nbvso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices104_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices104_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23872,34 +21670,12 @@ impl GraphRuntime {
         (nheptaoctaactc, nhheptaoctaactc, nbuso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices103_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices103_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -23999,34 +21775,12 @@ impl GraphRuntime {
         (nheptaheptaactc, nhheptaheptaactc, nbtso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices102_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices102_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24125,34 +21879,12 @@ impl GraphRuntime {
         (nheptahexaactc, nhheptahexaactc, nbsso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices100_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices100_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24249,34 +21981,12 @@ impl GraphRuntime {
         (nheptatetraactc, nhheptatetraactc, nbqso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices61_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices61_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24377,34 +22087,12 @@ impl GraphRuntime {
         (npenttriactc, nhpenttriactc, nadso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices60_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices60_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24505,34 +22193,12 @@ impl GraphRuntime {
         (ntetrtriactc, nhtetrtriactc, nacso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices59_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices59_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24632,34 +22298,12 @@ impl GraphRuntime {
         (ntritriactc, nhtritriactc, nabso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices58_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices58_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24758,34 +22402,12 @@ impl GraphRuntime {
         (ndotriactc, nhdotriactc, naaso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices57_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices57_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -24883,34 +22505,12 @@ impl GraphRuntime {
         (nhentriactc, nhhentriactc, nbso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices56_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices56_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -25008,34 +22608,12 @@ impl GraphRuntime {
         (ntriactc, nhtriactc, naso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices55_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices55_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -25133,34 +22711,12 @@ impl GraphRuntime {
         (nnonatc, nhnonatc, nzso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices53_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices53_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -25257,34 +22813,12 @@ impl GraphRuntime {
         (nheptatc, nhheptatc, nxso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices52_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices52_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -25381,34 +22915,12 @@ impl GraphRuntime {
         (nhexatc, nhhexatc, nvso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices51_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices51_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -25506,34 +23018,12 @@ impl GraphRuntime {
         (npenttc, nhpenttc, nuso, edge_count, nc)
     }
 
-    pub fn graph_topo_indices50_inner(&self) -> (u64, u64, u64, usize, usize) {
-        // 1. Compact node index.
-        let mut slot_to_ci = [usize::MAX; MAX_NODES];
-        let mut nc = 0usize;
-        for i in 0..MAX_NODES {
-            if self.nodes[i].is_some() {
-                slot_to_ci[i] = nc;
-                nc += 1;
-            }
-        }
+    fn graph_topo_indices50_inner(snap: &GraphTopologySnapshot) -> (u64, u64, u64, usize, usize) {
+        let (adj, nc) = snapshot_compact_adjacency(snap);
         if nc == 0 { return (0, 0, 0, 0, 0); }
-
-        // 2. Undirected adjacency bitmasks + edge count.
-        let mut adj        = [0u128; MAX_NODES];
         let mut edge_count = 0usize;
-        for ei in 0..MAX_EDGES {
-            let edge = match self.edges[ei] { Some(e) => e, None => continue };
-            let f_sl = match self.node_slot_by_id(edge.spec.from_node) { Some(s) => s, None => continue };
-            let t_sl = match self.node_slot_by_id(edge.spec.to_node)   { Some(s) => s, None => continue };
-            let f_ci = slot_to_ci[f_sl];
-            let t_ci = slot_to_ci[t_sl];
-            if f_ci == usize::MAX || t_ci == usize::MAX || f_ci == t_ci { continue; }
-            if (adj[f_ci] >> t_ci) & 1 == 0 {
-                adj[f_ci] |= 1u128 << t_ci;
-                adj[t_ci] |= 1u128 << f_ci;
-                edge_count += 1;
-            }
-        }
+        for ci in 0..nc { edge_count += adj[ci].count_ones() as usize; }
+        edge_count /= 2;
 
         // 3. Degree array.
         let mut deg = [0u64; MAX_NODES];
@@ -29206,7 +26696,8 @@ pub fn graph_zagreb() -> (u64, u64, u32, u32, usize, usize) {
 /// AZI skips pendant-pendant edges (both endpoints have degree 1, denominator = 0).
 /// All indices use integer Newton-Raphson isqrt for ppm/milli precision, O(V+E).
 pub fn graph_topo_indices() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices_inner(&snap)
 }
 
 /// V3.13: H + ABC + F degree-based topological indices.
@@ -29219,7 +26710,8 @@ pub fn graph_topo_indices() -> (u64, u64, u64, usize, usize) {
 ///   edge_count = undirected non-self-loop edges
 ///   node_count = alive nodes
 pub fn graph_topo_indices2() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices2_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices2_inner(&snap)
 }
 
 /// V3.14: SDD + ISI + Nirmala degree-based topological indices.
@@ -29229,7 +26721,8 @@ pub fn graph_topo_indices2() -> (u64, u64, u64, usize, usize) {
 ///   isi_ppm = ISI × 10^6 where ISI = Σ_{uv∈E} da·db/(da+db)       (Sedlar et al. 2011)
 ///   ni_ppm  = NI  × 10^6 where NI  = Σ_{uv∈E} √(da+db)            (Rather et al. 2021)
 pub fn graph_topo_indices3() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices3_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices3_inner(&snap)
 }
 
 /// V3.15: Sombor + Reduced Second Zagreb + Sigma degree-based topological indices.
@@ -29239,7 +26732,8 @@ pub fn graph_topo_indices3() -> (u64, u64, u64, usize, usize) {
 ///   rm2    = RM₂        where RM₂ = Σ_{uv∈E} (da-1)·(db-1)   (Furtula, Gutman & Ediz 2014)
 ///   sigma  = σ(G)       where σ   = Σ_{uv∈E} (da-db)²        (Gutman et al. 2014)
 pub fn graph_topo_indices4() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices4_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices4_inner(&snap)
 }
 
 /// V3.16: Hyper-Zagreb HM₁ + HM₂ + Arithmetic-Geometric AG degree-based indices.
@@ -29249,7 +26743,8 @@ pub fn graph_topo_indices4() -> (u64, u64, u64, usize, usize) {
 ///   hm2    = HM₂(G)    where HM₂ = Σ_{uv∈E} (da·db)²                    (Das & Trinajstić 2011)
 ///   ag_ppm = AG × 10^6 where AG  = Σ_{uv∈E} (da+db)/(2√(da·db))         (Zheng et al. 2020)
 pub fn graph_topo_indices5() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices5_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices5_inner(&snap)
 }
 
 /// V3.17: `graph topo6` — EM₁ + ABS + RRR degree-based topological indices (undirected projection).
@@ -29257,7 +26752,8 @@ pub fn graph_topo_indices5() -> (u64, u64, u64, usize, usize) {
 ///   abs_ppm = ABS×10^6  where ABS = Σ_{uv∈E} √((da+db-2)/(da+db))    (Chen et al. 2022)
 ///   rrr_ppm = RRR×10^6  where RRR = Σ_{uv∈E} √((da-1)·(db-1))        (Li & Shi 2008)
 pub fn graph_topo_indices6() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices6_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices6_inner(&snap)
 }
 
 /// V3.18: `graph topo7` — Wiener W + Harary H + Hyper-Wiener WW distance-based topological indices.
@@ -29266,7 +26762,8 @@ pub fn graph_topo_indices6() -> (u64, u64, u64, usize, usize) {
 ///   hyper_wiener = WW(G)      = (1/2) Σ_{u<v} [d(u,v) + d(u,v)²]          (Klein & Randić 1993)
 /// Disconnected pairs are excluded (d=∞ contributes 0). BFS on undirected projection.
 pub fn graph_topo_indices7() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices7_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices7_inner(&snap)
 }
 
 /// V3.19: `graph topo8` — eccentricity-based topological indices.
@@ -29280,7 +26777,8 @@ pub fn graph_topo_indices7() -> (u64, u64, u64, usize, usize) {
 /// ecc(v) = max BFS distance from v to any reachable node (0 for isolated or single node).
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices8() -> (u64, u64, u32, u32, usize, usize) {
-    RUNTIME.lock().graph_topo_indices8_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices8_inner(&snap)
 }
 
 /// V3.20: `graph topo9` — Schultz MTI + Gutman Index + Connective Eccentric Index (degree-distance hybrid).
@@ -29292,7 +26790,8 @@ pub fn graph_topo_indices8() -> (u64, u64, u32, u32, usize, usize) {
 /// Disconnected pairs (d=∞) contribute 0. Isolated nodes (ecc=0) contribute 0 to CξE.
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices9() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices9_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices9_inner(&snap)
 }
 
 /// V3.21: `graph topo10` — Szeged Sz + Revised Szeged rSz + Mostar Mo (edge-partition distance).
@@ -29305,7 +26804,8 @@ pub fn graph_topo_indices9() -> (u64, u64, u64, usize, usize) {
 /// Tree invariant: n₀=0 for all tree edges → Sz = rSz = Wiener index.
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices10() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices10_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices10_inner(&snap)
 }
 
 /// V3.22 transmission-based topological indices on the current graph.
@@ -29318,7 +26818,8 @@ pub fn graph_topo_indices10() -> (u64, u64, u64, usize, usize) {
 ///   piv   = PI_v(G) = Σ_{uv∈E} (T_u + T_v)  (exact u64; Khalifeh et al. 2008)
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices11() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices11_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices11_inner(&snap)
 }
 
 /// V3.23 Zagreb eccentricity indices on the current graph.
@@ -29331,7 +26832,8 @@ pub fn graph_topo_indices11() -> (u64, u64, u64, usize, usize) {
 /// M3* = 0 iff self-centered (all ecc equal, e.g. complete graphs, even cycles).
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices12() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices12_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices12_inner(&snap)
 }
 
 /// V3.24: Transmission Zagreb indices.
@@ -29342,7 +26844,8 @@ pub fn graph_topo_indices12() -> (u64, u64, u64, usize, usize) {
 /// T_v = vertex transmission = Σ_{w reachable,w≠v} d(v,w).
 /// GA_t = |E|×10^6 iff all nodes have equal transmission.
 pub fn graph_topo_indices13() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices13_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices13_inner(&snap)
 }
 
 /// V3.25: Eccentricity-based topological indices — TE + EDS + GEA.
@@ -29353,7 +26856,8 @@ pub fn graph_topo_indices13() -> (u64, u64, u64, usize, usize) {
 /// ecc(v)=max BFS distance from v (0 for isolated). T_v=vertex transmission.
 /// GEA = |E|×10^6 iff graph is self-centered (all ecc equal).
 pub fn graph_topo_indices14() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices14_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices14_inner(&snap)
 }
 
 /// V3.26: Leap Zagreb indices — LM₁ + LM₂ + LM₃.
@@ -29365,7 +26869,8 @@ pub fn graph_topo_indices14() -> (u64, u64, u64, usize, usize) {
 /// LM₁=LM₂=LM₃=0 for complete graphs (d₂=0 everywhere; all pairs adjacent).
 /// BFS on undirected projection, O(n·(n+m)).
 pub fn graph_topo_indices15() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices15_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices15_inner(&snap)
 }
 
 /// V3.27: Generalized Randić family — R_{1/2} + R_{-1} + Lanzhou Lz.
@@ -29378,7 +26883,8 @@ pub fn graph_topo_indices15() -> (u64, u64, u64, usize, usize) {
 /// Lz = 0 for complete graphs (n−1−d=0); = 0 for empty graphs.
 /// Algorithm: O(V+E) degree scan; no BFS needed.
 pub fn graph_topo_indices16() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices16_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices16_inner(&snap)
 }
 
 /// V3.28: `graph topo17` — Zagreb coindices M̄₁ + M̄₂ + forgotten coindex F̄.
@@ -29391,7 +26897,8 @@ pub fn graph_topo_indices16() -> (u64, u64, u64, usize, usize) {
 /// M̄₁=M̄₂=F̄=0 for complete graphs (no non-edges).
 /// Algorithm: O(V+E) degree scan; no BFS needed.
 pub fn graph_topo_indices17() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices17_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices17_inner(&snap)
 }
 
 /// V3.29: `graph topo18` — NM₁ + NM₂ + GA₂ Neighborhood Zagreb indices.
@@ -29404,7 +26911,8 @@ pub fn graph_topo_indices17() -> (u64, u64, u64, usize, usize) {
 /// GA₂ = |E| × 10^6 when all S(v) are equal (S-uniform: K_n, K_{r,s}, K_{1,k}).
 /// Algorithm: O(V+E) — neighbor-degree-sum pass then edge scan; no BFS needed.
 pub fn graph_topo_indices18() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices18_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices18_inner(&snap)
 }
 
 /// V3.30: `graph topo19` — Reverse Wiener Λ + Reciprocal Complementary Wiener RCW + Terminal Wiener TW.
@@ -29417,7 +26925,8 @@ pub fn graph_topo_indices18() -> (u64, u64, u64, usize, usize) {
 /// TW=0 iff fewer than 2 pendant nodes (deg=1) in the entire graph.
 /// Algorithm: O(n(n+m)) — 2 BFS phases; component detection O(V+E).
 pub fn graph_topo_indices19() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices19_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices19_inner(&snap)
 }
 
 /// V3.31: `graph topo20` — Sombor-family variants: SO* + RSO + rSO.
@@ -29429,7 +26938,8 @@ pub fn graph_topo_indices19() -> (u64, u64, u64, usize, usize) {
 /// rSO=0 iff all edges are pendant-pendant (d_u=d_v=1).
 /// Algorithm: O(V+E) degree scan only — no BFS needed.
 pub fn graph_topo_indices20() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices20_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices20_inner(&snap)
 }
 
 /// V3.32: `graph topo21` — ABC₄ + Neighborhood Harmonic NH + Neighborhood Sombor NSO.
@@ -29443,7 +26953,8 @@ pub fn graph_topo_indices20() -> (u64, u64, u64, usize, usize) {
 /// S-uniform invariant: K₃ and K_{1,4} share S=4 everywhere → identical per-edge values.
 /// Algorithm: O(V+E) S-scan — degree pass then edge pass; no BFS needed.
 pub fn graph_topo_indices21() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices21_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices21_inner(&snap)
 }
 
 /// V3.33: `graph topo22` — NR + NF + NSC (Neighborhood Randić, Forgotten, Sum Connectivity).
@@ -29457,7 +26968,8 @@ pub fn graph_topo_indices21() -> (u64, u64, u64, usize, usize) {
 /// For S-uniform graphs with S=c: NR=m×floor(10^6/c), NSC=m×isqrt64(10^12/(2c)).
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then node+edge pass; no BFS needed.
 pub fn graph_topo_indices22() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices22_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices22_inner(&snap)
 }
 
 /// V3.34: `graph topo23` — NHM1 + NSDD + NM3 (Neighborhood S-variant HM₁, SDD, M₃).
@@ -29471,35 +26983,43 @@ pub fn graph_topo_indices22() -> (u64, u64, u64, usize, usize) {
 /// NM3 invariant: NM3=0 iff S-regular (all S values equal).
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then edge scan; no BFS needed.
 pub fn graph_topo_indices23() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices23_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices23_inner(&snap)
 }
 
 pub fn graph_topo_indices24() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices24_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices24_inner(&snap)
 }
 
 pub fn graph_topo_indices25() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices25_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices25_inner(&snap)
 }
 
 pub fn graph_topo_indices26() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices26_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices26_inner(&snap)
 }
 
 pub fn graph_topo_indices27() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices27_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices27_inner(&snap)
 }
 
 pub fn graph_topo_indices28() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices28_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices28_inner(&snap)
 }
 
 pub fn graph_topo_indices29() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices29_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices29_inner(&snap)
 }
 
 pub fn graph_topo_indices30() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices30_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices30_inner(&snap)
 }
 
 /// V3.42: `graph topo31` — NSig + NHQS + NPS (S-variant irregularity and power-sum family).
@@ -29513,7 +27033,8 @@ pub fn graph_topo_indices30() -> (u64, u64, u64, usize, usize) {
 /// NHQS = n·(2S)^4 = 16n·S^4 for S-regular; NPS = n·S^5 for S-regular.
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
 pub fn graph_topo_indices31() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices31_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices31_inner(&snap)
 }
 
 /// V3.43: `graph topo32` — NSH + NHPS + NWSO (S-variant power-series and weighted Sombor).
@@ -29528,7 +27049,8 @@ pub fn graph_topo_indices31() -> (u64, u64, u64, usize, usize) {
 /// NSO(topo21) = Σ√(S²+S²); NWSO adds S_u·S_v weight: = Σ S_u·S_v·√(S_u²+S_v²).
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
 pub fn graph_topo_indices32() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices32_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices32_inner(&snap)
 }
 
 /// Compute S-variant topo33 indices: NSHP + NHSE + NCSO.
@@ -29542,7 +27064,8 @@ pub fn graph_topo_indices32() -> (u64, u64, u64, usize, usize) {
 /// NCSO = S-variant of the generalized Sombor index SO^3 (α=3).
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
 pub fn graph_topo_indices33() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices33_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices33_inner(&snap)
 }
 
 /// Compute S-variant topo34 indices: NOC + NHHS + NFSO.
@@ -29557,339 +27080,423 @@ pub fn graph_topo_indices33() -> (u64, u64, u64, usize, usize) {
 /// All three use u128 accumulators for overflow safety; no isqrt required.
 /// Algorithm: O(V+E) S-scan — degree pass then S-pass then vertex+edge scan; no BFS needed.
 pub fn graph_topo_indices34() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices34_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices34_inner(&snap)
 }
 
 pub fn graph_topo_indices35() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices35_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices35_inner(&snap)
 }
 
 pub fn graph_topo_indices36() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices36_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices36_inner(&snap)
 }
 
 pub fn graph_topo_indices37() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices37_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices37_inner(&snap)
 }
 
 pub fn graph_topo_indices38() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices38_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices38_inner(&snap)
 }
 
 pub fn graph_topo_indices39() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices39_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices39_inner(&snap)
 }
 
 pub fn graph_topo_indices40() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices40_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices40_inner(&snap)
 }
 
 pub fn graph_topo_indices41() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices41_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices41_inner(&snap)
 }
 
 pub fn graph_topo_indices42() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices42_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices42_inner(&snap)
 }
 
 pub fn graph_topo_indices43() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices43_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices43_inner(&snap)
 }
 
 pub fn graph_topo_indices44() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices44_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices44_inner(&snap)
 }
 
 pub fn graph_topo_indices45() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices45_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices45_inner(&snap)
 }
 
 pub fn graph_topo_indices46() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices46_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices46_inner(&snap)
 }
 
 pub fn graph_topo_indices47() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices47_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices47_inner(&snap)
 }
 
 pub fn graph_topo_indices48() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices48_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices48_inner(&snap)
 }
 
 pub fn graph_topo_indices49() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices49_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices49_inner(&snap)
 }
 
 pub fn graph_topo_indices65() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices65_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices65_inner(&snap)
 }
 
 pub fn graph_topo_indices66() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices66_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices66_inner(&snap)
 }
 
 pub fn graph_topo_indices67() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices67_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices67_inner(&snap)
 }
 
 pub fn graph_topo_indices68() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices68_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices68_inner(&snap)
 }
 
 pub fn graph_topo_indices69() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices69_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices69_inner(&snap)
 }
 
 pub fn graph_topo_indices70() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices70_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices70_inner(&snap)
 }
 
 pub fn graph_topo_indices71() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices71_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices71_inner(&snap)
 }
 
 pub fn graph_topo_indices72() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices72_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices72_inner(&snap)
 }
 
 pub fn graph_topo_indices73() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices73_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices73_inner(&snap)
 }
 
 pub fn graph_topo_indices74() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices74_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices74_inner(&snap)
 }
 
 pub fn graph_topo_indices75() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices75_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices75_inner(&snap)
 }
 
 pub fn graph_topo_indices77() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices77_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices77_inner(&snap)
 }
 
 pub fn graph_topo_indices76() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices76_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices76_inner(&snap)
 }
 
 pub fn graph_topo_indices64() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices64_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices64_inner(&snap)
 }
 
 pub fn graph_topo_indices63() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices63_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices63_inner(&snap)
 }
 
 pub fn graph_topo_indices62() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices62_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices62_inner(&snap)
 }
 
 pub fn graph_topo_indices61() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices61_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices61_inner(&snap)
 }
 
 pub fn graph_topo_indices60() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices60_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices60_inner(&snap)
 }
 
 pub fn graph_topo_indices59() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices59_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices59_inner(&snap)
 }
 
 pub fn graph_topo_indices58() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices58_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices58_inner(&snap)
 }
 
 pub fn graph_topo_indices57() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices57_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices57_inner(&snap)
 }
 
 pub fn graph_topo_indices56() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices56_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices56_inner(&snap)
 }
 
 pub fn graph_topo_indices55() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices55_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices55_inner(&snap)
 }
 
 pub fn graph_topo_indices54() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices54_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices54_inner(&snap)
 }
 
 pub fn graph_topo_indices53() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices53_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices53_inner(&snap)
 }
 
 pub fn graph_topo_indices52() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices52_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices52_inner(&snap)
 }
 
 pub fn graph_topo_indices51() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices51_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices51_inner(&snap)
 }
 
 pub fn graph_topo_indices50() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices50_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices50_inner(&snap)
 }
 
 pub fn graph_topo_indices78() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices78_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices78_inner(&snap)
 }
 
 pub fn graph_topo_indices79() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices79_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices79_inner(&snap)
 }
 
 pub fn graph_topo_indices80() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices80_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices80_inner(&snap)
 }
 
 pub fn graph_topo_indices81() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices81_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices81_inner(&snap)
 }
 
 pub fn graph_topo_indices82() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices82_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices82_inner(&snap)
 }
 
 pub fn graph_topo_indices83() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices83_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices83_inner(&snap)
 }
 
 pub fn graph_topo_indices84() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices84_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices84_inner(&snap)
 }
 
 pub fn graph_topo_indices85() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices85_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices85_inner(&snap)
 }
 
 pub fn graph_topo_indices86() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices86_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices86_inner(&snap)
 }
 
 pub fn graph_topo_indices87() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices87_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices87_inner(&snap)
 }
 
 pub fn graph_topo_indices88() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices88_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices88_inner(&snap)
 }
 
 pub fn graph_topo_indices89() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices89_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices89_inner(&snap)
 }
 
 pub fn graph_topo_indices90() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices90_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices90_inner(&snap)
 }
 
 pub fn graph_topo_indices91() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices91_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices91_inner(&snap)
 }
 
 pub fn graph_topo_indices92() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices92_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices92_inner(&snap)
 }
 
 pub fn graph_topo_indices93() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices93_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices93_inner(&snap)
 }
 
 pub fn graph_topo_indices94() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices94_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices94_inner(&snap)
 }
 
 pub fn graph_topo_indices95() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices95_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices95_inner(&snap)
 }
 
 pub fn graph_topo_indices96() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices96_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices96_inner(&snap)
 }
 
 pub fn graph_topo_indices97() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices97_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices97_inner(&snap)
 }
 
 pub fn graph_topo_indices98() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices98_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices98_inner(&snap)
 }
 
 pub fn graph_topo_indices99() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices99_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices99_inner(&snap)
 }
 
 pub fn graph_topo_indices100() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices100_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices100_inner(&snap)
 }
 
 pub fn graph_topo_indices101() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices101_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices101_inner(&snap)
 }
 
 pub fn graph_topo_indices117() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices117_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices117_inner(&snap)
 }
 
 pub fn graph_topo_indices116() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices116_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices116_inner(&snap)
 }
 
 pub fn graph_topo_indices115() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices115_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices115_inner(&snap)
 }
 
 pub fn graph_topo_indices114() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices114_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices114_inner(&snap)
 }
 
 pub fn graph_topo_indices113() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices113_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices113_inner(&snap)
 }
 
 pub fn graph_topo_indices112() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices112_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices112_inner(&snap)
 }
 
 pub fn graph_topo_indices111() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices111_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices111_inner(&snap)
 }
 
 pub fn graph_topo_indices110() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices110_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices110_inner(&snap)
 }
 
 pub fn graph_topo_indices109() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices109_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices109_inner(&snap)
 }
 
 pub fn graph_topo_indices108() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices108_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices108_inner(&snap)
 }
 
 pub fn graph_topo_indices107() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices107_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices107_inner(&snap)
 }
 
 pub fn graph_topo_indices106() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices106_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices106_inner(&snap)
 }
 
 pub fn graph_topo_indices105() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices105_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices105_inner(&snap)
 }
 
 pub fn graph_topo_indices104() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices104_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices104_inner(&snap)
 }
 
 pub fn graph_topo_indices103() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices103_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices103_inner(&snap)
 }
 
 pub fn graph_topo_indices102() -> (u64, u64, u64, usize, usize) {
-    RUNTIME.lock().graph_topo_indices102_inner()
+    let snap = RUNTIME.lock().topology_snapshot();
+    GraphRuntime::graph_topo_indices102_inner(&snap)
 }
 
 /// Register a node vector as the handler for a particular IRQ number.
