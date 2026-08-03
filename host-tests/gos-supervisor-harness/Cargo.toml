@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 gos-cypher-mut = { path = "../../crates/gos-cypher-mut" }
+gos-mutation-dispatch = { path = "../../crates/gos-mutation-dispatch" }
 gos-protocol = { path = "../../crates/gos-protocol" }
 gos-runtime = { path = "../../crates/gos-runtime" }
 gos-sign = { path = "../../crates/gos-sign" }

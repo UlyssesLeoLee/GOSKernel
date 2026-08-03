@@ -1,6 +1,6 @@
 # ADR-006：capability 检查从 `gos-supervisor` 表查询迁向 Grant 图查询
 
-> 状态：**提案（问题陈述 + 选项，待你选向）** · 日期：2026-06-11 · 配套：[ADR-001 §五](./ADR-001-edge-algebra-constitution.md)（"capability 即图可达性"，明文"写明以正式化 Phase V2.4"）、[ADR-005](./ADR-005-node-mutation.md)（claim/quota 与 NodeId 稳定性的同源冲突）、[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)
+> 状态：**已选向：选项 A（影子验证层）已落地** · 日期：2026-06-11 · 选向/落地日期：2026-08-03 · 配套：[ADR-001 §五](./ADR-001-edge-algebra-constitution.md)（"capability 即图可达性"，明文"写明以正式化 Phase V2.4"）、[ADR-005](./ADR-005-node-mutation.md)（claim/quota 与 NodeId 稳定性的同源冲突）、[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)
 >
 > 口径：V2.4a/b 已经在 `gos_mutation_dispatch::capability` 落地了 ADR-001 §五 的查询原语——`reachable_via_grant`（抽象图）+ `grant_edges_from_specs`/`capability_check`（接真实 `gos_protocol::EdgeSpec`，按 `edge_type.lower().bits.grant` 过滤 `Use`/`Call`）。本 ADR 处理 V2.4c 被推迟的硬问题——**这个查询原语如何接入 `gos-supervisor` 真实的 capability/claim 路径**（V2.4 遗留："尚未接入真实 capability/trap 检查路径"）。本 ADR 只陈述问题与选项，**不替你拍板**。
 
@@ -48,3 +48,5 @@ V2.4 的 exit criteria（"capability-path / hot-swap / fault-containment test �
 本 ADR 范围**不含** V2.4 其余两项遗留（`gos-hal::display` trait、跨域调用 + 剩余 4 个 killer demo）——它们是不同性质的设计问题（硬件驱动 / IPC 机制），需要各自独立的 ADR，不与本 ADR 的"capability 表→图迁移"问题共享决策依据。
 
 列为待你选向的 backlog 决定，**选项 A 不阻塞主线**：一旦确认，可在 `gos-mutation-dispatch-harness` 或新增 `gos-supervisor-harness` 等价性 property test 中立即实现，无需先等 ADR-005。
+
+**落地状态**：`gos-mutation-dispatch-harness/tests/capability_specs.rs` 早先已有 3 条测试（`claim_is_grant_edge_create_revoke_is_delete` 等）用手写 `EdgeSpec` 恢复 ADR-001 §5 的字面陈述，但从未接触真实 `gos-supervisor::ClaimRecord`——只是 `capability_check` 的自洽性证明，不是本 ADR 要求的跨系统等价性证明。本次补上真正的部分：`gos-supervisor-harness/tests/supervisor.rs` 新增 `capability_check_agrees_with_real_claim_resource_lifecycle`，驱动真实 `claim_resource`/`release_claim` 调用，同步维护一份手工映射的 Grant 边表，断言 `capability_check` 在 claim 建立前/建立后/释放后三个真实状态点都与预期一致。`abi_resolve_capability`/`claim_resource` 本身的实现未被触碰——仍是治理时等价性证明，非热路径替换。

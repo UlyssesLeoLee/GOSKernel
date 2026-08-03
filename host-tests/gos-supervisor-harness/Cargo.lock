@@ -86,6 +86,7 @@ name = "gos-supervisor-harness"
 version = "0.1.0"
 dependencies = [
  "gos-cypher-mut",
+ "gos-mutation-dispatch",
  "gos-protocol",
  "gos-runtime",
  "gos-sign",

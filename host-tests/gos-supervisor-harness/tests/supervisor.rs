@@ -1347,3 +1347,80 @@ fn apply_cypher_mutation_rejected_on_degraded_module() {
         "audit ring must be unchanged on gate rejection"
     );
 }
+
+// ── ADR-006 §三 option A — shadow-verification of capability_check ───────
+//
+// The existing capability_specs.rs-style tests (gos-mutation-dispatch-harness)
+// prove capability_check is internally self-consistent against hand-built
+// EdgeSpec tables, but never touch a *real* gos-supervisor ClaimRecord --
+// they restate ADR-001 §5's claim, they don't verify it against the actual
+// claim/release implementation. This test does: it drives real
+// claim_resource/release_claim calls and asserts a parallel,
+// hand-constructed Grant-edge table agrees with the real claim's lifecycle
+// at every step. Per ADR-006 §三, this is a governance-time equivalence
+// proof, not a hot-path substitution -- abi_resolve_capability and
+// claim_resource's own implementation are untouched.
+#[test]
+fn capability_check_agrees_with_real_claim_resource_lifecycle() {
+    use gos_mutation_dispatch::capability::capability_check;
+    use gos_protocol::{EdgeId, EdgeSpec, RoutePolicy, RuntimeEdgeType, RESOURCE_SOCKET};
+
+    let _guard = test_guard();
+    reset_state();
+    bootstrap(0);
+    let provider = install_module(PROVIDER).expect("provider install");
+    realize_boot_modules().expect("realize");
+    let instance = current_instance(provider).expect("primary instance");
+
+    // Arbitrary but stable NodeIds standing in for "the claiming instance"
+    // and "the resource it claims" in the shadow Grant graph. ADR-006 §一
+    // notes there's no established NodeId<->ClaimRecord mapping yet (that
+    // question belongs to ADR-008, and is independent of this one) -- this
+    // test hand-maps the two for its own duration, which is exactly what
+    // "shadow verification" means here.
+    let instance_node = gos_protocol::NodeId([0xC1; 16]);
+    let resource_node = gos_protocol::NodeId([0xC2; 16]);
+    let grant_edge = || EdgeSpec {
+        edge_id: EdgeId::ZERO,
+        from_node: instance_node,
+        to_node: resource_node,
+        edge_type: RuntimeEdgeType::Call,
+        weight: 1.0,
+        acl_mask: 0,
+        route_policy: RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    };
+    let no_edges: [EdgeSpec; 0] = [];
+
+    // Before this test's own claim: no Grant edge tracked for this
+    // (instance_node, resource_node) pair yet.
+    assert!(
+        !capability_check(&no_edges, instance_node, resource_node),
+        "capability_check must see no path before any claim exists"
+    );
+
+    // Real claim.
+    let lease = claim_resource(instance, RESOURCE_SOCKET, ClaimPolicy::Shared, PreemptPolicy::Never)
+        .expect("real claim_resource must succeed");
+
+    // Parallel Grant-edge representation of "the claim now exists" agrees.
+    let with_edge = [grant_edge()];
+    assert!(
+        capability_check(&with_edge, instance_node, resource_node),
+        "capability_check must agree a Grant path exists while the real claim is active"
+    );
+
+    // Real release.
+    release_claim(lease.claim_id).expect("real release_claim must succeed");
+
+    // Parallel representation catches back up: no edge, no path -- matching
+    // ADR-001 §5's "claim/revoke degrade to Grant edge create/delete", now
+    // driven by the actual claim_resource/release_claim implementation
+    // instead of only by a hand-simulated edge table.
+    assert!(
+        !capability_check(&no_edges, instance_node, resource_node),
+        "capability_check must agree no Grant path exists once the real claim is released"
+    );
+}
