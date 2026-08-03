@@ -24,6 +24,7 @@
 //! `#[repr(C)]`, so a future change to its in-memory padding wouldn't
 //! silently corrupt journal files.
 
+use gos_protocol::block::{BlockDeviceVTable, BlockIoStatus, BLOCK_SECTOR_SIZE_DEFAULT};
 use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind};
 
 pub const JOURNAL_MAGIC: [u8; 4] = *b"GOSJ";
@@ -51,6 +52,9 @@ pub enum JournalError {
     /// container's own `JOURNAL_VERSION`) doesn't match what this build of
     /// gos-journal understands. See ADR-015 axis③.
     UnsupportedProtocolVersion(u16),
+    /// ADR-010 F.5-logic — the underlying `BlockDeviceVTable` call failed
+    /// during `flush_to_device`/`replay_from_device`.
+    Io(BlockIoStatus),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -315,6 +319,149 @@ impl<const N: usize> JournalRing<N> {
         self.len = 0;
         self.wrapped = false;
     }
+
+    /// ADR-010 F.5-logic — flush header + all buffered records (oldest
+    /// first, same order as [`flush_into`](Self::flush_into)) to a real
+    /// block device starting at `start_lba`, then call `vtable.flush`.
+    /// `no_std`/no `alloc`: streams through one sector-sized stack buffer
+    /// instead of materializing the whole blob, so this works regardless
+    /// of how large `N` is. Returns the number of records written (the
+    /// caller must remember this count — the on-disk header carries no
+    /// record-count field — to pass to
+    /// [`replay_from_device`] later).
+    pub fn flush_to_device(
+        &self,
+        vtable: &BlockDeviceVTable,
+        start_lba: u64,
+    ) -> Result<usize, JournalError> {
+        let mut sector = [0u8; BLOCK_SECTOR_SIZE_DEFAULT as usize];
+        let mut fill = 0usize;
+        let mut lba = start_lba;
+
+        let mut header = [0u8; HEADER_BYTES];
+        JournalHeader::current().write_into(&mut header);
+        fill = accumulate_and_flush(vtable, &mut sector, fill, &mut lba, &header)?;
+
+        for i in 0..self.len {
+            let slot = (self.head + i) % N;
+            fill = accumulate_and_flush(vtable, &mut sector, fill, &mut lba, &self.records[slot])?;
+        }
+
+        // Flush the trailing partial sector (zero-padded) so nothing sits
+        // only in the stack buffer.
+        if fill > 0 {
+            write_one_sector(vtable, lba, &sector)?;
+        }
+
+        let status = unsafe { (vtable.flush)(vtable.handle) };
+        if status != BlockIoStatus::Ok as i32 {
+            return Err(JournalError::Io(BlockIoStatus::from_i32(status)));
+        }
+        Ok(self.len)
+    }
+}
+
+fn write_one_sector(
+    vtable: &BlockDeviceVTable,
+    lba: u64,
+    buf: &[u8; BLOCK_SECTOR_SIZE_DEFAULT as usize],
+) -> Result<(), JournalError> {
+    let status = unsafe {
+        (vtable.write_sector)(vtable.handle, lba, buf.as_ptr(), BLOCK_SECTOR_SIZE_DEFAULT)
+    };
+    if status != BlockIoStatus::Ok as i32 {
+        return Err(JournalError::Io(BlockIoStatus::from_i32(status)));
+    }
+    Ok(())
+}
+
+fn read_one_sector(
+    vtable: &BlockDeviceVTable,
+    lba: u64,
+    buf: &mut [u8; BLOCK_SECTOR_SIZE_DEFAULT as usize],
+) -> Result<(), JournalError> {
+    let status = unsafe {
+        (vtable.read_sector)(vtable.handle, lba, buf.as_mut_ptr(), BLOCK_SECTOR_SIZE_DEFAULT)
+    };
+    if status != BlockIoStatus::Ok as i32 {
+        return Err(JournalError::Io(BlockIoStatus::from_i32(status)));
+    }
+    Ok(())
+}
+
+/// Copy `data` into the caller's sector accumulator, flushing full
+/// sectors to `vtable` as they fill (advancing `*lba` each time). Returns
+/// the accumulator's new fill level (always `< SECTOR` on return).
+fn accumulate_and_flush(
+    vtable: &BlockDeviceVTable,
+    sector: &mut [u8; BLOCK_SECTOR_SIZE_DEFAULT as usize],
+    mut fill: usize,
+    lba: &mut u64,
+    mut data: &[u8],
+) -> Result<usize, JournalError> {
+    const SECTOR: usize = BLOCK_SECTOR_SIZE_DEFAULT as usize;
+    while !data.is_empty() {
+        let space = SECTOR - fill;
+        let take = space.min(data.len());
+        sector[fill..fill + take].copy_from_slice(&data[..take]);
+        fill += take;
+        data = &data[take..];
+        if fill == SECTOR {
+            write_one_sector(vtable, *lba, sector)?;
+            *lba += 1;
+            fill = 0;
+            *sector = [0u8; SECTOR];
+        }
+    }
+    Ok(fill)
+}
+
+/// ADR-010 F.5-logic — replay `record_count` envelopes previously written
+/// by [`JournalRing::flush_to_device`], reading sector-by-sector from
+/// `start_lba`. `record_count` must be the exact count the matching
+/// `flush_to_device` call returned (the on-disk header carries no
+/// record-count field, matching [`replay`]'s existing "caller supplies
+/// the blob boundary" contract — here the boundary is a record count
+/// instead of a slice length). `no_std`/no `alloc`: streams through one
+/// sector-sized stack buffer, so a record spanning a sector boundary is
+/// reassembled without needing the whole blob in memory at once.
+pub fn replay_from_device<F>(
+    vtable: &BlockDeviceVTable,
+    start_lba: u64,
+    record_count: usize,
+    mut sink: F,
+) -> Result<usize, JournalError>
+where
+    F: FnMut(ControlPlaneEnvelope),
+{
+    const SECTOR: usize = BLOCK_SECTOR_SIZE_DEFAULT as usize;
+    let mut sector = [0u8; SECTOR];
+    let mut lba = start_lba;
+    read_one_sector(vtable, lba, &mut sector)?;
+    let _header = JournalHeader::parse(&sector)?;
+    let mut sector_off = HEADER_BYTES;
+
+    let mut count = 0usize;
+    for _ in 0..record_count {
+        let mut record = [0u8; ENVELOPE_RECORD_BYTES];
+        let mut got = 0usize;
+        while got < ENVELOPE_RECORD_BYTES {
+            if sector_off >= SECTOR {
+                lba += 1;
+                read_one_sector(vtable, lba, &mut sector)?;
+                sector_off = 0;
+            }
+            let avail = SECTOR - sector_off;
+            let take = avail.min(ENVELOPE_RECORD_BYTES - got);
+            record[got..got + take].copy_from_slice(&sector[sector_off..sector_off + take]);
+            got += take;
+            sector_off += take;
+        }
+        let env = deserialize_envelope(&record)?;
+        sink(env);
+        count += 1;
+    }
+    Ok(count)
 }
 
 // ── Phase H.5 — runtime snapshot ────────────────────────────────────────────

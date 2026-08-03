@@ -82,6 +82,16 @@ pub enum VfsError {
     /// The filesystem implementation is still in stub form — see the
     /// Phase F roadmap in `plan/OPTIMIZATION_PLAN.md`.
     NotImplemented,
+    /// ADR-010 F.5-logic write path: no free cluster left in the FAT
+    /// table (or no free directory-entry slot for `create`).
+    NoSpace,
+    /// ADR-010 F.5-logic: `create`'s `name` doesn't fit the target
+    /// filesystem's naming rules (e.g. FAT32 8.3: at most 8 name bytes +
+    /// `.` + 3 extension bytes, no lowercase enforcement done here).
+    NameTooLong,
+    /// ADR-010 F.5-logic: `create` was called with a `name` that already
+    /// exists in `parent`.
+    AlreadyExists,
 }
 
 /// Mounted-filesystem trait.  Every concrete FS (FAT32 read in F.3,
@@ -112,6 +122,38 @@ pub trait FileSystem {
         cursor: u64,
         entries: &mut [DirEntry],
     ) -> Result<(usize, u64), VfsError>;
+
+    /// ADR-010 F.5-logic — write `data` at `offset` into `inode`. First
+    /// version only supports **extending an existing file**: `offset` must
+    /// be at or before the file's current end (`inode.size_bytes`);
+    /// truncate and random-write-with-hole are not supported yet (both
+    /// return `NotImplemented`). Returns the number of bytes written. The
+    /// on-disk directory entry's size field is updated so a subsequent
+    /// `lookup` sees the new size; the `Inode` value the caller already
+    /// holds is *not* mutated in place (mirrors why `read`/`lookup` never
+    /// mutate `&self` either — filesystems in this trait carry no mutable
+    /// cache, all state lives on the block device).
+    fn write(&self, inode: Inode, offset: u64, data: &[u8]) -> Result<usize, VfsError> {
+        let _ = (inode, offset, data);
+        Err(VfsError::NotImplemented)
+    }
+
+    /// ADR-010 F.5-logic — create a new, empty file or directory named
+    /// `name` inside `parent`. Returns the newly allocated `Inode`.
+    fn create(&self, parent: Inode, name: &[u8], kind: InodeKind) -> Result<Inode, VfsError> {
+        let _ = (parent, name, kind);
+        Err(VfsError::NotImplemented)
+    }
+
+    /// ADR-010 F.5-logic — ensure any writes so far are durable. Default
+    /// is a no-op: filesystems whose `write`/`create` already commit each
+    /// mutation synchronously to the block device (`k-fat32` today) don't
+    /// need to do anything further here; a filesystem with a write-back
+    /// cache would override this to flush it.
+    fn fsync(&self, inode: Inode) -> Result<(), VfsError> {
+        let _ = inode;
+        Ok(())
+    }
 }
 
 /// A mount provider needs a block device under it (for FAT32) or
