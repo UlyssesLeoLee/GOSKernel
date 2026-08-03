@@ -1,6 +1,6 @@
 # ADR-014：进程＝子图模型 + 兼容层策略选向（WASI-first / POSIX-native-first / 推迟）
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（§生态/兼容两支柱、附录 A/C、Parity 不变式、铁律 2/3）、[ADR-001 §2.2/§2.3/§三](./ADR-001-edge-algebra-constitution.md)（`Grant` 位的宪法定义）、[ADR-005 §五/§七](./ADR-005-node-mutation.md)（provisional node + 未接线的"promote"机制）、[ADR-006](./ADR-006-capability-graph-migration.md)（capability_check↔claim_resource 统一，选向待定）、[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5，文件型 fd 的真实存储后端）
+> 状态：**分裂状态——§二（进程=子图映射）已落地；§三/四（WASI-first / POSIX-native-first / 推迟）仍待你选向** · 提案日期：2026-06-12 · §二落地日期：2026-08-03 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（§生态/兼容两支柱、附录 A/C、Parity 不变式、铁律 2/3）、[ADR-001 §2.2/§2.3/§三](./ADR-001-edge-algebra-constitution.md)（`Grant` 位的宪法定义）、[ADR-005 §五/§七](./ADR-005-node-mutation.md)（provisional node + 未接线的"promote"机制）、[ADR-006](./ADR-006-capability-graph-migration.md)（capability_check↔claim_resource 统一，选向待定）、[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5，文件型 fd 的真实存储后端）
 >
 > 口径：V3 计划把本 ADR 称为"V3 最大的分叉点"——`crates/k-wasm`/`crates/k-libc` 等任何兼容层代码动笔前，必须先有"外来进程在图里是什么"的答案，并满足 Parity 不变式（人类/AI/gpm/外来进程共用同一条 `gos-cypher-mut` 门禁 + `capability_check`，禁止第二条特权路径）。本 ADR 分两部分：**§二"进程＝子图"映射是选项无关的——它同时是 [ADR-005 §七遗留 2](./ADR-005-node-mutation.md)"promote 机制缺触发点"问题的第一个具体触发场景，建议无论 A/B/C 如何选向都可以先行接线**；§三/四是 WASI-first / POSIX-native-first / 推迟 三个选项及建议，**不替你拍板**——这是继 ADR-005 之后第二个"不拍板"级别的分叉。
 
@@ -90,4 +90,12 @@ WASI 的 capability 句柄模型和 POSIX 的 fd 表，都是"一个整数 → �
 
 **但本 ADR 不替你拍板**——V3 计划称之为"V3 最大的分叉点"，门禁逻辑（铁律 2）要求 `crates/k-wasm`/`crates/k-libc` 或任何新增编译目标在本文档 §五 记录选向之前不得出现在 `Cargo.toml` workspace members 中。门禁范围**不含**§二的接线工作（见上，可先行）。
 
-**关联待选向项的交互说明**（均不阻塞本 ADR 的选向，仅供选向时参考）：[ADR-006](./ADR-006-capability-graph-migration.md) 选项 B（capability_check↔claim_resource 统一）与 §2.3 正交，两种结局都兼容；[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5-wiring）决定文件型 fd 的 `fd_read`/`fd_write` 何时触达真实存储，但不阻塞 console/网络型 fd 的首个 demo；**建议下一步起草 [ADR-012](../plan/V2_DEVELOPMENT_PLAN.md)（V2.6c，fast-path 节点标注）**——本 ADR §3.1 已经指出它是选项 A 解释执行开销的长期答案，优先级因此上升。
+**关联待选向项的交互说明**（均不阻塞本 ADR 的选向，仅供选向时参考）：[ADR-006](./ADR-006-capability-graph-migration.md) 选项 B（capability_check↔claim_resource 统一）与 §2.3 正交，两种结局都兼容；[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5-wiring）决定文件型 fd 的 `fd_read`/`fd_write` 何时触达真实存储，但不阻塞 console/网络型 fd 的首个 demo；[ADR-012](./ADR-012-fast-path-node-tagging.md)（V2.6c，fast-path 节点标注）已选向并落地——本 ADR §3.1 指出的"选项 A 解释执行开销的长期答案"现在有了具体机制。
+
+## 五、§二落地状态（2026-08-03）
+
+`host-tests/gos-shadow-kernel-harness/tests/shadow_kernel.rs` 新增 `capability_granting_mutation_is_the_promote_trigger_adr014`：在一个真实启动、持续 cycle 的双模块 shadow kernel 里（不是合成 EdgeSpec 表），`CypherMutation::CreateNode` 铸造 `proc`/`resource` 两个 provisional 节点，`gos_supervisor::apply_cypher_mutation(AddEdge{Use}, ...)` 走人类/AI/gpm 共用的同一条门禁模拟"打开一个新 fd"，断言 `capability_check` 由假转真——这正是 [ADR-005 §五 step 3](./ADR-005-node-mutation.md) 悬置的"promote 触发点"第一次有了具体实例；随后 `RemoveEdge`（同一门禁，无新删除原语）验证能力随之撤销。
+
+**已知、明确记录的缺口**（不是本次遗漏，是与 §2.1 字面设想的真实差距）：§2.1 设想进程节点应带 `RuntimeNodeType::Compute` / `EntryPolicy::OnDemand` / 解释器自己的 `ExecutorId`，但 `CypherMutation::CreateNode`/`create_provisional_node`（ADR-005 选项 A 落地时的形状）目前硬编码产出 `RuntimeNodeType::Vector` / `EntryPolicy::Manual` / `ExecutorId::ZERO`，没有参数可定制。本次证明的"capability-granting mutation = promote 触发点"这一核心论断不依赖节点的具体 `RuntimeNodeType`——但若 §三选向 A（wasm）后要落地"进程节点"，`CreateNode` 的形状需要先扩展以接受这些参数，这是一个尚未开的独立小缺口，留给 §三选向后一并处理。
+
+**§三/四（WASI-first / POSIX-native-first / 推迟）仍未选向**——门禁不变：`crates/k-wasm`/`crates/k-libc` 或任何新增编译目标在此处记录选向之前不得出现在 `Cargo.toml` workspace members 中。

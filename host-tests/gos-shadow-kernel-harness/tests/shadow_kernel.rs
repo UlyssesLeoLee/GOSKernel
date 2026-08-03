@@ -24,9 +24,11 @@
 //!   (t2:Function {name: "shadow_kernel_live_cypher_mutations_flow_through_running_system", type: "function"}),
 //!   (t3:Function {name: "shadow_kernel_survives_fault_and_restart_while_other_modules_keep_cycling", type: "function"}),
 //!   (t4:Function {name: "shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity", type: "function"}),
+//!   (t5:Function {name: "capability_granting_mutation_is_the_promote_trigger_adr014", type: "function"}),
 //!   (f)-[:CONTAINS]->(boot), (f)-[:CONTAINS]->(t1), (f)-[:CONTAINS]->(t2),
-//!   (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4),
-//!   (t1)-[:CALLS]->(boot), (t2)-[:CALLS]->(boot), (t3)-[:CALLS]->(boot), (t4)-[:CALLS]->(boot);
+//!   (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4), (f)-[:CONTAINS]->(t5),
+//!   (t1)-[:CALLS]->(boot), (t2)-[:CALLS]->(boot), (t3)-[:CALLS]->(boot), (t4)-[:CALLS]->(boot),
+//!   (t5)-[:CALLS]->(boot);
 //! ```
 
 use std::sync::Mutex;
@@ -309,6 +311,102 @@ fn shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity() {
     // most one Use edge survives per source node regardless of which path
     // performed the most recent rebind.
     assert!(!use_edge_present(theme_current, wabi, "use"));
+
+    run_steady_state_cycles(2);
+}
+
+// ── ADR-014 §二 — process=subgraph mapping, wired ahead of the A/B/C
+// compat-strategy choice ────────────────────────────────────────────────
+//
+// ADR-014 explicitly recommends landing §二 regardless of which compat
+// option (WASI-first / POSIX-native-first / defer) eventually gets chosen
+// -- its payload is the answer to ADR-005 §七's leftover (2), "capability
+// mutations have no trigger for 'promote'": a process node opening a new
+// fd is exactly one capability-granting mutation through the same gate a
+// human/AI/gpm mutation already uses. This test proves that claim against
+// the live system (not synthetic EdgeSpec tables), in a running, cycling
+// shadow kernel -- matching the shape kernel_main actually runs the same
+// mutation gate under.
+//
+// Known, documented gap this test does NOT paper over: ADR-014 §2.1 wants
+// process nodes tagged `RuntimeNodeType::Compute` / `EntryPolicy::OnDemand`
+// / a real interpreter `ExecutorId`; `CypherMutation::CreateNode` (ADR-005
+// option A) only ever produces the generic `RuntimeNodeType::Vector` /
+// `EntryPolicy::Manual` / `ExecutorId::ZERO` shape today -- there's no
+// parameter to customize it. That's a real, separate gap (extending
+// CreateNode's own shape), not something this test's "process=subgraph"
+// proof depends on: the promote-trigger claim is about the *mutation gate*,
+// not about which RuntimeNodeType the resulting node carries.
+#[test]
+fn capability_granting_mutation_is_the_promote_trigger_adr014() {
+    let _guard = test_guard();
+    boot_two_modules();
+    run_steady_state_cycles(2);
+
+    // §2.1: a process instance = a provisional node. §2.1's Compute/OnDemand
+    // tagging isn't available through CreateNode yet (see the gap noted
+    // above) -- `proc` stands in for it.
+    let proc = create_node();
+    // §2.4: the target resource a `path_open`-class call would name.
+    let resource = create_node();
+
+    // Before any fd is opened: no Grant path, using the *real* edge table
+    // (no edges exist between these two fresh nodes at all).
+    let no_edges: [gos_protocol::EdgeSpec; 0] = [];
+    assert!(
+        !gos_mutation_dispatch::capability::capability_check(&no_edges, proc, resource),
+        "a freshly created process/resource pair must start with no capability"
+    );
+
+    // §2.3: "opening a new fd" = a capability-granting mutation through the
+    // *same* gate a human/AI/gpm mutation goes through -- not a special
+    // process-only code path. Use `Use` (Refer+Bind+Grant, ADR-001):
+    // fd-like "process holds this exclusively, lifecycle-bound" semantics
+    // per §2.2's own mapping.
+    let edge_id = gos_supervisor::apply_cypher_mutation(
+        CypherMutation::AddEdge { from: proc, to: resource, edge_kind: ReceptiveEdgeKind::Use },
+        *b"K_TEST_ADR014\0\0\0",
+    )
+    .expect("path_open-class mutation must apply through the standard gate");
+
+    // This *is* ADR-005 §五 step 3's "promote" trigger, made concrete:
+    // capability_check now sees a Grant path where it didn't before,
+    // driven entirely by the ordinary mutation-gate path, using a
+    // hand-mirrored EdgeSpec for the one edge the real mutation just
+    // created (mirrors the ADR-006 shadow-verification pattern rather than
+    // re-deriving the full live graph).
+    let real_edge = gos_protocol::EdgeSpec {
+        edge_id,
+        from_node: proc,
+        to_node: resource,
+        edge_type: gos_protocol::RuntimeEdgeType::Use,
+        weight: 1.0,
+        acl_mask: 0,
+        route_policy: gos_protocol::RoutePolicy::Direct,
+        capability_namespace: None,
+        capability_binding: None,
+        vector_ref: None,
+    };
+    assert!(
+        gos_mutation_dispatch::capability::capability_check(&[real_edge], proc, resource),
+        "the capability-granting mutation must be visible to capability_check as a Grant path"
+    );
+
+    run_steady_state_cycles(1);
+
+    // §2.5: process exit = RemoveEdge on its outgoing capability edges --
+    // no new deletion primitive, same gate again.
+    gos_supervisor::apply_cypher_mutation(
+        CypherMutation::RemoveEdge { edge_id },
+        *b"K_TEST_ADR014\0\0\0",
+    )
+    .expect("fd close / process exit must apply through the standard gate");
+
+    assert!(
+        !gos_mutation_dispatch::capability::capability_check(&no_edges, proc, resource),
+        "after the granting edge is removed, capability_check must revoke the path -- \
+         an isolated provisional node with no Grant out-edges is harmless by construction"
+    );
 
     run_steady_state_cycles(2);
 }
