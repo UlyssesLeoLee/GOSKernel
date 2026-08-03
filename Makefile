@@ -8,8 +8,11 @@ build:
 	cargo bootimage --package gos-kernel
 
 ## Boot in QEMU (serial to stdout, VGA window, e1000 NIC on QEMU user-net)
-run: build
-	cargo bootimage run --package gos-kernel
+## `cargo bootimage run` is not a real command (bootimage only takes build
+## options); the QEMU runner is wired via .cargo/config.toml's
+## `runner = "bootimage runner"`, fired through plain `cargo run`.
+run:
+	cargo run --package gos-kernel
 
 ## Quick compile check (no image creation)
 check:
