@@ -1,6 +1,6 @@
 # ADR-007：`gos-hal::display` trait 的范围——与 `k-vga`（文本模式）/ `k-vk-host`（宿主桥接图形）的关系
 
-> 状态：**提案（问题陈述 + 选项，待你选向）** · 日期：2026-06-11 · 配套：[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)（line 89，`gos-hal::display` 原始草案）、[ADR-006](./ADR-006-capability-graph-migration.md)（同一遗留项的"需要独立 ADR"标注）、[ADR-002 §六](./ADR-002-rewrite-engine.md)（渲染模型）
+> 状态：**已选向：选项 C 的现状澄清 + 选项 A 的措辞调整** · 日期：2026-06-11 · 选向日期：2026-08-03 · 配套：[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)（line 89，`gos-hal::display` 原始草案，已按本 ADR 更新）、[ADR-006](./ADR-006-capability-graph-migration.md)（同一遗留项的"需要独立 ADR"标注）、[ADR-002 §六](./ADR-002-rewrite-engine.md)（渲染模型）、[ADR-013](./ADR-013-real-hardware-display-mvp.md)（`gos-hal::display` LFB Surface 的新归宿：V2.6 真机显示）
 >
 > 口径：V2 计划 line 89 描述的 `gos-hal::display` trait——`init(prefer: ResolutionHint) -> Surface` / `surface.lfb()` / `surface.flip()`，Bochs-VBE 为 backend #1，封装"`fbtest.rs:296` 的 DISPI 直写"——与当前 V2 代码库的实际显示架构有两处脱节：(1) `fbtest.rs` 在 V2 代码库中从未存在（V2.3d 已确认，参见 [V2 计划 V2.3 行](../plan/V2_DEVELOPMENT_PLAN.md)）；(2) 当前真实显示路径是两条平行、均非线性帧缓冲（LFB）的机制——`k-vga`（VGA 文本模式）与 `k-vk-host`（宿主桥接 graph-native 显示列表）。本 ADR 处理"`gos-hal::display` 该长成什么样、该对接哪条路径"，**不替你拍板**。
 

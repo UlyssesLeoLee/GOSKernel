@@ -1,6 +1,6 @@
 # ADR-008：`gos_protocol::NodeId`（V2 图身份）↔ 运行时身份（`VectorAddress` / B.4.5 跨域调用）的映射——V2.4 deliverable 3 的前置问题
 
-> 状态：**提案（问题陈述 + 选项，待你选向）** · 日期：2026-06-11 · 配套：[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)（deliverable 3"跨域调用走 Grant 路径，接 Phase B.4.5 已有的 cross-domain capability invocation 结构"）、[ADR-005](./ADR-005-node-mutation.md)（NodeId 稳定性）、[ADR-006](./ADR-006-capability-graph-migration.md)（`gos-supervisor` capability 表↔Grant 图同源问题）、[Phase B.4 §B.4.5](./PHASE_B4_DOMAIN_ISOLATION.md)（cross-domain capability invocation 现状）
+> 状态：**已选向：选项 B（`node_id_for_vector` 派生函数）已落地；选项 A 仍待 B.4.6** · 日期：2026-06-11 · 选向/落地日期：2026-08-03 · 配套：[V2 计划 V2.4](../plan/V2_DEVELOPMENT_PLAN.md)（deliverable 3"跨域调用走 Grant 路径，接 Phase B.4.5 已有的 cross-domain capability invocation 结构"）、[ADR-005](./ADR-005-node-mutation.md)（NodeId 稳定性）、[ADR-006](./ADR-006-capability-graph-migration.md)（`gos-supervisor` capability 表↔Grant 图同源问题）、[Phase B.4 §B.4.5](./PHASE_B4_DOMAIN_ISOLATION.md)（cross-domain capability invocation 现状）
 >
 > 口径：V2.4a/b/c 已经把 `capability_check(specs: &[gos_protocol::EdgeSpec], from: NodeId, to: NodeId) -> bool` 落地为可独立验证的纯函数（`gos-mutation-dispatch-harness` 28/28 绿）。V2.4 deliverable 3 要求"跨域调用走 Grant 路径"——即 B.4.5 的跨域 dispatch 在放行前应当问 `capability_check`。但 B.4.5 的 `route_signal(target: VectorAddress, ...)` 用的是 `VectorAddress`（48-bit `l4/l3/l2/offset`，pre-V2 寻址），不是 `gos_protocol::NodeId([u8;16])`——这是 ADR-006 在 `gos-supervisor` capability 表上发现的**同一类**"V2 图身份 vs. pre-V2 运行时身份，无既定映射"问题，但发生在路由层而非 claim 表层。本 ADR 处理这个映射缺口，**不替你拍板**。
 
