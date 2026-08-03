@@ -142,4 +142,38 @@ foreach ($file in $rustFiles) {
     Test-VectorRefBlocks -FilePath $file.FullName -TypeName "EdgeSpec"
 }
 
+# ADR-017 门禁 "治理红线落地": AI-facing crates (k-chat, k-ai, gos-ai-bridge,
+# and any future `agent`-family crate) must never call a gos_runtime write
+# path directly -- every mutation has to go through the same
+# apply_mutation/apply_cypher_mutation gate a human/gpm mutation uses.
+# `gos_runtime::RuntimeDispatcher` (the adapter struct fed *into*
+# `gos_cypher_mut::apply_mutation`) is deliberately not in this list --
+# that's the sanctioned way through the gate, not a bypass of it.
+$aiCrateNames = @("k-chat", "k-ai", "gos-ai-bridge")
+$forbiddenGosRuntimeWriteCalls = @(
+    "register_node",
+    "create_provisional_node",
+    "rebind_use",
+    "register_node_prop_u8",
+    "register_node_prop_u32",
+    "register_node_routes",
+    "apply_cypher_mutation",
+    "add_edge",
+    "remove_edge"
+) -join "|"
+$forbiddenGosRuntimeWritePattern = "gos_runtime::($forbiddenGosRuntimeWriteCalls)\s*\("
+foreach ($crateName in $aiCrateNames) {
+    $crateDir = Join-Path $RepoRoot "crates\$crateName"
+    if (-not (Test-Path $crateDir)) {
+        continue
+    }
+    $aiFiles = Get-ChildItem -Path $crateDir -Recurse -File -Filter *.rs
+    foreach ($file in $aiFiles) {
+        $content = Get-Content -Path $file.FullName -Raw
+        Assert-Rule (
+            $content -notmatch $forbiddenGosRuntimeWritePattern
+        ) "$($file.FullName) calls a gos_runtime write path directly, outside the apply_mutation chain (ADR-017 governance rule)"
+    }
+}
+
 Write-Host "[graph-governance] OK: repository satisfies graph and vector architecture rules." -ForegroundColor Green

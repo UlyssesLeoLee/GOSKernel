@@ -65,6 +65,16 @@ pub unsafe fn emit(ctx: *mut ExecutorContext, output: proc::Output) -> ExecStatu
             set_color(&sink, 7, 0);
         }
 
+        proc::Output::AiControlResult => {
+            set_color(&sink, 10, 0);
+            print_str(&sink, "[CHAT] ");
+            let resp_len = state.resp_len;
+            print_bytes(&sink, &state.resp_buf[..resp_len]);
+            print_byte(&sink, b'\n');
+            state.resp_len = 0;
+            set_color(&sink, 7, 0);
+        }
+
         proc::Output::NoOp => {}
     }
 

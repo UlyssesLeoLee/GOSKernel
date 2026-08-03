@@ -419,96 +419,254 @@ fn execute_tool(state: &ChatState, abi: &KernelAbi, sink: &ConsoleSink, tool: &[
     }
 }
 
-/// Read the full bridge turn (multiple `GRESP:` lines, optional `GTOOL:` frames,
-/// terminated by `GDONE:`). Appends all response text to `state.resp_buf`.
-pub(crate) fn collect_bridge_response(state: &mut ChatState) {
-    // We need the ABI for tool dispatch — obtain from CHAT_STATE indirectly via
-    // a temporary ConsoleSink. Since this is called from proc, we build a
-    // minimal sink here using the stored console_target.
-    //
-    // Tool signals are emitted via the KernelAbi stored in a thread-local
-    // during on_event execution. We stash it at the start of on_event.
-    let abi = match abi_cache_load() {
-        Some(abi) => unsafe { &*abi },
-        None => {
-            // No ABI available — collect text-only, skip tools
-            collect_text_only(state);
-            return;
-        }
-    };
+// ── ADR-017 §选项A — k-chat as LlmBackend transport ────────────────────────
+//
+// The reversal: k-chat no longer *is* the chat session. `send_via_ai_bridge`
+// (called from proc.rs's `Send` arm) builds an `LlmRequest` and calls
+// `gos_ai_bridge::ask()`; `ask()` calls back into `llm_backend_query` (the
+// `LlmBackend` k-chat registers in `chat_on_init`), which does the COM2
+// round-trip and assembles a typed `LlmResponse`. Tool frames (`GTOOL:`)
+// stay a side-effecting inline dispatch exactly as before — they aren't
+// part of the typed suggestion surface `gos_ai_bridge` gates.
+//
+// `GMUT:` frames (ADR-017 §1.2) are parsed via `gos_ai_bridge::wire` — a
+// single unparseable `GMUT:` line rejects the whole turn (`rc = 2`) rather
+// than silently dropping it, matching `ask()`'s existing
+// invalid-suggestion-rejects-everything behavior for the same reason: never
+// let a partially-applied, partially-hallucinated turn reach the gate.
 
-    let console_target = state.console_target;
-    let net_target     = state.net_target;
-    let sink = ConsoleSink {
-        target: if console_target != 0 { console_target } else { VGA_VEC.as_u64() },
+/// Append `text` to `response.text`, inserting a `\n` separator (mirrors
+/// the pre-reversal `resp_buf` accumulation exactly). Returns `false` if
+/// `text` had to be truncated to fit — non-fatal, matches prior behavior.
+fn append_response_text(response: &mut gos_ai_bridge::LlmResponse, text: &[u8]) -> bool {
+    let start = response.text_len as usize;
+    let remaining = gos_ai_bridge::MAX_RESPONSE_BYTES - start;
+    let to_copy = text.len().min(remaining.saturating_sub(1));
+    response.text[start..start + to_copy].copy_from_slice(&text[..to_copy]);
+    response.text_len += to_copy as u16;
+    if (response.text_len as usize) < gos_ai_bridge::MAX_RESPONSE_BYTES {
+        response.text[response.text_len as usize] = b'\n';
+        response.text_len += 1;
+    }
+    to_copy == text.len()
+}
+
+/// The `LlmBackend::query` implementation registered with `gos_ai_bridge` in
+/// `chat_on_init`. Sends `GCHAT:<prompt>` (context isn't transmitted this
+/// slice — no wire encoding for it is gated by ADR-017), then reads frames
+/// until `GDONE:`, same line-budget timeout discipline as before (see
+/// `LINE_TIMEOUT`'s calibration note — this real-world-latency bound is
+/// retained unchanged; ADR-017's own gate requires *recording*, not fixing,
+/// this debt for this slice).
+///
+/// Return codes: `0` success, `1` timed out before `GDONE:`, `2` an
+/// unparseable `GMUT:` frame (whole turn rejected).
+unsafe extern "C" fn llm_backend_query(
+    prompt: *const u8,
+    prompt_len: u32,
+    _context: *const u8,
+    _context_len: u32,
+    out_response: *mut gos_ai_bridge::LlmResponse,
+) -> i32 {
+    let prompt = unsafe { core::slice::from_raw_parts(prompt, prompt_len as usize) };
+    com2_write_line(b"GCHAT:", prompt);
+
+    let abi = abi_cache_load().map(|p| unsafe { &*p });
+    let state_ref = unsafe { &*CHAT_STATE.0.get() };
+    let sink = abi.map(|abi: &KernelAbi| ConsoleSink {
+        target: if state_ref.console_target != 0 { state_ref.console_target } else { VGA_VEC.as_u64() },
         from:   NODE_VEC.as_u64(),
         abi,
-    };
+    });
 
+    let mut response = gos_ai_bridge::LlmResponse::empty();
     let mut line = [0u8; 512];
 
     loop {
         let len = com2_read_line(&mut line);
         if len == 0 {
-            // Timeout — treat as end of turn
-            break;
+            return 1; // timed out before GDONE
         }
         let frame = &line[..len];
 
-        if frame.starts_with(b"GRESP:") {
-            let text = &frame[6..];
-            // Append to resp_buf, inserting a newline separator after each line
-            let remaining = RESP_BUF_SIZE - state.resp_len;
-            let to_copy   = text.len().min(remaining.saturating_sub(1));
-            state.resp_buf[state.resp_len..state.resp_len + to_copy]
-                .copy_from_slice(&text[..to_copy]);
-            state.resp_len += to_copy;
-            if state.resp_len < RESP_BUF_SIZE {
-                state.resp_buf[state.resp_len] = b'\n';
-                state.resp_len += 1;
+        if let Some(text) = frame.strip_prefix(b"GRESP:") {
+            let _ = append_response_text(&mut response, text);
+        } else if let Some(tool) = frame.strip_prefix(b"GTOOL:") {
+            if let (Some(abi), Some(sink)) = (abi, sink.as_ref()) {
+                execute_tool(state_ref, abi, sink, tool);
             }
-        } else if frame.starts_with(b"GTOOL:") {
-            let tool_frame = &frame[6..];
-            // Tool lines are rendered and acknowledged inline; NOT appended to resp_buf
-            let state_ref = unsafe { &*CHAT_STATE.0.get() };
-            execute_tool(state_ref, abi, &sink, tool_frame);
-            // After tool execution k-net was signalled — continue reading
-            let _ = net_target; // used in execute_tool via state_ref
-        } else if frame.starts_with(b"GDONE:") {
+        } else if let Some(mutation_line) = frame.strip_prefix(b"GMUT:") {
+            match gos_ai_bridge::wire::parse_gmut_line(mutation_line) {
+                Some(mutation) => {
+                    let idx = response.mutation_count as usize;
+                    if idx < gos_ai_bridge::MAX_SUGGESTED_MUTATIONS {
+                        response.mutations[idx] = Some(mutation);
+                        response.mutation_count += 1;
+                    }
+                    // Beyond MAX_SUGGESTED_MUTATIONS: capped, not an error —
+                    // matches LlmResponse's own bounded-array contract.
+                }
+                None => return 2, // one bad GMUT line -> reject the whole turn
+            }
+        } else if frame == b"GDONE:" {
             break;
         }
-        // Unknown frame prefix — silently ignore and keep reading
+        // Unknown frame prefix — silently ignore and keep reading (unchanged).
     }
 
-    // Trim trailing newline from resp_buf
+    while response.text_len > 0 && response.text[response.text_len as usize - 1] == b'\n' {
+        response.text_len -= 1;
+    }
+
+    unsafe { *out_response = response; }
+    0
+}
+
+/// `proc::process`'s `Send` arm for the COM2-bridge path (direct-HTTP mode
+/// bypasses this entirely — see `chat_direct_http`, unchanged by ADR-017:
+/// Ollama's raw-text response has no mutation-suggestion surface to gate).
+///
+/// This is the reversed control flow itself (ADR-017 §1.1): builds an
+/// `LlmRequest` and calls `gos_ai_bridge::ask()` — which round-trips through
+/// `llm_backend_query` above — then stages any suggested mutations in the
+/// gate for later `chat approve`/`chat reject`.
+pub(crate) fn send_via_ai_bridge(state: &mut ChatState) {
+    if state.com2_ready == 0 {
+        // Lazy bridge probe (was dead code pre-ADR-017: `com2_ready` was
+        // initialized to 0 and never subsequently set anywhere, so this
+        // branch always failed even with a live bridge attached — see
+        // ADR-017 landed-status notes).
+        if com2_probe() {
+            state.com2_ready = 1;
+        } else {
+            let err = b"[CHAT] COM2 bridge not ready. Start chat-bridge.py on the host.";
+            let n = err.len().min(RESP_BUF_SIZE);
+            state.resp_buf[..n].copy_from_slice(&err[..n]);
+            state.resp_len = n;
+            return;
+        }
+    }
+
+    let prompt_len = state.input_len.min(gos_ai_bridge::MAX_PROMPT_BYTES);
+    let req = gos_ai_bridge::LlmRequest {
+        prompt: &state.input_buf[..prompt_len],
+        context: &[],
+        mode: gos_ai_bridge::AcceptanceMode::Confirmed,
+    };
+
+    match gos_ai_bridge::ask(&req) {
+        Ok(response) => {
+            let text = response.text_bytes();
+            let n = text.len().min(RESP_BUF_SIZE);
+            state.resp_buf[..n].copy_from_slice(&text[..n]);
+            state.resp_len = n;
+
+            let staged = gos_ai_bridge::gate_enqueue(&response, req.mode);
+            if staged > 0 {
+                let suffix = b"\n[CHAT] mutation(s) pending -- run `chat pending`";
+                let remaining = RESP_BUF_SIZE.saturating_sub(state.resp_len);
+                let to_copy = suffix.len().min(remaining);
+                state.resp_buf[state.resp_len..state.resp_len + to_copy]
+                    .copy_from_slice(&suffix[..to_copy]);
+                state.resp_len += to_copy;
+            }
+        }
+        Err(e) => {
+            let msg: &[u8] = match e {
+                gos_ai_bridge::BridgeError::BackendUnavailable => b"[CHAT] AI backend unavailable.",
+                gos_ai_bridge::BridgeError::BackendError(1) => b"[CHAT] AI turn incomplete (timed out before GDONE).",
+                gos_ai_bridge::BridgeError::BackendError(2) => b"[CHAT] AI suggested an unparseable mutation frame -- entire turn rejected.",
+                gos_ai_bridge::BridgeError::BackendError(_) => b"[CHAT] AI backend returned an error.",
+                gos_ai_bridge::BridgeError::InvalidSuggestion(_) => b"[CHAT] AI suggested an invalid mutation -- entire turn rejected.",
+                gos_ai_bridge::BridgeError::PayloadTooLarge => b"[CHAT] message too large for the AI bridge.",
+            };
+            let n = msg.len().min(RESP_BUF_SIZE);
+            state.resp_buf[..n].copy_from_slice(&msg[..n]);
+            state.resp_len = n;
+        }
+    }
+}
+
+/// Append a byte slice into `resp_buf`, bounds-checked. Shared by the three
+/// `ai_*` control handlers below.
+fn resp_append(state: &mut ChatState, bytes: &[u8]) {
+    let remaining = RESP_BUF_SIZE.saturating_sub(state.resp_len);
+    let to_copy = bytes.len().min(remaining);
+    state.resp_buf[state.resp_len..state.resp_len + to_copy].copy_from_slice(&bytes[..to_copy]);
+    state.resp_len += to_copy;
+}
+
+fn format_mutation_kind(m: &gos_cypher_mut::CypherMutation) -> &'static str {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    match m {
+        CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Mount, .. } => "AddEdge{Mount}",
+        CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Use, .. } => "AddEdge{Use}",
+        CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Depend, .. } => "AddEdge{Depend}",
+        CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Link, .. } => "AddEdge{Link}",
+        CypherMutation::RemoveEdge { .. } => "RemoveEdge",
+        CypherMutation::RebindUse { .. } => "RebindUse",
+        CypherMutation::CreateNode => "CreateNode",
+    }
+}
+
+/// `chat pending` — render the gate's current contents into `resp_buf`.
+pub(crate) fn ai_render_pending(state: &mut ChatState) {
+    let mut pending = [None; gos_ai_bridge::MAX_SUGGESTED_MUTATIONS];
+    let n = gos_ai_bridge::gate_pending_snapshot(&mut pending);
+    state.resp_len = 0;
+    if n == 0 {
+        resp_append(state, b"no pending AI mutations");
+        return;
+    }
+    resp_append(state, b"pending AI mutations:\n");
+    for (i, slot) in pending[..n].iter().enumerate() {
+        let Some(m) = slot else { continue };
+        resp_append(state, b"  ");
+        let mut idx_buf = [0u8; 3];
+        let mut idx_len = 0usize;
+        buf_append_u32(&mut idx_buf, &mut idx_len, i as u32);
+        resp_append(state, &idx_buf[..idx_len]);
+        resp_append(state, b": ");
+        resp_append(state, format_mutation_kind(m).as_bytes());
+        resp_append(state, b"\n");
+    }
     while state.resp_len > 0 && state.resp_buf[state.resp_len - 1] == b'\n' {
         state.resp_len -= 1;
     }
 }
 
-fn collect_text_only(state: &mut ChatState) {
-    let mut line = [0u8; 512];
-    loop {
-        let len = com2_read_line(&mut line);
-        if len == 0 { break; }
-        let frame = &line[..len];
-        if frame.starts_with(b"GRESP:") {
-            let text = &frame[6..];
-            let remaining = RESP_BUF_SIZE - state.resp_len;
-            let to_copy = text.len().min(remaining.saturating_sub(1));
-            state.resp_buf[state.resp_len..state.resp_len + to_copy]
-                .copy_from_slice(&text[..to_copy]);
-            state.resp_len += to_copy;
-            if state.resp_len < RESP_BUF_SIZE {
-                state.resp_buf[state.resp_len] = b'\n';
-                state.resp_len += 1;
+/// Apply the mutation at gate index `idx` through the standard mutation
+/// gate, stamped `b"K_AI"` (`AuditedMutation::source` doc, gos-cypher-mut
+/// lib.rs:105-109). `CreateNode` bypasses `gos_supervisor::apply_cypher_mutation`
+/// the same way `gpm_install_raw` does — that gate is edge-scoped and has no
+/// `CreateNode` arm (see gos-supervisor lib.rs:3374-3380).
+pub(crate) fn ai_approve(state: &mut ChatState, idx: u8) {
+    const AI_SOURCE: [u8; 16] = *b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0";
+    let outcome = gos_ai_bridge::gate_accept_index(idx as usize).map(|mutation| {
+        match mutation {
+            gos_cypher_mut::CypherMutation::CreateNode => {
+                let mut dispatcher = gos_runtime::RuntimeDispatcher;
+                gos_cypher_mut::apply_mutation(&mut dispatcher, mutation).is_ok()
             }
-        } else if frame.starts_with(b"GDONE:") {
-            break;
+            _ => gos_supervisor::apply_cypher_mutation(mutation, AI_SOURCE).is_ok(),
         }
+    });
+    state.resp_len = 0;
+    match outcome {
+        Some(true) => resp_append(state, b"approved and applied"),
+        Some(false) => resp_append(state, b"approved mutation failed to apply"),
+        None => resp_append(state, b"no pending mutation at that index"),
     }
-    while state.resp_len > 0 && state.resp_buf[state.resp_len - 1] == b'\n' {
-        state.resp_len -= 1;
+}
+
+/// `chat reject <i>` — drop the mutation at gate index `idx` unapplied.
+pub(crate) fn ai_reject(state: &mut ChatState, idx: u8) {
+    let ok = gos_ai_bridge::gate_reject_index(idx as usize);
+    state.resp_len = 0;
+    if ok {
+        resp_append(state, b"rejected");
+    } else {
+        resp_append(state, b"no pending mutation at that index");
     }
 }
 
@@ -811,6 +969,11 @@ unsafe extern "C" fn chat_on_init(ctx: *mut ExecutorContext) -> ExecStatus {
 
     // Initialise COM2 UART
     com2_init();
+
+    // ADR-017 §选项A — register k-chat's COM2 round-trip as the
+    // gos_ai_bridge LlmBackend. Idempotent (re-registering on re-init just
+    // overwrites the same function pointer).
+    gos_ai_bridge::install_backend(gos_ai_bridge::LlmBackend { query: llm_backend_query });
 
     // Populate state; com2_ready starts false and is detected lazily on
     // first chat message to avoid a multi-second blocking probe during boot.

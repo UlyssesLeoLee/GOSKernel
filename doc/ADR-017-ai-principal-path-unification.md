@@ -1,6 +1,6 @@
 # ADR-017：AI principal 与通路统一——把活的 k-chat 接到分型的 gos-ai-bridge 上
 
-> 状态：**提案待选向** · 提案日期：2026-06-12 · 配套：[AI 原生方案](../plan/AI_NATIVE_OS_PLAN.md)（本 ADR gates 其 AI.1 切片）、[V3 计划 F3](../plan/V3_DEVELOPMENT_PLAN.md)（"AI 原生"前沿判据 + V3.1 F3 demo 收尾）、[gos-ai-bridge](../crates/gos-ai-bridge/src/lib.rs)（H.2 分型 gate，0 生产调用方）、[k-chat](../crates/k-chat/src/lib.rs)（COM2 桥，B3b 已验证）、[gos-cypher-mut](../crates/gos-cypher-mut/src/lib.rs)（H.1 receptive subset + `b"K_AI"` source 戳）
+> 状态：**已选向：选项 A · 已落地**（2026-08-03）· 提案日期：2026-06-12 · 配套：[AI 原生方案](../plan/AI_NATIVE_OS_PLAN.md)（本 ADR gates 其 AI.1 切片）、[V3 计划 F3](../plan/V3_DEVELOPMENT_PLAN.md)（"AI 原生"前沿判据 + V3.1 F3 demo 收尾）、[gos-ai-bridge](../crates/gos-ai-bridge/src/lib.rs)（H.2 分型 gate，0 生产调用方）、[k-chat](../crates/k-chat/src/lib.rs)（COM2 桥，B3b 已验证）、[gos-cypher-mut](../crates/gos-cypher-mut/src/lib.rs)（H.1 receptive subset + `b"K_AI"` source 戳）
 >
 > 口径：AI 原生方案 §一 已盘点清楚：`k-chat` 有活的模型连接但无分型（自由文本 + 3 个硬编码 `GTOOL:` 工具），`gos-ai-bridge` 有完整分型（`LlmRequest/LlmResponse/MutationGate/pre_validate` 整轮拒绝）但 `install_backend` 全仓库零调用。本 ADR 决定**接线的具体形状**——五个待定点：(a) `MutationGate` 实例归属；(b) mutation 建议的 wire 编码（`GMUT:` 帧）；(c) `LlmBackend` 的安装者是谁；(d) k-ai 事件窗口的归属；(e) AI 节点的初始权限面。目标状态：F3 demo（"说一句话改写 OS"）的每一步都走 Parity 不变式的同一条 gate，journal 里留 `b"K_AI"` 记录。
 
@@ -73,3 +73,27 @@ UI 上最省事：host 终端里 y/n，内核侧零新命令。
 - **阻塞债不带出 AI.1**：k-chat 现 `on_event` 内 `LINE_TIMEOUT≈5s` 轮询（AI 方案 §四5 已记录）——反转时一并改为非阻塞分段收集，或在 ADR 选向时明确接受"再欠一个切片"并记录,二选一,不允许沉默继承。
 - **治理红线落地**：`verify-graph-architecture.ps1` 加规则——`crates/k-chat`、`crates/k-ai`、`crates/gos-ai-bridge` 及未来 `agent` 系 crate 中,出现对 `gos_runtime::` 写路径（`apply_mutation` 链之外）的直接调用即 CI 红。
 - (d)(e) 的窗口格式与 Grant 初始集**不在本 ADR 门禁内**——分别留给 ADR-018 与 AI.2 的工具注册表工作,本 ADR 只固定归属（窗口归 k-ai）与红线形状。
+
+## 四、落地状态（选项 A，2026-08-03）
+
+**接线点 (a) MutationGate 归属**：`gos_ai_bridge::GATE`，模块级 `Mutex<MutationGate>`，mirror `BACKEND` 的既有模式（[lib.rs](../crates/gos-ai-bridge/src/lib.rs)）。新增访问器 `gate_enqueue`/`gate_pending_snapshot`/`gate_len`/`gate_accept_index`/`gate_reject_index`/`gate_clear`，均不持锁做 I/O（锁纪律门禁满足——`ask()` 的串口往返发生在 `gate_enqueue` 调用之前，两者不共享临界区）。
+
+**接线点 (b) `GMUT:` 帧**：落在 `gos_ai_bridge::wire`（不是 k-chat）——纯逻辑、无硬件依赖，因此是真实可 host-test 的代码，不需要像 k-chat 其余部分那样在 harness 里镜像。`add_edge` 只接受 `mount|use`（`depend`/`link` 虽然通过 `pre_validate`，但 wire 解析器直接拒绝——这是 AI 面的实际执行点，门禁按 §1.2 原样落地）。
+
+**接线点 (c) LlmBackend 反转**：`k-chat::llm_backend_query`（`crates/k-chat/src/lib.rs`）是新的 `LlmBackend::query` 实现——串口收发下沉，`proc.rs` 的 `Send` 分支改为调用 `send_via_ai_bridge` → `gos_ai_bridge::ask()`。`GTOOL:` 帧仍在 `llm_backend_query` 内联派发（副作用，不进入分型 `LlmResponse`），行为与反转前一致。
+
+**顺带修复的真实 bug**：`com2_ready` 此前初始化为 0 后**永远不会被置 1**（`com2_probe()` 定义了但从未被调用）——COM2 桥接路径在合并后的内核里从未真正工作过。反转顺手把探测调用接上（`send_via_ai_bridge` 首次发送时惰性探测），这是本 ADR 触及同一段代码时发现并修的独立缺陷,不是本 ADR 的设计目标。
+
+**接线点 (d)(e)**：未动——按门禁明确排除在外。
+
+**命令名与 ADR 原文的偏差**：原文建议 `ai approve/ai reject/ai pending`，但落地时发现 `ai`/`ask` 在 k-shell 里已被一个无关的既有功能（`enter_ai_api_mode`，一个底部 AI 编辑面板）占用。改用 `chat pending`/`chat approve <i>`/`chat reject <i>`，与既有 `chat key`/`chat model`/`chat api`/`chat http` 子命令族同款——`function → signal → target node` 模式（`CHAT_CONTROL_AI_PENDING/APPROVE/REJECT`，`0xC8`-`0xCA`）。k-chat 是实际调用 `accept_index`/`reject_index` 的一方（§1.3 原文"k-chat 只是调 accept_index/reject_index 的 UI"），shell 侧只发信号,不影子维护 gate 状态——结果通过 k-chat 自己的控制台 sink 渲染（同一块 VGA）。
+
+**锁纪律**：满足——见接线点 (a)。
+
+**阻塞债**：`LINE_TIMEOUT`（约 5s 轮询）原样保留，未在本切片修复——显式记录为遗留债务，不是沉默继承（门禁二选一里选择"记录"这一支）。
+
+**治理红线**：`tools/verify-graph-architecture.ps1` 新增规则——`crates/k-chat`、`crates/k-ai`、`crates/gos-ai-bridge` 中禁止出现 `gos_runtime::{register_node,create_provisional_node,rebind_use,register_node_prop_u8,register_node_prop_u32,register_node_routes,apply_cypher_mutation,add_edge,remove_edge}(` 直接调用；`gos_runtime::RuntimeDispatcher`（喂给 `gos_cypher_mut::apply_mutation` 的标准适配器）不在禁止之列。
+
+**Parity harness**：`host-tests/gos-shadow-kernel-harness/tests/shadow_kernel.rs` 新增 13 个 `adr017_*` 测试——`wire::parse_gmut_line` 直接测试（真实代码，非镜像）；`ask()`/`MutationGate` 端到端生命周期（stub `LlmBackend` + 真实 `gos_supervisor::apply_cypher_mutation` 落图验证）；`llm_backend_query` 帧分类循环的镜像测试（k-chat 本身不可 host 编译,镜像是既定模式），含 B3b 回归证明（GRESP/GTOOL/GDONE 累积行为在引入 GMUT 后不变）与 GMUT 单行解析失败拒绝整轮的证明。DryRun 零应用、reject 不落图两个用例也已覆盖。全套 19 个测试（6 个既有 + 13 个新增）通过；`cargo check --workspace`、`cargo check -p gos-kernel`、`tools/verify-graph-architecture.ps1` 均绿。
+
+**明确未做（不在本 ADR 门禁内，留给后续切片）**：`tools/chat-bridge.py` 未新增任何 `GMUT:` 帧的生成逻辑——给模型设计一套"建议图变更"的自然语言/工具调用语法，并让它安全地引用裸 `NodeId`/`EdgeId` 十六进制值，属于 AI.2 工具注册表（ADR-018）的范畴，不是本 ADR 的接线形状问题；仅更新了协议表文档。(d) 事件窗口、(e) 初始权限面同样留给 ADR-018/AI.2。

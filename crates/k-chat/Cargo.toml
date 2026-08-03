@@ -7,4 +7,8 @@ edition = "2021"
 gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 k-net = { path = "../k-net" }
+gos-ai-bridge = { path = "../gos-ai-bridge" }
+gos-cypher-mut = { path = "../gos-cypher-mut" }
+gos-runtime = { path = "../gos-runtime" }
+gos-supervisor = { path = "../gos-supervisor", default-features = false }
 

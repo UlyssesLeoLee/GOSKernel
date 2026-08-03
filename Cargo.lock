@@ -236,8 +236,12 @@ version = "0.2.0"
 name = "k-chat"
 version = "0.1.0"
 dependencies = [
+ "gos-ai-bridge",
+ "gos-cypher-mut",
  "gos-hal",
  "gos-protocol",
+ "gos-runtime",
+ "gos-supervisor",
  "k-net",
 ]
 

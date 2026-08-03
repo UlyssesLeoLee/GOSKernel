@@ -237,3 +237,145 @@ impl MutationGate {
         self.len = write;
     }
 }
+
+/// ADR-017 §选项A — the single `MutationGate` instance, mirroring `BACKEND`'s
+/// own module-level `Mutex` above. Living here (not in k-chat) is the point
+/// of the option-A reversal: approval state stays in a `no_std`, host-harness
+/// -testable core crate, and k-chat is reduced to "UI that calls
+/// accept_index/reject_index" (ADR-017 §二 option A). Callers must not hold
+/// this lock across I/O (`ask()` itself never touches it — the backend
+/// round-trip happens before `gate_enqueue` is called, lock-free) — mirrors
+/// the `route_signal`-releases-before-executor-call discipline elsewhere in
+/// this codebase (ADR-017 门禁 "锁纪律").
+static GATE: Mutex<MutationGate> = Mutex::new(MutationGate::new());
+
+/// Stage a response's mutations for operator approval. `DryRun` stages
+/// nothing (see [`MutationGate::enqueue`]). Returns the number staged.
+pub fn gate_enqueue(response: &LlmResponse, mode: AcceptanceMode) -> usize {
+    GATE.lock().enqueue(response, mode)
+}
+
+/// Copy up to `out.len()` pending mutations into `out` (index-stable within
+/// a single call — a concurrent accept/reject between snapshot and use is a
+/// caller-level race the uniprocessor cooperative kernel doesn't have).
+pub fn gate_pending_snapshot(out: &mut [Option<CypherMutation>]) -> usize {
+    let gate = GATE.lock();
+    let pending = gate.pending();
+    let n = pending.len().min(out.len());
+    out[..n].copy_from_slice(&pending[..n]);
+    n
+}
+
+pub fn gate_len() -> usize {
+    GATE.lock().len()
+}
+
+/// Accept the pending mutation at `idx`, removing it from the gate. Caller
+/// (k-chat) is responsible for actually applying it through
+/// `gos_supervisor::apply_cypher_mutation` — mirrors `MutationGate`'s own
+/// doc comment ("Operator UI calls accept_index(i) to apply one").
+pub fn gate_accept_index(idx: usize) -> Option<CypherMutation> {
+    GATE.lock().accept_index(idx)
+}
+
+pub fn gate_reject_index(idx: usize) -> bool {
+    GATE.lock().reject_index(idx)
+}
+
+pub fn gate_clear() {
+    GATE.lock().clear()
+}
+
+/// ADR-017 §1.2 — wire encoding for `CypherMutation` over k-chat's
+/// line-framed COM2 protocol. `GMUT:` frames are fixed-shape text (the
+/// mutation enum is 4 variants, all fixed-width integer fields), so this is
+/// a hand-rolled parser rather than anything resembling general Cypher
+/// grammar — matches the wire table in ADR-017 §1.2 exactly.
+///
+/// This is real, directly host-testable logic (no hardware I/O) — unlike
+/// k-chat's COM2 read loop, which can only be exercised by mirroring it in
+/// a harness. Living here means the parser itself needs no mirror.
+pub mod wire {
+    use gos_cypher_mut::{CypherMutation, ReceptiveEdgeKind};
+    use gos_protocol::{EdgeId, NodeId};
+
+    fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    /// Parse exactly 32 hex chars into a 16-byte id (`NodeId`/`EdgeId`'s
+    /// wire width). Anything else — wrong length, non-hex byte — is `None`.
+    fn parse_hex16(hex: &[u8]) -> Option<[u8; 16]> {
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let hi = hex_nibble(hex[i * 2])?;
+            let lo = hex_nibble(hex[i * 2 + 1])?;
+            *slot = (hi << 4) | lo;
+        }
+        Some(out)
+    }
+
+    fn split_once(bytes: &[u8], sep: u8) -> Option<(&[u8], &[u8])> {
+        let pos = bytes.iter().position(|&b| b == sep)?;
+        Some((&bytes[..pos], &bytes[pos + 1..]))
+    }
+
+    /// Parse a `GMUT:` frame body — the bytes *after* the `GMUT:` prefix —
+    /// into a [`CypherMutation`]. Wire shapes (ADR-017 §1.2):
+    ///
+    /// ```text
+    /// add_edge:<from_hex32>:<to_hex32>:<mount|use>
+    /// remove_edge:<edge_id_hex32>
+    /// rebind_use:<from_hex32>:<to_hex32>
+    /// create_node
+    /// ```
+    ///
+    /// `add_edge` only accepts `mount`/`use` — `depend`/`link` are
+    /// boot-manifest-only and interface-file-only respectively
+    /// (`gos_cypher_mut::ReceptiveEdgeKind` doc comments), never AI-mutable.
+    ///
+    /// Any malformed line returns `None`; the caller (k-chat's
+    /// `LlmBackend::query`) treats a single unparseable `GMUT:` line as
+    /// grounds to reject the *entire* response — matches `ask()`'s existing
+    /// whole-turn-rejection semantics for invalid suggestions, not a
+    /// silent skip.
+    pub fn parse_gmut_line(line: &[u8]) -> Option<CypherMutation> {
+        if line == b"create_node" {
+            return Some(CypherMutation::CreateNode);
+        }
+        let (verb, rest) = split_once(line, b':')?;
+        match verb {
+            b"add_edge" => {
+                let (from_hex, rest) = split_once(rest, b':')?;
+                let (to_hex, kind) = split_once(rest, b':')?;
+                let from = NodeId(parse_hex16(from_hex)?);
+                let to = NodeId(parse_hex16(to_hex)?);
+                let edge_kind = match kind {
+                    b"mount" => ReceptiveEdgeKind::Mount,
+                    b"use" => ReceptiveEdgeKind::Use,
+                    _ => return None,
+                };
+                Some(CypherMutation::AddEdge { from, to, edge_kind })
+            }
+            b"remove_edge" => {
+                let edge_id = EdgeId(parse_hex16(rest)?);
+                Some(CypherMutation::RemoveEdge { edge_id })
+            }
+            b"rebind_use" => {
+                let (from_hex, to_hex) = split_once(rest, b':')?;
+                let from = NodeId(parse_hex16(from_hex)?);
+                let new_target = NodeId(parse_hex16(to_hex)?);
+                Some(CypherMutation::RebindUse { from, new_target })
+            }
+            _ => None,
+        }
+    }
+}

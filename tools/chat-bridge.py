@@ -43,6 +43,14 @@ GOS Bridge Protocol (COM2 / TCP 14444)
   Bridge → Kernel   GRESP:<text>\\n      one paragraph of AI response
   Bridge → Kernel   GTOOL:<t>:<a>\\n     optional tool invocation request
   Kernel → Bridge   GRSLT:<result>\\n    tool execution result
+  Bridge → Kernel   GMUT:<verb>:<...>\\n optional mutation suggestion (ADR-017;
+                                         parsed by gos_ai_bridge::wire, staged
+                                         for operator approval -- `chat pending`
+                                         / `chat approve <i>` in the shell).
+                                         Not emitted by this script yet: no
+                                         model-facing mutation-suggestion UX
+                                         has been built here (deferred to
+                                         ADR-018 / AI.2's tool registry).
   Bridge → Kernel   GDONE:\\n            end of AI turn
 
 Supported tools (returned as GTOOL frames)

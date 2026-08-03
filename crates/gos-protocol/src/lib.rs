@@ -381,6 +381,17 @@ pub const CHAT_CONTROL_MODEL_COMMIT: u8 = 0xC5;
 pub const CHAT_CONTROL_API_TYPE: u8 = 0xC6;
 /// Shell → k-chat: toggle direct-HTTP mode (val: 0=bridge, 1=direct).
 pub const CHAT_CONTROL_HTTP_TOGGLE: u8 = 0xC7;
+/// Shell → k-chat: render `gos_ai_bridge`'s `MutationGate` pending list to
+/// the console (ADR-017). Named `chat pending` at the shell — `ai`/`ask`
+/// were already taken by k-shell's unrelated AI-panel editor.
+pub const CHAT_CONTROL_AI_PENDING: u8 = 0xC8;
+/// Shell → k-chat: approve the pending mutation at gate index `val` and
+/// apply it through the standard `gos_supervisor::apply_cypher_mutation`
+/// gate, stamped `b"K_AI"` (ADR-017).
+pub const CHAT_CONTROL_AI_APPROVE: u8 = 0xC9;
+/// Shell → k-chat: drop the pending mutation at gate index `val` without
+/// applying it (ADR-017).
+pub const CHAT_CONTROL_AI_REJECT: u8 = 0xCA;
 
 // ── NIM (NVIDIA NIM / OpenAI-compatible) commands (k-nim ↔ k-shell) ─────────
 /// Shell → k-nim: submit the buffered user message to the NIM endpoint.

@@ -15,6 +15,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "gos-ai-bridge"
+version = "0.1.0"
+dependencies = [
+ "gos-cypher-mut",
+ "gos-protocol",
+ "spin",
+]
+
+[[package]]
 name = "gos-cypher-mut"
 version = "0.1.0"
 dependencies = [
@@ -63,6 +72,7 @@ dependencies = [
 name = "gos-shadow-kernel-harness"
 version = "0.1.0"
 dependencies = [
+ "gos-ai-bridge",
  "gos-cypher-mut",
  "gos-mutation-dispatch",
  "gos-protocol",

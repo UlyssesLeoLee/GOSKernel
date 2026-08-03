@@ -13,6 +13,7 @@ use gos_protocol::{
     CHAT_CONTROL_KEY_BEGIN, CHAT_CONTROL_KEY_COMMIT,
     CHAT_CONTROL_MODEL_BEGIN, CHAT_CONTROL_MODEL_COMMIT,
     CHAT_CONTROL_API_TYPE, CHAT_CONTROL_HTTP_TOGGLE,
+    CHAT_CONTROL_AI_PENDING, CHAT_CONTROL_AI_APPROVE, CHAT_CONTROL_AI_REJECT,
 };
 
 /// What kind of work the proc stage should perform.
@@ -40,6 +41,13 @@ pub enum InputKind {
     ApiType(u8),
     /// Set HTTP transport mode.  `val`: 0=COM2 bridge, 1=direct TCP.
     HttpMode(u8),
+    // ── ADR-017 §选项A — AI mutation gate control ─────────────────────────────
+    /// List `gos_ai_bridge`'s `MutationGate` pending suggestions.
+    AiPending,
+    /// Approve the pending mutation at gate index `val`.
+    AiApprove(u8),
+    /// Reject the pending mutation at gate index `val`.
+    AiReject(u8),
 }
 
 pub struct Input {
@@ -74,6 +82,10 @@ pub fn prepare(event: *const NodeEvent) -> Option<Input> {
 
         Signal::Control { cmd: CHAT_CONTROL_API_TYPE,    val } => Some(Input { kind: InputKind::ApiType(val) }),
         Signal::Control { cmd: CHAT_CONTROL_HTTP_TOGGLE, val } => Some(Input { kind: InputKind::HttpMode(val) }),
+
+        Signal::Control { cmd: CHAT_CONTROL_AI_PENDING, .. } => Some(Input { kind: InputKind::AiPending }),
+        Signal::Control { cmd: CHAT_CONTROL_AI_APPROVE, val } => Some(Input { kind: InputKind::AiApprove(val) }),
+        Signal::Control { cmd: CHAT_CONTROL_AI_REJECT,  val } => Some(Input { kind: InputKind::AiReject(val) }),
 
         _ => None,
     }

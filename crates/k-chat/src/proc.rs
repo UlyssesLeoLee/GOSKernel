@@ -28,6 +28,9 @@ pub enum Output {
     Exited,
     /// Configuration change committed — nothing to display.
     ConfigChanged,
+    /// ADR-017 — AI mutation gate control result (pending list, or an
+    /// approve/reject outcome). Text is in `state.resp_buf`.
+    AiControlResult,
     /// Nothing to do.
     NoOp,
 }
@@ -84,16 +87,10 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: pre::Input) -> Option<Ou
             if state.http_mode == 1 {
                 // Direct TCP/HTTP to Ollama (or configured endpoint)
                 unsafe { super::chat_direct_http(state) };
-            } else if state.com2_ready == 0 {
-                // Bridge not detected
-                let err = b"[CHAT] COM2 bridge not ready. Start chat-bridge.py on the host.";
-                let n = err.len().min(super::RESP_BUF_SIZE);
-                state.resp_buf[..n].copy_from_slice(&err[..n]);
-                state.resp_len = n;
             } else {
-                // COM2 bridge path
-                super::com2_write_line(b"GCHAT:", &state.input_buf[..state.input_len]);
-                super::collect_bridge_response(state);
+                // COM2 bridge path — ADR-017 §选项A: routed through the
+                // gos_ai_bridge typed gate instead of raw COM2 I/O here.
+                super::send_via_ai_bridge(state);
             }
 
             state.input_len = 0;
@@ -148,6 +145,20 @@ pub unsafe fn process(ctx: *mut ExecutorContext, input: pre::Input) -> Option<Ou
         pre::InputKind::HttpMode(m) => {
             state.http_mode = if m == 0 { 0 } else { 1 };
             Some(Output::ConfigChanged)
+        }
+
+        // ── ADR-017 §选项A — AI mutation gate control ─────────────────────────
+        pre::InputKind::AiPending => {
+            super::ai_render_pending(state);
+            Some(Output::AiControlResult)
+        }
+        pre::InputKind::AiApprove(idx) => {
+            super::ai_approve(state, idx);
+            Some(Output::AiControlResult)
+        }
+        pre::InputKind::AiReject(idx) => {
+            super::ai_reject(state, idx);
+            Some(Output::AiControlResult)
         }
     }
 }

@@ -12,3 +12,4 @@ gos-runtime = { path = "../../crates/gos-runtime" }
 gos-mutation-dispatch = { path = "../../crates/gos-mutation-dispatch" }
 gos-sign = { path = "../../crates/gos-sign" }
 gos-supervisor = { path = "../../crates/gos-supervisor", default-features = false, features = ["host-testing"] }
+gos-ai-bridge = { path = "../../crates/gos-ai-bridge" }

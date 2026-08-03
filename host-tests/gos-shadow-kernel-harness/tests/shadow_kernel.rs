@@ -26,10 +26,13 @@
 //!   (t4:Function {name: "shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity", type: "function"}),
 //!   (t5:Function {name: "capability_granting_mutation_is_the_promote_trigger_adr014", type: "function"}),
 //!   (t6:Function {name: "gpm_install_mints_a_package_node_mounted_under_packages_root", type: "function"}),
+//!   (t7:Function {name: "adr017_ask_stages_mutations_and_chat_approve_applies_through_the_standard_gate", type: "function"}),
+//!   (t8:Function {name: "adr017_mirror_bad_gmut_line_rejects_the_whole_turn", type: "function"}),
 //!   (f)-[:CONTAINS]->(boot), (f)-[:CONTAINS]->(t1), (f)-[:CONTAINS]->(t2),
 //!   (f)-[:CONTAINS]->(t3), (f)-[:CONTAINS]->(t4), (f)-[:CONTAINS]->(t5), (f)-[:CONTAINS]->(t6),
+//!   (f)-[:CONTAINS]->(t7), (f)-[:CONTAINS]->(t8),
 //!   (t1)-[:CALLS]->(boot), (t2)-[:CALLS]->(boot), (t3)-[:CALLS]->(boot), (t4)-[:CALLS]->(boot),
-//!   (t5)-[:CALLS]->(boot), (t6)-[:CALLS]->(boot);
+//!   (t5)-[:CALLS]->(boot), (t6)-[:CALLS]->(boot), (t7)-[:CALLS]->(boot), (t8)-[:CALLS]->(boot);
 //! ```
 
 use std::sync::Mutex;
@@ -484,4 +487,354 @@ fn gpm_install_mints_a_package_node_mounted_under_packages_root() {
     );
 
     run_steady_state_cycles(2);
+}
+
+// ── ADR-017 §选项A — gos-ai-bridge as the single AI mutation gate ────────
+//
+// k-chat is a no_std kernel crate tied to COM2/asm hardware access and
+// isn't host-compilable, matching every other k-chat/k-shell-adjacent test
+// in this codebase. Two things follow from that split:
+//
+//   1. `gos_ai_bridge::wire::parse_gmut_line` and the `ask()`/`MutationGate`
+//      machinery are *real*, directly host-testable code (they're pure
+//      no_std logic, no asm) -- the tests below call them directly, not a
+//      mirror. This is the actual "does the reversed control flow work"
+//      proof (ADR-017 §1.1's `LlmBackend` reversal + §1.3's gate ownership).
+//   2. k-chat's `llm_backend_query` frame-classification loop (which frame
+//      prefix does what) is mirrored here as a pure function taking canned
+//      lines instead of live COM2 reads -- this is the B3b-regression proof
+//      that the pre-ADR-017 GRESP/GTOOL/GDONE round trip is unchanged by
+//      the GMUT extension (`mirror_llm_backend_query` below).
+
+fn hex32(byte: u8) -> String {
+    let mut s = String::new();
+    for _ in 0..16 {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s
+}
+
+// ── wire::parse_gmut_line — real code, direct tests ──────────────────────
+
+#[test]
+fn adr017_wire_parse_gmut_create_node() {
+    assert_eq!(
+        gos_ai_bridge::wire::parse_gmut_line(b"create_node"),
+        Some(CypherMutation::CreateNode)
+    );
+}
+
+#[test]
+fn adr017_wire_parse_gmut_add_edge_mount_and_use() {
+    let from = hex32(0x11);
+    let to = hex32(0x22);
+    for (kind_str, expect_use) in [("mount", false), ("use", true)] {
+        let line = format!("add_edge:{from}:{to}:{kind_str}");
+        let parsed = gos_ai_bridge::wire::parse_gmut_line(line.as_bytes());
+        match parsed {
+            Some(CypherMutation::AddEdge { edge_kind, .. }) => {
+                assert_eq!(edge_kind == ReceptiveEdgeKind::Use, expect_use);
+            }
+            other => panic!("expected AddEdge for {kind_str}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn adr017_wire_parse_gmut_remove_edge_and_rebind_use() {
+    let edge_hex = hex32(0x33);
+    let remove_line = format!("remove_edge:{edge_hex}");
+    assert!(matches!(
+        gos_ai_bridge::wire::parse_gmut_line(remove_line.as_bytes()),
+        Some(CypherMutation::RemoveEdge { .. })
+    ));
+
+    let from = hex32(0x44);
+    let to = hex32(0x55);
+    let rebind_line = format!("rebind_use:{from}:{to}");
+    assert!(matches!(
+        gos_ai_bridge::wire::parse_gmut_line(rebind_line.as_bytes()),
+        Some(CypherMutation::RebindUse { .. })
+    ));
+}
+
+#[test]
+fn adr017_wire_parse_gmut_rejects_depend_and_link_edge_kinds() {
+    // ReceptiveEdgeKind::Depend/Link both pass pre_validate (boot-manifest /
+    // interface-file mutations are legal in general) but must be
+    // unreachable from the AI wire surface -- the wire parser is the actual
+    // enforcement point (ADR-017 §1.2), not pre_validate.
+    let from = hex32(0x66);
+    let to = hex32(0x77);
+    for kind in ["depend", "link", "bogus"] {
+        let line = format!("add_edge:{from}:{to}:{kind}");
+        assert!(
+            gos_ai_bridge::wire::parse_gmut_line(line.as_bytes()).is_none(),
+            "AI must not be able to mint a {kind} edge over the wire"
+        );
+    }
+}
+
+#[test]
+fn adr017_wire_parse_gmut_rejects_malformed_frames() {
+    assert!(gos_ai_bridge::wire::parse_gmut_line(b"remove_edge:tooshort").is_none());
+    assert!(gos_ai_bridge::wire::parse_gmut_line(b"bogus_verb").is_none());
+    assert!(gos_ai_bridge::wire::parse_gmut_line(b"").is_none());
+}
+
+// ── k-chat's llm_backend_query frame loop — mirrored (not host-compilable) ─
+
+/// Mirrors `k-chat::llm_backend_query`'s frame-classification loop exactly
+/// (COM2 reads replaced by a canned line iterator). Returns `Err(1)` for
+/// "ran out of lines before GDONE" (timeout-equivalent) and `Err(2)` for an
+/// unparseable `GMUT:` line (whole-turn rejection), matching the real
+/// function's return codes.
+fn mirror_llm_backend_query(lines: &[&[u8]]) -> Result<gos_ai_bridge::LlmResponse, i32> {
+    let mut response = gos_ai_bridge::LlmResponse::empty();
+    for &frame in lines {
+        if let Some(text) = frame.strip_prefix(b"GRESP:") {
+            let start = response.text_len as usize;
+            let remaining = gos_ai_bridge::MAX_RESPONSE_BYTES - start;
+            let to_copy = text.len().min(remaining.saturating_sub(1));
+            response.text[start..start + to_copy].copy_from_slice(&text[..to_copy]);
+            response.text_len += to_copy as u16;
+            if (response.text_len as usize) < gos_ai_bridge::MAX_RESPONSE_BYTES {
+                response.text[response.text_len as usize] = b'\n';
+                response.text_len += 1;
+            }
+        } else if frame.strip_prefix(b"GTOOL:").is_some() {
+            // Side-effecting inline dispatch in the real function (VGA +
+            // k-net signals) -- deliberately not reflected into the typed
+            // response here, same as the real function.
+        } else if let Some(mutation_line) = frame.strip_prefix(b"GMUT:") {
+            match gos_ai_bridge::wire::parse_gmut_line(mutation_line) {
+                Some(mutation) => {
+                    let idx = response.mutation_count as usize;
+                    if idx < gos_ai_bridge::MAX_SUGGESTED_MUTATIONS {
+                        response.mutations[idx] = Some(mutation);
+                        response.mutation_count += 1;
+                    }
+                }
+                None => return Err(2),
+            }
+        } else if frame == b"GDONE:" {
+            while response.text_len > 0 && response.text[response.text_len as usize - 1] == b'\n' {
+                response.text_len -= 1;
+            }
+            return Ok(response);
+        }
+        // Unknown frame prefix -- silently ignored and keep reading, same
+        // as the real function.
+    }
+    Err(1)
+}
+
+#[test]
+fn adr017_mirror_resp_and_done_round_trip_unaffected_by_gmut_extension() {
+    let response = mirror_llm_backend_query(&[b"GRESP:hello", b"GRESP:world", b"GDONE:"])
+        .expect("well-formed turn must succeed");
+    assert_eq!(response.text_bytes(), b"hello\nworld");
+    assert_eq!(response.mutation_count, 0);
+}
+
+#[test]
+fn adr017_mirror_gtool_frames_are_excluded_from_response_text() {
+    let response = mirror_llm_backend_query(&[
+        b"GRESP:before",
+        b"GTOOL:ping:1.1.1.1",
+        b"GRESP:after",
+        b"GDONE:",
+    ])
+    .expect("turn with a tool frame must still succeed");
+    assert_eq!(
+        response.text_bytes(),
+        b"before\nafter",
+        "GTOOL frames must not leak into the typed response text"
+    );
+}
+
+#[test]
+fn adr017_mirror_valid_gmut_add_edge_is_captured() {
+    let from = hex32(0x11);
+    let to = hex32(0x22);
+    let line = format!("GMUT:add_edge:{from}:{to}:mount");
+    let response = mirror_llm_backend_query(&[b"GRESP:ok", line.as_bytes(), b"GDONE:"])
+        .expect("valid GMUT line must succeed");
+    assert_eq!(response.mutation_count, 1);
+    assert!(matches!(
+        response.mutations[0],
+        Some(CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Mount, .. })
+    ));
+}
+
+#[test]
+fn adr017_mirror_bad_gmut_line_rejects_the_whole_turn() {
+    let err = mirror_llm_backend_query(&[
+        b"GRESP:ok",
+        b"GMUT:add_edge:not-hex:also-not-hex:mount",
+        b"GDONE:",
+    ])
+    .expect_err("an unparseable GMUT line must reject the entire turn");
+    assert_eq!(err, 2);
+}
+
+#[test]
+fn adr017_mirror_missing_gdone_is_a_timeout() {
+    let err = mirror_llm_backend_query(&[b"GRESP:ok"])
+        .expect_err("no GDONE before lines run out must be treated as a timeout");
+    assert_eq!(err, 1);
+}
+
+// ── ask() + MutationGate lifecycle — proves §1.1's reversal end-to-end ────
+
+struct StubPlan {
+    text: &'static [u8],
+    mutations: Vec<CypherMutation>,
+    rc: i32,
+}
+
+static STUB_PLAN: Mutex<Option<StubPlan>> = Mutex::new(None);
+
+/// Deterministic `LlmBackend` stub (mirrors the doc comment on
+/// `gos_ai_bridge::LlmBackend`: "host harnesses install a deterministic
+/// stub for tests"). Reads a plan set by `set_stub_plan` -- callers must set
+/// one before calling `ask()`.
+unsafe extern "C" fn stub_backend_query(
+    _prompt: *const u8,
+    _prompt_len: u32,
+    _context: *const u8,
+    _context_len: u32,
+    out_response: *mut gos_ai_bridge::LlmResponse,
+) -> i32 {
+    let plan = STUB_PLAN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take()
+        .expect("set_stub_plan must be called before ask()");
+    if plan.rc != 0 {
+        return plan.rc;
+    }
+    let mut response = gos_ai_bridge::LlmResponse::empty();
+    let n = plan.text.len().min(gos_ai_bridge::MAX_RESPONSE_BYTES);
+    response.text[..n].copy_from_slice(&plan.text[..n]);
+    response.text_len = n as u16;
+    for m in plan.mutations.iter().take(gos_ai_bridge::MAX_SUGGESTED_MUTATIONS) {
+        let idx = response.mutation_count as usize;
+        response.mutations[idx] = Some(*m);
+        response.mutation_count += 1;
+    }
+    unsafe { *out_response = response; }
+    0
+}
+
+fn install_stub_backend() {
+    gos_ai_bridge::install_backend(gos_ai_bridge::LlmBackend { query: stub_backend_query });
+}
+
+fn set_stub_plan(text: &'static [u8], mutations: Vec<CypherMutation>) {
+    *STUB_PLAN.lock().unwrap_or_else(|poison| poison.into_inner()) =
+        Some(StubPlan { text, mutations, rc: 0 });
+}
+
+#[test]
+fn adr017_ask_stages_mutations_and_chat_approve_applies_through_the_standard_gate() {
+    let _guard = test_guard();
+    boot_two_modules();
+    run_steady_state_cycles(1);
+    gos_ai_bridge::gate_clear();
+    install_stub_backend();
+
+    let a = create_node();
+    let b = create_node();
+
+    set_stub_plan(
+        b"sure, mounting a under b",
+        vec![CypherMutation::AddEdge { from: a, to: b, edge_kind: ReceptiveEdgeKind::Mount }],
+    );
+
+    let req = gos_ai_bridge::LlmRequest {
+        prompt: b"mount a under b",
+        context: &[],
+        mode: gos_ai_bridge::AcceptanceMode::Confirmed,
+    };
+    let response = gos_ai_bridge::ask(&req).expect("stub backend turn must succeed");
+    assert_eq!(response.text_bytes(), b"sure, mounting a under b");
+
+    // §1.1's reversal, mirroring k-chat's send_via_ai_bridge exactly: the
+    // suggestion is staged, not applied.
+    let staged = gos_ai_bridge::gate_enqueue(&response, req.mode);
+    assert_eq!(staged, 1);
+    assert!(
+        !use_edge_present(a, b, "cypher.mount"),
+        "AI suggestions must not auto-apply -- operator approval required"
+    );
+
+    // `chat approve 0` -- mirrors k-chat's ai_approve exactly: pull off the
+    // gate, apply through gos_supervisor::apply_cypher_mutation stamped
+    // b"K_AI" (same gate a human/gpm mutation uses -- Parity invariant).
+    let mutation = gos_ai_bridge::gate_accept_index(0).expect("mutation must still be pending");
+    const AI_SOURCE: [u8; 16] = *b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0";
+    gos_supervisor::apply_cypher_mutation(mutation, AI_SOURCE)
+        .expect("approved AI mutation must apply through the standard gate");
+
+    assert!(use_edge_present(a, b, "cypher.mount"), "approved mutation must now be live");
+    assert_eq!(
+        gos_ai_bridge::gate_len(),
+        0,
+        "gate must be empty after the only pending suggestion was approved"
+    );
+
+    run_steady_state_cycles(1);
+}
+
+#[test]
+fn adr017_dry_run_mode_never_stages_anything() {
+    let _guard = test_guard();
+    boot_two_modules();
+    gos_ai_bridge::gate_clear();
+    install_stub_backend();
+
+    let a = create_node();
+    let b = create_node();
+    set_stub_plan(
+        b"here is what I would do",
+        vec![CypherMutation::AddEdge { from: a, to: b, edge_kind: ReceptiveEdgeKind::Mount }],
+    );
+
+    let req = gos_ai_bridge::LlmRequest {
+        prompt: b"what would you do",
+        context: &[],
+        mode: gos_ai_bridge::AcceptanceMode::DryRun,
+    };
+    let response = gos_ai_bridge::ask(&req).expect("dry-run turn must still succeed and return text");
+    let staged = gos_ai_bridge::gate_enqueue(&response, req.mode);
+    assert_eq!(staged, 0, "DryRun must never stage a mutation for approval");
+    assert_eq!(gos_ai_bridge::gate_len(), 0);
+}
+
+#[test]
+fn adr017_reject_drops_the_suggestion_without_applying_it() {
+    let _guard = test_guard();
+    boot_two_modules();
+    gos_ai_bridge::gate_clear();
+    install_stub_backend();
+
+    let a = create_node();
+    let b = create_node();
+    set_stub_plan(
+        b"suggestion",
+        vec![CypherMutation::AddEdge { from: a, to: b, edge_kind: ReceptiveEdgeKind::Use }],
+    );
+
+    let req = gos_ai_bridge::LlmRequest {
+        prompt: b"x",
+        context: &[],
+        mode: gos_ai_bridge::AcceptanceMode::Confirmed,
+    };
+    let response = gos_ai_bridge::ask(&req).expect("turn must succeed");
+    gos_ai_bridge::gate_enqueue(&response, req.mode);
+
+    assert!(gos_ai_bridge::gate_reject_index(0), "rejecting a pending index must succeed");
+    assert!(!use_edge_present(a, b, "cypher.use"), "rejected mutation must never be applied");
+    assert_eq!(gos_ai_bridge::gate_len(), 0);
 }

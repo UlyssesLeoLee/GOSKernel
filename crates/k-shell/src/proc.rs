@@ -14,6 +14,7 @@ use gos_protocol::{
     CHAT_CONTROL_KEY_BEGIN, CHAT_CONTROL_KEY_COMMIT,
     CHAT_CONTROL_MODEL_BEGIN, CHAT_CONTROL_MODEL_COMMIT,
     CHAT_CONTROL_API_TYPE, CHAT_CONTROL_HTTP_TOGGLE,
+    CHAT_CONTROL_AI_PENDING, CHAT_CONTROL_AI_APPROVE, CHAT_CONTROL_AI_REJECT,
     CUDA_CONTROL_REPORT, CUDA_CONTROL_RESET,
     IME_MODE_ASCII, IME_MODE_ZH_PINYIN,
     NET_CONTROL_PING, NET_CONTROL_PROBE, NET_CONTROL_REPORT, NET_CONTROL_RESET,
@@ -738,6 +739,9 @@ fn dispatch_text_command(
         super::print_str(sink, "  chat api <type>  set backend: ollama | openai | anthropic\n");
         super::print_str(sink, "  chat http        toggle direct TCP mode (Ollama at 10.0.2.2)\n");
         super::print_str(sink, "  chat status      show current chat configuration\n");
+        super::print_str(sink, "  chat pending     list AI-suggested mutations awaiting approval (ADR-017)\n");
+        super::print_str(sink, "  chat approve <i> apply pending mutation i through the standard gate\n");
+        super::print_str(sink, "  chat reject <i>  drop pending mutation i unapplied\n");
         super::print_str(sink, "  nim     enter NIM inference mode (type 'exit' to quit)\n");
         super::print_str(sink, "  nim model <m>    set NIM model (e.g. meta/llama-3.1-8b-instruct)\n");
         super::print_str(sink, "  nim port <n>     set NIM host port (default 8000)\n");
@@ -2151,6 +2155,15 @@ fn dispatch_text_command(
     } else if cmd == "chat status" || cmd == "chat info" {
         // chat status  — display current chat configuration
         dispatch_chat_status(sink, state);
+    } else if cmd == "chat pending" {
+        // chat pending  — list gos-ai-bridge MutationGate suggestions (ADR-017)
+        dispatch_chat_ai_pending(sink, state);
+    } else if let Some(idx_str) = cmd.strip_prefix("chat approve ") {
+        // chat approve <i>  — apply pending mutation at gate index i (ADR-017)
+        dispatch_chat_ai_approve(sink, state, idx_str.trim());
+    } else if let Some(idx_str) = cmd.strip_prefix("chat reject ") {
+        // chat reject <i>  — drop pending mutation at gate index i (ADR-017)
+        dispatch_chat_ai_reject(sink, state, idx_str.trim());
     } else if cmd == "nim" {
         // Enter interactive NIM inference mode.
         let nim_target = super::NIM_TARGET.load(core::sync::atomic::Ordering::SeqCst);
@@ -3664,6 +3677,61 @@ fn dispatch_chat_http_toggle(
 }
 
 /// Print current chat configuration.
+/// ADR-017 §选项A — `chat pending`/`chat approve <i>`/`chat reject <i>`:
+/// fire-and-forget signals to the k-chat node, same "function -> signal ->
+/// target node" shape as `dispatch_chat_http_toggle`. k-chat owns the
+/// `gos_ai_bridge::MutationGate` interaction (it's the one calling
+/// `accept_index`/`reject_index`, ADR-017 §二 option A) and renders the
+/// real outcome via its own console sink (the same VGA target this shell
+/// prints to) — these dispatchers don't try to shadow that state locally.
+///
+/// Named `chat *` rather than the ADR text's literal `ai approve`/`ai
+/// reject`/`ai pending` — `ai`/`ask` were already claimed by k-shell's
+/// pre-existing, unrelated AI-panel editor (`enter_ai_api_mode`) by the
+/// time this landed; see the ADR-017 landed-status section.
+fn dispatch_chat_ai_pending(sink: &super::ConsoleSink, _state: &mut super::ShellState) {
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        gos_protocol::Signal::Control { cmd: CHAT_CONTROL_AI_PENDING, val: 0 },
+    );
+}
+
+fn dispatch_chat_ai_approve(sink: &super::ConsoleSink, _state: &mut super::ShellState, idx_str: &str) {
+    dispatch_chat_ai_gate_control(sink, idx_str, CHAT_CONTROL_AI_APPROVE, "approve");
+}
+
+fn dispatch_chat_ai_reject(sink: &super::ConsoleSink, _state: &mut super::ShellState, idx_str: &str) {
+    dispatch_chat_ai_gate_control(sink, idx_str, CHAT_CONTROL_AI_REJECT, "reject");
+}
+
+fn dispatch_chat_ai_gate_control(sink: &super::ConsoleSink, idx_str: &str, cmd: u8, verb: &str) {
+    let chat_target = super::CHAT_TARGET.load(core::sync::atomic::Ordering::SeqCst);
+    if chat_target == 0 {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " [chat] k-chat not available\n");
+        return;
+    }
+    let Some(idx) = idx_str.parse::<u8>().ok() else {
+        super::set_color(sink, 12, 0);
+        super::print_str(sink, " usage: chat ");
+        super::print_str(sink, verb);
+        super::print_str(sink, " <index>\n");
+        return;
+    };
+    super::emit_target_signal_raw(
+        sink.abi,
+        chat_target,
+        gos_protocol::Signal::Control { cmd, val: idx },
+    );
+}
+
 fn dispatch_chat_status(
     sink:  &super::ConsoleSink,
     _state: &mut super::ShellState,
