@@ -104,3 +104,16 @@
 **结论与建议**：真正迁移时,`gos-kernel` 的 `Cargo.toml` 建议钉 `bootloader = "=0.11.9"`（而非 `"0.11"` 隐式解析到不兼容的 0.11.17）,并在设计新的 `.cargo/config.toml`/构建 crate 拓扑时,直接以"这个仓库以后可能有多套 target/build-std 需求（宿主侧镜像构建工具 vs 裸机内核本体）"为前提去写,不要重演 spike 里"事后补丁式覆盖继承配置"的弯路——这正是 §一 1.2 已经预见的"内核在构建拓扑里从最终产物降格为另一个 crate 的输入"那部分工作,现在多了一条具体的钉版本建议。
 
 Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留在仓库中作为可复现证据（`README.md` 已注明：一旦真正的 `gos-kernel` 迁移 PR 存在，应连带删除，不该长期与生产代码并存)。
+
+## 五、门禁核实：内存管理 crate 的 target-JSON 依赖（部分完成）
+
+按 §三门禁"内存管理 crate 逐一核实",对比了 [`x86_64-gos-kernel.json`](../x86_64-gos-kernel.json) 与 rustc 内建 `x86_64-unknown-none`（`rustc -Z unstable-options --print target-spec-json --target x86_64-unknown-none`)的完整字段：
+
+- `data-layout`、`disable-redzone`、`panic-strategy` 三项**完全一致**——这三项是最容易踩坑的 ABI 相关字段,一致是好消息。
+- **两项真实差异,足以否决"直接切到内建 target"这个选项**：
+  1. 内建 target 显式 `"features": "...,+soft-float"` + `"rustc-abi": "softfloat"`（强制软件浮点,不用 SSE 寄存器)；本仓库的自定义 JSON 没有 `features` 字段,按 LLVM x86_64 默认值走,大概率是**硬件浮点**（SSE2 默认启用)。若 `crates/k-pmm`/`k-vmm`/`k-idt`/`k-heap` 或中断处理路径里有任何 `f32`/`f64` 运算,在早期中断/异常上下文（FPU/SSE 状态尚未 `CR0.EM`/`CR4.OSFXSR` 显式初始化前)触发,两种 target 的行为可能不同——软浮点走库调用不碰 XMM 寄存器,硬浮点会;没有查到本仓库是否已经显式做了 FPU 早期初始化,这是需要另外核实的点,不在本次 spike 预算内。
+  2. 内建 target 显式 `"code-model": "kernel"`（假设代码/数据被链接在虚拟地址空间顶部 -2GB 窗口内,x86_64 内核的标准做法);自定义 JSON 没有这个字段,按默认 code-model 走。本仓库**没有独立的 linker script**（`.ld` 文件未找到)——当前链接地址由 `bootloader 0.9.23` 自身的构建流程决定,不在本仓库直接可见,核实"迁移后 code-model 是否仍与实际加载地址匹配"需要先弄清 `bootloader` 0.11.9 默认把内核链接到哪（大概率也是顶部 -2GB,这是 bootloader crate 系列的一贯做法,但"大概率"不等于"已核实")。
+
+**结论（修正 §一 1.2 的一个假设）**：真正迁移时**不建议**切到内建 `x86_64-unknown-none`——应该**保留自定义 `x86_64-gos-kernel.json`**（或从它派生一份新版本),只换 `bootloader` 版本 + 构建方式（§四已验证的"两步构建,不用 artifact-dependency"形状),而不是把 target 本身也换成内建的。这比 §1.2 原文设想的"整套 target/build-std 配置整段替换"要小——`build-std`（`core`/`compiler_builtins`/`alloc`)与自定义 target JSON 都可以照旧保留,因为 §四的 spike 已经证明这套组合能在 `bootloader = "=0.11.9"` 下正常工作（`toy-kernel` 用的是内建 `x86_64-unknown-none` 只是为了让 spike 尽快出结果,不代表迁移必须切过去)。
+
+**仍未核实（下一步)**：(a) FPU/SSE 早期初始化路径是否存在、浮点运算是否只在初始化之后触发；(b) `bootloader 0.11.9` 默认内核加载地址与本仓库当前实际加载地址是否一致,不一致则需要在新构建流程里显式配置。两项都需要读 `crates/k-idt`/`k-gdt`（中断早期初始化)与 `bootloader` 0.11 的 `BootloaderConfig`（内核加载地址配置项)源码,比本次 spike 验证的"能否编译通过"更深一层,留给继续迁移的下一次会话。
