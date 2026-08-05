@@ -3417,7 +3417,7 @@ pub fn apply_cypher_mutation(
         // policy gating is a future slice; callers that want `CreateNode`
         // go through `gos_runtime::apply_cypher_mutation` / `apply_mutation`
         // directly instead of this edge-scoped gate.
-        CypherMutation::CreateNode => return Err(MutationError::UnsupportedMutation),
+        CypherMutation::CreateNode { .. } => return Err(MutationError::UnsupportedMutation),
     };
 
     // Step 2: gate on owning module's lifecycle.  An unknown owner
@@ -3490,7 +3490,7 @@ fn cypher_acl_endpoints(
         CypherMutation::RebindUse { from, new_target } => {
             (*from, *new_target, gos_cypher_mut::ReceptiveEdgeKind::Use as u8)
         }
-        CypherMutation::RemoveEdge { .. } | CypherMutation::CreateNode => return None,
+        CypherMutation::RemoveEdge { .. } | CypherMutation::CreateNode { .. } => return None,
     };
     let from_class = gos_runtime::node_summary_by_id(from)?.sub_domain;
     let to_class = gos_runtime::node_summary_by_id(to)?.sub_domain;

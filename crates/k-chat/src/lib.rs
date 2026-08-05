@@ -605,7 +605,7 @@ fn format_mutation_kind(m: &gos_cypher_mut::CypherMutation) -> &'static str {
         CypherMutation::AddEdge { edge_kind: ReceptiveEdgeKind::Link, .. } => "AddEdge{Link}",
         CypherMutation::RemoveEdge { .. } => "RemoveEdge",
         CypherMutation::RebindUse { .. } => "RebindUse",
-        CypherMutation::CreateNode => "CreateNode",
+        CypherMutation::CreateNode { .. } => "CreateNode",
     }
 }
 
@@ -644,7 +644,7 @@ pub(crate) fn ai_approve(state: &mut ChatState, idx: u8) {
     const AI_SOURCE: [u8; 16] = *b"K_AI\0\0\0\0\0\0\0\0\0\0\0\0";
     let outcome = gos_ai_bridge::gate_accept_index(idx as usize).map(|mutation| {
         match mutation {
-            gos_cypher_mut::CypherMutation::CreateNode => {
+            gos_cypher_mut::CypherMutation::CreateNode { .. } => {
                 let mut dispatcher = gos_runtime::RuntimeDispatcher;
                 gos_cypher_mut::apply_mutation(&mut dispatcher, mutation).is_ok()
             }

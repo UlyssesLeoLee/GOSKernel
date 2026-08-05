@@ -877,7 +877,15 @@ pub fn gpm_install_raw(_name: &str) -> Option<gos_protocol::NodeId> {
     // CreateNode arm has no `EdgeId` to hand a caller and no `{props}`
     // payload to audit yet (see this fn's own doc comment above).
     let mut dispatcher = gos_runtime::RuntimeDispatcher;
-    let pkg_id = apply_mutation(&mut dispatcher, CypherMutation::CreateNode).ok()??;
+    let pkg_id = apply_mutation(
+        &mut dispatcher,
+        CypherMutation::CreateNode {
+            node_type: gos_protocol::RuntimeNodeType::Vector,
+            entry_policy: gos_protocol::EntryPolicy::Manual,
+            executor_id: gos_protocol::ExecutorId::ZERO,
+        },
+    )
+    .ok()??;
 
     const GPM_SOURCE: [u8; 16] = *b"K_GPM\0\0\0\0\0\0\0\0\0\0\0";
     let root_id = gos_runtime::node_id_for_vec(PACKAGES_ROOT_NODE_VEC)?;

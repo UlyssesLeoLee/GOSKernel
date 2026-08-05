@@ -60,7 +60,12 @@ fn create_provisional_node_is_visible_unbound_and_renderable() {
     gos_runtime::reset();
 
     let epoch0 = gos_runtime::graph_epoch();
-    let (id, vector) = gos_runtime::create_provisional_node().expect("create provisional node");
+    let (id, vector) = gos_runtime::create_provisional_node(
+        RuntimeNodeType::Vector,
+        EntryPolicy::Manual,
+        ExecutorId::ZERO,
+    )
+    .expect("create provisional node");
 
     assert!(
         gos_runtime::is_provisional_node_id(id),
@@ -88,8 +93,18 @@ fn create_provisional_node_allocates_distinct_ids_and_vectors() {
     gos_runtime::reset();
 
     let epoch0 = gos_runtime::graph_epoch();
-    let (a, va) = gos_runtime::create_provisional_node().expect("create a");
-    let (b, vb) = gos_runtime::create_provisional_node().expect("create b");
+    let (a, va) = gos_runtime::create_provisional_node(
+        RuntimeNodeType::Vector,
+        EntryPolicy::Manual,
+        ExecutorId::ZERO,
+    )
+    .expect("create a");
+    let (b, vb) = gos_runtime::create_provisional_node(
+        RuntimeNodeType::Vector,
+        EntryPolicy::Manual,
+        ExecutorId::ZERO,
+    )
+    .expect("create b");
 
     assert_ne!(a, b, "each call allocates a fresh NodeId");
     assert!(gos_runtime::is_provisional_node_id(a));
@@ -120,11 +135,16 @@ fn create_node_mutation_dispatches_to_provisional_node() {
 
     use gos_cypher_mut::{apply_mutation, pre_validate, CypherMutation, MutationDispatcher};
 
-    pre_validate(&CypherMutation::CreateNode).expect("CreateNode is in the receptive subset");
+    let create_mutation = CypherMutation::CreateNode {
+        node_type: RuntimeNodeType::Vector,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: ExecutorId::ZERO,
+    };
+    pre_validate(&create_mutation).expect("CreateNode is in the receptive subset");
 
     let epoch0 = gos_runtime::graph_epoch();
     let mut d = gos_runtime::RuntimeDispatcher;
-    let id = apply_mutation(&mut d, CypherMutation::CreateNode)
+    let id = apply_mutation(&mut d, create_mutation)
         .expect("create applies")
         .expect("CreateNode returns the allocated NodeId");
 
@@ -133,7 +153,9 @@ fn create_node_mutation_dispatches_to_provisional_node() {
     assert!(find_node(id).is_some(), "node from apply_mutation is visible via node_page");
 
     // The trait method directly, too — a second, distinct provisional node.
-    let id2 = d.create_node().expect("dispatcher create_node");
+    let id2 = d
+        .create_node(RuntimeNodeType::Vector, EntryPolicy::Manual, ExecutorId::ZERO)
+        .expect("dispatcher create_node");
     assert_ne!(id, id2);
     assert!(find_node(id2).is_some());
     assert_eq!(gos_runtime::graph_epoch(), epoch0 + 2);

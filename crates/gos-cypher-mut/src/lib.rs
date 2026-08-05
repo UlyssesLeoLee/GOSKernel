@@ -26,7 +26,10 @@
 //! every claim and restart_generation count downstream, so those
 //! remain rejected.
 
-use gos_protocol::{ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, NodeId, VectorAddress};
+use gos_protocol::{
+    ControlPlaneEnvelope, ControlPlaneMessageKind, EdgeId, EntryPolicy, ExecutorId, NodeId,
+    RuntimeNodeType, VectorAddress,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationError {
@@ -69,7 +72,28 @@ pub enum CypherMutation {
     /// a Grant edge. `Label`/`{props}` storage isn't wired yet — the
     /// dispatcher returns the allocated `NodeId` (see [`apply_mutation`])
     /// so a same-statement `CREATE (a)-[:Mount]->(n)` can reference it.
-    CreateNode,
+    ///
+    /// ADR-019 §五-2: the node's shape used to be hardcoded
+    /// (`RuntimeNodeType::Vector` / `EntryPolicy::Manual` /
+    /// `ExecutorId::ZERO`) three call frames deep inside
+    /// `gos_runtime::create_provisional_node`, which made every
+    /// provisional node a passive data node by construction — no caller
+    /// could mint anything else, including the "process" nodes
+    /// ADR-014 §二's process=subgraph model needs. Threading these three
+    /// fields up to the mutation itself doesn't change today's default
+    /// behavior (every existing caller passes the same
+    /// Vector/Manual/ZERO triple explicitly now instead of it being
+    /// baked in), it just stops blocking a future caller from asking
+    /// for something else. Policy over *who* may request a non-Vector
+    /// node type is deliberately out of scope here — `CreateNode` is
+    /// still rejected outright by `gos_supervisor::apply_cypher_mutation`
+    /// and `gos_runtime::apply_edge_mutation` (see their match arms),
+    /// so this alone grants no new capability.
+    CreateNode {
+        node_type: RuntimeNodeType,
+        entry_policy: EntryPolicy,
+        executor_id: ExecutorId,
+    },
 }
 
 /// The narrow set of edge types Cypher mutations are allowed to
@@ -128,7 +152,7 @@ impl AuditedMutation {
             // envelope just audits *that* `source` requested a create.
             // `register_node` emits its own `NodeUpsert` with the real
             // id/vector when the dispatcher actually applies it.
-            CypherMutation::CreateNode => (0, 0),
+            CypherMutation::CreateNode { .. } => (0, 0),
         };
         ControlPlaneEnvelope {
             version: 1,
@@ -165,7 +189,7 @@ pub fn pre_validate(mutation: &CypherMutation) -> Result<(), MutationError> {
         },
         CypherMutation::RemoveEdge { .. }
         | CypherMutation::RebindUse { .. }
-        | CypherMutation::CreateNode => Ok(()),
+        | CypherMutation::CreateNode { .. } => Ok(()),
     }
 }
 
@@ -190,7 +214,12 @@ pub trait MutationDispatcher {
     /// Allocate a fresh provisional node (ADR-005 option A, V2.5e) and
     /// return its `NodeId`. Backed by `gos_runtime::create_provisional_node`
     /// in the real dispatcher.
-    fn create_node(&mut self) -> Result<NodeId, u32>;
+    fn create_node(
+        &mut self,
+        node_type: RuntimeNodeType,
+        entry_policy: EntryPolicy,
+        executor_id: ExecutorId,
+    ) -> Result<NodeId, u32>;
 }
 
 /// Apply a mutation through `dispatcher`. Returns `Ok(Some(node_id))` for
@@ -234,8 +263,8 @@ pub fn apply_mutation<D: MutationDispatcher>(
                 .map(|_edge_id| None)
                 .map_err(MutationError::DispatcherRejected)
         }
-        CypherMutation::CreateNode => dispatcher
-            .create_node()
+        CypherMutation::CreateNode { node_type, entry_policy, executor_id } => dispatcher
+            .create_node(node_type, entry_policy, executor_id)
             .map(Some)
             .map_err(MutationError::DispatcherRejected),
     }

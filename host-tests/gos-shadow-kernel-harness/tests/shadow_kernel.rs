@@ -149,11 +149,26 @@ fn use_edge_present(from: NodeId, to: NodeId, key: &str) -> bool {
 /// dispatcher, mirroring `k-cypher`'s `CREATE (n)` handler — bypasses the
 /// edge-scoped supervisor gate (which has no policy for node creation yet),
 /// same as production `CREATE (n)` does.
-fn create_node() -> NodeId {
+fn create_node(
+    node_type: gos_protocol::RuntimeNodeType,
+    entry_policy: gos_protocol::EntryPolicy,
+    executor_id: gos_protocol::ExecutorId,
+) -> NodeId {
     let mut d = gos_runtime::RuntimeDispatcher;
-    apply_mutation(&mut d, CypherMutation::CreateNode)
+    apply_mutation(&mut d, CypherMutation::CreateNode { node_type, entry_policy, executor_id })
         .expect("create applies")
         .expect("CreateNode returns the allocated NodeId")
+}
+
+/// `create_node` with the plain "passive data node" shape every caller used
+/// before ADR-019 §五-2 parameterized `CreateNode` — most of this file's
+/// tests don't care what shape the node has, just that one exists.
+fn create_plain_node() -> NodeId {
+    create_node(
+        gos_protocol::RuntimeNodeType::Vector,
+        gos_protocol::EntryPolicy::Manual,
+        gos_protocol::ExecutorId::ZERO,
+    )
 }
 
 // ── Boot + steady-state ──────────────────────────────────────────────────
@@ -190,9 +205,9 @@ fn shadow_kernel_live_cypher_mutations_flow_through_running_system() {
     boot_two_modules();
     run_steady_state_cycles(2);
 
-    let a = create_node();
-    let b = create_node();
-    let c = create_node();
+    let a = create_plain_node();
+    let b = create_plain_node();
+    let c = create_plain_node();
     assert_ne!(a, b);
     assert_ne!(b, c);
 
@@ -278,9 +293,9 @@ fn shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity() {
     boot_two_modules();
     run_steady_state_cycles(2);
 
-    let theme_current = create_node();
-    let wabi = create_node();
-    let shoji = create_node();
+    let theme_current = create_plain_node();
+    let wabi = create_plain_node();
+    let shoji = create_plain_node();
 
     // Seed via the free-function atomic path (mirrors k-shell's boot-time
     // theme wiring), with two other live modules mid-cycle around it.
@@ -333,27 +348,36 @@ fn shadow_kernel_rebind_use_stays_atomic_under_concurrent_module_activity() {
 // shadow kernel -- matching the shape kernel_main actually runs the same
 // mutation gate under.
 //
-// Known, documented gap this test does NOT paper over: ADR-014 §2.1 wants
-// process nodes tagged `RuntimeNodeType::Compute` / `EntryPolicy::OnDemand`
-// / a real interpreter `ExecutorId`; `CypherMutation::CreateNode` (ADR-005
-// option A) only ever produces the generic `RuntimeNodeType::Vector` /
-// `EntryPolicy::Manual` / `ExecutorId::ZERO` shape today -- there's no
-// parameter to customize it. That's a real, separate gap (extending
-// CreateNode's own shape), not something this test's "process=subgraph"
-// proof depends on: the promote-trigger claim is about the *mutation gate*,
-// not about which RuntimeNodeType the resulting node carries.
+// ADR-019 §五-2 closed a gap this test used to document as open: ADR-014
+// §2.1 wants process nodes tagged `RuntimeNodeType::Compute` /
+// `EntryPolicy::OnDemand` / a real interpreter `ExecutorId`, but
+// `CypherMutation::CreateNode` (ADR-005 option A) used to only ever
+// produce the generic `RuntimeNodeType::Vector` / `EntryPolicy::Manual` /
+// `ExecutorId::ZERO` shape -- no parameter existed to customize it.
+// `CreateNode` now carries all three fields, so `proc` below is minted
+// with the actual §2.1 shape instead of standing in for it. What's still
+// NOT wired (out of scope here, tracked under ADR-019 §五 items 4-6): a
+// real loader/interpreter that would make `test.proc` a *registered*
+// ExecutorId whose vtable actually runs something -- `register_node`
+// doesn't validate `executor_id` against any table, so an unregistered
+// id is accepted and stored, but the node stays `NodeBinding::Unbound`
+// regardless (same as the `ZERO` case) until a real binding step exists.
 #[test]
 fn capability_granting_mutation_is_the_promote_trigger_adr014() {
     let _guard = test_guard();
     boot_two_modules();
     run_steady_state_cycles(2);
 
-    // §2.1: a process instance = a provisional node. §2.1's Compute/OnDemand
-    // tagging isn't available through CreateNode yet (see the gap noted
-    // above) -- `proc` stands in for it.
-    let proc = create_node();
-    // §2.4: the target resource a `path_open`-class call would name.
-    let resource = create_node();
+    // §2.1: a process instance = a provisional node, now minted with its
+    // real intended shape.
+    let proc = create_node(
+        gos_protocol::RuntimeNodeType::Compute,
+        gos_protocol::EntryPolicy::OnDemand,
+        gos_protocol::ExecutorId::from_ascii("test.proc"),
+    );
+    // §2.4: the target resource a `path_open`-class call would name --
+    // stays a plain data node, not a process.
+    let resource = create_plain_node();
 
     // Before any fd is opened: no Grant path, using the *real* edge table
     // (no edges exist between these two fresh nodes at all).
@@ -457,7 +481,7 @@ fn gpm_install_mints_a_package_node_mounted_under_packages_root() {
     // gpm_install_raw's CreateNode step -- mirrors k-shell exactly (bypasses
     // the audited-envelope gate the same way k-cypher's own `CREATE (n)`
     // does; see gpm_install_raw's doc comment for why).
-    let pkg_id = create_node();
+    let pkg_id = create_plain_node();
 
     // gpm_install_raw's Mount step -- through the standard supervisor gate,
     // stamped b"K_GPM" instead of b"K_SHELL"/b"K_AI".
@@ -520,7 +544,11 @@ fn hex32(byte: u8) -> String {
 fn adr017_wire_parse_gmut_create_node() {
     assert_eq!(
         gos_ai_bridge::wire::parse_gmut_line(b"create_node"),
-        Some(CypherMutation::CreateNode)
+        Some(CypherMutation::CreateNode {
+            node_type: gos_protocol::RuntimeNodeType::Vector,
+            entry_policy: gos_protocol::EntryPolicy::Manual,
+            executor_id: gos_protocol::ExecutorId::ZERO,
+        })
     );
 }
 
@@ -744,8 +772,8 @@ fn adr017_ask_stages_mutations_and_chat_approve_applies_through_the_standard_gat
     gos_ai_bridge::gate_clear();
     install_stub_backend();
 
-    let a = create_node();
-    let b = create_node();
+    let a = create_plain_node();
+    let b = create_plain_node();
 
     set_stub_plan(
         b"sure, mounting a under b",
@@ -794,8 +822,8 @@ fn adr017_dry_run_mode_never_stages_anything() {
     gos_ai_bridge::gate_clear();
     install_stub_backend();
 
-    let a = create_node();
-    let b = create_node();
+    let a = create_plain_node();
+    let b = create_plain_node();
     set_stub_plan(
         b"here is what I would do",
         vec![CypherMutation::AddEdge { from: a, to: b, edge_kind: ReceptiveEdgeKind::Mount }],
@@ -819,8 +847,8 @@ fn adr017_reject_drops_the_suggestion_without_applying_it() {
     gos_ai_bridge::gate_clear();
     install_stub_backend();
 
-    let a = create_node();
-    let b = create_node();
+    let a = create_plain_node();
+    let b = create_plain_node();
     set_stub_plan(
         b"suggestion",
         vec![CypherMutation::AddEdge { from: a, to: b, edge_kind: ReceptiveEdgeKind::Use }],

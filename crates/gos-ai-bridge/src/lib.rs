@@ -349,7 +349,16 @@ pub mod wire {
     /// silent skip.
     pub fn parse_gmut_line(line: &[u8]) -> Option<CypherMutation> {
         if line == b"create_node" {
-            return Some(CypherMutation::CreateNode);
+            // AI-suggested creates only ever ask for a plain provisional
+            // data node — the wire protocol has no syntax for requesting
+            // a different node_type/entry_policy/executor_id, and this
+            // mutation is rejected outright downstream anyway (see
+            // gos_supervisor::apply_cypher_mutation's CreateNode arm).
+            return Some(CypherMutation::CreateNode {
+                node_type: gos_protocol::RuntimeNodeType::Vector,
+                entry_policy: gos_protocol::EntryPolicy::Manual,
+                executor_id: gos_protocol::ExecutorId::ZERO,
+            });
         }
         let (verb, rest) = split_once(line, b':')?;
         match verb {

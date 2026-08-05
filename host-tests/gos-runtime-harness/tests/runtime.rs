@@ -134,7 +134,12 @@ fn cypher_mutation_pre_validate_and_dispatch() {
     let remove = CypherMutation::RemoveEdge {
         edge_id: EdgeId([3u8; 16]),
     };
-    for m in [mount, use_e, rebind, remove, CypherMutation::CreateNode] {
+    let create = CypherMutation::CreateNode {
+        node_type: RuntimeNodeType::Vector,
+        entry_policy: EntryPolicy::Manual,
+        executor_id: ExecutorId::ZERO,
+    };
+    for m in [mount, use_e, rebind, remove, create] {
         pre_validate(&m).expect("receptive");
     }
 
@@ -166,7 +171,12 @@ fn cypher_mutation_pre_validate_and_dispatch() {
             self.rebound += 1;
             Ok(EdgeId([0xBB; 16]))
         }
-        fn create_node(&mut self) -> Result<NodeId, u32> {
+        fn create_node(
+            &mut self,
+            _: RuntimeNodeType,
+            _: EntryPolicy,
+            _: ExecutorId,
+        ) -> Result<NodeId, u32> {
             self.created += 1;
             Ok(NodeId([0xC0u8; 16]))
         }
@@ -186,7 +196,7 @@ fn cypher_mutation_pre_validate_and_dispatch() {
     assert_eq!(d.rebound, 1);
 
     // CreateNode -> Some(new_id), dispatcher.create_node() invoked once.
-    let created = apply_mutation(&mut d, CypherMutation::CreateNode).expect("create applies");
+    let created = apply_mutation(&mut d, create).expect("create applies");
     assert_eq!(created, Some(NodeId([0xC0u8; 16])));
     assert_eq!(d.created, 1);
 

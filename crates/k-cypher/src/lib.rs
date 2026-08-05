@@ -526,7 +526,11 @@ fn try_run_mutation(sink: &ConsoleSink, state: &mut CypherState, query: &str) ->
     state.executions = state.executions.saturating_add(1);
 
     if is_create_node {
-        match gos_runtime::create_provisional_node() {
+        match gos_runtime::create_provisional_node(
+            gos_protocol::RuntimeNodeType::Vector,
+            gos_protocol::EntryPolicy::Manual,
+            gos_protocol::ExecutorId::ZERO,
+        ) {
             Ok((_id, vector)) => {
                 set_color(sink, 10, 0);
                 print_str(sink, "cypher> created ");
@@ -1875,7 +1879,11 @@ fn run_query(sink: &ConsoleSink, state: &mut CypherState, query: &str) {
     // verbs above. `register_node` bumps `graph_epoch` synchronously, so the
     // next `vk_auto_refresh` poll (V2.5c) picks the new node up with no pump.
     if contains_ci(query, "create (") {
-        match gos_runtime::create_provisional_node() {
+        match gos_runtime::create_provisional_node(
+            gos_protocol::RuntimeNodeType::Vector,
+            gos_protocol::EntryPolicy::Manual,
+            gos_protocol::ExecutorId::ZERO,
+        ) {
             Ok((_id, vector)) => {
                 set_color(sink, 10, 0);
                 print_str(sink, "cypher> created ");

@@ -23895,8 +23895,23 @@ static NEXT_PROVISIONAL_SEQ: AtomicU64 = AtomicU64::new(1);
 /// `register_node`'s idempotent-on-`node_id` short-circuit never triggers
 /// here (unlike boot nodes, which intentionally re-register the same
 /// `derive_node_id`-derived id every boot).
-pub fn create_provisional_node() -> Result<(NodeId, VectorAddress), RuntimeError> {
-    RUNTIME.lock().create_provisional_node_locked()
+///
+/// ADR-019 §五-2: `node_type`/`entry_policy`/`executor_id` used to be
+/// hardcoded to `Vector`/`Manual`/`ZERO` here — every provisional node
+/// was a passive data node by construction, with no way for a caller to
+/// ask for anything else (e.g. a future "process" node bound to a real
+/// executor). Every existing caller now passes that same triple
+/// explicitly instead of it being baked in three call frames deep; this
+/// alone doesn't grant any caller a new capability (see the doc comment
+/// on `CypherMutation::CreateNode`).
+pub fn create_provisional_node(
+    node_type: RuntimeNodeType,
+    entry_policy: EntryPolicy,
+    executor_id: ExecutorId,
+) -> Result<(NodeId, VectorAddress), RuntimeError> {
+    RUNTIME
+        .lock()
+        .create_provisional_node_locked(node_type, entry_policy, executor_id)
 }
 
 impl GraphRuntime {
@@ -23905,7 +23920,12 @@ impl GraphRuntime {
     /// [`gos_cypher_mut::MutationDispatcher::create_node`] for `GraphRuntime`,
     /// which is invoked while the caller already holds the `RUNTIME` guard
     /// (re-locking would deadlock the non-reentrant `spin::Mutex`).
-    fn create_provisional_node_locked(&mut self) -> Result<(NodeId, VectorAddress), RuntimeError> {
+    fn create_provisional_node_locked(
+        &mut self,
+        node_type: RuntimeNodeType,
+        entry_policy: EntryPolicy,
+        executor_id: ExecutorId,
+    ) -> Result<(NodeId, VectorAddress), RuntimeError> {
         let seq = NEXT_PROVISIONAL_SEQ.fetch_add(1, Ordering::Relaxed);
 
         let mut id_bytes = [0u8; 16];
@@ -23920,19 +23940,20 @@ impl GraphRuntime {
             offset: (seq & 0x0FFF) as u16,
         };
 
-        // RuntimeNodeType::Vector is the existing "passive data node" type (cf.
-        // theme.current/theme.wabi/theme.shoji in builtin_bundle.rs);
-        // EntryPolicy::Manual means never auto-scheduled; ExecutorId::ZERO
-        // leaves the node NodeBinding::Unbound + NodeInstanceId::ZERO after
-        // register_node — exactly the "visible, connectable, renderable, but no
-        // claim/quota/instance" state ADR-005 §四 already proved is render- and
-        // capability-transparent.
+        // Passing `ExecutorId::ZERO` (with any node_type/entry_policy)
+        // still leaves the node `NodeBinding::Unbound` +
+        // `NodeInstanceId::ZERO` after `register_node` — exactly the
+        // "visible, connectable, renderable, but no claim/quota/instance"
+        // state ADR-005 §四 already proved is render- and
+        // capability-transparent. A caller asking for a real
+        // `executor_id` gets a genuinely bound node instead; that's the
+        // point of parameterizing this.
         let spec = NodeSpec {
             node_id,
             local_node_key: "cypher.provisional",
-            node_type: RuntimeNodeType::Vector,
-            entry_policy: EntryPolicy::Manual,
-            executor_id: ExecutorId::ZERO,
+            node_type,
+            entry_policy,
+            executor_id,
             state_schema_hash: 0,
             permissions: &[],
             exports: &[],
@@ -25423,8 +25444,13 @@ impl gos_cypher_mut::MutationDispatcher for GraphRuntime {
         self.register_edge(spec).map_err(|_| 4u32)
     }
 
-    fn create_node(&mut self) -> Result<NodeId, u32> {
-        self.create_provisional_node_locked()
+    fn create_node(
+        &mut self,
+        node_type: RuntimeNodeType,
+        entry_policy: EntryPolicy,
+        executor_id: ExecutorId,
+    ) -> Result<NodeId, u32> {
+        self.create_provisional_node_locked(node_type, entry_policy, executor_id)
             .map(|(id, _vector)| id)
             .map_err(dispatcher_error_for)
     }
@@ -27702,8 +27728,13 @@ impl MutationDispatcher for RuntimeDispatcher {
     /// [`create_provisional_node`]. `Label`/`{props}` storage is left for a
     /// follow-up step; the caller gets the new `NodeId` back so a
     /// same-statement edge-add can reference it.
-    fn create_node(&mut self) -> Result<NodeId, u32> {
-        create_provisional_node()
+    fn create_node(
+        &mut self,
+        node_type: RuntimeNodeType,
+        entry_policy: EntryPolicy,
+        executor_id: ExecutorId,
+    ) -> Result<NodeId, u32> {
+        create_provisional_node(node_type, entry_policy, executor_id)
             .map(|(id, _vector)| id)
             .map_err(dispatcher_error_for)
     }
@@ -27750,6 +27781,6 @@ pub fn apply_edge_mutation(mutation: CypherMutation) -> Result<EdgeId, MutationE
                 .rebind_use(from, new_target)
                 .map_err(MutationError::DispatcherRejected)
         }
-        CypherMutation::CreateNode => Err(MutationError::UnsupportedMutation),
+        CypherMutation::CreateNode { .. } => Err(MutationError::UnsupportedMutation),
     }
 }
