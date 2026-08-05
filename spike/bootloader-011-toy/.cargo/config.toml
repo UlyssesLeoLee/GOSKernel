@@ -8,6 +8,7 @@
 # override both back to a normal host build.
 [unstable]
 json-target-spec = true
+build-std = []
 
 [build]
 target = "x86_64-pc-windows-msvc"
