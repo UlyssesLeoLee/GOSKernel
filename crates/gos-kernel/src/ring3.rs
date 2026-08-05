@@ -127,9 +127,28 @@ extern "C" fn syscall_entry() {
         "push r13",
         "push r14",
         "push r15",
-        // syscall ABI passes the 4th arg in R10; C ABI expects RCX.
-        "mov rcx, r10",
-        // Rust handler reads (RAX, RDI, RSI, RDX, RCX, R8, R9).
+        // syscall ABI leaves (RAX=nr, RDI=arg0, RSI=arg1, RDX=arg2,
+        // R10=arg3, R8=arg4, R9=arg5) -- none of that lines up with the
+        // C ABI's (RDI, RSI, RDX, RCX, R8, R9) argument registers a
+        // `call` needs, so it has to be shuffled explicitly rather than
+        // just moving R10 -> RCX (ADR-019 §五-3: this was a real,
+        // never-exercised bug -- rust_syscall_handler's parameters used
+        // to be *named* rax/rdi/rsi/rdx/rcx/r8 but the C ABI actually
+        // delivered them shifted by one register, so "rax" silently
+        // received RDI's value, "rdi" received RSI's, etc., and the
+        // 7th declared parameter read uninitialized stack memory since
+        // only 6 args fit in registers. RBP/RBX/R12-R15 are already
+        // saved above, so they're free scratch here; their *original*
+        // values still get restored correctly by the pops below since
+        // those read from the stack, not these registers.
+        "mov r15, r8",   // stash arg4
+        "mov r14, r10",  // stash arg3
+        "mov rcx, rdx",  // rcx (C arg3) <- arg2
+        "mov rdx, rsi",  // rdx (C arg2) <- arg1
+        "mov rsi, rdi",  // rsi (C arg1) <- arg0
+        "mov rdi, rax",  // rdi (C arg0) <- syscall number
+        "mov r8, r14",   // r8  (C arg4) <- arg3
+        "mov r9, r15",   // r9  (C arg5) <- arg4
         "call rust_syscall_handler",
         // RAX = return value.
         "pop r15",
@@ -144,24 +163,35 @@ extern "C" fn syscall_entry() {
     )
 }
 
-/// Decode RAX and dispatch.  Until the kernel has plugins issuing
-/// syscalls, this never runs — but the table is wired so the first
-/// real Ring 3 plugin lands on the right ABI fn.
+/// Decode the syscall number and dispatch.  Until the kernel has
+/// plugins issuing syscalls, this never runs — but the table is wired
+/// so the first real Ring 3 plugin lands on the right ABI fn.
 ///
-/// SAFETY: `rax` is the user-supplied syscall number; out-of-range
-/// values return `u64::MAX` (sentinel for "ENOSYS").  Pointer args
-/// are validated lazily inside the corresponding ABI fn.
+/// Parameter names match what `syscall_entry`'s register shuffle
+/// actually delivers (see its comment) — `syscall_no` is the raw
+/// `syscall`-instruction RAX value, `arg0..arg4` are args 0-4 of the
+/// Linux-compatible syscall ABI this module's doc comment describes.
+/// Arg 5 is dropped: nothing implemented today uses a 6th argument, and
+/// the C ABI has no 7th register to carry it in anyway.
+///
+/// SAFETY: `syscall_no` is user-supplied; out-of-range values return
+/// `u64::MAX` (sentinel for "ENOSYS"). Pointer args are validated
+/// lazily inside the corresponding ABI fn.
 #[no_mangle]
 pub extern "C" fn rust_syscall_handler(
-    rax: u64,
-    rdi: u64,
-    rsi: u64,
-    rdx: u64,
-    rcx: u64,
-    r8: u64,
-    _r9: u64,
+    syscall_no: u64,
+    arg0: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    _arg4: u64,
 ) -> u64 {
-    match rax {
+    match syscall_no {
+        // ADR-019 §五-3: the boot-time ring3 probe's sentinel. Diverges
+        // (longjmps straight back to the probe's saved kernel context)
+        // instead of falling through to the normal sysretq epilogue --
+        // see crate::ring3_probe's module doc comment.
+        x if x == crate::ring3_probe::SENTINEL_SYSCALL => crate::ring3_probe::on_sentinel_syscall(),
         x if x == SyscallNo::AllocPages as u64 => {
             // alloc_pages goes through the same gos-runtime ABI shim
             // the kernel-side path uses today; quota accounting and
@@ -169,30 +199,29 @@ pub extern "C" fn rust_syscall_handler(
             // dispatching_instance() tracks the instance on the current
             // executor dispatch; when a Ring 3 plugin issues `syscall` the
             // instance context is preserved via the kernel stack.
-            let _ = (rsi, rdx, rcx, r8);
-            unsafe { gos_runtime::syscall_alloc_pages(rdi as usize) as u64 }
+            let _ = (arg1, arg2, arg3);
+            unsafe { gos_runtime::syscall_alloc_pages(arg0 as usize) as u64 }
         }
         x if x == SyscallNo::FreePages as u64 => {
-            // free_pages(ptr, page_count): rdi = ptr, rsi = page_count.
-            let _ = (rdx, rcx, r8);
-            unsafe { gos_runtime::syscall_free_pages(rdi as *mut u8, rsi as usize) };
+            // free_pages(ptr, page_count): arg0 = ptr, arg1 = page_count.
+            let _ = (arg2, arg3);
+            unsafe { gos_runtime::syscall_free_pages(arg0 as *mut u8, arg1 as usize) };
             0
         }
         x if x == SyscallNo::EmitSignal as u64 => {
-            // emit_signal(target_vec, packet_lo, packet_hi): rdi, rsi, rdx.
+            // emit_signal(target_vec, packet_lo, packet_hi): arg0, arg1, arg2.
             // packet_lo[63:56] = signal kind tag; packet_lo[55:0] = arg0.
-            let _ = (rcx, r8);
-            unsafe { gos_runtime::syscall_emit_signal(rdi, rsi, rdx) as u64 }
+            let _ = arg3;
+            unsafe { gos_runtime::syscall_emit_signal(arg0, arg1, arg2) as u64 }
         }
         x if x == SyscallNo::ResolveCapability as u64 => {
             // resolve_capability(ns_ptr, ns_len, name_ptr, name_len).
-            let _ = r8;
             unsafe {
                 gos_runtime::syscall_resolve_capability(
-                    rdi as *const u8,
-                    rsi as usize,
-                    rdx as *const u8,
-                    rcx as usize,
+                    arg0 as *const u8,
+                    arg1 as usize,
+                    arg2 as *const u8,
+                    arg3 as usize,
                 )
             }
         }

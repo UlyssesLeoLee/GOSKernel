@@ -7,6 +7,7 @@ mod builtin_bundle;
 mod fbtest;
 mod kfont;
 mod ring3;
+mod ring3_probe;
 
 use bootloader_api::{entry_point, BootInfo};
 use bootloader_api::config::{BootloaderConfig, Mapping};
@@ -170,6 +171,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Phase E.2: program the syscall MSRs once the GDT is live.
     unsafe { ring3::init(); }
     log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "ring3 syscall surface armed (STAR/LSTAR)");
+
+    // Boot-time self-test (ADR-019 §五-3): actually drop to CPL3 and
+    // issue a real `syscall`, proving the trampoline programmed above
+    // catches it -- the MSRs being programmed doesn't by itself prove
+    // `syscall_entry`/`rust_syscall_handler` are reachable or correct;
+    // nothing had ever executed `syscall` from ring3 before this.
+    let ring3_ok = unsafe { ring3_probe::run() };
+    log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0",
+        "ring3 syscall trampoline probe: {}", if ring3_ok { "PASS" } else { "FAIL" });
 
     // Boot-time sanity check (ADR-019 §五-1): every bracketed native
     // dispatch should have produced a real Cr3::write_raw -- if these two
