@@ -103,7 +103,7 @@
 
 **结论与建议**：真正迁移时,`gos-kernel` 的 `Cargo.toml` 建议钉 `bootloader = "=0.11.9"`（而非 `"0.11"` 隐式解析到不兼容的 0.11.17）,并在设计新的 `.cargo/config.toml`/构建 crate 拓扑时,直接以"这个仓库以后可能有多套 target/build-std 需求（宿主侧镜像构建工具 vs 裸机内核本体）"为前提去写,不要重演 spike 里"事后补丁式覆盖继承配置"的弯路——这正是 §一 1.2 已经预见的"内核在构建拓扑里从最终产物降格为另一个 crate 的输入"那部分工作,现在多了一条具体的钉版本建议。
 
-Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留在仓库中作为可复现证据（`README.md` 已注明：一旦真正的 `gos-kernel` 迁移 PR 存在，应连带删除，不该长期与生产代码并存)。
+Spike 目录 `spike/bootloader-011-toy/`（当时保留作为可复现证据）已在 §七"真正迁移已落地"的同一 session 内按其 `README.md` 自己的记录删除——真正的 `gos-kernel` 迁移已经存在，不需要再让玩具内核继续与生产代码并存。
 
 ## 五、门禁核实：内存管理 crate 的 target-JSON 依赖（部分完成）
 

@@ -91,15 +91,33 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     gos_hal::phys::set_phys_offset(phys_offset);
     log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "vaddr/meta/phys initialized");
 
-    // Bring up the framebuffer (k_fb self-drives Bochs VBE/DispI via
-    // port I/O when present -- independent of what the bootloader set
-    // up, see crates/k-fb's own doc comment and ADR-018 §六 -- falling
-    // back to legacy VGA mode 13h otherwise, which this UEFI boot path
-    // does not set up). Clearing to Background immediately gives any
-    // observer in QEMU a "kernel is alive" signal instead of a blank
-    // screen.
+    // Bring up the framebuffer. Three tiers, in priority order: (1)
+    // k_fb self-drives Bochs VBE/DispI via port I/O when present --
+    // independent of what the bootloader set up, see crates/k-fb's own
+    // doc comment -- gives the sharpest QEMU dev-loop result; (2) ADR-
+    // 013/018 GOP, the UEFI-firmware-provided linear framebuffer real
+    // hardware (no Bochs DispI) actually needs, sourced from
+    // BootInfo.framebuffer; (3) legacy VGA mode 13h. Clearing to
+    // Background immediately gives any observer a "kernel is alive"
+    // signal instead of a blank/garbage screen.
+    let gop_fb = boot_info.framebuffer.as_mut().and_then(|fb| {
+        let info = fb.info();
+        Some(k_fb::GopFramebuffer {
+            // Already the resolved kernel virtual address -- bootloader_api
+            // maps the GOP framebuffer via its own independent Mapping
+            // (Mappings::framebuffer), not through phys_offset, so this
+            // is used as-is, not added to phys_offset (see GopFramebuffer's
+            // own doc comment in crates/k-fb).
+            virt_addr: fb.buffer_mut().as_mut_ptr() as u64,
+            width: info.width,
+            height: info.height,
+            stride: info.stride,
+            bytes_per_pixel: info.bytes_per_pixel,
+            bgr: matches!(info.pixel_format, bootloader_api::info::PixelFormat::Bgr),
+        })
+    });
     unsafe {
-        k_fb::init(phys_offset);
+        k_fb::init(phys_offset, gop_fb);
     }
     k_fb::clear(k_fb::Color::Background);
     // Header bar serves as the boot-progress indicator: dim teal
@@ -107,10 +125,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     k_fb::fill_rect(0, 0, k_fb::WIDTH, 18, k_fb::Color::HeaderBar);
     if k_fb::is_hd() {
         raw_serial_println(format_args!(
-            "boot: framebuffer up (HD VBE LFB {}x{} @ 32bpp, phys=0x{:x}, logical 320x200 @ 4x upscale)",
+            "boot: framebuffer up ({} LFB {}x{} @ 32bpp, phys=0x{:x}, logical 320x200 @ {}x upscale)",
+            if k_fb::is_gop() { "GOP" } else { "Bochs VBE" },
             k_fb::native_width(),
             k_fb::native_height(),
             k_fb::lfb_physical_address(),
+            k_fb::scale(),
         ));
     } else {
         raw_serial_println(format_args!("boot: framebuffer up (mode 13h fallback, 320x200)"));

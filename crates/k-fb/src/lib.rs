@@ -94,15 +94,26 @@ static FB_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// Active framebuffer format:
 ///   1 = legacy mode 13h, 8-bpp palette at 0xA0000
-///   4 = HD VBE mode, 32-bpp BGRX linear framebuffer
+///   4 = HD VBE mode, 32-bpp BGRX linear framebuffer (self-driven Bochs DispI)
+///   5 = ADR-013/018 GOP mode, 32-bpp BGRX linear framebuffer supplied by
+///       UEFI firmware via BootInfo.framebuffer (real hardware's only
+///       option -- Bochs DispI doesn't exist outside QEMU/virtualization)
 static FB_BPP: AtomicU8 = AtomicU8::new(1);
 
-/// Native framebuffer width in pixels (320 for mode 13h, 1280 for HD).
+/// Native framebuffer width in pixels (320 for mode 13h, 1280+ for HD/GOP).
 static FB_NATIVE_W: AtomicU32 = AtomicU32::new(WIDTH as u32);
-/// Native framebuffer height in pixels (200 for mode 13h, 800 for HD).
+/// Native framebuffer height in pixels (200 for mode 13h, 800+ for HD/GOP).
 static FB_NATIVE_H: AtomicU32 = AtomicU32::new(HEIGHT as u32);
-/// Integer upscale: logical → native pixel ratio (1 for mode 13h, 4 for HD).
+/// Integer upscale: logical → native pixel ratio (1 for mode 13h, 4+ for HD/GOP).
 static FB_SCALE: AtomicU32 = AtomicU32::new(1);
+/// Pixels between the start of one scanline and the next. Equals
+/// FB_NATIVE_W for mode 13h and the self-driven HD path (no padding),
+/// but GOP framebuffers may pad each line wider than the visible
+/// width -- ADR-018's own QEMU/OVMF measurement had stride==width, but
+/// the field exists precisely because that isn't guaranteed, and using
+/// native width for row addressing when it doesn't hold silently skews
+/// every row after the first.
+static FB_STRIDE: AtomicU32 = AtomicU32::new(WIDTH as u32);
 
 /// Discovered LFB physical address (HD path only).  0 means mode 13h.
 static FB_LFB_PHYS: AtomicU64 = AtomicU64::new(0);
@@ -207,13 +218,21 @@ const HUE_PEAKS: &[(u8, u8, u8)] = &[
 /// Install the palette + cache the framebuffer base.  Call once from
 /// `kernel_main` immediately after `gos_hal::phys::set_phys_offset`.
 ///
+/// `gop_fb` is the UEFI-firmware-provided linear framebuffer (ADR-013/
+/// 018), when the bootloader handed one to `BootInfo.framebuffer` --
+/// `None` under BIOS boot or when the bootloader config didn't request
+/// one. Tried as the second-priority path, after the self-driven Bochs
+/// probe (which stays first since it's already integration-tested and
+/// gives the sharper HD_SCALE=6 target on QEMU) and before the legacy
+/// mode 13h fallback.
+///
 /// # Safety
 /// Writes to the VGA DAC ports and dereferences `phys_offset +
 /// 0xA0000`.  Caller must guarantee the bootloader switched the card
 /// into mode 13h (i.e. the `vga_320x200` feature is enabled) and that
 /// the physical memory at 0xA0000 is mapped into the kernel virtual
 /// address space.
-pub unsafe fn init(phys_offset: u64) {
+pub unsafe fn init(phys_offset: u64, gop_fb: Option<GopFramebuffer>) {
     // ── Phase N.x — HD path now enabled ──────────────────────────
     //
     // The earlier veto (I.13.c) said HD was unusable because each
@@ -225,16 +244,21 @@ pub unsafe fn init(phys_offset: u64) {
     // frame budget is now ~10-30 ms at SCALE=4 (1280×800) — comfortable
     // for the 30+ fps paint loop.
     //
-    // Falls back to mode 13h if the Bochs DispI device isn't present
-    // (e.g. headless test, exotic chipsets).
+    // Falls back to GOP (real UEFI hardware's only LFB option -- Bochs
+    // DispI doesn't exist outside QEMU/virtualization), then to mode
+    // 13h, if neither self-driven mode-set nor a usable GOP framebuffer
+    // is available (e.g. headless test, exotic chipsets).
     let hd_succeeded = unsafe { try_set_hd_mode(phys_offset) };
+    let gop_succeeded = !hd_succeeded
+        && gop_fb.is_some_and(|gop| unsafe { try_set_gop_mode(&gop) });
 
-    if !hd_succeeded {
+    if !hd_succeeded && !gop_succeeded {
         // ── Legacy mode 13h fallback ──
         FB_VIRT.store(phys_offset + FB_PHYS, Ordering::SeqCst);
         FB_BPP.store(1, Ordering::SeqCst);
         FB_NATIVE_W.store(WIDTH as u32, Ordering::SeqCst);
         FB_NATIVE_H.store(HEIGHT as u32, Ordering::SeqCst);
+        FB_STRIDE.store(WIDTH as u32, Ordering::SeqCst);
         FB_SCALE.store(1, Ordering::SeqCst);
 
         // Program the 12 named palette slots (0..11).
@@ -327,16 +351,88 @@ unsafe fn try_set_hd_mode(phys_offset: u64) -> bool {
     // land in mapped-but-unused RAM rather than the framebuffer.
     let lfb_phys = unsafe { discover_stdvga_lfb() }.unwrap_or(HD_LFB_PHYS_FALLBACK);
 
-    // bootloader 0.9's `map_physical_memory` feature mapped *all*
-    // physical memory at `phys_offset()`, so the LFB virtual
-    // address is just `phys_offset + lfb_phys` — no new page-table
-    // work needed.
+    // ADR-018: physical memory is mapped at `phys_offset()` (bootloader
+    // 0.9's `map_physical_memory` feature originally; now bootloader_api
+    // 0.11's `Mapping::Dynamic`, requested explicitly in gos-kernel's
+    // BOOTLOADER_CONFIG -- same net effect, different mechanism), so the
+    // LFB virtual address is just `phys_offset + lfb_phys` either way.
     FB_VIRT.store(phys_offset + lfb_phys, Ordering::SeqCst);
     FB_LFB_PHYS.store(lfb_phys, Ordering::SeqCst);
     FB_BPP.store(4, Ordering::SeqCst);
     FB_NATIVE_W.store(HD_WIDTH, Ordering::SeqCst);
     FB_NATIVE_H.store(HD_HEIGHT, Ordering::SeqCst);
+    FB_STRIDE.store(HD_WIDTH, Ordering::SeqCst);
     FB_SCALE.store(HD_SCALE, Ordering::SeqCst);
+    true
+}
+
+/// ADR-013/018 — GOP linear framebuffer, supplied by UEFI firmware via
+/// `bootloader_api::BootInfo.framebuffer` and translated by the caller
+/// (kept out of this crate's own dependency graph -- k-fb stays
+/// bootloader-crate-agnostic, same reasoning as `init` taking a raw
+/// `phys_offset: u64` instead of a `BootInfo` reference).
+pub struct GopFramebuffer {
+    /// Already a kernel *virtual* address -- `bootloader_api` maps the
+    /// GOP framebuffer itself (`Mappings::framebuffer`, independent of
+    /// the physical-memory-offset mapping `phys_offset` describes) and
+    /// hands back a resolved pointer via `FrameBuffer::buffer()`. Unlike
+    /// the Bochs HD path (which discovers a *physical* BAR address and
+    /// must add `phys_offset` itself), this is used as-is -- adding
+    /// `phys_offset` here would be double-counting a translation
+    /// `bootloader_api` already did.
+    pub virt_addr: u64,
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub bytes_per_pixel: usize,
+    /// `true` for `PixelFormat::Bgr` (matches this crate's own BGRX
+    /// backbuffer format exactly, zero per-pixel conversion needed).
+    /// `false` covers everything else (`Rgb`/`U8`/`Unknown`) -- treated
+    /// as unsupported for this v0 rather than guessed at, since the
+    /// only hardware this has been verified against (QEMU+OVMF) reports
+    /// `Bgr`; real-hardware GOP reporting `Rgb` needs a channel-swap
+    /// this function deliberately doesn't attempt blind.
+    pub bgr: bool,
+}
+
+/// Adopt a GOP-provided linear framebuffer as the HD surface. Returns
+/// `false` (caller falls back to legacy mode 13h) when the format isn't
+/// the one this v0 actually handles -- 32-bpp BGR -- rather than
+/// attempting an unverified conversion.
+///
+/// # Safety
+/// Calls `gos_hal::phys::virt_to_phys`, which reads the active page
+/// table via CR3 -- must only run after `gos_hal::phys::set_phys_offset`
+/// has been called with the correct value (same precondition `init`'s
+/// own caller contract already documents).
+unsafe fn try_set_gop_mode(gop: &GopFramebuffer) -> bool {
+    if !gop.bgr || gop.bytes_per_pixel != 4 || gop.width == 0 || gop.height == 0 {
+        return false;
+    }
+
+    // Best-fit integer upscale for the logical 320x200 canvas -- mirrors
+    // how HD_SCALE=6 was chosen for the fixed 1920x1200 Bochs target,
+    // just computed at runtime since GOP resolution isn't a compile-time
+    // constant. Floors to the tighter of the two axes so the image never
+    // overflows either dimension; clamps to at least 1.
+    let scale_w = (gop.width / WIDTH).max(1);
+    let scale_h = (gop.height / HEIGHT).max(1);
+    let scale = scale_w.min(scale_h).min(HD_SCALE as usize).max(1) as u32;
+
+    // Diagnostic only (`lfb_physical_address()`) -- the address k-fb
+    // actually reads/writes is `gop.virt_addr` below, already resolved
+    // by bootloader_api. Best-effort: 0 (the same "not available"
+    // sentinel `lfb_physical_address()`'s own doc already defines) if
+    // the page-table walk can't resolve it.
+    let phys_for_diag = unsafe { gos_hal::phys::virt_to_phys(gop.virt_addr) }.unwrap_or(0);
+
+    FB_VIRT.store(gop.virt_addr, Ordering::SeqCst);
+    FB_LFB_PHYS.store(phys_for_diag, Ordering::SeqCst);
+    FB_BPP.store(5, Ordering::SeqCst);
+    FB_NATIVE_W.store(gop.width as u32, Ordering::SeqCst);
+    FB_NATIVE_H.store(gop.height as u32, Ordering::SeqCst);
+    FB_STRIDE.store(gop.stride as u32, Ordering::SeqCst);
+    FB_SCALE.store(scale, Ordering::SeqCst);
     true
 }
 
@@ -459,10 +555,30 @@ pub fn native_height() -> u32 {
     FB_NATIVE_H.load(Ordering::Relaxed)
 }
 
-/// True when the in-kernel Bochs DispI mode-set succeeded and the
-/// framebuffer is the 32-bpp HD linear surface.
+/// Integer upscale factor from the logical 320x200 canvas to the
+/// active native resolution (1 for mode 13h, computed per-mode for
+/// HD/GOP -- see `HD_SCALE`/`try_set_gop_mode`). Exists so callers
+/// (e.g. boot-log messages) can report the real value instead of
+/// hardcoding a number that silently goes stale when the target
+/// resolution changes.
+pub fn scale() -> u32 {
+    FB_SCALE.load(Ordering::Relaxed)
+}
+
+/// True when either the self-driven Bochs DispI mode-set or a GOP
+/// framebuffer (ADR-013/018) succeeded -- the framebuffer is a 32-bpp
+/// linear surface either way, just sourced differently. Callers that
+/// only care "is this the high-res direct-color path, not mode 13h"
+/// (the common case) don't need to distinguish further; `is_gop()`
+/// exists for the few that do (e.g. boot-log messages).
 pub fn is_hd() -> bool {
-    FB_BPP.load(Ordering::Relaxed) == 4
+    matches!(FB_BPP.load(Ordering::Relaxed), 4 | 5)
+}
+
+/// True specifically for the GOP path (bootloader-supplied UEFI
+/// framebuffer), as opposed to the self-driven Bochs DispI HD path.
+pub fn is_gop() -> bool {
+    FB_BPP.load(Ordering::Relaxed) == 5
 }
 
 /// Discovered LFB physical address (HD path only).  Returns 0 when
@@ -1253,7 +1369,7 @@ pub fn present() {
     // HD path: scanline expand BGRX → BGRX (no palette indirection now)
     // + bulk REP MOVSD per native row.
     let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
-    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let stride = FB_STRIDE.load(Ordering::Relaxed) as usize;
     let fb32 = fb as *mut u32;
 
     let mut line_buf = [0u32; WIDTH * HD_SCALE as usize];
@@ -1271,7 +1387,12 @@ pub fn present() {
         }
         let src = line_buf.as_ptr();
         for dy in 0..scale {
-            let row_off = (y * scale + dy) * native_w;
+            // Row addressing uses `stride` (pixels per scanline,
+            // including any trailing padding), NOT native width --
+            // GOP framebuffers (ADR-013/018) may pad each line wider
+            // than what's visible; the self-driven Bochs HD path has
+            // no padding so stride==native width there, unchanged.
+            let row_off = (y * scale + dy) * stride;
             unsafe { core::ptr::copy_nonoverlapping(src, fb32.add(row_off), line_len); }
         }
     }
@@ -1307,9 +1428,16 @@ pub unsafe fn force_clear(color: Color) {
     let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
     let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
     let native_h = FB_NATIVE_H.load(Ordering::Relaxed) as usize;
+    let stride = FB_STRIDE.load(Ordering::Relaxed) as usize;
     let fb32 = fb as *mut u32;
-    for i in 0..(native_w * native_h) {
-        unsafe { fb32.add(i).write(bgrx); }
+    // Per-row fill respecting stride (see `present`'s comment) --
+    // a flat `native_w * native_h` range assumes stride==width, which
+    // silently mis-fills padded GOP framebuffers row by row.
+    for row in 0..native_h {
+        let row_off = row * stride;
+        for col in 0..native_w {
+            unsafe { fb32.add(row_off + col).write(bgrx); }
+        }
     }
 }
 
@@ -1330,7 +1458,7 @@ pub unsafe fn force_fill_rect(x: usize, y: usize, w: usize, h: usize, color: Col
         return;
     }
     let scale = FB_SCALE.load(Ordering::Relaxed) as usize;
-    let native_w = FB_NATIVE_W.load(Ordering::Relaxed) as usize;
+    let stride = FB_STRIDE.load(Ordering::Relaxed) as usize;
     let bgrx = PALETTE_BGRX.lock()[color.idx() as usize];
     let fb32 = fb as *mut u32;
     let base_x_native = x * scale;
@@ -1338,7 +1466,7 @@ pub unsafe fn force_fill_rect(x: usize, y: usize, w: usize, h: usize, color: Col
     for py in y..y_end {
         let base_y_native = py * scale;
         for dy in 0..scale {
-            let row_off = (base_y_native + dy) * native_w + base_x_native;
+            let row_off = (base_y_native + dy) * stride + base_x_native;
             for dx in 0..w_native {
                 unsafe { fb32.add(row_off + dx).write(bgrx); }
             }
