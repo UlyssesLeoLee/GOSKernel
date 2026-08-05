@@ -1,6 +1,6 @@
 # ADR-018：bootloader 0.9→0.11+ 迁移——UEFI 真机启动的第一步
 
-> 状态：**选项 A 已选向**（2026-08-04，用户选择"迁移，BIOS+UEFI 并存"）；**spike 已完成——版本兼容性、FPU 时序均已核实；加载地址形状已核实一致，loader 是否接受该形状受限于 spike 自身隔离手法未能跑完，留给迁移分支首步重测，见 §四/§五** · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
+> 状态：**门禁已全部核实通过（UEFI 路径）——真实 UEFI+OVMF 端到端跑通，从固件到内核入口点全链路证据见 §六**；BIOS 路径发现独立、真实的不兼容项，建议真正迁移**只做 UEFI**（选项 A 的"BIOS+UEFI 并存"降级为"UEFI 优先，BIOS 视 §六发现另行评估"，原因见 §六）· 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
 >
 > 触发：用户在开发队列（ADR-006…017 + 拓扑指数族重构）完成后提供了具体目标——"我希望把它安装在 2014 年 macmini 上，用 U 盘引导"，并明确指示"你完成开发后再做安装包"。开发已完成（本 ADR 之前的全部提案待选向 ADR 均已按选项 A 落地），现在轮到安装包这一步——但落地前先摸清 ADR-013 §一 1.1 已经指出的"UEFI GOP 隐藏前提"到底有多大。
 
@@ -123,3 +123,46 @@ Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留�
 为直接验证"bootloader 0.11.9 的 loader 能否接受这种固定地址、非 PIE 的内核"（bootloader changelog 提到 0.11.1 "support for higher half position independent kernels"，需要确认这是否意味着旧的固定地址内核不再受支持),在 spike 里用**真实的 `x86_64-gos-kernel.json`**（而非玩具内核原来用的内建 target)重新编译了 toy-kernel——产出的二进制同样是 `ET_EXEC`,与真实 `gos-kernel` 二进制形状一致,证实了 spike 玩具内核可以复现真实内核的关键 ELF 特征。但让 `bootloader::BiosBoot`/`UefiBoot` 消费这个二进制时,再次撞上 §四已经记录过的 `[unstable] build-std` 继承问题——这次额外确认了一个新的、更精确的子结论：**在 spike 本地 `.cargo/config.toml` 里显式设 `build-std = []` 并不能取消从 `E:\GOSKernel\.cargo\config.toml` 继承的 `build-std = ["core", ...]`**（两次独立复现,`E0152 duplicate lang item` 签名一致)——`[unstable] build-std` 这个 key 在 Cargo 配置层级合并里走的是"追加/合并"语义,不是"就近覆盖"语义,和 `[build] target` 这种标量 key 的合并规则不同。这本身是一个值得记录的 Cargo 配置合并细节,但意味着**这个具体子测试在 spike 现有的目录嵌套方式下无法干净地跑完**——不是 bootloader 0.11.9 或 gos-kernel 二进制形状本身有问题,是 spike 逃逸父目录配置的手法在这一层失效了。
 
 **结论**：(a) 已用真实源码核实,风险排除。(b) 的"是否与真实二进制形状一致"这一半已核实（ET_EXEC、低地址、非 PIE),"bootloader 0.11.9 的 loader 是否接受这种形状"这一半**仍未验证**,原因是 spike 自身的环境隔离限制,不是新发现的兼容性问题。**建议**：真正开始迁移 `gos-kernel` 时,第一步就是从一个不嵌套在任何冲突 `.cargo/config.toml` 之下的全新目录（例如迁移分支自己的工作区,而不是继续在 `E:\GOSKernel` 内部的 spike 子目录里打补丁)重跑这个具体测试——那时 `gos-kernel` 自己的构建配置是被重新设计的,不是被继承/逃逸的,不会重演这个问题。
+
+## 六、门禁收口——真实 UEFI+OVMF 端到端跑通（2026-08-04，同一 session 内完成）
+
+按 §五的建议,把测试搬到完全在 `E:\GOSKernel` 目录树**之外**的位置（`%TEMP%\claude\...\scratchpad\bootloader-test\`),从根上避免与仓库自身 `.cargo/config.toml` 的继承冲突。这次是**从零**独立复现,不是继续修补 spike 子目录里的旧状态。
+
+**中途发现两项新的、真实的问题,均已定位并解决或规避**：
+
+1. **`bootloader` 0.11.9 自带的 BIOS 阶段 target JSON 用的是旧 schema**——`bios/stage-2/3/4` 各自内嵌 `i386-code16-boot-sector.json`/`i686-stage-3.json`/`x86_64-stage-4.json` 等文件,字段如 `target-c-int-width`/`target-pointer-width` 写成**带引号的字符串**（如 `"32"`),而本项目固定的 `nightly-2026-04-02` 的 target-spec-json 解析器要求这些字段是**裸整数**（`32`),报 `invalid type: string "32", expected u16`。这是 `bootloader` crate 自己内嵌文件的 schema 版本落后于本项目 nightly 的 target-spec 解析器——与本 ADR 反复出现的"unstable API 随 nightly 演进,依赖方版本卡在不同代际"是同一类问题,但这次不是 `x86_64` crate 的 `Step` trait,而是 bootloader 自己的构建资产。**这个问题只影响 BIOS 阶段,不影响 UEFI 阶段**（UEFI 用标准内建 target `x86_64-unknown-uefi`,不触碰这些自带 JSON 文件)。
+   - **规避方式**：`bootloader` crate 把 `bios`/`uefi` 拆成独立 Cargo feature（`default = ["bios", "uefi"]`,查证自 `Cargo.toml` 原文),`bootloader = { version = "=0.11.9", default-features = false, features = ["uefi"] }` 让 `bios` 相关子 crate 完全不参与编译,问题消失。**这不是权宜之计**——2014 Mac mini（本 ADR 的真实目标)本身就需要原生 UEFI 启动（§一 1.1 已论证 Mac 固件的 legacy/CSM 支持不可靠),BIOS 镜像从来就不是必需产出物,只是 ADR 选项 A 最初"BIOS+UEFI 并存"图省事想两个都要。
+2. **kernel 侧 `bootloader_api` 版本必须与 host 侧 `bootloader` 版本严格一致**——玩具内核最初写的是 `bootloader_api = "0.11"`（隐式最新 0.11.17),而 disk-image builder 钉的是 `bootloader = "=0.11.9"`,QEMU 里 UEFI 固件真的加载了 bootloader 阶段代码后,该代码自己校验版本戳,直接 panic："kernel was compiled with incompatible bootloader_api version: invalid len"——这是 bootloader crate 自己的设计特性（一次真实的、有意义的运行时校验,不是 bug),需要两侧钉同一个精确版本。改成 `bootloader_api = "=0.11.9"` 后问题消失。
+
+**修完这两项后,完整端到端验证跑通**（`qemu-system-x86_64 -drive if=pflash,format=raw,readonly=on,file=<OVMF>.fd -drive format=raw,file=toy-uefi.img -serial stdio -display none`,OVMF 固件复制到本地可写目录后加 `readonly=on`——直接指向 `Program Files` 下的原始文件会因 Windows 权限报"拒绝访问"),完整日志证据链：
+
+```
+BdsDxe: loading Boot0001 "UEFI QEMU HARDDISK QM00001 " ...
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00001 " ...
+INFO : Framebuffer info: FrameBufferInfo { ... width: 1280, height: 800, ... }
+INFO : UEFI bootloader started
+...
+INFO : Elf file loaded at Pointer { addr: 0x5f5e000, ... }
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), ..., virtual_addr: 200000, ... })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), ..., virtual_addr: 203410, ... })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), ..., virtual_addr: 210a40, ... })
+INFO : Entry point at: 0x203760
+INFO : Jumping to kernel entry point at VirtAddr(0x203760)
+```
+
+`virtual_addr: 200000`——**与真实 `gos-kernel` 二进制的 `PT_LOAD` 首段地址 `0x200000` 完全一致**（§五已记录的独立核实结果),不是凑巧接近,是同一个数字。loader 把三段 `PT_LOAD` 按 ELF header 里写的固定地址原样映射,**没有做任何 PIE 重定位或地址平移**,证实 §五"bootloader 0.11.x 仍支持传统固定地址内核,higher-half/PIE 只是新增能力不是强制替代"的判断。QEMU 干净退出（`timeout 15` 触发的正常终止,内核自身 `spin_loop()` 死循环,无 panic 输出)。
+
+**门禁结论（全部关闭)**：
+- 版本兼容窗口——`bootloader = "=0.11.9"` 编译通过（§四)。
+- FPU/SSE 时序——`kernel_main` 首段代码即初始化,风险排除（§五)。
+- ELF 形状——`ET_EXEC`/固定低地址/非 PIE,与真实 `gos-kernel` 完全一致（§五、本节复核)。
+- **loader 接受度——本节新增,已用真实 OVMF+QEMU 端到端证实：接受,原样映射,成功跳转到入口点。**
+- BIOS 路径——发现独立的、真实的不兼容项（bootloader 自带 target JSON schema 落后于本项目 nightly),**建议真正迁移时不做**,原因见上文第 1 点,不是"没空验证"而是"验证后判断不必要,且原设想的它'并存'的收益本来就低于诚实拆分成两个条目"（mirrors ADR-013 处理 virtio-gpu vs UEFI GOP 的同一原则:一个条目里两种不同成本的工作要拆开算账,不能因为选项 A 最初写了"并存"就不顾新证据继续两个都做)。
+
+**给真正迁移 `crates/gos-kernel` 的具体建议**（本 ADR 仍不实现,这是记录经验证的构建形状供迁移分支直接采用)：
+1. `crates/gos-kernel/Cargo.toml`：`bootloader = "0.9.23"` → `bootloader_api = "=0.11.9"`（钉精确版本,不用范围)。
+2. 新增一个 host 侧 disk-image-builder（建议放进已有的 `xtask` crate,新增子命令,而不是新建顶层 crate)：`bootloader = { version = "=0.11.9", default-features = false, features = ["uefi"] }`,读取已构建的 `gos-kernel` 二进制路径,调 `bootloader::UefiBoot::new(path).create_disk_image(out)`。
+3. `main.rs`：`use bootloader::{entry_point, BootInfo}` → `use bootloader_api::{entry_point, BootInfo}`；`kernel_main` 签名从 `&'static BootInfo` 改 `&'static mut BootInfo`；`boot_info.physical_memory_offset` 等字段现在是 `bootloader_api::info::Optional<u64>` 而非裸 `u64`,所有读取点需要跟着改（`gos_hal::phys::set_phys_offset` 等调用点)——这是本次 spike 没有覆盖的部分,真正迁移时需要单独过一遍。
+4. `.cargo/config.toml`：继续保留 `[build] target = "x86_64-gos-kernel.json"` + `build-std`（§五已论证不建议换内建 target);`bootimage runner` 换成指向新 xtask 子命令的 runner,或迁移期间先用显式命令代替 `cargo run` 的隐式 runner。
+5. `Makefile`/`.github/workflows/installer-artifact.yml`/`tools/build-installer.ps1`：`cargo install bootimage` + `cargo bootimage` 整条链路替换为新 xtask 命令;`tools/write-usb-image.ps1` 需要确认 `UefiBoot::create_disk_image` 的产物格式（本次验证用的是单一 raw 磁盘镜像,GPT/ESP 结构内嵌,与现有"整镜像 dd 到 U 盘"的写入方式兼容,不需要新脚本逻辑)。
+6. `doc/06_运维维护/INSTALL_BARE_METAL_zh.md`：把"进入 BIOS/UEFI 启动菜单"改为明确的"UEFI 启动菜单/按住 Option 键选 EFI Boot"（含 Mac 特有步骤),不再暗示两者等价。
