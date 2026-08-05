@@ -1,6 +1,6 @@
 # ADR-014：进程＝子图模型 + 兼容层策略选向（WASI-first / POSIX-native-first / 推迟）
 
-> 状态：**分裂状态——§二（进程=子图映射）已落地；§三/四（WASI-first / POSIX-native-first / 推迟）仍待你选向** · 提案日期：2026-06-12 · §二落地日期：2026-08-03 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（§生态/兼容两支柱、附录 A/C、Parity 不变式、铁律 2/3）、[ADR-001 §2.2/§2.3/§三](./ADR-001-edge-algebra-constitution.md)（`Grant` 位的宪法定义）、[ADR-005 §五/§七](./ADR-005-node-mutation.md)（provisional node + 未接线的"promote"机制）、[ADR-006](./ADR-006-capability-graph-migration.md)（capability_check↔claim_resource 统一，选向待定）、[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5，文件型 fd 的真实存储后端）
+> 状态：**已选向 B（POSIX-native-first），2026-08-05** · 提案日期：2026-06-12 · §二落地日期：2026-08-03 · 选向日期：2026-08-05 · 配套：[V3 计划](../plan/V3_DEVELOPMENT_PLAN.md)（§生态/兼容两支柱、附录 A/C、Parity 不变式、铁律 2/3）、[ADR-001 §2.2/§2.3/§三](./ADR-001-edge-algebra-constitution.md)（`Grant` 位的宪法定义）、[ADR-005 §五/§七](./ADR-005-node-mutation.md)（provisional node + 未接线的"promote"机制）、[ADR-006](./ADR-006-capability-graph-migration.md)（capability_check↔claim_resource 统一，选向待定）、[ADR-010](./ADR-010-f5-persistent-storage-path.md)（F.5，文件型 fd 的真实存储后端）
 >
 > 口径：V3 计划把本 ADR 称为"V3 最大的分叉点"——`crates/k-wasm`/`crates/k-libc` 等任何兼容层代码动笔前，必须先有"外来进程在图里是什么"的答案，并满足 Parity 不变式（人类/AI/gpm/外来进程共用同一条 `gos-cypher-mut` 门禁 + `capability_check`，禁止第二条特权路径）。本 ADR 分两部分：**§二"进程＝子图"映射是选项无关的——它同时是 [ADR-005 §七遗留 2](./ADR-005-node-mutation.md)"promote 机制缺触发点"问题的第一个具体触发场景，建议无论 A/B/C 如何选向都可以先行接线**；§三/四是 WASI-first / POSIX-native-first / 推迟 三个选项及建议，**不替你拍板**——这是继 ADR-005 之后第二个"不拍板"级别的分叉。
 
@@ -99,3 +99,15 @@ WASI 的 capability 句柄模型和 POSIX 的 fd 表，都是"一个整数 → �
 **已知、明确记录的缺口**（不是本次遗漏，是与 §2.1 字面设想的真实差距）：§2.1 设想进程节点应带 `RuntimeNodeType::Compute` / `EntryPolicy::OnDemand` / 解释器自己的 `ExecutorId`，但 `CypherMutation::CreateNode`/`create_provisional_node`（ADR-005 选项 A 落地时的形状）目前硬编码产出 `RuntimeNodeType::Vector` / `EntryPolicy::Manual` / `ExecutorId::ZERO`，没有参数可定制。本次证明的"capability-granting mutation = promote 触发点"这一核心论断不依赖节点的具体 `RuntimeNodeType`——但若 §三选向 A（wasm）后要落地"进程节点"，`CreateNode` 的形状需要先扩展以接受这些参数，这是一个尚未开的独立小缺口，留给 §三选向后一并处理。
 
 **§三/四（WASI-first / POSIX-native-first / 推迟）仍未选向**——门禁不变：`crates/k-wasm`/`crates/k-libc` 或任何新增编译目标在此处记录选向之前不得出现在 `Cargo.toml` workspace members 中。
+
+## 六、选向记录（2026-08-05）——选项 B，POSIX-native-first
+
+用户明确选择**选项 B**，理由原话："这个是原生独创的操作系统，要从 0 到 1 啃硬骨头"——不选 A（wasm 沙箱）绕开 fork/exec/信号这些难题，而是把它们当作 GOS 自己需要正面回答的设计问题，直接面对。
+
+**追加的核心约束**（用户同一轮明确要求）："并且要做成适合图论构造的形式"——即 §三选项 B 描述的 `fork`/`exec`/信号语义,不是"照抄 POSIX 教科书定义再拿图结构模拟",而是要反过来：先问"这件事在'一切皆图重写'的模型里,最自然的图操作是什么",再让语义落在那个答案上。这与 ADR-014 §二已经确立的方法论一致（fd=边不是类比,是"同一个 Grant 位")——§三/四的落地必须延续同一纪律,不能退化成"POSIX 语义 + 图数据库外壳"。
+
+**本 ADR 本身不实现选项 B**——它只记录选向。选项 B 自己的风险条款（§三"B"小节)已经写明：`fork`="子图克隆"的 CoW/边复制语义、`exec`=原地替换 `executor_id`+镜像、信号的投递/屏蔽/handler 语义,三者都是"图模型里没有先例的尖锐问题",**需要各自独立的 ADR**,不是本 ADR 一次性拍板能覆盖的范围。按本项目"ADR 先于实现"铁律,落地顺序建议：
+
+1. **门禁降低,不是解除**：`crates/k-libc` 现在可以创建（§四门禁本身只挡"选向前"),但 `fork`/`exec`/信号相关代码在各自的子 ADR 写出之前,同样不应该出现——铁律 2 的精神延续到选向之后的每一个"没有先例"的子问题,不是选完 A/B/C 就一次性放行所有后续代码。
+2. **建议的第一个可落地切片,不依赖 fork/exec**：§三选项 B 原文已经指出 POSIX 子集"从 `open`/`read`/`write`/`close`/`mmap`/`exit` 起步"——这五个加上已经武装好但零调用方的 ring3 syscall MSR 机制（`ring3.rs`,`STAR`/`LSTAR`/`FMASK` 已编程),足够做一个不涉及进程创建/替换的"hello world"（对应 §三选项 A 描述的同类 demo,只是走真实机器码 + 真实 ring3 而非解释器)——这一步先证明"ring3 边界本身真的隔离、真实语法";`fork`/`exec`/信号留给后续独立 ADR,不堵在这一步前面。
+3. **`fork`/`exec`/信号各自的子 ADR**,落地时都要先回答"图论原生形式是什么"这一步,再回答"如何满足 POSIX 语义期望"——顺序不能颠倒（这正是用户本轮追加约束的字面要求)。`fork` 的候选起点已经在 §三 B 小节写出（"子图克隆"),但 CoW 语义、边的复制规则（Grant 边复制是否等于重新鉴权？子图边界怎么定义?)都还没有答案,是这几个子 ADR 里分量最重的一个。
