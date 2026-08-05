@@ -1,6 +1,6 @@
 # ADR-013：真机显示 MVP——一个条目里藏着两种成本
 
-> 状态：**选项 A 已选向；virtio-gpu 发现骨架已落地**（2026-08-03）；UEFI GOP 仍待独立 ADR · 提案日期：2026-06-12 · 配套：[V2 计划 line 104](../plan/V2_DEVELOPMENT_PLAN.md)（"真机显示（UEFI GOP / virtio-gpu backend）"）、[ADR-007](./ADR-007-display-hal-scope.md)（`gos-hal::display` LFB `Surface` trait 范围已收窄至本 ADR）、`crates/k-net`（PCI 发现层 + virtio 检测，本 ADR 的可复用precedent）、任务 #45（installer 真机验证，blocked on hardware）
+> 状态：**选项 A 已选向；virtio-gpu 发现骨架已落地**（2026-08-03）；UEFI GOP 的独立 ADR 已写出——见 [ADR-018](./ADR-018-bootloader-uefi-migration.md)（提案待选向，2026-08-04）· 提案日期：2026-06-12 · 配套：[V2 计划 line 104](../plan/V2_DEVELOPMENT_PLAN.md)（"真机显示（UEFI GOP / virtio-gpu backend）"）、[ADR-007](./ADR-007-display-hal-scope.md)（`gos-hal::display` LFB `Surface` trait 范围已收窄至本 ADR）、`crates/k-net`（PCI 发现层 + virtio 检测，本 ADR 的可复用precedent）、任务 #45（installer 真机验证，blocked on hardware）
 >
 > 口径：V2 line 104 把"UEFI GOP"和"virtio-gpu"并列写在同一个括号里，读起来像"两个可互换的 backend 选项"。调查后发现二者的**依赖结构完全不同**——virtio-gpu 是 `k-net` 已经探测到、且有完整可复用 PCI 发现层的 PCI 设备，加一个驱动 crate 量级；UEFI GOP 需要从 `BootInfo` 拿到 framebuffer 句柄，而当前 `bootloader = "0.9.23"`（[main.rs:9](../crates/hypervisor/src/main.rs)）的 `BootInfo` **没有这个字段**——这是 bootloader 0.10/0.11 重写后才引入的，意味着"加 UEFI GOP backend"的真实第一步是**整条 boot pipeline 的大版本迁移**，量级与"显示 backend"完全不同。本 ADR 把这一个条目拆成两个，分别定价。
 

@@ -101,7 +101,7 @@
 
 ### Phase V2.6 — 硬化 & 产品收尾（约 4–6 周）
 
-**交付**：真机显示（UEFI GOP / virtio-gpu backend）；`persistent` 属性接真实 FS-backed 边（接 `gos-vfs` / journal，含 F.5：FAT32 write + journal fsync，自 V2.5 移入，见 [ADR-009](../doc/ADR-009-f5-screenshot-scope.md)）；installer 真机验证（已有 `tools/build-installer.ps1` 流程）；fast-path node（rasterizer / DMA 仍走快路径——只要快路径也是图里一个挂 fast-path 标签的 node）；`.gitignore` 收拾根目录 20+ 个 `log*.txt`；`hypervisor` → `gos-graph-engine` 改名（不只是改名，是 identity shift——它已缩成 rewrite engine 本身）。
+**交付**：真机显示（UEFI GOP / virtio-gpu backend——[ADR-013](../doc/ADR-013-real-hardware-display-mvp.md) 已选向 A，virtio-gpu 发现骨架落地 2026-08-03；UEFI GOP 拆给 [ADR-018](../doc/ADR-018-bootloader-uefi-migration.md)，提案待选向 2026-08-04）；`persistent` 属性接真实 FS-backed 边（接 `gos-vfs` / journal，含 F.5：FAT32 write + journal fsync，自 V2.5 移入，见 [ADR-009](../doc/ADR-009-f5-screenshot-scope.md)，F.5-logic 已按 [ADR-010](../doc/ADR-010-f5-persistent-storage-path.md) 落地 2026-08-03）；installer 真机验证（目标机器已确认：2014 Mac mini，USB 引导——但现有 `tools/build-installer.ps1` 产出的是 BIOS/MBR 镜像，Mac 需要原生 UEFI 启动，是 ADR-018 存在的直接原因，见该 ADR §1.1）；fast-path node（`PermissionKind::FastPathSnapshot` 已按 [ADR-012](../doc/ADR-012-fast-path-node-tagging.md) 落地 2026-08-03）；`.gitignore` 收拾根目录 20+ 个 `log*.txt`；`hypervisor` → `gos-kernel` 改名（[ADR-011](../doc/ADR-011-hypervisor-rename-scope.md) 已选向 A 并落地，2026-08-03）。
 
 **退出判据 / 终极 Demo**：换 CPU、图不变，boot 时长缩短（rewrite engine 找到更宽的并发 fire 层——没有性能调优 PR，性能来自图算法）。全系统测试报告；产品级 V2.0 发布。
 
