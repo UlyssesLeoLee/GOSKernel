@@ -12,5 +12,5 @@ max-ram-4g = []
 gos-protocol = { path = "../gos-protocol" }
 gos-hal = { path = "../gos-hal" }
 spin = "0.9"
-bootloader = { version = "0.9.23" }
+bootloader_api = "=0.11.9"
 x86_64 = "0.14"

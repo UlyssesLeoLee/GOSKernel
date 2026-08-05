@@ -21,19 +21,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
-name = "bootloader"
-version = "0.9.34"
+name = "bootloader_api"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13f6a8a495d2f93fe3d6eb3a224f9aa749a63cfd746ed03eb5ddcbd00ade7d8f"
-dependencies = [
- "font8x8 0.2.7",
-]
-
-[[package]]
-name = "font8x8"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e63201c624b8c8883921b1a1accc8916c4fa9dbfb15d122b26e4dde945b86bbf"
+checksum = "57a08a674787a3711ea0ba3bd730e6ffeb74832dcf6c51caf553528b33b54f73"
 
 [[package]]
 name = "font8x8"
@@ -74,7 +65,6 @@ version = "0.1.0"
 name = "gos-hal"
 version = "0.2.0"
 dependencies = [
- "bootloader",
  "gos-protocol",
  "gos-runtime",
  "spin",
@@ -93,7 +83,7 @@ dependencies = [
 name = "gos-kernel"
 version = "0.2.0"
 dependencies = [
- "bootloader",
+ "bootloader_api",
  "gos-ai-bridge",
  "gos-cluster",
  "gos-cypher-mut",
@@ -291,7 +281,7 @@ dependencies = [
 name = "k-fb"
 version = "0.2.0"
 dependencies = [
- "font8x8 0.3.1",
+ "font8x8",
  "gos-hal",
  "k-assets",
  "libm",
@@ -407,7 +397,7 @@ dependencies = [
 name = "k-pmm"
 version = "0.2.0"
 dependencies = [
- "bootloader",
+ "bootloader_api",
  "gos-hal",
  "gos-protocol",
  "spin",
@@ -488,6 +478,7 @@ dependencies = [
 name = "k-vga"
 version = "0.2.0"
 dependencies = [
+ "gos-hal",
  "gos-protocol",
  "x86_64",
 ]
@@ -514,7 +505,7 @@ dependencies = [
 name = "k-vmm"
 version = "0.2.0"
 dependencies = [
- "bootloader",
+ "bootloader_api",
  "gos-hal",
  "gos-protocol",
  "k-pmm",

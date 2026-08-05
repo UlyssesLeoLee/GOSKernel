@@ -49,29 +49,17 @@ spin = "0.9"
 # Already a dep (declared above) but kept for grep visibility — the
 # I.3.11 hit-test reads `MOUSE_X` / `MOUSE_Y` / `MOUSE_BUTTONS`
 # directly from k-mouse.
-# Phase I.3.0 — `vga_320x200` puts the VGA card into mode 13h (320×200
-# × 256-color palette, linear framebuffer at physical 0xA0000) before
-# kernel_main runs.  k-fb wraps the resulting framebuffer; the boot
-# loop paints kernel-node bars over it as the first graphical UI.
-# Trade-off: the legacy 0xB8000 text mode (used by k-vga's diagnostic
-# splash) is gone after boot; serial output via raw_serial_println
-# stays the canonical boot trace.
-bootloader = { version = "0.9.23", features = ["map_physical_memory", "vga_320x200"] }
+# ADR-018 (2026-08-04): migrated off bootloader 0.9.23's `bootimage`-
+# subcommand pipeline to bootloader_api 0.11.9, UEFI-only (the real
+# target hardware -- a 2014 Mac mini -- needs native UEFI boot; the
+# BIOS path also hit its own separate, real incompatibility with this
+# project's pinned nightly, see ADR-018 §六). Pinned exact: the
+# bootloader stage checks this at boot time and panics on any mismatch
+# against xtask's `bootloader` pin (xtask/Cargo.toml). Physical-memory
+# mapping (former `map_physical_memory` feature) and the framebuffer
+# request are now explicit in main.rs's BOOTLOADER_CONFIG, not Cargo
+# features. `run-args`/`test-args` below moved to xtask's `run`/`qemu`
+# verbs (see xtask/src/main.rs) since `[package.metadata.bootimage]`
+# has no meaning without the `bootimage` tool.
+bootloader_api = "=0.11.9"
 x86_64 = "0.14"
-
-[package.metadata.bootimage]
-# Default display (no -display): boots reliably. `-display gtk,gl=on` crashed
-# QEMU on this host (0xc0000005 in the GL path) — do NOT re-add gl=on here.
-# For a flicker-free setup use the host Vulkan viewer with `-display none`
-# (window off; viewer is the display), or try `-display sdl` to keep a window.
-# `-serial tcp:...14445` (COM3) feeds gos-vk-viewer; keep it.
-#
-# claude/determined-hamilton-2c803b's I.11 full-screen/GL boot UI
-# (-display sdl,gl=on -full-screen -vga std) was NOT adopted here: same
-# GL-acceleration risk category as the gtk,gl=on crash documented above,
-# and it drops the COM3 serial line gos-vk-viewer depends on. Revisit
-# once GL stability on this host is separately verified.
-run-args = ["-accel", "whpx", "-accel", "tcg", "-serial", "stdio", "-serial", "tcp:127.0.0.1:14444,server,nowait", "-serial", "tcp:127.0.0.1:14445,server,nowait", "-no-reboot", "-monitor", "telnet:127.0.0.1:45555,server,nowait", "-netdev", "user,id=gosnet0", "-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"]
-test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none"]
-test-success-exit-code = 33         # (0x10 << 1) | 1
-test-timeout = 300

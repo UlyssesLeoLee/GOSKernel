@@ -83,8 +83,8 @@ unsafe extern "C" fn vmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
     
     let boot_info_payload = BOOT_INFO_PTR;
     if boot_info_payload != 0 {
-        let boot_info_ptr = boot_info_payload as *const bootloader::BootInfo;
-        let offset: Option<u64> = (*boot_info_ptr).physical_memory_offset.into();
+        let boot_info_ptr = boot_info_payload as *const bootloader_api::BootInfo;
+        let offset: Option<u64> = (*boot_info_ptr).physical_memory_offset.into_option();
         if let Some(o) = offset {
             let state_ptr = p.add(1024) as *mut VmmState;
             core::ptr::write(state_ptr, VmmState { phys_offset: o });

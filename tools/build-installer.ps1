@@ -20,7 +20,7 @@ function Stop-StaleGosQemu {
             $_.Name -eq "qemu-system-x86_64.exe" -and
             $_.CommandLine -and
             (
-                $_.CommandLine -like "*bootimage-gos-kernel.bin*" -or
+                $_.CommandLine -like "*gos-kernel-uefi.img*" -or
                 $_.CommandLine -like "*gos-kernel*"
             )
         }
@@ -37,39 +37,30 @@ function Assert-Command([string]$Name) {
     }
 }
 
-function Assert-BootimageInstalled {
-    $null = & cargo bootimage --help 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo-bootimage is not installed. Run: cargo install bootimage --locked"
-    }
-}
-
+# ADR-018: image building is now `xtask image` (bootloader_api 0.11.9,
+# UEFI-only), a normal build-dependency resolved by cargo -- no separate
+# `cargo install bootimage` step needed anymore.
 function Get-BootImagePath {
     param(
         [string]$RepoRoot,
         [string]$Profile
     )
 
-    $candidate = Join-Path $RepoRoot ("target/x86_64-gos-kernel/{0}/bootimage-gos-kernel.bin" -f $Profile)
+    # Respects CARGO_TARGET_DIR the same way xtask's own
+    # cargo_target_dir() does -- this dev environment sets it to a
+    # shared cache dir outside the repo, not <repo>/target.
+    $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $RepoRoot "target" }
+    $candidate = Join-Path $TargetDir ("x86_64-gos-kernel/{0}/gos-kernel-uefi.img" -f $Profile)
     if (Test-Path $candidate) {
         return $candidate
     }
 
-    $fallback = Get-ChildItem -Path (Join-Path $RepoRoot "target") -Filter "bootimage-gos-kernel*.bin" -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-
-    if ($fallback) {
-        return $fallback.FullName
-    }
-
-    throw "Boot image not found under target/. Expected bootimage-gos-kernel.bin."
+    throw "UEFI disk image not found at $candidate. Expected gos-kernel-uefi.img (run `xtask image` first, or omit -SkipBuild)."
 }
 
 Write-Host "[GOS] Checking installer toolchain..." -ForegroundColor Cyan
 Assert-Command "cargo"
 Assert-Command "rustup"
-Assert-BootimageInstalled
 
 if ($CheckOnly) {
     Write-Host "[GOS] Installer toolchain check completed." -ForegroundColor Green
@@ -79,15 +70,20 @@ if ($CheckOnly) {
 Stop-StaleGosQemu
 
 if (-not $SkipBuild) {
-    $bootimageArgs = @("bootimage", "-p", "gos-kernel")
+    $xtaskArgs = @("run", "--", "image")
     if ($Profile -eq "release") {
-        $bootimageArgs += "--release"
+        $xtaskArgs += "--release"
     }
 
-    Write-Host "[GOS] Building bootable installer image..." -ForegroundColor Cyan
-    & cargo @bootimageArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo bootimage failed"
+    Write-Host "[GOS] Building bootable UEFI installer image..." -ForegroundColor Cyan
+    Push-Location (Join-Path $RepoRoot "xtask")
+    try {
+        & cargo @xtaskArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "xtask image failed"
+        }
+    } finally {
+        Pop-Location
     }
 }
 
@@ -110,17 +106,23 @@ $Manifest = [ordered]@{
     artifact = "gos-installer.img"
     sha256 = $ImageHash
     built_at_utc = (Get-Date).ToUniversalTime().ToString("o")
-    target = "x86_64 bare metal"
-    boot_mode = "raw boot disk image"
+    target = "x86_64 UEFI bare metal"
+    boot_mode = "UEFI disk image (GPT/ESP, bootloader_api 0.11.9) -- write raw, boot via EFI, not BIOS/legacy"
     notes = @(
         "Write the image to USB to boot a target machine without Rust tooling.",
-        "The current installer is a bootable system image, not an in-OS partitioning wizard."
+        "The current installer is a bootable system image, not an in-OS partitioning wizard.",
+        "Target machine must boot via native UEFI (hold Option on Mac hardware and select the EFI Boot entry) -- this image is not a legacy BIOS/MBR boot sector."
     )
 }
 $Manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
 
 Copy-Item -LiteralPath (Join-Path $RepoRoot "tools/write-usb-image.ps1") -Destination (Join-Path $PackageRoot "write-usb-image.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "doc/INSTALL_BARE_METAL_zh.md") -Destination (Join-Path $PackageRoot "INSTALL_BARE_METAL_zh.md") -Force
+# ADR-018: doc/INSTALL_BARE_METAL_zh.md is a deliberate 1-line stub
+# redirecting to doc/06_运维维护/INSTALL_BARE_METAL_zh.md (single-source-
+# of-truth convention) -- this was copying the stub, not the real
+# 137-line guide, into every installer package. Found while updating
+# this script for the bootloader migration, fixed in the same pass.
+Copy-Item -LiteralPath (Join-Path $RepoRoot "doc/06_运维维护/INSTALL_BARE_METAL_zh.md") -Destination (Join-Path $PackageRoot "INSTALL_BARE_METAL_zh.md") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path $PackageRoot "README.md") -Force
 
 if (Test-Path $ZipPath) {

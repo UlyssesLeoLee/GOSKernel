@@ -8,13 +8,33 @@ mod fbtest;
 mod kfont;
 mod ring3;
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::config::{BootloaderConfig, Mapping};
 use core::fmt::{self, Write};
 use gos_log::{LogLevel, log};
 use gos_protocol::{GraphEdgeSummary, GraphNodeSummary, RuntimeNodeType, VectorAddress};
 use k_rast::{project_to_screen, sort_by_depth_desc, Mat4, Vec3};
 
-entry_point!(kernel_main);
+// ADR-018: bootloader 0.9's `map_physical_memory` Cargo feature always
+// mapped all physical memory; bootloader_api 0.11 defaults to NOT
+// mapping it (`Mappings::physical_memory: Option<Mapping> = None`) and
+// requires opting in via config -- k_fb's Bochs-VBE and DMA address
+// translation (gos_hal::phys) both need the offset this provides.
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Default is 80 KiB with a guard page (bootloader_api docs). GOS's
+    // boot call depth (supervisor bootstrap, builtin graph construction)
+    // page-faults into that guard page under the default -- bootloader
+    // 0.9 had no such guard, so this was never visible as a fault
+    // before, presumably silently corrupting adjacent memory instead.
+    // 1 MiB is a generous first cut, not a measured minimum -- revisit
+    // if boot time/image size ever matters.
+    config.kernel_stack_size = 16 * 1024 * 1024;
+    config
+};
+
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// `extern "C"` serial write backend for gos-log — writes the message
 /// bytes directly to COM1 followed by a newline.
@@ -32,7 +52,7 @@ unsafe extern "C" fn log_serial_write(
     unsafe { port.write(b'\n'); }
 }
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Install gos-log serial backend so log!() calls populate both the
     // COM1 serial stream and the in-kernel ring buffer (for the shell's
     // `log` command).
@@ -60,17 +80,26 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Minimal bootstrap only owns compatibility addressing and metadata schemas.
     gos_hal::vaddr::init();
     gos_hal::meta::init();
+    // ADR-018: bootloader_api 0.11 only maps physical memory when asked
+    // (BOOTLOADER_CONFIG above sets Mapping::Dynamic) -- the offset
+    // itself is carried as Optional<u64>, unwrapped once here.
+    let phys_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("bootloader did not map physical memory (check BOOTLOADER_CONFIG)");
     // Store the physical memory offset for DMA address translation in k-net and other drivers.
-    gos_hal::phys::set_phys_offset(boot_info.physical_memory_offset);
+    gos_hal::phys::set_phys_offset(phys_offset);
     log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "vaddr/meta/phys initialized");
 
-    // Phase I.3.1 — bring up the VGA mode-13h framebuffer (the
-    // bootloader's `vga_320x200` feature switched the card before
-    // entering `kernel_main`).  Clearing to Background immediately
-    // gives any observer in QEMU a "kernel is alive" signal instead
-    // of the leftover BIOS splash.
+    // Bring up the framebuffer (k_fb self-drives Bochs VBE/DispI via
+    // port I/O when present -- independent of what the bootloader set
+    // up, see crates/k-fb's own doc comment and ADR-018 §六 -- falling
+    // back to legacy VGA mode 13h otherwise, which this UEFI boot path
+    // does not set up). Clearing to Background immediately gives any
+    // observer in QEMU a "kernel is alive" signal instead of a blank
+    // screen.
     unsafe {
-        k_fb::init(boot_info.physical_memory_offset);
+        k_fb::init(phys_offset);
     }
     k_fb::clear(k_fb::Color::Background);
     // Header bar serves as the boot-progress indicator: dim teal

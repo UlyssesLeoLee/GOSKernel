@@ -4,10 +4,10 @@
 |---|---|
 | 文档编号 | GOS-DOC-06-01 |
 | 所属阶段 | 06・运维维护 |
-| 版本 / 状态 | v1.1 / 现行 |
+| 版本 / 状态 | v1.2 / 现行 |
 | 作成 / 审核 / 批准 | GOS 核心团队 |
 | 基线日期 | 2026-06-30 |
-| 最终更新 | 2026-07-01 |
+| 最终更新 | 2026-08-04 |
 
 **变更履历**
 
@@ -15,6 +15,7 @@
 |---|---|---|---|
 | v1.0 | 2026-06-30 | 纳入日系工程阶段目录（06_运维维护） | GOS 核心团队 |
 | v1.1 | 2026-07-01 | 补充文档管理信息 | GOS 核心团队 |
+| v1.2 | 2026-08-04 | [ADR-018](../ADR-018-bootloader-uefi-migration.md)：安装链迁移到 UEFI-only 镜像（`bootloader_api` 0.11.9），`cargo bootimage` 步骤替换为 `xtask image`；明确"BIOS/UEFI 启动菜单"不等价，本镜像只支持原生 UEFI 启动 | GOS 核心团队 |
 
 ---
 
@@ -53,19 +54,19 @@
 
 构建机需要：
 
-- Rust nightly
+- Rust nightly（钉版本 `nightly-2026-04-02`，见 [`rust-toolchain.toml`](../../rust-toolchain.toml)）
 - `rust-src`
 - `llvm-tools-preview`
-- `cargo bootimage`
 - PowerShell 7
 
 建议命令：
 
 ```powershell
-rustup toolchain install nightly
-rustup component add rust-src llvm-tools-preview --toolchain nightly
-cargo install bootimage --locked
+rustup toolchain install nightly-2026-04-02
+rustup component add rust-src llvm-tools-preview --toolchain nightly-2026-04-02
 ```
+
+不再需要 `cargo install bootimage`——[ADR-018](../ADR-018-bootloader-uefi-migration.md) 迁移后，镜像构建走 `bootloader_api`/`bootloader`（`=0.11.9`），是普通的 build-dependency，`xtask image` 会自动解析下载,不需要额外安装工具。
 
 ### 2. 生成安装包
 
@@ -101,9 +102,12 @@ pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-insta
 
 ## 在目标机器上启动
 
+**本镜像只支持原生 UEFI 启动**（[ADR-018](../ADR-018-bootloader-uefi-migration.md) 选定 UEFI-only，未产出 BIOS/MBR 镜像）——"BIOS/UEFI 启动菜单"不是同一件事,不要假设两者等价：
+
 1. 插入写好镜像的 U 盘。
-2. 进入 BIOS/UEFI 启动菜单。
-3. 选择该 U 盘启动。
+2. 进入目标机器的 UEFI 启动菜单（不是传统 BIOS 启动选择菜单，某些机器需要在固件设置里显式关闭"Legacy/CSM Boot"或类似选项才会显示 UEFI 启动项）。
+   - **Mac 机型**（本项目当前的真机验证目标：2014 Mac mini）：开机时按住 `Option`/`⌥` 键，等启动选择界面出现后选择标为"EFI Boot"的 U 盘条目。
+3. 选择该 U 盘的 UEFI 启动项。
 4. GOS 会引导进入当前的 builtin graph，并进入由 supervisor 持续服务的系统控制台。
 
 ## 当前限制
@@ -119,9 +123,9 @@ pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-insta
 
 ## 故障排查
 
-### `cargo bootimage` 失败
+### `xtask image` 失败
 
-如果在 Windows 上遇到 `llvm-objcopy.exe: permission denied`，优先使用 CI 产物，或者改在 Linux/WSL/GitHub Actions 上构建安装包。
+如果在 Windows 上遇到 `llvm-objcopy.exe: permission denied` 之类的构建工具权限错误，优先使用 CI 产物，或者改在 Linux/WSL/GitHub Actions 上构建安装包。
 
 ### U 盘写入失败
 
@@ -131,7 +135,7 @@ pwsh -File .\tools\write-usb-image.ps1 -ImagePath .\dist\gos-installer\gos-insta
 
 请检查：
 
-- BIOS/UEFI 是否允许从 USB 启动
+- 目标机器固件是否允许从 USB 启动 UEFI 镜像（部分机器需要先在固件设置里关闭"Legacy/CSM Boot",UEFI 启动项才会出现;本镜像不支持传统 BIOS/MBR 启动,这不是可以绕过的临时限制)
 - 目标机器是否识别该 U 盘
 - 镜像写入是否完整
 - 下载的安装包 SHA256 是否与 `installer-manifest.json` 一致

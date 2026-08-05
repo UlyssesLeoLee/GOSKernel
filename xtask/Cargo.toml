@@ -5,6 +5,15 @@ edition = "2021"
 
 [workspace]
 
+[dependencies]
+# ADR-018: pinned exact to match crates/gos-kernel's own bootloader_api
+# pin -- the bootloader stage checks this at boot time and panics on
+# any mismatch (verified the hard way in the ADR-018 spike). UEFI-only:
+# 0.11.9's own bundled BIOS-stage target JSON files use a schema this
+# project's pinned nightly rejects (ADR-018 §六), and UEFI is the only
+# mode the real target hardware (2014 Mac mini) needs.
+bootloader = { version = "=0.11.9", default-features = false, features = ["uefi"] }
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"

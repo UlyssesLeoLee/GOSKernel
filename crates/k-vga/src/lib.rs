@@ -124,8 +124,15 @@ unsafe fn state_mut(ctx: *mut ExecutorContext) -> &'static mut VgaState {
     unsafe { &mut *(ctx.state_ptr as *mut VgaState) }
 }
 
+// ADR-018: bootloader 0.9 + `map_physical_memory` identity-offset-mapped
+// all physical memory including low addresses like this one, so the
+// raw physical address doubled as a valid kernel virtual address.
+// bootloader_api 0.11's physical-memory mapping (gos-kernel's
+// BOOTLOADER_CONFIG, Mapping::Dynamic) picks an arbitrary offset
+// instead -- this needs gos_hal::phys::phys_offset() added in, same
+// pattern k-fb already uses for its own framebuffer physical address.
 fn text_buffer() -> *mut u16 {
-    VGA_TEXT_BUFFER_ADDR as *mut u16
+    (gos_hal::phys::phys_offset() + VGA_TEXT_BUFFER_ADDR as u64) as *mut u16
 }
 
 fn cell_index(row: usize, col: usize) -> usize {

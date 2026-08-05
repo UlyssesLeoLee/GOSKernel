@@ -21,9 +21,6 @@ jobs:
           toolchain: nightly-2026-04-02
           components: rust-src, llvm-tools-preview
 
-      - name: Install cargo-bootimage
-        run: cargo install bootimage --locked
-
       - name: Build Installer Package
         shell: pwsh
         run: ./tools/build-installer.ps1 -Profile release

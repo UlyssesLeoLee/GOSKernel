@@ -11,6 +11,8 @@
 //! Verbs:
 //!   check       — `cargo check -p gos-kernel` against the kernel target
 //!   test        — run every host-side test harness
+//!   image       — ADR-018: build a UEFI disk image (bootloader_api
+//!                 0.11.9, UEFI-only) from the compiled gos-kernel binary
 //!   all         — check + test (default)
 //!   verify      — placeholder, currently same as `all`; future home for
 //!                 the Rust port of `tools/verify-graph-architecture.ps1`
@@ -46,7 +48,9 @@ fn main() -> ExitCode {
         "check" => run_check(&workspace_root),
         "test" => run_test(&workspace_root),
         "lint" => run_lint(&workspace_root),
-        "qemu" => run_qemu_smoke(&workspace_root),
+        "image" => build_uefi_image(&workspace_root, release_flag(&args)).map(|_| ()),
+        "qemu" => run_qemu_smoke(&workspace_root, release_flag(&args)),
+        "run" => run_interactive(&workspace_root, release_flag(&args)),
         "check-interfaces" => run_check_interfaces(&workspace_root),
         "all" | "verify" => run_check(&workspace_root)
             .and_then(|_| run_test(&workspace_root))
@@ -76,8 +80,12 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "gos-xtask\n\nverbs:\n  check               cargo check -p gos-kernel (kernel target)\n  test                run every host-side harness\n  lint                cargo clippy on kernel + each host harness, -D warnings\n  qemu                boot kernel under QEMU; pass once steady-state marker seen\n  check-interfaces    verify interfaces/plugins.yaml matches Rust builtin_bundle\n  all                 check + test + lint + check-interfaces (default)\n  verify              alias for all\n  help                this message"
+        "gos-xtask\n\nverbs:\n  check               cargo check -p gos-kernel (kernel target)\n  test                run every host-side harness\n  lint                cargo clippy on kernel + each host harness, -D warnings\n  image [--release]   build a UEFI disk image (ADR-018) from the compiled kernel\n  run [--release]     interactive QEMU+OVMF boot with the full dev flag set (was `cargo run`)\n  qemu [--release]    boot kernel under QEMU+OVMF; pass once steady-state marker seen\n  check-interfaces    verify interfaces/plugins.yaml matches Rust builtin_bundle\n  all                 check + test + lint + check-interfaces (default)\n  verify              alias for all\n  help                this message"
     );
+}
+
+fn release_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--release")
 }
 
 fn run_check(root: &Path) -> Result<(), u8> {
@@ -165,40 +173,130 @@ fn run_lint(root: &Path) -> Result<(), u8> {
     Ok(())
 }
 
+/// Resolves the same `target/` directory `cargo` itself would use —
+/// respects `CARGO_TARGET_DIR` (set machine-wide in this project's dev
+/// environments to a shared cache dir outside the repo) rather than
+/// assuming `<root>/target`.
+fn cargo_target_dir(root: &Path) -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
+}
+
+fn kernel_binary_path(root: &Path, release: bool) -> PathBuf {
+    cargo_target_dir(root)
+        .join("x86_64-gos-kernel")
+        .join(if release { "release" } else { "debug" })
+        .join("gos-kernel")
+}
+
+/// ADR-018 — build a UEFI disk image from the compiled `gos-kernel`
+/// binary via `bootloader::UefiBoot` (pinned `=0.11.9`, `uefi`-only
+/// feature — see xtask/Cargo.toml's doc comment for why). Builds the
+/// kernel first as a fully separate `cargo build` invocation (not an
+/// artifact-dependency — rust-lang/cargo#10444/#10647 make that panic
+/// for a non-default-target artifact dep on this project's pinned
+/// nightly, see ADR-018 §四) against `crates/gos-kernel`'s existing
+/// custom target/build-std config, unchanged.
+fn build_uefi_image(root: &Path, release: bool) -> Result<PathBuf, u8> {
+    println!("xtask: cargo build -p gos-kernel{}", if release { " --release" } else { "" });
+    let mut build_args = vec!["build", "-p", "gos-kernel"];
+    if release {
+        build_args.push("--release");
+    }
+    let status = Command::new("cargo").args(&build_args).current_dir(root).status();
+    forward_status(status)?;
+
+    let kernel_path = kernel_binary_path(root, release);
+    if !kernel_path.is_file() {
+        eprintln!("xtask: expected kernel binary at {} but it doesn't exist", kernel_path.display());
+        return Err(2);
+    }
+
+    let image_path = cargo_target_dir(root).join("x86_64-gos-kernel").join(if release { "release" } else { "debug" }).join("gos-kernel-uefi.img");
+    println!("xtask: building UEFI disk image from {}", kernel_path.display());
+    bootloader::UefiBoot::new(&kernel_path)
+        .create_disk_image(&image_path)
+        .map_err(|err| {
+            eprintln!("xtask: UefiBoot::create_disk_image failed: {err}");
+            2u8
+        })?;
+    println!("xtask: wrote {}", image_path.display());
+    Ok(image_path)
+}
+
+/// Copies the OVMF/EDK2 UEFI firmware into the target dir so QEMU's
+/// `-drive if=pflash` (which needs a writable handle even with
+/// `readonly=on`) doesn't hit a Windows ACL denial against a stock
+/// `Program Files` install — verified the hard way in the ADR-018
+/// spike (`拒绝访问` / access denied pointing straight at the source).
+fn writable_ovmf_copy(root: &Path) -> Result<PathBuf, u8> {
+    let source = env::var_os("OVMF_CODE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:/Program Files/qemu/share/edk2-x86_64-code.fd"));
+    if !source.is_file() {
+        eprintln!(
+            "xtask: OVMF firmware not found at {} (set OVMF_CODE to override)",
+            source.display()
+        );
+        return Err(2);
+    }
+    let dest = cargo_target_dir(root).join("ovmf-code.fd");
+    std::fs::copy(&source, &dest).map_err(|err| {
+        eprintln!("xtask: failed to copy OVMF firmware to {}: {}", dest.display(), err);
+        2u8
+    })?;
+    Ok(dest)
+}
+
 /// Phase D.2 — QEMU smoke verb.
 ///
-/// Boots the kernel under QEMU via the workspace's `bootimage runner`
-/// (configured in `.cargo/config.toml`), tails stdout for the steady-
-/// state marker emitted right before the kernel starts servicing
-/// interrupts, then kills the child.  Pass if the marker is seen
-/// within `QEMU_SMOKE_TIMEOUT_SECS`; fail otherwise.
+/// ADR-018: boots the UEFI disk image (built via `build_uefi_image`)
+/// under QEMU+OVMF directly (no longer the `bootimage runner` —
+/// bootloader 0.9's `bootimage` subcommand doesn't exist for a
+/// bootloader_api 0.11 kernel), tails stdout for the steady-state
+/// marker emitted right before the kernel starts servicing interrupts,
+/// then kills the child.  Pass if the marker is seen within
+/// `QEMU_SMOKE_TIMEOUT_SECS`; fail otherwise.
 ///
 /// This is the foundation Phase I `gfx-smoke` and `gfx-interact` will
 /// build on — once Vulkan host-bridge lands, the same harness will
 /// add a `gfx: first frame submitted` marker check on top of this one.
 const QEMU_SMOKE_TIMEOUT_SECS: u64 = 90;
-const QEMU_SMOKE_MARKER: &str = "boot: enabling interrupts; entering steady-state";
+// ADR-018: this previously read "boot: enabling interrupts; entering
+// steady-state", which doesn't match any string main.rs actually emits
+// (found while verifying the UEFI migration boots -- a real kernel
+// reaching steady state, e.g. via the vk-input polling loop, was being
+// misreported as a smoke-test failure). The real log line is emitted
+// right before the steady-state loop starts.
+const QEMU_SMOKE_MARKER: &str = "interrupts enabled";
 
-fn run_qemu_smoke(root: &Path) -> Result<(), u8> {
+fn run_qemu_smoke(root: &Path, release: bool) -> Result<(), u8> {
+    let image_path = build_uefi_image(root, release)?;
+    let ovmf_path = writable_ovmf_copy(root)?;
+
     println!(
         "xtask: qemu smoke — booting kernel, watching for `{}` (timeout {}s)",
         QEMU_SMOKE_MARKER, QEMU_SMOKE_TIMEOUT_SECS
     );
 
-    // `cargo run -p gos-kernel` invokes the bootimage runner configured
-    // in .cargo/config.toml, which in turn launches qemu-system-x86_64
-    // with `-serial stdio`.  That redirects the kernel's serial port
-    // straight onto our captured stdout, which is what we tail below.
-    let mut child = match Command::new("cargo")
-        .args(["run", "-p", "gos-kernel"])
-        .current_dir(root)
+    let mut child = match Command::new("qemu-system-x86_64")
+        .arg("-drive")
+        .arg(format!("if=pflash,format=raw,readonly=on,file={}", ovmf_path.display()))
+        .arg("-drive")
+        .arg(format!("format=raw,file={}", image_path.display()))
+        .arg("-serial")
+        .arg("stdio")
+        .arg("-display")
+        .arg("none")
+        .arg("-no-reboot")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
         Err(err) => {
-            eprintln!("xtask: failed to spawn cargo run: {}", err);
+            eprintln!("xtask: failed to spawn qemu-system-x86_64: {}", err);
             return Err(1);
         }
     };
@@ -296,6 +394,36 @@ fn kill_child_tree(child: &mut std::process::Child, pid: u32) -> std::io::Result
         let _ = pid; // suppress unused warning
         child.kill()
     }
+}
+
+/// ADR-018 — interactive replacement for the old `cargo run -p
+/// gos-kernel` (which worked via `bootimage runner` +
+/// `[package.metadata.bootimage] run-args` in crates/gos-kernel/Cargo.toml
+/// -- both gone along with bootloader 0.9). Carries forward the same
+/// dev-flag set those `run-args` had: WHPX/TCG accel, COM1 to stdio,
+/// COM2/COM3 as TCP servers for gos-vk-viewer (14444/14445), the QEMU
+/// monitor on 45555, and an e1000 NIC on user-mode networking. Runs
+/// until the user kills it (Ctrl+C) or QEMU exits on its own.
+fn run_interactive(root: &Path, release: bool) -> Result<(), u8> {
+    let image_path = build_uefi_image(root, release)?;
+    let ovmf_path = writable_ovmf_copy(root)?;
+
+    println!("xtask: launching QEMU (interactive) — Ctrl+C to stop");
+    let status = Command::new("qemu-system-x86_64")
+        .arg("-drive")
+        .arg(format!("if=pflash,format=raw,readonly=on,file={}", ovmf_path.display()))
+        .arg("-drive")
+        .arg(format!("format=raw,file={}", image_path.display()))
+        .args(["-accel", "whpx", "-accel", "tcg"])
+        .args(["-serial", "stdio"])
+        .args(["-serial", "tcp:127.0.0.1:14444,server,nowait"])
+        .args(["-serial", "tcp:127.0.0.1:14445,server,nowait"])
+        .arg("-no-reboot")
+        .args(["-monitor", "telnet:127.0.0.1:45555,server,nowait"])
+        .args(["-netdev", "user,id=gosnet0"])
+        .args(["-device", "e1000,netdev=gosnet0,mac=52:54:00:12:34:56"])
+        .status();
+    forward_status(status)
 }
 
 /// L+ — validate that interfaces/plugins.yaml mentions exactly the

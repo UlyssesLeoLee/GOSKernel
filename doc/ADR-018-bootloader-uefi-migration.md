@@ -1,6 +1,6 @@
 # ADR-018：bootloader 0.9→0.11+ 迁移——UEFI 真机启动的第一步
 
-> 状态：**门禁已全部核实通过（UEFI 路径）——真实 UEFI+OVMF 端到端跑通，从固件到内核入口点全链路证据见 §六**；BIOS 路径发现独立、真实的不兼容项，建议真正迁移**只做 UEFI**（选项 A 的"BIOS+UEFI 并存"降级为"UEFI 优先，BIOS 视 §六发现另行评估"，原因见 §六）· 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
+> 状态：**已落地（UEFI-only，2026-08-04）**——`crates/gos-kernel` 正式迁移到 `bootloader_api = "=0.11.9"`，`xtask qemu` 端到端验证通过（23/23 builtin 模块、steady-state、framebuffer 全部工作），过程中发现并修复 4 个真实 bug，完整记录见 §七 · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
 >
 > 触发：用户在开发队列（ADR-006…017 + 拓扑指数族重构）完成后提供了具体目标——"我希望把它安装在 2014 年 macmini 上，用 U 盘引导"，并明确指示"你完成开发后再做安装包"。开发已完成（本 ADR 之前的全部提案待选向 ADR 均已按选项 A 落地），现在轮到安装包这一步——但落地前先摸清 ADR-013 §一 1.1 已经指出的"UEFI GOP 隐藏前提"到底有多大。
 
@@ -171,3 +171,22 @@ INFO : Jumping to kernel entry point at VirtAddr(0x203760)
    - **QEMU 环境**（有 Bochs DispI/stdvga 设备,与固件是 BIOS 还是 UEFI 无关）下,`try_set_hd_mode` 探测会成功,`k_fb` 走自驱动路径,**完全不受本次 bootloader 迁移影响**——本 ADR 的迁移可以只改 boot 入口/`BootInfo` 字段访问,不用碰 `k_fb`,QEMU 验证依然有效。
    - **真机（2014 Mac mini,Intel 集成显卡,非 Bochs DispI 兼容)**下,`try_set_hd_mode` 会失败,退回 legacy mode 13h 路径——但这条路径依赖的 `vga_320x200` bootloader feature 在 0.11/UEFI 下**不存在**（UEFI 固件没有"BIOS INT 10h 模式 13h"这个概念),意味着**真机上 `k_fb` 目前两条路径都不可用,会黑屏**,直到有一条消费 `BootInfo.framebuffer`（真正的 UEFI GOP 线性帧缓冲)的新路径。
    - 这**不是本次迁移新引入的缺口**——正是 [ADR-013](./ADR-013-real-hardware-display-mvp.md) 已经明确拆出、标注为"独立、待 bootloader 迁移完成、等 #45 真机解除阻塞后才是验证合适时机"的那部分工作（UEFI GOP backend)。本 ADR 完成后,`BootInfo.framebuffer` 终于存在,那项工作的前置条件被满足,但**实现它本身不在本 ADR 门禁内**——迁移本身（内核能启动、串口/shell 能用、QEMU 下图形照常)与"真机上有画面"是两个不同的判据,前者是本 ADR 的范围,后者留给 ADR-013 那条独立线。
+
+## 七、真正迁移已落地（2026-08-04，同一 session 内完成）——QEMU+OVMF 端到端验证通过
+
+`crates/gos-kernel` 从 `bootloader = "0.9.23"` 迁移到 `bootloader_api = "=0.11.9"`（UEFI-only，`xtask` 新增 `image`/`run`/`qemu` 三个子命令承接原 `cargo bootimage`/`cargo run`/`Makefile` 工作流)。过程中发现并修复了**四个真实 bug**，全部是"旧 bootloader 的宽松内存布局掩盖了既有假设，新 bootloader 的精确布局把它们暴露成硬故障"这同一类问题的不同实例：
+
+1. **物理内存映射不再默认开启**——`Mappings::physical_memory` 默认 `None`（0.9 的 `map_physical_memory` feature 总是开)。`main.rs` 新增 `BOOTLOADER_CONFIG` 显式设 `Mapping::Dynamic`。
+2. **`k-vga`/`fbtest.rs` 硬编码物理地址 `0xB8000`**（VGA 文本模式诊断输出)当裸虚拟地址用，从未加 `phys_offset`——0.9 的映射方案下低地址物理页恰好可能落在可用虚拟范围内（未证实为设计保证，只是没炸)，0.11 的 `Dynamic` 映射下这是一个未映射地址，第一次写入即触发 page fault→双重错误→三重错误（QEMU `-no-reboot` 下表现为进程干净退出，容易误判成"卡住"而非崩溃)。两处都改成 `gos_hal::phys::phys_offset() + 0xB8000`，与 `k-fb` 自己的做法同型。
+3. **默认内核栈 80 KiB 不够**（`bootloader_api` 文档:默认值 + guard page，0.9 无此机制，此前只是静默腐化相邻内存，从未表现为故障)——GOS 的启动调用深度（`gos_supervisor::bootstrap`/`gos_runtime::reset` 等)会踩进 guard page。改为显式 `config.kernel_stack_size = 1 MiB`（经验值，非量测下限)。
+4. **`k-pmm`/`k-vmm`/`gos-hal` 仍直接依赖 `bootloader = "0.9.23"`**，且在 `on_init` 回调里把 `main.rs` 传下来的裸指针（现在指向新 `bootloader_api::BootInfo` 布局)强行转型成旧 `bootloader::BootInfo` 读取——一次类型混淆，读出的 `memory_map`/`physical_memory_offset` 是垃圾数据。表现为一条指向**旧 `bootloader-0.9.34` crate 自身源码**的 panic（`memory_map.rs:72`，"range end index ... out of range"）——panic 位置本身就是排查这个 bug 的关键线索。`k-pmm` 迁移到 `bootloader_api::info::{MemoryRegion, MemoryRegionKind}`（字段形状不同：`region.range.start_addr()`→`region.start` 等)；`k-vmm` 同理迁移 `physical_memory_offset` 读取（新类型 `Optional<u64>`，`.into_option()` 而非旧 `Option<u64>` 的恒等 `.into()`)；`gos-hal` 的 `bootloader` 依赖经核实**从未被使用**，直接删除，不是迁移目标。
+
+**排障方法**：不是靠猜，是靠临时二分诊断日志（在 `boot_builtin_graph` 逐阶段插 `raw_serial_println`，定位到具体在哪一步炸)+ QEMU `-d int,cpu_reset` 读取 `CR2`/`RIP`/`RSP` 精确定位故障地址与触发指令，每次缩小范围一步——四个 bug 是循序浮现的（先解决 1 才能看到 2，先解决 3 才能看到 4)，不是一次性发现的。诊断日志已在修复确认后移除，不留存到生产代码。
+
+**验证证据**（`xtask qemu`，OVMF+QEMU，非模拟)：`xtask: qemu smoke PASS — marker observed`。完整链路：UEFI 固件找到并启动磁盘的 UEFI 引导项 → `bootloader_api` 阶段初始化 1280×800 framebuffer、映射物理内存、创建 bootinfo → 跳转内核入口点 → `kernel_main entered` → FPU/SSE 使能 → `k_fb` 自驱动 Bochs VBE 上屏（1920×1200)→ 23/23 builtin 模块发现+加载 → manifest graph 同步 → supervisor 实现 23/23 模块、17 个已发布能力、0 失败 → graph ready（28 节点/66 边)→ GDT/IDT/PIC 就绪 → ring3 syscall 武装 → **`interrupts enabled — steady-state loop`** → desktop/framebuffer 初始化（1920×1080)→ `vk-input` 轮询持续产生（本 session 全程用来确认"内核跑到稳态"的同一个信号)。
+
+顺带修了两处与本迁移相关、但独立发现的问题：(a) `xtask` 的 `QEMU_SMOKE_MARKER` 常量字符串与 `main.rs` 实际输出的日志文本从未匹配过（`"boot: enabling interrupts; entering steady-state"` vs 实际的 `"interrupts enabled — steady-state loop"`）——这是迁移前就存在的 bug，验证时顺带发现并修正；(b) `tools/build-installer.ps1` 把 `doc/INSTALL_BARE_METAL_zh.md`（单行 stub，指向真正的 `doc/06_运维维护/INSTALL_BARE_METAL_zh.md`）打进每一个安装包——同样是迁移前就存在、借这次改脚本的机会一并修正。
+
+**改动范围**（全部本 session 完成，已验证 `cargo check --workspace`、`tools/verify-graph-architecture.ps1`、`xtask test`（14 个 test result 块全绿）、`xtask qemu` 全部通过）：`crates/gos-kernel`（`Cargo.toml` + `main.rs` + `fbtest.rs`）、`crates/k-pmm`、`crates/k-vmm`、`crates/k-vga`、`crates/gos-hal`（删除未用依赖）、`xtask`（新增 `image`/`run` 子命令，修正 `qemu` 子命令的 marker + 直接调用 QEMU/OVMF 而非 `bootimage runner`）、`.cargo/config.toml`、`Makefile`、`.github/workflows/installer-artifact.yml`、`tools/build-installer.ps1`、`doc/06_运维维护/INSTALL_BARE_METAL_zh.md`。
+
+**未做（明确不在本次范围内）**：UEFI GOP 真机图形路径（ADR-013 的独立线，见 §一第 7 条)；BIOS 双启动（§六已论证放弃,原因是 `bootloader` 自带 target JSON schema 不兼容 + 真机目标本就需要 UEFI)；真机（2014 Mac mini)实测——本 ADR 的验证判据是 QEMU+OVMF,真机验证是 installer 工作本身的判据,不是这个迁移 ADR 的。

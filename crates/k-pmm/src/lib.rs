@@ -29,7 +29,7 @@ mod post;
 // MERGE (p)-[:EXPORTS]->(cap_memory_frame_alloc)
 // ============================================================
 
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use gos_hal::{meta, vaddr};
 use gos_protocol::*;
 use spin::Mutex;
@@ -124,17 +124,17 @@ pub struct BitmapFrameAllocator {
 impl BitmapFrameAllocator {
     /// Bootstrap the allocator from the bootloader memory map.
     ///
-    /// All frames start as USED. Only `MemoryRegionType::Usable` regions are
+    /// All frames start as USED. Only `MemoryRegionKind::Usable` regions are
     /// freed into the bitmap.
     ///
     /// # Safety
     /// Must be called exactly once, before any allocation. Accesses
     /// `static mut BITMAP` and `static mut SUMMARY`.
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_map: &[MemoryRegion]) -> Self {
         // Determine the highest physical address reported by the bootloader.
         let mut max_addr: u64 = 0;
         for region in memory_map.iter() {
-            let end = region.range.end_addr();
+            let end = region.end;
             if end > max_addr {
                 max_addr = end;
             }
@@ -148,12 +148,12 @@ impl BitmapFrameAllocator {
 
         // Free frames that belong to usable regions.
         for region in memory_map.iter() {
-            if region.region_type != MemoryRegionType::Usable {
+            if region.kind != MemoryRegionKind::Usable {
                 continue;
             }
 
-            let start_frame = (region.range.start_addr() / PAGE_SIZE) as usize;
-            let end_frame = ((region.range.end_addr() / PAGE_SIZE) as usize).min(total_frames);
+            let start_frame = (region.start / PAGE_SIZE) as usize;
+            let end_frame = ((region.end / PAGE_SIZE) as usize).min(total_frames);
 
             for frame_idx in start_frame..end_frame {
                 if frame_idx >= MAX_PHYS_FRAMES {
@@ -393,8 +393,8 @@ unsafe extern "C" fn pmm_on_init(_ctx: *mut ExecutorContext) -> ExecStatus {
         meta::burn_node_metadata(p, "SYS", "PMM");
 
         let boot_info_payload = BOOT_INFO_PTR;
-        let boot_info_ptr = boot_info_payload as *const bootloader::BootInfo;
-        let memory_map = &(*boot_info_ptr).memory_map;
+        let boot_info_ptr = boot_info_payload as *const bootloader_api::BootInfo;
+        let memory_map: &[MemoryRegion] = &(*boot_info_ptr).memory_regions;
 
         let alloc = BitmapFrameAllocator::init(memory_map);
 
@@ -474,7 +474,6 @@ pub const PLUGIN_DESCRIPTOR: BuiltinPluginDescriptor = BuiltinPluginDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bootloader::bootinfo::{MemoryRegion, MemoryRegionType, MemoryMap};
 
     #[test]
     fn test_bitmap_alloc_dealloc() {
@@ -485,15 +484,10 @@ mod tests {
 
             // Create a mock memory map with one usable region [4MB, 8MB)
             // This contains (8-4)*1024/4 = 1024 frames.
-            let mut mmap = MemoryMap::default();
-            mmap.add_region(MemoryRegion {
-                range: bootloader::bootinfo::MemoryRange::new(0, 0x400000),
-                region_type: MemoryRegionType::Reserved,
-            });
-            mmap.add_region(MemoryRegion {
-                range: bootloader::bootinfo::MemoryRange::new(0x400000, 0x800000),
-                region_type: MemoryRegionType::Usable,
-            });
+            let mmap = [
+                MemoryRegion { start: 0, end: 0x400000, kind: MemoryRegionKind::Bootloader },
+                MemoryRegion { start: 0x400000, end: 0x800000, kind: MemoryRegionKind::Usable },
+            ];
 
             let mut alloc = BitmapFrameAllocator::init(&mmap);
             

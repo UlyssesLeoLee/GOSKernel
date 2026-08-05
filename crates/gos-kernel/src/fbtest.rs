@@ -779,7 +779,10 @@ fn draw_console(fb: &mut [u32], n: usize, ne: usize) {
     let _ = draw_str(fb, x, oy + 28, " edges", dim);
     draw_str(fb, ox, oy + 52, "ESC, the X (top-right), or right-click: return to the 3D desktop, where the console becomes a red sphere", dim);
     draw_str(fb, ox, oy + 86, "gos> _", green);
-    let text = 0xB8000 as *const u16;
+    // ADR-018: raw physical 0xB8000 needs gos_hal::phys::phys_offset()
+    // added in under bootloader_api 0.11's dynamic physical-memory
+    // mapping -- see k-vga's text_buffer() for the same fix.
+    let text = (gos_hal::phys::phys_offset() + 0xB8000) as *const u16;
     let mut row = 0usize;
     while row < 22 {
         let mut col = 0usize;
