@@ -1,6 +1,6 @@
 # ADR-019：POSIX 原生用户态进程——fork/exec/信号的图论原生语义
 
-> 状态：**提案待选向（子分叉，见 §二）** · 提案日期：2026-08-05 · 配套：[ADR-014](./ADR-014-process-as-subgraph-compat-strategy.md)（§二进程=子图映射已落地；§六记录选向 B，本 ADR 是 B 自己要求的"各自独立 ADR"里第一个动笔的）、[ADR-018](./ADR-018-bootloader-uefi-migration.md)（真实 ELF header 解析证实内核当前加载在低半区 `0x200000`，是本 ADR §一发现的关键阻塞项的直接证据）
+> 状态：**§五第 1 项已落地（2026-08-05）；fork/exec/信号本体仍待你在 §二/§三选向** · 提案日期：2026-08-05 · 配套：[ADR-014](./ADR-014-process-as-subgraph-compat-strategy.md)（§二进程=子图映射已落地；§六记录选向 B，本 ADR 是 B 自己要求的"各自独立 ADR"里第一个动笔的）、[ADR-018](./ADR-018-bootloader-uefi-migration.md)（真实 ELF header 解析证实内核当前加载在低半区 `0x200000`，是本 ADR §一发现的关键阻塞项的直接证据）
 >
 > 口径：用户在选定 ADR-014 选项 B 时明确追加约束（原话）："并且要做成适合图论构造的形式"——本 ADR 的方法论因此倒过来：先问"这件事在'一切皆图重写'模型里最自然的图操作是什么"，再检验它是否满足 POSIX 语义期望，不允许"POSIX 语义 + 图数据库外壳"这种退化写法。
 
@@ -63,8 +63,9 @@
 
 ## 五、建议的落地顺序（供参考，不是门禁内容）
 
-1. **内核高半区重定位**——§1.3 发现的单点阻塞，优先级最高：一旦完成，B.4.1（域根创建）+ B.4.4（CR3 切换框架）这两块已经写好的代码几乎不需要改动就能真正激活。这本身是一个不小的工程（链接方式、`code-model`、boot 早期虚拟地址假设都要重新过一遍——量级上接近 ADR-018 的迁移，但范围更窄，是纯内部改动，不涉及外部工具链选型）。
-2. **`CreateNode` 参数化**——§1.4 的独立小缺口，无依赖，可以随时先做。
+1. **内核高半区重定位**——✅ **已落地（2026-08-05）**。§1.3 发现的单点阻塞，优先级最高：一旦完成，B.4.1（域根创建）+ B.4.4（CR3 切换框架）这两块已经写好的代码几乎不需要改动就能真正激活。实现：`x86_64-gos-kernel.json` 加 `code-model=kernel`，`.cargo/config.toml` 对该 target 加 `-C link-arg=--image-base=0xffffffff80000000`（PML4 index 511，落在 `create_isolated_address_space` 已经克隆的 256..512 范围内）。真机验证：ELF `PT_LOAD` 确实搬到高半区，QEMU+OVMF 端到端跑到 steady-state，一次成功。
+   过程中发现并顺带修的一个更深的问题："B.4.4 只是等内核搬到高半区就能激活"这个假设本身不完整——boot-time PML4 index 诊断（临时加、验完即删）实测发现 bootloader_api 的动态映射（内核栈、`phys_offset` 窗口、`BootInfo`）落在低位索引（这次实测：栈=2、phys_offset=4、boot_info=6），根本不在 256..512 里；`k_vmm::create_isolated_address_space` 因此改为克隆**整个** PML4（而不只是 256..512），域私有窗口（`gos-supervisor::DOMAIN_BASE`）在克隆后显式清零以保持隔离性。修完之后把 `cr3_switch_into`/`cr3_restore`（B.4.4）从硬编码 no-op 换成真实的 `Cr3::read_raw`/`write_raw`，QEMU 实测：boot 期间 13 次 bracket 调用，13 次真实 CR3 写入，一一对应，内核仍然干净跑到 steady-state（23/23 模块、23/23 域、0 失败）；`gos-supervisor-harness` 25/25 host test 全过。这两次校验（switch count 对账）作为永久性 boot-time 健康检查保留在 `crates/gos-kernel/src/main.rs`。详见 commit `cf6a840`、`d8380cf`。
+2. **`CreateNode` 参数化**——§1.4 的独立小缺口，无依赖，可以随时先做。**下一步。**
 3. **验证 ring3 syscall trampoline 真的工作**——第一次真实触发一次 `syscall` 指令，不需要等前两项，可以用一个精简的、直接嵌入 boot 流程的测试路径验证（不必是真正的用户进程，先证明"trampoline 本身接得住"）。
 4. **`gos-loader` 的 ET_DYN 解析器复用到新的隔离加载路径**——解析/重定位逻辑复用，加载目标从"内核空间"换成"isolated domain"，依赖第 1 项。
 5. **`exec`**——依赖第 1、2、4 项，不依赖 `fork`，可以先做。
