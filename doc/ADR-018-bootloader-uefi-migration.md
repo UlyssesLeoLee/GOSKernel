@@ -166,3 +166,8 @@ INFO : Jumping to kernel entry point at VirtAddr(0x203760)
 4. `.cargo/config.toml`：继续保留 `[build] target = "x86_64-gos-kernel.json"` + `build-std`（§五已论证不建议换内建 target);`bootimage runner` 换成指向新 xtask 子命令的 runner,或迁移期间先用显式命令代替 `cargo run` 的隐式 runner。
 5. `Makefile`/`.github/workflows/installer-artifact.yml`/`tools/build-installer.ps1`：`cargo install bootimage` + `cargo bootimage` 整条链路替换为新 xtask 命令;`tools/write-usb-image.ps1` 需要确认 `UefiBoot::create_disk_image` 的产物格式（本次验证用的是单一 raw 磁盘镜像,GPT/ESP 结构内嵌,与现有"整镜像 dd 到 U 盘"的写入方式兼容,不需要新脚本逻辑)。
 6. `doc/06_运维维护/INSTALL_BARE_METAL_zh.md`：把"进入 BIOS/UEFI 启动菜单"改为明确的"UEFI 启动菜单/按住 Option 键选 EFI Boot"（含 Mac 特有步骤),不再暗示两者等价。
+
+**7. 迁移前发现的关键澄清（`crates/k-fb` 的图形路径与本迁移的关系)**：核实了 `k_fb::init`（[`crates/k-fb/src/lib.rs:216`](../crates/k-fb/src/lib.rs)）——它不是单一路径,而是"HD"（自驱动 Bochs VBE/DispI,端口 I/O 直接探测+编程显卡,与 bootloader 的模式设置完全无关)优先,失败才退回"legacy mode 13h"（依赖 `bootloader 0.9` 的 `vga_320x200` feature 提前切好模式,读固定物理地址 `0xA0000`)。这意味着：
+   - **QEMU 环境**（有 Bochs DispI/stdvga 设备,与固件是 BIOS 还是 UEFI 无关）下,`try_set_hd_mode` 探测会成功,`k_fb` 走自驱动路径,**完全不受本次 bootloader 迁移影响**——本 ADR 的迁移可以只改 boot 入口/`BootInfo` 字段访问,不用碰 `k_fb`,QEMU 验证依然有效。
+   - **真机（2014 Mac mini,Intel 集成显卡,非 Bochs DispI 兼容)**下,`try_set_hd_mode` 会失败,退回 legacy mode 13h 路径——但这条路径依赖的 `vga_320x200` bootloader feature 在 0.11/UEFI 下**不存在**（UEFI 固件没有"BIOS INT 10h 模式 13h"这个概念),意味着**真机上 `k_fb` 目前两条路径都不可用,会黑屏**,直到有一条消费 `BootInfo.framebuffer`（真正的 UEFI GOP 线性帧缓冲)的新路径。
+   - 这**不是本次迁移新引入的缺口**——正是 [ADR-013](./ADR-013-real-hardware-display-mvp.md) 已经明确拆出、标注为"独立、待 bootloader 迁移完成、等 #45 真机解除阻塞后才是验证合适时机"的那部分工作（UEFI GOP backend)。本 ADR 完成后,`BootInfo.framebuffer` 终于存在,那项工作的前置条件被满足,但**实现它本身不在本 ADR 门禁内**——迁移本身（内核能启动、串口/shell 能用、QEMU 下图形照常)与"真机上有画面"是两个不同的判据,前者是本 ADR 的范围,后者留给 ADR-013 那条独立线。
