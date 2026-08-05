@@ -23,9 +23,10 @@ mod post;
 
 use core::ptr;
 use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
-    PhysFrame, Size4KiB,
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable,
+    PageTableFlags, PhysFrame, Size4KiB,
 };
 use x86_64::{PhysAddr, VirtAddr};
 use gos_hal::{meta, vaddr};
@@ -161,8 +162,30 @@ pub unsafe fn create_isolated_address_space(
         page_table_for_phys(active_frame.start_address().as_u64())
     };
 
-    for idx in 256..512 {
+    // Clone the ENTIRE active PML4 into the new domain root, not just the
+    // 256..512 "kernel high half" range this used to assume. ADR-019
+    // §五-1 found (empirically, via a boot-time PML4-index dump) that
+    // bootloader_api's dynamic mappings -- the kernel's own stack,
+    // phys_offset window, and BootInfo -- land at whatever low PML4 index
+    // the bootloader's first-fit allocator picks (observed: stack=2,
+    // phys_offset=4, boot_info=6), not inside 256..512. A domain root
+    // that only carried the high half would fault on the very next stack
+    // access after a real CR3 switch. Cloning everything is safe: the
+    // domain's own private image/stack/ipc window (a distinct PML4 slot
+    // chosen by gos-supervisor's DOMAIN_BASE specifically to avoid the
+    // kernel's own live mappings) is explicitly zeroed right below, so
+    // nothing about domain isolation weakens.
+    for idx in 0..512 {
         new_root[idx] = active_root[idx].clone();
+    }
+
+    // The domain-private window must start genuinely empty rather than
+    // inherit whatever (nothing, today) the active root has at that PML4
+    // slot -- without this, a future change to the active root could leak
+    // parent mappings into a supposedly isolated domain.
+    for base in [image_base, stack_base, ipc_base] {
+        let idx = ((base >> 39) & 0x1FF) as usize;
+        new_root[idx] = PageTableEntry::new();
     }
 
     map_anonymous_window(

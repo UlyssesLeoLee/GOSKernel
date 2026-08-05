@@ -171,6 +171,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     unsafe { ring3::init(); }
     log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "ring3 syscall surface armed (STAR/LSTAR)");
 
+    // Boot-time sanity check (ADR-019 §五-1): every bracketed native
+    // dispatch should have produced a real Cr3::write_raw -- if these two
+    // counts ever diverge, the CR3 trampoline is silently short-circuiting
+    // again (e.g. a future domain root missing a PML4 clone) and isolated
+    // domains are back to implicitly sharing the caller's CR3.
+    log!(LogLevel::Info, *b"SUPERVISOR\0\0\0\0\0\0",
+        "cr3 trampoline: domain_switch_count={} real_cr3_switch_count={}",
+        gos_runtime::domain_switch_count(), gos_supervisor::real_cr3_switch_count());
+
     log!(LogLevel::Info, *b"BOOT\0\0\0\0\0\0\0\0\0\0\0\0", "interrupts enabled — steady-state loop");
     x86_64::instructions::interrupts::enable();
 

@@ -2831,40 +2831,81 @@ unsafe extern "C" fn trampoline_leave(token: u64) {
     cr3_restore(token);
 }
 
+/// ADR-019 §五-1 verification counter (temporary): counts real
+/// `Cr3::write_raw` calls inside `cr3_switch_into`, distinct from
+/// `gos_runtime::domain_switch_count()` which counts every bracket
+/// invocation regardless of whether the target/current CR3 short-circuit
+/// checks skipped the actual hardware write. Lets a one-time boot log
+/// confirm the switch genuinely fired rather than silently no-op'ing.
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-unsafe fn cr3_switch_into(_target_root: u64) -> u64 {
-    // Phase B.4.4 trampoline — *intentionally a no-op on real boot
-    // today*.  The reason:
-    //
-    //   build_domain (k_vmm::create_isolated_address_space) clones
-    //   only the kernel HIGH half (PML4 entries 256..512) into each
-    //   per-module PML4.  The kernel binary itself, however, is
-    //   loaded by bootloader 0.9 into a virtual address that lives in
-    //   the LOWER half.  Switching CR3 to a domain root with no
-    //   lower-half mapping would unmap the kernel's own .text
-    //   immediately — next instruction fetch -> #PF on an empty page
-    //   table -> #DF (no IST stack mapped here either) -> triple
-    //   fault.
-    //
-    //   Until ELF user-mode plugins arrive (Phase G.1.x) and the
-    //   kernel is moved into the high half by a linker-script /
-    //   bootloader switch, every running module is Privilege::Kernel
-    //   and shares the kernel's CR3 anyway — the switch would be a
-    //   no-op even with a correct PML4, just slower.
-    //
-    // The trampoline's API surface (DomainGuard, install_domain_switch,
-    // domain_switch_count, the host harness test
-    // `domain_switch_hook_brackets_every_native_dispatch`) all stay
-    // exactly as they were — only the kernel's switch implementation
-    // is neutered.  When the kernel base flips to the high half the
-    // body below restores cleanly.
-    0
+static REAL_CR3_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+pub fn real_cr3_switch_count() -> u64 {
+    REAL_CR3_SWITCH_COUNT.load(Ordering::Relaxed)
 }
 
 #[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
-unsafe fn cr3_restore(_token: u64) {
-    // Mirror of cr3_switch_into: no-op on real boot until the kernel
-    // image lives in the high half.  See cr3_switch_into above.
+unsafe fn cr3_switch_into(target_root: u64) -> u64 {
+    // Phase B.4.4 trampoline — real CR3 switch as of ADR-019 §五-1.
+    //
+    //   Two preconditions had to land first: (1) the kernel image itself
+    //   now links at the high half (0xffffffff80000000, see
+    //   x86_64-gos-kernel.json's code-model=kernel + the --image-base
+    //   link-arg), and (2) k_vmm::create_isolated_address_space clones
+    //   the ENTIRE active PML4 into every domain root, not just
+    //   256..512 — a boot-time diagnostic found the bootloader's own
+    //   dynamic mappings (kernel stack, phys_offset window, BootInfo)
+    //   land at low PML4 indices (observed: 2/4/6), which a
+    //   high-half-only clone would have left unmapped, faulting on the
+    //   very next stack access after this function's own `mov cr3`.
+    //
+    //   With both fixed, every domain root carries the same kernel
+    //   .text/.stack/.phys-window mappings the live boot root has, plus
+    //   its own private image/stack/ipc window at a PML4 slot
+    //   (DOMAIN_BASE) chosen to never collide with the kernel's own
+    //   live mappings — so the switch is safe for native (still
+    //   kernel-code) dispatch today, and is the same mechanism ELF
+    //   user-mode plugins (Phase G.1.x) will ride once they have real
+    //   per-domain images to switch *into*.
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PhysFrame;
+    use x86_64::PhysAddr;
+
+    if target_root == 0 {
+        return 0;
+    }
+    let (current_frame, current_flags) = Cr3::read_raw();
+    let current_phys = current_frame.start_address().as_u64();
+    if current_phys == target_root {
+        return 0;
+    }
+    let Ok(new_frame) = PhysFrame::from_start_address(PhysAddr::new(target_root)) else {
+        return 0;
+    };
+    let token = current_phys | (current_flags as u64);
+    REAL_CR3_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    unsafe { Cr3::write_raw(new_frame, current_flags); }
+    token
+}
+
+#[cfg(all(feature = "kernel-vmm", not(any(test, feature = "host-testing"))))]
+unsafe fn cr3_restore(token: u64) {
+    // Counterpart to cr3_switch_into. `token` is 0 exactly when enter()
+    // short-circuited (no switch happened), so this stays a no-op then.
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PhysFrame;
+    use x86_64::PhysAddr;
+
+    if token == 0 {
+        return;
+    }
+    let phys = token & 0x000F_FFFF_FFFF_F000;
+    let flags = (token & 0xFFF) as u16;
+    let Ok(frame) = PhysFrame::from_start_address(PhysAddr::new(phys)) else {
+        return;
+    };
+    unsafe { Cr3::write_raw(frame, flags); }
 }
 
 #[cfg(any(test, feature = "host-testing"))]
