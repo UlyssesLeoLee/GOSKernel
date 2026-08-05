@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "toy-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bootloader_api = "0.11"
+
+[[bin]]
+name = "toy-kernel"
+path = "src/main.rs"

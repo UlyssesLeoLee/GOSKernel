@@ -1,6 +1,6 @@
 # ADR-018：bootloader 0.9→0.11+ 迁移——UEFI 真机启动的第一步
 
-> 状态：**提案待选向** · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
+> 状态：**选项 A 已选向**（2026-08-04，用户选择"迁移，BIOS+UEFI 并存"）；**spike 已完成，发现真实阻塞项——见 §四** · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
 >
 > 触发：用户在开发队列（ADR-006…017 + 拓扑指数族重构）完成后提供了具体目标——"我希望把它安装在 2014 年 macmini 上，用 U 盘引导"，并明确指示"你完成开发后再做安装包"。开发已完成（本 ADR 之前的全部提案待选向 ADR 均已按选项 A 落地），现在轮到安装包这一步——但落地前先摸清 ADR-013 §一 1.1 已经指出的"UEFI GOP 隐藏前提"到底有多大。
 
@@ -76,3 +76,25 @@
 - **不牺牲已验证路径**：迁移产出必须同时保留 BiosBoot 镜像（供 QEMU 开发流、CI `graph-governance.yml` 继续用),UefiBoot 是**新增**产线,不是替换——选项 A 与 B 的门禁分界点就在这里,本 ADR 选向前默认按 A 的"共存"要求设计 spike。
 - **真机验证时间点对齐 #45**：即使 spike + 迁移都完成,"UEFI GOP 在 2014 Mac mini 上真正点亮画面"仍然是 ADR-013 §1.3 所说的"等真机解除阻塞才是验证的合适时机"——本 ADR 的门禁只到"迁移后 QEMU+OVMF 里能引导到 `kernel_main`,能读到非空 `BootInfo.framebuffer`",不包括"已经在真机上启动过"（那是 §45/installer 验证本身的判据,不是这个迁移 ADR 的)。
 - **选项 A/B/C 最终选向留给用户**——本 ADR 只确认迁移的存在、大致形状与门禁,不替用户拍板选哪个,mirrors ADR-014 的 WASI/POSIX 分叉处理方式。
+
+## 四、spike 结果（2026-08-04）——发现真实阻塞项，不是假设性风险
+
+按 §三门禁"spike 先行"，在 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/)（独立 `[workspace]`，未加入根 `Cargo.toml` members，不影响主仓库构建）里搭了一个最小 `no_std`/`no_main` 玩具内核（`bootloader_api::entry_point!` + 写 framebuffer 前 64×64 像素为绿色），验证 §一 1.2 描述的"新构建拓扑"能否在本仓库固定的 `nightly-2026-04-02` 上跑通。
+
+**方法论修正（本身也是发现）**：第一次尝试直接用 `bootloader` 上游文档推荐的 artifact-dependency 方式（`kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }` + `.cargo/config.toml` 的 `[unstable] bindeps = true`）在仓库内跑，先后踩了两个环境坑：(1) `-Z bindeps` 对"artifact dependency 指定非默认 target"这个组合有一个至今未修的 cargo 自身 bug（[rust-lang/cargo#10444](https://github.com/rust-lang/cargo/issues/10444)、[#10647](https://github.com/rust-lang/cargo/issues/10647)，`unit_dependencies.rs:201` panic "no entry found for key"）——**放弃 artifact-dependency 方案本身**，改用 bootloader 自己文档里并列提到的替代形状："kernel 单独 `cargo build`，一个不含 build.rs 的普通 host 二进制工具读取产物路径调 `BiosBoot`/`UefiBoot`"，这与本仓库现有 `bootimage` 流程的"两步"结构同型，且规避了 bindeps。(2) 在 `E:\GOSKernel` 目录树内跑任何 cargo 命令都会向上找到 [`.cargo/config.toml`](../.cargo/config.toml) 并把**宿主侧工具自身**也强制交叉编译到 `x86_64-gos-kernel.json`——这解释了 `Makefile`（`cd /tmp && cargo +nightly test --manifest-path ...`）与全部 `host-tests/*` 为什么必须从仓库目录树**外**运行，不只是"避免 build-std 继承"这一句注释字面意思。spike 同样必须从 `/tmp` 之类的目录外跑,并显式 `cargo +nightly-2026-04-02`（`/tmp` 没有 `rust-toolchain.toml` 祖先,默认解析到 `stable`,而 bootloader 自身 build.rs 内部要跑 `-Z` 需要 nightly)。
+
+**真实阻塞项（排除以上两个方法论干扰后,复现两次)**：`bootloader` 的 UEFI/BIOS stage 二进制自身依赖 `x86_64` crate（与本项目 `crates/gos-kernel` 依赖的 `x86_64 = "0.14"` 是**同一个上游 crate 家族,不同版本**),而这个 crate 的 `Step` trait 实现随版本经历了至少三个不兼容的不稳定 API 形状,`nightly-2026-04-02` 精确卡在中间那一档:
+
+| `x86_64` 版本 | 来源 | `Step` 期望形状 | 本 nightly 实际结果 |
+|---|---|---|---|
+| v0.14.10 | `bootloader = "=0.11.7"` 拉的 | `steps_between() -> Option<usize>`（旧形状) | **E0053**：本 nightly 的 `Step` 已要求 `-> (usize, Option<usize>)`,旧形状不兼容 |
+| v0.14.13 | `crates/gos-kernel` 自己钉的版本 | `steps_between() -> (usize, Option<usize>)` | ✅ 兼容（这正是 [`gos-nightly-toolchain-pin`](../.claude/skills/gos-nightly-toolchain-pin/SKILL.md) skill 记录的钉版本原因) |
+| v0.15.5 | `bootloader = "0.11.17"`（最新)拉的 | 额外要求 `forward_overflowing`/`backward_overflowing` 成为 `Step` trait 方法（更新形状) | **E0407**：本 nightly 的 `Step` trait 还没有这两个方法,not a member of trait |
+
+也就是说：**本仓库当前钉的 nightly 只有一个精确的兼容窗口，`x86_64 v0.14.13` 恰好落在窗口内——但 `bootloader` 0.11.7 与 0.11.17 分别落在窗口两侧**，都编译不过。没有对着两次全量构建失败去猜测；两次实验用的是同一 nightly、同一台机器、同一套 `edk2-x86_64-code.fd`（已确认存在于 `C:\Program Files\qemu\share\`,供后续 UEFI QEMU 验证用),只换了 `bootloader` 版本号,失败签名不同（E0053 vs E0407)且都精确指向 `Step` trait,足以确认这是版本窗口问题,不是环境噪声。
+
+**结论**：QEMU/OVMF 引导验证本身**未能开始**——两次尝试都在 `bootloader` 自身构建阶段失败,从未产出 `toy-bios.img`/`toy-uefi.img`。这不是"迁移工作量比预期大"这类软性发现,是一个**具体的、可复现的阻塞项**,必须先解决才能继续本 ADR 门禁列的其余步骤（内存管理 crate 逐一核实、真机验证)。
+
+**未完成的下一步**（供接手者或下一次会话参考，本 ADR 不在这次 spike 里继续搜索)：`bootloader` 0.11.8–0.11.16 之间某个点版本的 `x86_64` 依赖锁定版本,可能恰好落在 v0.14.11–v0.14.13 兼容窗口内——用 `cargo tree -p x86_64` 对每个点版本做一次**依赖解析检查**（不需要全量构建,比本次两次多分钟构建快得多)可以二分定位。若窗口内确实没有任何 `bootloader` 0.11.x 点版本命中,备选项是：(a) 提升 nightly 版本直到 `x86_64 v0.15.x` 兼容,同时验证 `crates/gos-kernel` 自己的 `x86_64 = "0.14"` 依赖是否也要同步升级到 0.15 系列（这本身是新的兼容性核实,不能假设"顺带就好"),或 (b) fork/patch `x86_64` crate 的 `Step` impl 到 `Step` trait 的本 nightly 实际形状,较重,不推荐。
+
+Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留在仓库中作为可复现的失败证据与继续排查的起点（其 `README.md` 已注明：一旦真正解决了兼容窗口问题，应在折入 gos-kernel 本体迁移的 PR 里连带删除，不该长期与生产代码并存)。
