@@ -1,0 +1,13 @@
+# Nested under E:\GOSKernel, whose own .cargo/config.toml sets
+# [build] target = "x86_64-gos-kernel.json" + build-std -- Cargo config
+# merging inherits ancestor keys a closer file doesn't override, so
+# leaving `target`/`build-std` unset here does NOT cancel them (learned
+# the hard way: omitting them here still dragged this host tool through
+# build-std, breaking on `serde_core` unable to find `Option`/`Some` --
+# not a real bug, a config-inheritance artifact). Must explicitly
+# override both back to a normal host build.
+[unstable]
+json-target-spec = true
+
+[build]
+target = "x86_64-pc-windows-msvc"

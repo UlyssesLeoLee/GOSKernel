@@ -1,6 +1,6 @@
 # ADR-018：bootloader 0.9→0.11+ 迁移——UEFI 真机启动的第一步
 
-> 状态：**选项 A 已选向**（2026-08-04，用户选择"迁移，BIOS+UEFI 并存"）；**spike 已完成，发现真实阻塞项——见 §四** · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
+> 状态：**选项 A 已选向**（2026-08-04，用户选择"迁移，BIOS+UEFI 并存"）；**spike 已完成——兼容性阻塞项已定位并找到可行版本，见 §四** · 提案日期：2026-08-04 · 配套：[ADR-013](./ADR-013-real-hardware-display-mvp.md)（virtio-gpu MVP 已选向 A 落地；本 ADR 是它明确留给"独立 ADR"的另一半）、[tools/build-installer.ps1](../tools/build-installer.ps1) + [tools/write-usb-image.ps1](../tools/write-usb-image.ps1) + [doc/06_运维维护/INSTALL_BARE_METAL_zh.md](../doc/06_运维维护/INSTALL_BARE_METAL_zh.md)（现有 U 盘安装链）、[.github/workflows/installer-artifact.yml](../.github/workflows/installer-artifact.yml)（CI 产物工作流）、V2 计划 line 104（"真机显示"exit criterion，已被 ADR-013 拆分）
 >
 > 触发：用户在开发队列（ADR-006…017 + 拓扑指数族重构）完成后提供了具体目标——"我希望把它安装在 2014 年 macmini 上，用 U 盘引导"，并明确指示"你完成开发后再做安装包"。开发已完成（本 ADR 之前的全部提案待选向 ADR 均已按选项 A 落地），现在轮到安装包这一步——但落地前先摸清 ADR-013 §一 1.1 已经指出的"UEFI GOP 隐藏前提"到底有多大。
 
@@ -95,6 +95,12 @@
 
 **结论**：QEMU/OVMF 引导验证本身**未能开始**——两次尝试都在 `bootloader` 自身构建阶段失败,从未产出 `toy-bios.img`/`toy-uefi.img`。这不是"迁移工作量比预期大"这类软性发现,是一个**具体的、可复现的阻塞项**,必须先解决才能继续本 ADR 门禁列的其余步骤（内存管理 crate 逐一核实、真机验证)。
 
-**未完成的下一步**（供接手者或下一次会话参考，本 ADR 不在这次 spike 里继续搜索)：`bootloader` 0.11.8–0.11.16 之间某个点版本的 `x86_64` 依赖锁定版本,可能恰好落在 v0.14.11–v0.14.13 兼容窗口内——用 `cargo tree -p x86_64` 对每个点版本做一次**依赖解析检查**（不需要全量构建,比本次两次多分钟构建快得多)可以二分定位。若窗口内确实没有任何 `bootloader` 0.11.x 点版本命中,备选项是：(a) 提升 nightly 版本直到 `x86_64 v0.15.x` 兼容,同时验证 `crates/gos-kernel` 自己的 `x86_64 = "0.14"` 依赖是否也要同步升级到 0.15 系列（这本身是新的兼容性核实,不能假设"顺带就好"),或 (b) fork/patch `x86_64` crate 的 `Step` impl 到 `Step` trait 的本 nightly 实际形状,较重,不推荐。
+**后续定位（同一 spike 会话内完成，未开新会话)**：没有盲目二分 0.11.8–0.11.16,而是直接用 GitHub API 读取每个 tag 的 `bios/stage-4/Cargo.toml`（`gh api repos/rust-osdev/bootloader/contents/bios/stage-4/Cargo.toml?ref=<tag>`,零构建成本)——发现 `x86_64` 依赖锁定值在 0.11.9→0.11.10 之间从 `"0.14.8"`（caret 语义,可解析到任何 0.14.x)跳到 `"0.15.2"`。`"0.14.8"` 在今天会解析到 **0.14.13**——与 `crates/gos-kernel` 自己钉的版本完全相同。
 
-Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留在仓库中作为可复现的失败证据与继续排查的起点（其 `README.md` 已注明：一旦真正解决了兼容窗口问题，应在折入 gos-kernel 本体迁移的 PR 里连带删除，不该长期与生产代码并存)。
+**验证结果**：`bootloader = "=0.11.9"` 确实解析出 `x86_64 v0.14.13` 并**编译通过**（无 E0053/E0407,`Compiling x86_64 v0.14.13` 后 `bootloader-x86_64-uefi v0.11.9` 编译+安装成功)——本 ADR §一 1.2 提出的核心兼容性问题**已有一个已验证可行的版本组合**。UEFI stage 干净通过；BIOS boot-sector 的构建额外触发了两层与本次 spike 特有的隔离手法相关的环境噪声（均已定位根因,但未继续消耗更多 spike 时间去彻底铺平,详见下段)，不影响"`bootloader 0.11.9` 与本项目 nightly 兼容"这个结论本身的可信度——UEFI 路径（真机启动真正需要的那一半，见 §1.1)已经完整跑通了依赖解析与编译两关。
+
+**未彻底解决、但已诊断清楚根因的环境噪声**（判断为 spike 本身"钉在 `E:\GOSKernel` 目录树内"这个隔离手法特有的问题，**预期在真正迁移 `gos-kernel` 本体时不会重现**——那时不是从内部逃逸父目录配置，而是直接重写 `crates/gos-kernel` 自己的 `.cargo/config.toml`)：(1) BIOS boot-sector 的嵌套 cargo 调用需要 `-Z json-target-spec`,而 spike 为了逃逸 `E:\GOSKernel\.cargo\config.toml` 的 `[build] target` 强制交叉编译（宿主侧 `runner` 工具本身也被强制编译到裸机 target,导致 `serde_core` 等 host-only 依赖找不到 `Option`/`Some` 这类 prelude 项)而从 `/tmp` 跑,连带丢了这个必需的 unstable flag；(2) 在 spike 目录本地补一个只设 `json-target-spec` 的 `.cargo/config.toml` 后,Cargo 配置合并规则对未在近端文件重新声明的 key **不会**从祖先配置里"取消"——`[build] target` 与 `[unstable] build-std` 数组仍从 `E:\GOSKernel\.cargo\config.toml` 继承,即使本地文件显式覆盖 `target` 回宿主三元组,`build-std` 数组仍激活,导致宿主构建里 `core`/`alloc` 被重复从源码编译一份,与 rustup 自带的预编译版本产生 `E0152 duplicate lang item` 冲突。两层都已经用真实构建输出诊断到具体机制,不是"没查出原因就放弃"。
+
+**结论与建议**：真正迁移时,`gos-kernel` 的 `Cargo.toml` 建议钉 `bootloader = "=0.11.9"`（而非 `"0.11"` 隐式解析到不兼容的 0.11.17）,并在设计新的 `.cargo/config.toml`/构建 crate 拓扑时,直接以"这个仓库以后可能有多套 target/build-std 需求（宿主侧镜像构建工具 vs 裸机内核本体）"为前提去写,不要重演 spike 里"事后补丁式覆盖继承配置"的弯路——这正是 §一 1.2 已经预见的"内核在构建拓扑里从最终产物降格为另一个 crate 的输入"那部分工作,现在多了一条具体的钉版本建议。
+
+Spike 目录 [`spike/bootloader-011-toy/`](../spike/bootloader-011-toy/) 保留在仓库中作为可复现证据（`README.md` 已注明：一旦真正的 `gos-kernel` 迁移 PR 存在，应连带删除，不该长期与生产代码并存)。

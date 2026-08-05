@@ -27,7 +27,11 @@ Building `bootloader` 0.11.x's own internal BIOS/UEFI stage binaries (a transiti
 - `bootloader = "=0.11.7"` → pulls `x86_64 v0.14.10` → **E0053** (phase 1, too old).
 - `bootloader = "0.11.17"` (latest) → pulls `x86_64 v0.15.5` → **E0407** (phase 3, too new).
 
-Neither is a code bug in this repository -- both are upstream `bootloader`/`x86_64` crate releases landing outside this nightly's exact compatible slice. Full writeup, including the isolation methodology needed to reach this conclusion (running outside `E:\GOSKernel`'s directory tree to escape `.cargo/config.toml`'s inherited bare-metal target, and explicitly selecting `+nightly-2026-04-02` since directories outside the repo default to `stable`): [`doc/ADR-018-bootloader-uefi-migration.md` §四](../../doc/ADR-018-bootloader-uefi-migration.md).
+Neither is a code bug in this repository -- both are upstream `bootloader`/`x86_64` crate releases landing outside this nightly's exact compatible slice.
+
+**Resolved**: rather than binary-searching by full build (slow), reading each `bootloader` git tag's `bios/stage-4/Cargo.toml` directly via `gh api repos/rust-osdev/bootloader/contents/bios/stage-4/Cargo.toml?ref=<tag>` (zero build cost) found the exact version where upstream's own `x86_64` requirement jumps from `"0.14.8"` to `"0.15.2"`: between `v0.11.9` and `v0.11.10`. `bootloader = "=0.11.9"` resolves `x86_64`'s caret req `"0.14.8"` to **0.14.13** today -- the same release this repo's own `crates/gos-kernel` pins -- and compiles clean (verified: `Compiling x86_64 v0.14.13` with no E0053/E0407, `bootloader-x86_64-uefi v0.11.9` built and installed successfully). Full writeup, including the isolation methodology needed to reach this conclusion (running outside `E:\GOSKernel`'s directory tree to escape `.cargo/config.toml`'s inherited bare-metal target, and explicitly selecting `+nightly-2026-04-02` since directories outside the repo default to `stable`): [`doc/ADR-018-bootloader-uefi-migration.md` §四](../../doc/ADR-018-bootloader-uefi-migration.md).
+
+**Reusable technique**: when hunting for which point release of a transitive dependency lands back inside a compatibility window, don't binary-search via full builds -- fetch that dependency's own manifest at each candidate tag directly (`gh api repos/<owner>/<repo>/contents/<path-to-Cargo.toml>?ref=<tag>`, base64-decode `.content`) and read the pinned sub-dependency version off it. Full builds of a real OS-dev crate take minutes each; a manifest fetch is sub-second.
 
 ## How to apply
 

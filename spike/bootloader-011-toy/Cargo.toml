@@ -7,15 +7,14 @@ name = "toy-os-builder"
 version = "0.1.0"
 edition = "2021"
 
-# Known broken as of 2026-08-04 -- see ADR-018 §四. "0.11" resolves to
-# 0.11.17 today, which fails (x86_64 v0.15.5 vs this project's pinned
-# nightly-2026-04-02, E0407). Pinning to =0.11.7 also fails (x86_64
-# v0.14.10, E0053) -- the two point releases straddle the nightly's
-# compatible window from opposite sides. Left unpinned intentionally so
-# the next attempt starts from upstream's current default, not a stale
-# guess.
+# "0.11" (latest, 0.11.17) and "=0.11.7" both fail -- see ADR-018 §四.
+# 0.11.9 is the last point release before upstream bumped its internal
+# bios/uefi stage crates from `x86_64 = "0.14.8"` to `"0.15.2"` (checked
+# via bios/stage-4/Cargo.toml at each tag on GitHub, not guessed) --
+# "0.14.8" is a caret req, so it resolves to 0.14.13 today, the same
+# x86_64 release this repo's own crates/gos-kernel already pins.
 [dependencies]
-bootloader = "0.11"
+bootloader = "=0.11.9"
 
 [[bin]]
 name = "runner"
