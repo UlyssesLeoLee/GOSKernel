@@ -14,6 +14,18 @@ build-std         = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
 json-target-spec   = true
 
+# ADR-019 (2026-08-05): kernel high-half relocation. Links gos-kernel's
+# .text/.rodata/.data/.bss at PML4 index 511 (0xffffffff80000000, the
+# "kernel" code-model's top -2GB region) instead of the LLD default
+# 0x200000 low-half address. This is what unlocks the CR3-switch
+# trampoline (gos-supervisor::cr3_switch_into) and the isolated-domain
+# infra (k_vmm::create_isolated_address_space) that already clones
+# PML4 256..512 into every domain root -- until now that clone carried
+# no kernel mapping at all, since the kernel itself lived below index
+# 256. See doc/ADR-019-posix-process-graph-native-semantics.md §五.
+[target.x86_64-gos-kernel]
+rustflags = ["-C", "link-arg=--image-base=0xffffffff80000000"]
+
 # ADR-018 (2026-08-04): the `bootimage runner` this used to point at
 # doesn't exist anymore -- migrated off bootloader 0.9.23's bootimage-
 # subcommand pipeline to bootloader_api 0.11.9 (UEFI-only). There's no
